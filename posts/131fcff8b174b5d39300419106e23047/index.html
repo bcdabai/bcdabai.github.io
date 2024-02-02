@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>TCP Server处理多Client请求的方法—非阻塞accept与select - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="TCP Server处理多Client请求的方法—非阻塞accept与select" />
+<meta property="og:description" content="前言 参看基于TCP/UDP的socket代码，同一时间Server只能处理一个Client请求：在使用当前连接的socket和client进行交互的时候，不能够accept新的连接请求。为了使Server能够处理多个Client请求，常见的方法： （1）多进程/线程方法、（2）non-blocking socket(单进程并发)、（3）non-blocking和select结合使用。三种方法各有优缺点，下面进行详细分析和说明。
+一、多进程/线程方法 这种方法，每个子进程/线程单独处理一个client连接。以使用进程为例，在每个accept成功之后，使用fork创建一个子进程专门处理该client的connection，父进程(server)本身可以继续accept其他新的client的连接请求。示例代码如下：
+#include &lt;stdio.h&gt; #include &lt;stdlib.h&gt; #include &lt;string.h&gt; #include &lt;arpa/inet.h&gt; #include &lt;sys/types.h&gt; #include &lt;sys/socket.h&gt; #include &lt;unistd.h&gt; #include &lt;signal.h&gt; #include &lt;sys/wait.h&gt; #define DEFAULT_PORT 1984 //默认端口 #define BUFFER_SIZE 1024 //buffer大小 void sigCatcher(int n) { //printf(&#34;a child process dies\n&#34;); while(waitpid(-1, NULL, WNOHANG) &gt; 0); } int clientProcess(int new_sock); int main(int argc, char *argv[]) { unsigned short int port; //get port, use default if not set if (argc == 2) { port = atoi(argv[1]); } else if (argc &lt; 2) { port = DEFAULT_PORT; } else { fprintf(stderr, &#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/131fcff8b174b5d39300419106e23047/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2016-12-22T16:44:53+08:00" />
+<meta property="article:modified_time" content="2016-12-22T16:44:53+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">TCP Server处理多Client请求的方法—非阻塞accept与select</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3 id="前言">前言</h3> 
+<p>参看基于TCP/UDP的socket代码，同一时间Server只能处理一个Client请求：在使用当前连接的socket和client进行交互的时候，不能够accept新的连接请求。为了使Server能够处理多个Client请求，常见的方法： <br> （1）多进程/线程方法、（2）non-blocking socket(单进程并发)、（3）non-blocking和select结合使用。三种方法各有优缺点，下面进行详细分析和说明。</p> 
+<h3 id="一多进程线程方法">一、多进程/线程方法</h3> 
+<p>这种方法，每个子进程/线程单独处理一个client连接。以使用进程为例，在每个accept成功之后，使用fork创建一个子进程专门处理该client的connection，父进程(server)本身可以继续accept其他新的client的连接请求。示例代码如下：</p> 
+<pre class="prettyprint"><code class=" hljs cpp"><span class="hljs-preprocessor">#include &lt;stdio.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;stdlib.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;string.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;arpa/inet.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;sys/types.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;sys/socket.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;unistd.h&gt;</span>
+
+<span class="hljs-preprocessor">#include &lt;signal.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;sys/wait.h&gt;</span>
+
+<span class="hljs-preprocessor">#define DEFAULT_PORT    1984    <span class="hljs-comment">//默认端口</span></span>
+<span class="hljs-preprocessor">#define BUFFER_SIZE     1024    <span class="hljs-comment">//buffer大小</span></span>
+
+<span class="hljs-keyword">void</span> sigCatcher(<span class="hljs-keyword">int</span> n) {
+    <span class="hljs-comment">//printf("a child process dies\n");</span>
+    <span class="hljs-keyword">while</span>(waitpid(-<span class="hljs-number">1</span>, NULL, WNOHANG) &gt; <span class="hljs-number">0</span>);
+}
+
+<span class="hljs-keyword">int</span> clientProcess(<span class="hljs-keyword">int</span> new_sock);
+
+<span class="hljs-keyword">int</span> main(<span class="hljs-keyword">int</span> argc, <span class="hljs-keyword">char</span> *argv[]) {
+    <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">short</span> <span class="hljs-keyword">int</span> port;
+
+    <span class="hljs-comment">//get port, use default if not set</span>
+    <span class="hljs-keyword">if</span> (argc == <span class="hljs-number">2</span>) {
+        port = atoi(argv[<span class="hljs-number">1</span>]);
+    } <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (argc &lt; <span class="hljs-number">2</span>) {
+        port = DEFAULT_PORT;
+    } <span class="hljs-keyword">else</span> {
+        <span class="hljs-built_in">fprintf</span>(stderr, <span class="hljs-string">"USAGE: %s [port]\n"</span>, argv[<span class="hljs-number">0</span>]);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+
+    <span class="hljs-comment">//create socket</span>
+    <span class="hljs-keyword">int</span> sock;
+    <span class="hljs-keyword">if</span> ( (sock = socket(PF_INET, SOCK_STREAM, <span class="hljs-number">0</span>)) == -<span class="hljs-number">1</span> ) {
+        perror(<span class="hljs-string">"socket failed, "</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+    <span class="hljs-built_in">printf</span>(<span class="hljs-string">"socket done\n"</span>);
+
+    <span class="hljs-comment">//create socket address and initialize</span>
+    <span class="hljs-keyword">struct</span> sockaddr_in bind_addr;
+    <span class="hljs-built_in">memset</span>(&amp;bind_addr, <span class="hljs-number">0</span>, <span class="hljs-keyword">sizeof</span>(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);  <span class="hljs-comment">//设置接受任意地址</span>
+    bind_addr.sin_port = htons(port);<span class="hljs-comment">//将host byte order转换为network byte order</span>
+
+    <span class="hljs-comment">//bind (bind socket to the created socket address)</span>
+    <span class="hljs-keyword">if</span> ( bind(sock, (<span class="hljs-keyword">struct</span> sockaddr *)&amp;bind_addr, <span class="hljs-keyword">sizeof</span>(bind_addr)) == -<span class="hljs-number">1</span> ) {
+        perror(<span class="hljs-string">"bind failed, "</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+    <span class="hljs-built_in">printf</span>(<span class="hljs-string">"bind done\n"</span>);
+
+    <span class="hljs-comment">//listen</span>
+    <span class="hljs-keyword">if</span> ( listen(sock, <span class="hljs-number">5</span>) == -<span class="hljs-number">1</span>) {
+        perror(<span class="hljs-string">"listen failed."</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+    <span class="hljs-built_in">printf</span>(<span class="hljs-string">"listen done\n"</span>);
+
+    <span class="hljs-comment">//handler to clear zombie process</span>
+    signal(SIGCHLD, sigCatcher);
+
+    <span class="hljs-comment">//loop and respond to client</span>
+    <span class="hljs-keyword">int</span> new_sock;
+    <span class="hljs-keyword">int</span> pid;
+    <span class="hljs-keyword">while</span> (<span class="hljs-number">1</span>) {
+        <span class="hljs-comment">//wait for a connection, then accept it</span>
+        <span class="hljs-keyword">if</span> ( (new_sock = accept(sock, NULL, NULL)) == -<span class="hljs-number">1</span> ) {
+            perror(<span class="hljs-string">"accept failed."</span>);
+            <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+        }
+        <span class="hljs-built_in">printf</span>(<span class="hljs-string">"accept done\n"</span>);
+
+        pid = fork();
+        <span class="hljs-keyword">if</span> (pid &lt; <span class="hljs-number">0</span>) {
+            perror(<span class="hljs-string">"fork failed"</span>);
+            <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+        } <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (pid == <span class="hljs-number">0</span>) {
+            <span class="hljs-comment">//这里是子进程</span>
+            close(sock);            <span class="hljs-comment">//子进程中不需要server的sock</span>
+            clientProcess(new_sock);    <span class="hljs-comment">//使用新的new_sock和client进行交互</span>
+            close(new_sock);        <span class="hljs-comment">//关闭client的连接</span>
+            <span class="hljs-built_in">exit</span>(EXIT_SUCCESS);     <span class="hljs-comment">//子进程退出</span>
+        } <span class="hljs-keyword">else</span> {
+            <span class="hljs-comment">//这里是父进程</span>
+            close(new_sock); <span class="hljs-comment">//由于new_sock已经交给子进程处理，这里可以关闭了</span>
+        }
+    }
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+}
+
+<span class="hljs-keyword">int</span> clientProcess(<span class="hljs-keyword">int</span> new_sock) {
+    <span class="hljs-keyword">int</span> recv_size;
+    <span class="hljs-keyword">char</span> buffer[BUFFER_SIZE];
+
+    <span class="hljs-built_in">memset</span>(buffer, <span class="hljs-number">0</span>, BUFFER_SIZE);
+    <span class="hljs-keyword">if</span> ( (recv_size = recv(new_sock, buffer, <span class="hljs-keyword">sizeof</span>(buffer), <span class="hljs-number">0</span>)) == -<span class="hljs-number">1</span>) {
+        perror(<span class="hljs-string">"recv failed"</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+    <span class="hljs-built_in">printf</span>(<span class="hljs-string">"%s\n"</span>, buffer);
+
+    <span class="hljs-keyword">char</span> *response = <span class="hljs-string">"This is the response"</span>;
+    <span class="hljs-keyword">if</span> ( send(new_sock, response, <span class="hljs-built_in">strlen</span>(response) + <span class="hljs-number">1</span>, <span class="hljs-number">0</span>) == -<span class="hljs-number">1</span> ) {
+        perror(<span class="hljs-string">"send failed"</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+}</code></pre> 
+<p>其中：</p> 
+<pre class="prettyprint"><code class=" hljs erlang"><span class="hljs-function"><span class="hljs-title">signal</span><span class="hljs-params">(<span class="hljs-variable">SIGCHLD</span>, sig<span class="hljs-variable">Catcher</span>)</span></span></code></pre> 
+<p>代码为了处理zombie process（僵尸进程）问题：当server进程运行时间较长，且产生越来越多的子进程，当这些子进程运行结束都会成为zombie process，占据系统的process table。解决方法是在父进程(server进程)中显式地处理子进程结束之后发出的SIGCHLD信号：调用wait/waitpid清理子进程的zombie信息。</p> 
+<p><strong>测试：</strong>运行server程序，然后同时运行2个client(telnet localhost 1984)，可看到该server能够很好地处理2个client。 <br> <strong>多进程方法的优点：</strong> <br> 每个独立进程处理一个独立的client，对server进程来说只需要accept新的连接，对每个子进程来说只需要处理自己的client即可。</p> 
+<p><strong>多进程方法的缺点：</strong> <br> 子进程的创建需要独立的父进程资源副本，开销较大，对高并发的请求不太适合；且一个进程仅处理一个client不能有效发挥作用。另外有些情况下还需要进程间进行通信以协调各进程要完成的任务。</p> 
+<h3 id="二non-blocking-socket单进程并发方法">二、non-blocking socket(单进程并发)方法</h3> 
+<p><strong>blocking socket VS non-blocking socket</strong> <br> 默认情况下socket是blocking的，即函数accept(), recv/recvfrom, send/sendto，connect等，需等待函数执行结束之后才能够返回(此时操作系统切换到其他进程执行)。accpet()等待到有client连接请求并接受成功之后，recv/recvfrom需要读取完client发送的数据之后才能够返回。</p> 
+<p>可设置socket为non-blocking模式，即调用函数立即返回，而不是必须等待满足一定条件才返回。参看<a href="http://www.scottklement.com/rpg/socktut/nonblocking.html" rel="nofollow">http://www.scottklement.com/rpg/socktut/nonblocking.html</a></p> 
+<p>non-blocking: by default, sockets are blocking – this means that they stop the function from returning until all data has been transfered. With multiple connections which may or may not be transmitting data to a server, this would not be very good as connections may have to wait to transmit their data.</p> 
+<p><strong>设置socket为非阻塞non-blocking</strong> <br> 使用socket()创建的socket(file descriptor)，默认是阻塞的(blocking)；使用函数fcntl()(file control)可设置创建的socket为非阻塞的non-blocking。</p> 
+<pre class="prettyprint"><code class=" hljs perl"><span class="hljs-comment">#include &lt;unistd.h&gt;</span>
+<span class="hljs-comment">#include &lt;fcntl.h&gt;</span>
+
+sock = <span class="hljs-keyword">socket</span>(PF_INET, SOCK_STREAM, <span class="hljs-number">0</span>);
+
+<span class="hljs-keyword">int</span> flags = <span class="hljs-keyword">fcntl</span>(sock, F_GETFL, <span class="hljs-number">0</span>);
+<span class="hljs-keyword">fcntl</span>(sock, F_SETFL, flags | O_NONBLOCK);</code></pre> 
+<p><strong><em>accept():</em></strong> <br> 在non-blocking模式下，如果返回值为-1，且errno == EAGAIN或errno == EWOULDBLOCK表示no connections没有新连接请求；</p> 
+<p><strong><em>recv()/recvfrom():</em></strong> <br> 在non-blocking模式下，如果返回值为-1，且errno == EAGAIN表示没有可接受的数据或正在接受尚未完成；</p> 
+<p><strong><em>send()/sendto():</em></strong> <br> 在non-blocking模式下，如果返回值为-1，且errno == EAGAIN或errno == EWOULDBLOCK表示没有可发送数据或数据发送正在进行没有完成。</p> 
+<p><strong><em>read/write:</em></strong> <br> 在non-blocking模式下，如果返回-1，且errno == EAGAIN表示没有可读写数据或可读写正在进行尚未完成。</p> 
+<p><strong><em>connect():</em></strong> <br> 在non-bloking模式下，如果返回-1，且errno = EINPROGRESS表示正在连接。</p> 
+<p>使用如上方法，可以创建一个non-blocking的server的程序，类似如下代码：</p> 
+<pre class="prettyprint"><code class=" hljs r">int main(int argc, char *argv[]) {
+    int sock;
+    <span class="hljs-keyword">if</span> ( (sock = socket(PF_INET, SOCK_STREAM, <span class="hljs-number">0</span>)) == -<span class="hljs-number">1</span> ) {
+        perror(<span class="hljs-string">"socket failed"</span>);
+        <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+    }
+
+    //set socket to be non-blocking
+    int flags = fcntl(sock, F_GETFL, <span class="hljs-number">0</span>);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+    //create socket address to bind
+    struct sockaddr_in bind_addr
+    <span class="hljs-keyword">...</span>
+
+    //bind
+    bind(<span class="hljs-keyword">...</span>)
+    <span class="hljs-keyword">...</span>
+
+    //listen
+    listen(<span class="hljs-keyword">...</span>)
+    <span class="hljs-keyword">...</span>
+
+    //loop 
+    int new_sock;
+    <span class="hljs-keyword">while</span> (<span class="hljs-number">1</span>) {
+        new_sock = accept(sock, <span class="hljs-literal">NULL</span>, <span class="hljs-literal">NULL</span>);
+        <span class="hljs-keyword">if</span> (new_sock == -<span class="hljs-number">1</span> &amp;&amp; errno == EAGAIN) {
+            fprintf(stderr, <span class="hljs-string">"no client connections yet\n"</span>);
+            continue;
+        } <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (new_sock == -<span class="hljs-number">1</span>) {
+            perror(<span class="hljs-string">"accept failed"</span>);
+            <span class="hljs-keyword">return</span> <span class="hljs-number">1</span>;
+        }
+
+        //read and write
+        <span class="hljs-keyword">...</span>
+
+    }   
+
+    <span class="hljs-keyword">...</span>
+}</code></pre> 
+<p><strong>纯non-blocking程序缺点：</strong> <br> 如果运行如上程序会发现调用accept可以理解返回，但这样会耗费大量的CPU time，实际中并不会这样使用。实际中将non-blocking和select结合使用。</p> 
+<h3 id="三non-blocking和select结合使用的方法">三、non-blocking和select结合使用的方法</h3> 
+<p>select通过轮询，监视指定file descriptor(包括socket)的变化，知道:哪些ready for reading, 哪些ready for writing，哪些发生了错误等。select和non-blocking结合使用可很好地实现socket的多client同步通信。</p> 
+<p>select函数：</p> 
+<pre class="prettyprint"><code class=" hljs vala"><span class="hljs-preprocessor">#include &lt;sys/time.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;sys/types.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;unistd.h&gt;</span>
+
+<span class="hljs-keyword">int</span> select(<span class="hljs-keyword">int</span> maxfd, fd_set* readfds, fd_set* writefds, fd_set* errorfds, <span class="hljs-keyword">struct</span> timeval* timeout);</code></pre> 
+<p>参数说明：</p> 
+<p>maxfd：所有set中最大的file descriptor + 1 <br> readfds：指定要侦听ready to read的file descriptor，可以为NULL <br> writefds：指定要侦听ready to write的file descriptor，可以为NULL <br> errorfds：指定要侦听errors的file descriptor，可以为NULL <br> timeout：指定侦听到期的时间长度，如果该struct timeval的各个域都为0，则相当于完全的non-blocking模式；如果该参数为NULL，相当于block模式； <br> select返回：</p> 
+<p>select返回total number of bits set in readfds, writefds and errorfds，当timeout的时候返回0，发生错误返回-1。 <br> 注：select会更新readfds(保存ready to read的file descriptor), writefds(保存read to write的fd), errorfds(保存error的fd)，且更新timeout为距离超时时刻的剩余时间。</p> 
+<p>另外，fd_set类型需要使用如下4个宏进行赋值：</p> 
+<pre class="prettyprint"><code class=" hljs sql">FD_ZERO(fd_set *<span class="hljs-operator"><span class="hljs-keyword">set</span>);</span>       //Clear all entries from the <span class="hljs-operator"><span class="hljs-keyword">set</span>.
+FD_SET(<span class="hljs-keyword">int</span> fd, fd_set *<span class="hljs-keyword">set</span>);</span>    //Add fd to the <span class="hljs-operator"><span class="hljs-keyword">set</span>.
+FD_CLR(<span class="hljs-keyword">int</span> fd, fd_set *<span class="hljs-keyword">set</span>);</span>    //Remove fd from the <span class="hljs-operator"><span class="hljs-keyword">set</span>.
+FD_ISSET(<span class="hljs-keyword">int</span> fd, fd_set *<span class="hljs-keyword">set</span>);</span>  //Return true if fd is in the <span class="hljs-operator"><span class="hljs-keyword">set</span>.</span></code></pre> 
+<p>因此通过如下代码可以将要侦听的file descriptor/socket添加到响应的fd_set中，例如：</p> 
+<pre class="prettyprint"><code class=" hljs vala">fd_set readfds;
+FD_ZERO(&amp;readfds);
+
+<span class="hljs-keyword">int</span> sock;
+sock = socket(PF_INET, SOCK_STREAM, <span class="hljs-number">0</span>);
+
+FD_SET(sock, &amp;readfds);     <span class="hljs-comment">//将新创建的socket添加到readfds中</span>
+FD_SET(<span class="hljs-keyword">stdin</span>, &amp;readfds);    <span class="hljs-comment">//将stdin添加到readfds中</span></code></pre> 
+<p>struct timeval类型：</p> 
+<pre class="prettyprint"><code class=" hljs cs"><span class="hljs-keyword">struct</span> timeval {
+    <span class="hljs-keyword">int</span> tv_sec;     <span class="hljs-comment">//seconds</span>
+    <span class="hljs-keyword">int</span> tv_usec;    <span class="hljs-comment">//microseconds，注意这里是微秒不是毫秒，1秒 = 1000, 000微秒</span>
+};</code></pre> 
+<p>因此，使用select函数可以添加希望侦听的file descriptor/socket到read, write或error中(如果对某一项不感兴趣，可以设置为NULL)，并设置每次侦听的timeout时间。</p> 
+<p>注意如果设置timeout为：</p> 
+<pre class="prettyprint"><code class=" hljs applescript">struct timeval <span class="hljs-keyword">timeout</span>;
+<span class="hljs-keyword">timeout</span>.tv_sec = <span class="hljs-number">0</span>;
+<span class="hljs-keyword">timeout</span>.tv_usec = <span class="hljs-number">0</span>;</code></pre> 
+<p>相当于每次select立即返回相当于纯non-blocking模式； <br> 如果设置timeout参数为NULL，则每次select持续等待到有变化则相当于blocking模式。 <br> <strong>使用select和non-blocking实现server处理多client实例：</strong></p> 
+<pre class="prettyprint"><code class=" hljs cpp"><span class="hljs-preprocessor">#include &lt;stdio.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;stdlib.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;string.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;arpa/inet.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;sys/types.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;sys/socket.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;unistd.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;fcntl.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;errno.h&gt;</span>
+<span class="hljs-preprocessor">#include &lt;sys/time.h&gt;</span>
+
+<span class="hljs-preprocessor">#define DEFAULT_PORT    1984    <span class="hljs-comment">//默认端口</span></span>
+<span class="hljs-preprocessor">#define BUFF_SIZE       1024    <span class="hljs-comment">//buffer大小</span></span>
+<span class="hljs-preprocessor">#define SELECT_TIMEOUT  5       <span class="hljs-comment">//select的timeout seconds</span></span>
+
+<span class="hljs-comment">//函数：设置sock为non-blocking mode</span>
+<span class="hljs-keyword">void</span> setSockNonBlock(<span class="hljs-keyword">int</span> sock) {
+    <span class="hljs-keyword">int</span> flags;
+    flags = fcntl(sock, F_GETFL, <span class="hljs-number">0</span>);
+    <span class="hljs-keyword">if</span> (flags &lt; <span class="hljs-number">0</span>) {
+        perror(<span class="hljs-string">"fcntl(F_GETFL) failed"</span>);
+        <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+    }
+    <span class="hljs-keyword">if</span> (fcntl(sock, F_SETFL, flags | O_NONBLOCK) &lt; <span class="hljs-number">0</span>) {
+        perror(<span class="hljs-string">"fcntl(F_SETFL) failed"</span>);
+        <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+    }
+}
+<span class="hljs-comment">//函数：更新maxfd</span>
+<span class="hljs-keyword">int</span> updateMaxfd(fd_set fds, <span class="hljs-keyword">int</span> maxfd) {
+    <span class="hljs-keyword">int</span> i;
+    <span class="hljs-keyword">int</span> new_maxfd = <span class="hljs-number">0</span>;
+    <span class="hljs-keyword">for</span> (i = <span class="hljs-number">0</span>; i &lt;= maxfd; i++) {
+        <span class="hljs-keyword">if</span> (FD_ISSET(i, &amp;fds) &amp;&amp; i &gt; new_maxfd) {
+            new_maxfd = i;
+        }
+    }
+    <span class="hljs-keyword">return</span> new_maxfd;
+}
+
+<span class="hljs-keyword">int</span> main(<span class="hljs-keyword">int</span> argc, <span class="hljs-keyword">char</span> *argv[]) {
+    <span class="hljs-keyword">unsigned</span> <span class="hljs-keyword">short</span> <span class="hljs-keyword">int</span> port;
+
+    <span class="hljs-comment">//获取自定义端口</span>
+    <span class="hljs-keyword">if</span> (argc == <span class="hljs-number">2</span>) {
+        port = atoi(argv[<span class="hljs-number">1</span>]);
+    } <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (argc &lt; <span class="hljs-number">2</span>) {
+        port = DEFAULT_PORT;
+    } <span class="hljs-keyword">else</span> {
+        <span class="hljs-built_in">fprintf</span>(stderr, <span class="hljs-string">"USAGE: %s [port]\n"</span>, argv[<span class="hljs-number">0</span>]);
+        <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+    }
+
+    <span class="hljs-comment">//创建socket</span>
+    <span class="hljs-keyword">int</span> sock;
+    <span class="hljs-keyword">if</span> ( (sock = socket(PF_INET, SOCK_STREAM, <span class="hljs-number">0</span>)) == -<span class="hljs-number">1</span> ) {
+        perror(<span class="hljs-string">"socket failed, "</span>);
+        <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+    }
+    <span class="hljs-built_in">printf</span>(<span class="hljs-string">"socket done\n"</span>);
+
+    <span class="hljs-comment">//in case of 'address already in use' error message</span>
+    <span class="hljs-keyword">int</span> yes = <span class="hljs-number">1</span>;
+    <span class="hljs-keyword">if</span> (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &amp;yes, <span class="hljs-keyword">sizeof</span>(<span class="hljs-keyword">int</span>))) {
+        perror(<span class="hljs-string">"setsockopt failed"</span>);
+        <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+    }
+
+    <span class="hljs-comment">//设置sock为non-blocking</span>
+    setSockNonBlock(sock);
+
+    <span class="hljs-comment">//创建要bind的socket address</span>
+    <span class="hljs-keyword">struct</span> sockaddr_in bind_addr;
+    <span class="hljs-built_in">memset</span>(&amp;bind_addr, <span class="hljs-number">0</span>, <span class="hljs-keyword">sizeof</span>(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);  <span class="hljs-comment">//设置接受任意地址</span>
+    bind_addr.sin_port = htons(port);<span class="hljs-comment">//将host byte order转换为network byte order</span>
+
+    <span class="hljs-comment">//bind sock到创建的socket address上</span>
+    <span class="hljs-keyword">if</span> ( bind(sock, (<span class="hljs-keyword">struct</span> sockaddr *)&amp;bind_addr, <span class="hljs-keyword">sizeof</span>(bind_addr)) == -<span class="hljs-number">1</span> ) {
+        perror(<span class="hljs-string">"bind failed, "</span>);
+        <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+    }
+    <span class="hljs-built_in">printf</span>(<span class="hljs-string">"bind done\n"</span>);
+
+    <span class="hljs-comment">//listen</span>
+    <span class="hljs-keyword">if</span> ( listen(sock, <span class="hljs-number">5</span>) == -<span class="hljs-number">1</span>) {
+        perror(<span class="hljs-string">"listen failed."</span>);
+        <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+    }
+    <span class="hljs-built_in">printf</span>(<span class="hljs-string">"listen done\n"</span>);
+
+    <span class="hljs-comment">//创建并初始化select需要的参数(这里仅监视read)，并把sock添加到fd_set中</span>
+    fd_set readfds;
+    fd_set readfds_bak; <span class="hljs-comment">//backup for readfds(由于每次select之后会更新readfds，因此需要backup)</span>
+    <span class="hljs-keyword">struct</span> timeval timeout;
+    <span class="hljs-keyword">int</span> maxfd;
+    maxfd = sock;
+    FD_ZERO(&amp;readfds);
+    FD_ZERO(&amp;readfds_bak);
+    FD_SET(sock, &amp;readfds_bak);
+
+    <span class="hljs-comment">//循环接受client请求</span>
+    <span class="hljs-keyword">int</span> new_sock;
+    <span class="hljs-keyword">struct</span> sockaddr_in client_addr;
+    socklen_t client_addr_len;
+    <span class="hljs-keyword">char</span> client_ip_str[INET_ADDRSTRLEN];
+    <span class="hljs-keyword">int</span> res;
+    <span class="hljs-keyword">int</span> i;
+    <span class="hljs-keyword">char</span> buffer[BUFF_SIZE];
+    <span class="hljs-keyword">int</span> recv_size;
+
+    <span class="hljs-keyword">while</span> (<span class="hljs-number">1</span>) {
+
+        <span class="hljs-comment">//注意select之后readfds和timeout的值都会被修改，因此每次都进行重置</span>
+        readfds = readfds_bak;
+        maxfd = updateMaxfd(readfds, maxfd);        <span class="hljs-comment">//更新maxfd</span>
+        timeout.tv_sec = SELECT_TIMEOUT;
+        timeout.tv_usec = <span class="hljs-number">0</span>;
+        <span class="hljs-built_in">printf</span>(<span class="hljs-string">"selecting maxfd=%d\n"</span>, maxfd);
+
+        <span class="hljs-comment">//select(这里没有设置writefds和errorfds，如有需要可以设置)</span>
+        res = select(maxfd + <span class="hljs-number">1</span>, &amp;readfds, NULL, NULL, &amp;timeout);
+        <span class="hljs-keyword">if</span> (res == -<span class="hljs-number">1</span>) {
+            perror(<span class="hljs-string">"select failed"</span>);
+            <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+        } <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (res == <span class="hljs-number">0</span>) {
+            <span class="hljs-built_in">fprintf</span>(stderr, <span class="hljs-string">"no socket ready for read within %d secs\n"</span>, SELECT_TIMEOUT);
+            <span class="hljs-keyword">continue</span>;
+        }
+
+        <span class="hljs-comment">//检查每个socket，并进行读(如果是sock则accept)</span>
+        <span class="hljs-keyword">for</span> (i = <span class="hljs-number">0</span>; i &lt;= maxfd; i++) {
+            <span class="hljs-keyword">if</span> (!FD_ISSET(i, &amp;readfds)) {
+                <span class="hljs-keyword">continue</span>;
+            }
+            <span class="hljs-comment">//可读的socket</span>
+            <span class="hljs-keyword">if</span> ( i == sock) {
+                <span class="hljs-comment">//当前是server的socket，不进行读写而是accept新连接</span>
+                client_addr_len = <span class="hljs-keyword">sizeof</span>(client_addr);
+                new_sock = accept(sock, (<span class="hljs-keyword">struct</span> sockaddr *) &amp;client_addr, &amp;client_addr_len);
+                <span class="hljs-keyword">if</span> (new_sock == -<span class="hljs-number">1</span>) {
+                    perror(<span class="hljs-string">"accept failed"</span>);
+                    <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+                }
+                <span class="hljs-keyword">if</span> (!inet_ntop(AF_INET, &amp;(client_addr.sin_addr), client_ip_str, <span class="hljs-keyword">sizeof</span>(client_ip_str))) {
+                    perror(<span class="hljs-string">"inet_ntop failed"</span>);
+                    <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+                }
+                <span class="hljs-built_in">printf</span>(<span class="hljs-string">"accept a client from: %s\n"</span>, client_ip_str);
+                <span class="hljs-comment">//设置new_sock为non-blocking</span>
+                setSockNonBlock(new_sock);
+                <span class="hljs-comment">//把new_sock添加到select的侦听中</span>
+                <span class="hljs-keyword">if</span> (new_sock &gt; maxfd) {
+                    maxfd = new_sock;
+                }
+                FD_SET(new_sock, &amp;readfds_bak);
+            } <span class="hljs-keyword">else</span> {
+                <span class="hljs-comment">//当前是client连接的socket，可以读(read from client)</span>
+                <span class="hljs-built_in">memset</span>(buffer, <span class="hljs-number">0</span>, <span class="hljs-keyword">sizeof</span>(buffer));
+                <span class="hljs-keyword">if</span> ( (recv_size = recv(i, buffer, <span class="hljs-keyword">sizeof</span>(buffer), <span class="hljs-number">0</span>)) == -<span class="hljs-number">1</span> ) {
+                    perror(<span class="hljs-string">"recv failed"</span>);
+                    <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+                }
+                <span class="hljs-built_in">printf</span>(<span class="hljs-string">"recved from new_sock=%d : %s(%d length string)\n"</span>, i, buffer, recv_size);
+                <span class="hljs-comment">//立即将收到的内容写回去，并关闭连接</span>
+                <span class="hljs-keyword">if</span> ( send(i, buffer, recv_size, <span class="hljs-number">0</span>) == -<span class="hljs-number">1</span> ) {
+                    perror(<span class="hljs-string">"send failed"</span>);
+                    <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+                }
+                <span class="hljs-built_in">printf</span>(<span class="hljs-string">"send to new_sock=%d done\n"</span>, i);
+                <span class="hljs-keyword">if</span> ( close(i) == -<span class="hljs-number">1</span> ) {
+                    perror(<span class="hljs-string">"close failed"</span>);
+                    <span class="hljs-built_in">exit</span>(EXIT_FAILURE);
+                }
+                <span class="hljs-built_in">printf</span>(<span class="hljs-string">"close new_sock=%d done\n"</span>, i);
+                <span class="hljs-comment">//将当前的socket从select的侦听中移除</span>
+                FD_CLR(i, &amp;readfds_bak);
+            }
+        }
+    }
+
+    <span class="hljs-keyword">return</span> <span class="hljs-number">0</span>;
+}</code></pre> 
+<p>编译并运行如上程序，然后尝试使用多个 telnet localhost 1984 连接该server。可以发现各个connection很好地独立工作。因此，使用select可实现一个进程尽最大所能地处理尽可能多的client。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f75f50b59351580b188047553f1c8940/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">TensorFlow的卷积神经网络例子解析</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/91116f73b4f6d965057274db8394172d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">高德地图API开发应用-----地图显示&#43;定位&#43;marker</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

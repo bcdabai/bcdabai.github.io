@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Apache Doris 聚合函数源码阅读与解析｜源码解读系列 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Apache Doris 聚合函数源码阅读与解析｜源码解读系列" />
+<meta property="og:description" content="笔者最近由于工作需要开始调研 Apache Doris，通过阅读聚合函数代码切入 Apache Doris 内核，同时也秉承着开源的精神，开发了 array_agg 函数并贡献给社区。笔者通过这篇文章记录下对源码的一些理解，同时也方便后面的新人更快速地上手源码开发。
+聚合函数，顾名思义，即对一组数据执行聚合计算并返回结果的函数，在统计分析过程中属于最常见的函数之一，最典型的聚合函数包括 count、min、max、sum 等。基于聚合函数可以实现对大量数据的汇总计算，以更简洁的形式呈现数据并支持数据可视化。
+相较于单机数据库，由于所有数据都存储在同一台机器上、无需跨节点的网络数据传输，往往单机数据库的聚合函数执行效率更高，而分布式数据库由于数据分散存储于多个节点、并行执行计算时需要从多个节点汇集数据，带来了额外的网络传输和本地磁盘 IO 开销，且多副本机制和分片策略也进一步增加了计算的数据量和管理的复杂性。
+为避免单点瓶颈同时减少网络 IO，往往需要使用多阶段的方式进行执行，因此 Apache Doris 实现了灵活的多阶段聚合机制，能够根据查询语句的特点为其选择适当的聚合方式，从而在执行时间和执行开销（如内存，IO 等）之间取得有效的平衡。
+多阶段聚合 在 Apache Doris 中，主要聚合机制有如下几种：
+一阶段聚合：Group By 仅包含分桶列，不同 Tablet 的数据在不同的分组中，因此不同 BE 可以独立并行计算；
+两阶段聚合：Group By 包含非分桶列，同一个分组中的数据可能分布在多个 BE 上；
+三阶段聚合：Count Distinct 包含 Group By（即 2 个两阶段聚合的组合）；
+四阶段聚合：Count Distinct 不包含 Group by，通常采用 4 阶段聚合（1 个一阶段聚合和 1 个二阶段聚合的组合）
+一阶段聚合 以如下查询为例，c1 是分桶列：
+SELECT count(c1) FROM t1 GROUP BY c1 由于每个 BE 存储了若干个 Tablet ，每台 BE 只需要对当前节点上的 Tablet Set，分别进行 Hash Aggregate 即可，也称为 Final Hash Aggregate，随后对各个 BE 结果进行汇总。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/165e69eb2e6d538c08aeb74c3b7acb57/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-10T10:52:02+08:00" />
+<meta property="article:modified_time" content="2024-01-10T10:52:02+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Apache Doris 聚合函数源码阅读与解析｜源码解读系列</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <blockquote> 
+ <p>笔者最近由于工作需要开始调研 <a href="https://doris.apache.org/" rel="nofollow" title="Apache Doris">Apache Doris</a>，通过阅读聚合函数代码切入 Apache Doris 内核，同时也秉承着开源的精神，开发了 array_agg 函数并贡献给社区。笔者通过这篇文章记录下对源码的一些理解，同时也方便后面的新人更快速地上手源码开发。</p> 
+</blockquote> 
+<p>聚合函数，顾名思义，即对一组数据执行聚合计算并返回结果的函数，在统计分析过程中属于最常见的函数之一，最典型的聚合函数包括 count、min、max、sum 等。基于聚合函数可以实现对大量数据的汇总计算，以更简洁的形式呈现数据并支持数据可视化。</p> 
+<p>相较于单机数据库，由于所有数据都存储在同一台机器上、无需跨节点的网络数据传输，往往单机数据库的聚合函数执行效率更高，而分布式数据库由于数据分散存储于多个节点、并行执行计算时需要从多个节点汇集数据，带来了额外的网络传输和本地磁盘 IO 开销，且多副本机制和分片策略也进一步增加了计算的数据量和管理的复杂性。</p> 
+<p>为避免单点瓶颈同时减少网络 IO，往往需要使用多阶段的方式进行执行，因此 Apache Doris 实现了灵活的多阶段聚合机制，能够根据查询语句的特点为其选择适当的聚合方式，从而在执行时间和执行开销（如内存，IO 等）之间取得有效的平衡。</p> 
+<h3 style="background-color:transparent;">多阶段聚合</h3> 
+<p>在 Apache Doris 中，主要聚合机制有如下几种：</p> 
+<ul><li> <p>一阶段聚合：Group By 仅包含分桶列，不同 Tablet 的数据在不同的分组中，因此不同 BE 可以独立并行计算；</p> </li><li> <p>两阶段聚合：Group By 包含非分桶列，同一个分组中的数据可能分布在多个 BE 上；</p> </li><li> <p>三阶段聚合：Count Distinct 包含 Group By（即 2 个两阶段聚合的组合）；</p> </li><li> <p>四阶段聚合：Count Distinct 不包含 Group by，通常采用 4 阶段聚合（1 个一阶段聚合和 1 个二阶段聚合的组合）</p> </li></ul> 
+<h4>一阶段聚合</h4> 
+<p>以如下查询为例，c1 是分桶列：</p> 
+<pre><code class="language-sql">SELECT  count(c1) FROM t1 GROUP BY c1</code></pre> 
+<p>由于每个 BE 存储了若干个 Tablet ，每台 BE 只需要对当前节点上的 Tablet Set，分别进行 Hash Aggregate 即可，也称为 Final Hash Aggregate，随后对各个 BE 结果进行汇总。</p> 
+<p>同一个 BE 可以使用多个线程来同时进行 Final Hash Aggregate 以提高效率，这里为了便于更简单理解仅讨论单线程。</p> 
+<h4>两阶段聚合</h4> 
+<p>以如下查询为例，c2 不是分桶列：</p> 
+<pre><code class="language-sql">SELECT c2, count(c1) FROM t1 GROUP BY c2</code></pre> 
+<p>对于上述查询，可以生成如下两阶段查询：</p> 
+<ul><li> <p>对 scan 分区按照 group by 字段（即 c2）进行分组聚合；</p> </li><li> <p>将聚合后的结果按照 group by 字段进行重分区，然后对新的分区按照 group by 字段进行分组聚合。</p> </li></ul> 
+<p>具体流程如下：</p> 
+<ol><li> <p>BE 对本节点上的 Tablet Set 进行第一次 Hash Aggregate，也称为 Pre Hash Aggregate；</p> </li><li> <p>BE 将 Pre Hash Aggregate 产生的结果按照完全相同的规则进行 Shuffle，其目的是将相同分组中的数据分发到同一台机器上；</p> </li><li> <p>BE 收到 Shuffle 数据后，再次进行 Hash Aggregate，也称为 Final Hash Aggregate；</p> </li><li> <p>对各个 BE 结果进行汇总</p> </li></ol> 
+<p></p> 
+<p class="img-center"><img alt="两阶段聚合" height="476" src="https://images2.imgbox.com/0e/1f/DDBs9kQe_o.jpg" width="1200"></p> 
+<h4>三阶段聚合</h4> 
+<p>以如下查询为例：</p> 
+<pre><code class="language-sql">SELECT count(distinct c1) FROM t1 GROUP BY c2</code></pre> 
+<p>对于上述查询，可以生成如下三阶段查询：</p> 
+<ul><li> <p>对 scan 分区按照 group by 和 distinct 字段（即 c2, c1）进行分组聚合；</p> </li><li> <p>将聚合后的结果按照 group by 和 distinct 字段进行重分区，然后对新的分区按照 group by 和 distinct 字段进行分组聚合；</p> </li><li> <p>对新的分区按照 group by 字段（即 c2）进行分组聚合。</p> </li></ul> 
+<p></p> 
+<p class="img-center"><img alt="三阶段聚合" height="476" src="https://images2.imgbox.com/19/05/kejetAjb_o.jpg" width="1200"></p> 
+<h4>四阶段聚合</h4> 
+<p>以如下查询为例：</p> 
+<pre><code class="language-sql">SELECT count(distinct c1), sum(c2) FROM t1</code></pre> 
+<p>对于上述查询，可以生成如下四阶段查询：</p> 
+<ul><li> <p>对 scan 分区按照 distinct 字段进行分组聚合；</p> </li><li> <p>将聚合后的结果按照 distinct 字段进行重分区，然后对新的分区按照 distinct 字段进行分组聚合；</p> </li><li> <p>将 count distinct 转换为 count，对新的分区进行聚合；</p> </li><li> <p>对各分区的结果进行汇总聚合。</p> </li></ul> 
+<h4 style="text-align:center;"><img alt="" src="https://images2.imgbox.com/93/73/Dq5iPAQM_o.jpg"></h4> 
+<h4 style="background-color:transparent;">流式预聚合</h4> 
+<p>对于上述多阶段聚合中的第一阶段，其主要作用是通过预聚合减少重分区产生的网络 IO。如果在聚合时使用了高基数的维度作为分组维度（如 group by ID），则预聚合的效果可能会大打折扣。为此，Apache Doris 支持为此聚合阶段启用流式预聚合，在此模式下如果 Aggregate Pipeline 发现聚合操作产生的行数减少效果不及预期，则不再对新的 Block 进行聚合而是将其转换后放到队列中。而 Read Pipeline 也无需等待前者聚合完毕才开始执行，而是读取队列中 Block 进行处理，直到 Aggregate Pipeline 执行完毕后才读取 Hash 表中的聚合结果。 简单而言，聚合过程中如果 Hash Table 需要扩容但发现聚合效果不好（比如输入 1w 条数据，经聚合后还有 1w 个分组）就会跳过聚合，直接把每一行输入当作一个分组。即在第一阶段，对不同的数据分布，采用不同的处理方式能够进一步提高效率：</p> 
+<ul><li> <p>若数据聚合度高，那么在该阶段进行聚合，可以有效减少数据量，降低 Shuffle 时的网络开销；</p> </li><li> <p>若数据聚合度低，在该阶段进行聚合无法起到很好的聚合效果，同时伴随着额外的开销，例如哈希计算、额外的 Map、Set 存储空间，此时我们可以将该算子退化成一个简单的流式传输的算子，数据进入该算子后，不做处理直接输出。</p> </li></ul> 
+<h4>Merge &amp; Finalize</h4> 
+<p>由于聚合计算的执行过程和最终结果的生成方式不同，聚合函数可以分为需要 Finalize 的和不需要 Finalize 的这两类。需要 Finalize 的聚合函数（在计算过程中会产生中间结果，这些中间结果可能需要进一步的处理或合并才能得到最终的聚合结果）包括：</p> 
+<ul><li> <p>AVG：计算平均值时需要将所有值相加再除以总数，因此需要 Finalize 操作来完成这个过程；</p> </li><li> <p>STDDEV：计算标准差时需要先计算方差再开方得到标准差，这个过程需要多次遍历数据集，因此需要 Finalize 操作来完成；</p> </li><li> <p>VAR_POP、VAR_SAMP：计算方差时需要用到所有数据的平方和，这个过程需要多次遍历数据集，因此需要 Finalize 操作来完成。</p> </li></ul> 
+<p>不需要 Finalize 的聚合函数（在计算过程中可以直接得到最终结果）包括：</p> 
+<ul><li> <p>COUNT：只需要统计数据集中的行数，不需要进行其他操作；</p> </li><li> <p>SUM、MIN、MAX：对数据集进行聚合时，这些函数只需要遍历一次数据集，因此不需要进行 Finalize 操作。</p> </li></ul> 
+<p>对于非第一阶段的聚合算子来说，由于其读取到的是经过聚合后的数据，因此在执行时需要将聚合状态进行合并。而对于最后阶段的聚合算子，则需要在聚合计算后计算出最终的聚合结果。</p> 
+<h3>聚合函数核心接口</h3> 
+<h4>IAggregateFunction接口</h4> 
+<p>在 Apache Doris 之中，定义了一个统一的聚合函数接口 IAggregateFunction。上文笔者提到的聚合函数，则都是作为抽象类 IAggregateFunction 的子类来实现的。该类中所有函数都是纯虚函数，需要子类自己实现，其中该接口最为核心的方法如下：</p> 
+<ul><li> <p>add函数：最为核心的调用接口，将对应 AggregateDataPtr 指针之中数据取出，与列 columns 中的第 row_num 的数据进行对应的聚合计算。(这里可以看到Doris是一个纯粹的列式存储数据库，所有的操作都是基于列的数据结构。）</p> </li><li> <p>merge函数：将两个聚合结果进行合并的函数，通常用在并发执行聚合函数的过程之中，需要将对应的聚合结果进行合并。</p> </li><li> <p>serialize 函数与 deserialize 函数：序列化与反序列化的函数，通常用于 Spill-to-Disk 或 BE 节点之间传输中间结果的。</p> </li><li> <p>add_batch 函数：虽然它仅仅实现了一个 for 循环调用 add 函数，但通过这样的方式来减少虚函数的调用次数，并且增加了编译器内联的概率。（虚函数的调用需要一次访存指令，一次查表，最终才能定位到需要调用的函数上，这在传统的火山模型的实现上会带来极大的CPU开销。）</p> </li></ul> 
+<p>首先看聚合节点 Aggregetor 是如何调用 add_batch 函数：</p> 
+<pre><code class="language-cpp">for (int i = 0; i &lt; _aggregate_evaluators.size(); ++i) {
+    RETURN_IF_ERROR(_aggregate_evaluators[i]-&gt;execute_batch_add(
+            block, _offsets_of_aggregate_states[i], _places.data(),
+            _agg_arena_pool.get()));
+}</code></pre> 
+<p>这里依次遍历 AggFnEvaluator 并调用 execute_batch_add--&gt;add_batch，而 add_batch 接口就是一行行的遍历列进行聚合计算：</p> 
+<pre><code class="language-cpp">void add_batch(size_t batch_size, AggregateDataPtr* places, size_t place_offset,
+               const IColumn** columns, Arena* arena, bool agg_many) const override{
+   for (size_t i = 0; i &lt; batch_size; ++i) {
+    assert_cast&lt;const Derived*&gt;(this)-&gt;add(places[i] + place_offset, columns, i, arena);
+  }                                 
+}</code></pre> 
+<p>构造函数：</p> 
+<pre><code class="language-cpp">IAggregateFunction(const DataTypes&amp; argument_types_) : 
+argument_types(argument_types_) {}</code></pre> 
+<p>argument_types_ 指的是函数的参数类型，比如函数 <code>select avg(a), avg(b), c from test group by c</code>, 这里 a, b 分别是 UInt16 类型与 Decimal 类型，那么这个 avg(a) 与 avg(b) 的参数就不同。</p> 
+<p>聚合函数结果输出接口 将聚合计算的结果重新组织为列存：</p> 
+<pre><code class="language-cpp">/// Inserts results into a column.
+virtual void insert_result_into(ConstAggregateDataPtr __restrict place, IColumn&amp; to) const = 0;</code></pre> 
+<pre><code class="language-cpp">首先看聚合节点 AggregationNode 是如何调用 insert_result_into 函数的：
+
+for (size_t i = 0; i &lt; _aggregate_evaluators.size(); ++i) {
+    _aggregate_evaluators[i]-&gt;insert_result_info(
+            mapped + _offsets_of_aggregate_states[i],
+            value_columns[i].get());
+}
+
+void AggFnEvaluator::insert_result_info(AggregateDataPtr place, IColumn* column) {
+    _function-&gt;insert_result_into(place, *column);
+}</code></pre> 
+<p>AggregationNode 同样是遍历 Hash表之中的结果，将 Key 列先组织成列存，然后调用 insert_result_info 函数将聚合计算的结果也转换为列存。以 avg 的实现为例：</p> 
+<pre><code class="language-cpp">   void insert_result_into(ConstAggregateDataPtr __restrict place, IColumn&amp; to) const override {
+        auto&amp; column = assert_cast&lt;ColVecResult&amp;&gt;(to);
+        column.get_data().push_back(this-&gt;data(place).template result&lt;ResultType&gt;());
+   }
+    
+   template &lt;typename ResultT&gt;
+   AggregateFunctionAvgData::ResultT result() const {
+        if constexpr (std::is_floating_point_v&lt;ResultT&gt;) {
+            if constexpr (std::numeric_limits&lt;ResultT&gt;::is_iec559) {
+                return static_cast&lt;ResultT&gt;(sum) / count; /// allow division by zero
+            }
+      }
+
+// https://github.com/apache/doris/blob/master/be/src/vec/aggregate_functions/aggregate_function_avg.h</code></pre> 
+<p>这里就是调用 ConstAggregateDataPtr ，即 AggregateFunctionAvgData 的 result() 函数获取 avg 计算的结果添加到内存中。</p> 
+<h4>IAggregateFunctionDataHelper 接口</h4> 
+<p>这个接口是上面提到 IAggregateFunction 的辅助子类接口，主要实现获取 add/serialize/deserialize 函数地址的方法。</p> 
+<h4>抽象类 IColumn</h4> 
+<p>聚合函数需要大量使用 Doris 的核心接口 IColumn 类。IColumn 接口是所有数据存储类型的基类，其表达了所有数据的内存结构，其他带有具体数据类型的如：ColumnNullable、ColumnUInt8、ColumnString、ColumnVector、ColumnArray 等，都实现了对应的列接口，并且在子类之中具象实现了不同的内存布局。</p> 
+<p>在此以 avg 的实现为例（这里简化了对 Decimal 类型的处理)：</p> 
+<pre><code class="language-cpp">void add(AggregateDataPtr __restrict place, const IColumn** columns, size_t row_num,
+         Arena*) const override {
+    const auto&amp; column = assert_cast&lt;const ColVecType&amp;&gt;(*columns[0]);
+     this-&gt;data(place).sum += column.get_data()[row_num].value;
+    ++this-&gt;data(place).count;
+}
+
+// https://github.com/apache/doris/blob/master/be/src/vec/aggregate_functions/aggregate_function_avg.h</code></pre> 
+<p>这里 columns 是一个二维数组，通过 columns[0] 可以取到第一列。这里只有涉及到一列，为什么 columns 是二维数组呢？因为处理多列的时候，也是通过对应的接口，而 array 就需要应用二维数组了。 注意这里有一个强制的类型转换，column 已经转换为 ColVecType 类型了，这是模板派生出 IColumn 的子类。</p> 
+<p>然后通过 IColumn 子类实现的 get_data() 方法获取对应 row_num 行的数据，进行 add 函数调用就完成了一次聚合函数的计算了。由于这里是计算平均值，我们可以看到不仅仅累加了 value 还计算 count。</p> 
+<h3>聚合函数主体流程</h3> 
+<p>在执行时，对应的 Fragment 会被转换为如下 Pipeline：</p> 
+<p></p> 
+<p class="img-center"><img alt="聚合函数主体流程" height="40" src="https://images2.imgbox.com/d9/92/FCvkPCIx_o.png" width="566"></p> 
+<p>在上述 Pipeline 中，Aggregate Pipeline 负责使用 Hash 表（有 group by 的情况下）对输入数据进行聚合，Read Pipeline 负责读取聚合后的数据并发送至父算子，因此两者存在依赖关系，后者需要等待前者执行完成后才能开始执行。</p> 
+<p>在此仅以 BE 节点收到来自 FE 节点的 Execution Fragment 来分析。Aggregate 逻辑的入口位于 AggregationNode，处理流程根据是否启用流式预聚合而有所不同。但是不论哪种，都依赖于 AggregationNode 的实现。在介绍具体实现之前，我们先介绍下 AggregationNode。</p> 
+<h4>结构体介绍</h4> 
+<p>AggregationNode 的一些重要成员如下，其中中文部分是笔者添加的注释：</p> 
+<pre><code class="language-cpp">class AggregationNode : public ::doris::ExecNode{
+    Status init(const TPlanNode&amp; tnode, RuntimeState* state = nullptr) override;
+    Status prepare_profile(RuntimeState* state);
+    Status prepare(RuntimeState* state) override;
+    //SQL中包含的聚合函数的数组
+    std::vector&lt;AggFnEvaluator*&gt; _aggregate_evaluators;
+    //是否需要finalize，前文有提到判断准则
+    bool _needs_finalize;
+    //是否需要merge
+    bool _is_merge;
+    //是否是第一阶段聚合
+    bool _is_first_phase;
+    //用来bind执行阶段需要用到的函数
+    executor _executor;
+    //存放聚合过程中的数据
+    AggregatedDataVariantsUPtr _agg_data;
+    
+    //取出聚合结果，发送至父算子进行处理
+    //进行读取操作，会使用get_result函数进行处理
+    Status pull(doris::RuntimeState* state, vectorized::Block* output_block, bool* eos) override;
+    //对输入block进行聚合，该步骤会使用前面分配的execute函数进行处理。
+    Status sink(doris::RuntimeState* state, vectorized::Block* input_block, bool eos) override;
+    //读取聚合结果，该函数最终会调用AggregationNode::pull函数进行读取操作
+    Status get_next(RuntimeState* state, Block* block, bool* eos) override;
+    
+    //执行阶段需要用到的函数
+    Status _get_without_key_result(RuntimeState* state, Block* block, bool* eos);
+    Status _serialize_without_key(RuntimeState* state, Block* block, bool* eos);
+    Status _execute_without_key(Block* block);
+    Status _merge_without_key(Block* block);
+    Status _get_with_serialized_key_result(RuntimeState* state, Block* block, bool* eos);
+    Status _get_result_with_serialized_key_non_spill(RuntimeState* state, Block* block, bool* eos);
+    Status _execute_with_serialized_key(Block* block);
+    Status _merge_with_serialized_key(Block* block);
+}
+</code></pre> 
+<p>Apache Doris 在聚合计算过程中使用了一种比较灵活的方式，在 AggregationNode 中事先声明了一个executor 结构体，其中封装了多个 std::function，分别代表执行阶段可能需要调用到的函数。在 Prepare 阶段会使用 std::bind 将函数绑定到具体的实现上，根据是否开启 streaming pre-agg、是否存在 group by、是否存在 distinct 等条件来确定具体绑定什么函数。</p> 
+<pre><code class="language-cpp">struct AggregationNode::executor {
+    vectorized_execute execute;
+    vectorized_pre_agg pre_agg;
+    vectorized_get_result get_result;
+    vectorized_closer close;
+    vectorized_update_memusage update_memusage;
+};</code></pre> 
+<p>这几个函数的大致调用关系过程可如下所示：</p> 
+<p></p> 
+<p class="img-center"><img alt="函数调用关系" height="977" src="https://images2.imgbox.com/ce/14/DnU7bZiM_o.png" width="1200"></p> 
+<p>对应的相关绑定过程：</p> 
+<p></p> 
+<p class="img-center"><img alt="相关绑定过程" height="601" src="https://images2.imgbox.com/8b/16/oYBiyLvL_o.png" width="1200"></p> 
+<h4>普通聚合</h4> 
+<p>在没有启用流式预聚合的情况下，处理流程如下：</p> 
+<ol><li> <p>调用 AggregationNode::init 函数进行初始化，包含如下处理逻辑：</p> 
+  <ul><li> <p>调用 VExpr::create_expr_trees 函数创建 group by 相关的信息；</p> </li><li> <p>调用 AggFnEvaluator::create 函数创建聚合函数。在代码中，这里是一个 for 循环，即如果 SQL 中包含多个聚合函数，需要创建多次。</p> </li></ul></li><li> <p>调用 AggregationNode::prepare 函数执行运行前的准备，包含如下处理逻辑：</p> 
+  <ul><li> <p>调用 ExecNode::prepare 函数为父类成员执行运行前的准备；</p> </li><li> <p>对 group by 表达式调用 VExpr::prepare 函数执行运行前的准备；</p> </li><li> <p>计算聚合函数需要的状态空间大小及各聚合函数的偏移，这些偏移量后续取地址的时候会用到</p> </li><li> <p>AggregationNode::prepare_profile 根据当前聚合类型及是否涉及 group by 参数 bind 对应的处理函数，分配逻辑如下：</p> 
+    <ul><li> <p>如果当前聚合包含 group by 参数：</p> 
+      <ul><li> <p>如果当前聚合需要 merge 聚合状态（多阶段聚合），则使用 AggregationNode::<em>merge_with_serialized_key 函数用于处理输入 block（下称 execute 函数），否则使用 AggregationNode::</em>execute_with_serialized_key 函数。如果是多阶段聚合多个 AggregationNode 会分别绑定_merge_with_serialized_key 和 _execute_with_serialized_key。</p> </li><li> <p>如果当前聚合需要对聚合结果执行 finalize，则使用 AggregationNode::<em>get_with_serialized_key_result 函数用于读取聚合结果（下称 get_result 函数），否则使用AggregationNode::</em>serialize_with_serialized_key_result 函数。</p> </li></ul></li><li> <p>如果当前聚合不包含 group by 参数：</p> 
+      <ul><li> <p>如果当前聚合需要 merge 聚合状态，则使用 AggregationNode::<em>merge_without_key 函数用于处理输入 block（下称execute函数），否则使用 AggregationNode::</em>execute_without_key 函数。</p> </li><li> <p>如果当前聚合需要对聚合结果执行 finalize，则使用 AggregationNode::<em>get_with_serialized_key_result 函数用于读取聚合结果（下称 get_result 函数），否则使用 AggregationNode::</em>serialize_with_serialized_key_result 函数。</p> </li></ul></li><li> <p>如果当前聚合包含 group by 参数，则需要根据参数类型分配对应的 hash 方法：_init_hash_method</p> </li></ul></li></ul></li><li> <p>调用 AggregationNode::sink 函数对输入 Block 进行聚合，该步骤会使用前面分配的 execute 函数进行处理。</p> </li><li> <p>调用 AggregationNode::get_next 函数读取聚合结果，该函数最终会调用 AggregationNode::pull 函数进行读取操作，后者会使用前面分配的 get_result 函数进行处理。</p> </li><li> <p>调用 AggregationNode::release_resource 函数释放资源，该函数会调用 _executor.close()。</p> </li></ol> 
+<p>对 block 数据的聚合逻辑较为简单，以包含 group by 参数的情况为例，聚合流程如下：</p> 
+<ul><li> <p>调用 AggregationNode::_emplace_into_hash_table 函数创建具体的聚合方法类，并获取 Hash 表中对应行的聚合状态。</p> </li><li> <p>如果当前聚合处理的是原始的行数据，则调用 AggFnEvaluator::execute_batch_add 函数进行聚合处理。</p> </li><li> <p>如果当前聚合需要 merge 聚合状态，则首先需要对聚合状态中的结果进行反序列化，然后调用 IAggregateFunctionHelper::merge_vec 函数对当前聚合状态进行合并。</p> </li></ul> 
+<h4 style="background-color:transparent;">流式聚合</h4> 
+<p>对于 hash 分组效果不佳的场景，会启用流式预聚合，处理流程如下：</p> 
+<ul><li> <p>调用 AggregationNode::init 函数进行初始化；</p> </li><li> <p>调用AggregationNode::prepare函数执行运行前的准备；</p> </li><li> <p>调用 AggregationNode::do_pre_agg 函数对输入 block 进行聚合，该函数会调用 _pre_agg_with_serialized_key 函数进行实际的聚合操作。如果在处理过程中 hash 扩容达到阈值，则跳过聚合，直接把每一行输入当作一个分组，即调用 streaming_agg_serialize_to_column，否则还是使用朴素的方法 AggFnEvaluator::execute_batch_add；</p> </li><li> <p>调用 AggregationNode::pull 函数取出聚合结果，发送至父算子进行处理；</p> </li><li> <p>调用 AggregationNode::release_resource 函数释放资源。</p> </li></ul> 
+<p>感兴趣的读者可以自行阅读流式聚合相关的源码，可以给 streaming_agg_serialize_to_column 加断点进行 debug，触发方法如下：</p> 
+<ul><li> <p>TPC-H 准备 3G 数据，方法见 <a href="https://doris.apache.org/zh-CN/docs/1.2/benchmark/tpch/" rel="nofollow" title="https://doris.apache.org/zh-CN/docs/1.2/benchmark/tpch/ ">https://doris.apache.org/zh-CN/docs/1.2/benchmark/tpch/ </a></p> </li><li> <p>执行 SQL <code>select count() from (select map_agg(o_orderstatus,o_clerk) from orders group by o_custkey, o_orderdate) a</code>；</p> </li></ul> 
+<h3>如何新增一个聚合函数</h3> 
+<p>下面以 map_agg 为例介绍添加聚合函数的流程。以下内容仅为笔者个人的思考，感兴趣的读者可以具体参考：<a href="https://github.com/apache/doris/pull/22043" title="[feature](agg) add the aggregation function 'mag_agg' by mrhhsg · Pull Request #22043 · apache/doris · GitHub">[feature](agg) add the aggregation function 'mag_agg' by mrhhsg · Pull Request #22043 · apache/doris · GitHub</a><a href="https://github.com/apache/doris/pull/22043" title="[feature](agg) add the aggregation function 'mag_agg' by mrhhsg · Pull Request #22043 · apache/doris · GitHub">[feature](agg) add the aggregation function 'mag_agg' by mrhhsg · Pull Request #22043 · apache/doris · GitHub</a></p> 
+<h4>map_agg 使用介绍</h4> 
+<p>语法：<code>MAP_AGG(expr1, expr2)</code></p> 
+<p>功能：返回一个 map，由 expr1 作为键、expr2 作为对应的值。</p> 
+<h4>在 FE 创建函数签名</h4> 
+<p>Step 1: <a href="https://github.com/apache/doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/FunctionSet.java" title="维护 FunctionSet.java">维护 FunctionSet.java</a></p> 
+<p>FE 通过 initAggregateBuiltins 来描述聚合函数，所有的聚合函数都会注册在 FunctionSet 中。初始化阶段在 <a href="https://github.com/apache/doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/FunctionSet.java" title="FunctionSet.java">FunctionSet.java</a> 的 initAggregateBuiltins 中增加对应的 AggregateFunction.createBuiltin 函数即可。</p> 
+<pre><code class="language-java">if (!Type.JSONB.equals(t)) {
+    for (Type valueType : Type.getMapSubTypes()) {
+        addBuiltin(AggregateFunction.createBuiltin(MAP_AGG, Lists.newArrayList(t, valueType),
+                new MapType(t, valueType),
+                Type.VARCHAR,
+                "", "", "", "", "", null, "",
+                true, true, false, true));
+    }
+
+    for (Type v : Type.getArraySubTypes()) {
+        addBuiltin(AggregateFunction.createBuiltin(MAP_AGG, Lists.newArrayList(t, new ArrayType(v)),
+                new MapType(t, new ArrayType(v)),
+                new MapType(t, new ArrayType(v)),
+                "", "", "", "", "", null, "",
+                true, true, false, true));
+    }
+ }</code></pre> 
+<p>以上代码的理解思路如下：</p> 
+<ul><li> <p>如果 map_agg 的 key 不是 josn blob 字段( if (!Type.JSONB.equals(t)) )，则先找到 map_agg 相关函数 ( for (Type valueType : Type.getMapSubTypes())) 。</p> </li><li> <p>通过 addBuiltin 初始化对应 MAP_AGG 函数，value 类型是传进来的 valueType，中间状态变量是 Type.VARCHAR。</p> </li><li> <p>找到 array 相关函数( for (Type v : Type.getArraySubTypes()))，通过 addBuiltin 初始化对应 MAP_AGG 函数， value 类型是 ArrayType，中间状态变量是 MapType。</p> </li></ul> 
+<p>Step 2：维护 <a href="https://github.com/apache/doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/AggregateFunction.java" title="AggregateFunction.java">AggregateFunction.java</a></p> 
+<p>在 <a href="https://github.com/apache/doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/AggregateFunction.java" title="AggregateFunction.java ">AggregateFunction.java </a>文件中，注册 FunctionSet.MAP_AGG，具体如下：</p> 
+<pre><code class="language-java">    public static ImmutableSet&lt;String&gt; NOT_NULLABLE_AGGREGATE_FUNCTION_NAME_SET = ImmutableSet.of("row_number", "rank",
+            "dense_rank", "multi_distinct_count", "multi_distinct_sum", FunctionSet.HLL_UNION_AGG,
+            FunctionSet.HLL_UNION, FunctionSet.HLL_RAW_AGG, FunctionSet.BITMAP_UNION, FunctionSet.BITMAP_INTERSECT,
+            FunctionSet.ORTHOGONAL_BITMAP_INTERSECT, FunctionSet.ORTHOGONAL_BITMAP_INTERSECT_COUNT,
+            FunctionSet.ORTHOGONAL_BITMAP_EXPR_CALCULATE_COUNT, FunctionSet.ORTHOGONAL_BITMAP_EXPR_CALCULATE,
+            FunctionSet.INTERSECT_COUNT, FunctionSet.ORTHOGONAL_BITMAP_UNION_COUNT,
+            FunctionSet.COUNT, "approx_count_distinct", "ndv", FunctionSet.BITMAP_UNION_INT,
+            FunctionSet.BITMAP_UNION_COUNT, "ndv_no_finalize", FunctionSet.WINDOW_FUNNEL, FunctionSet.RETENTION,
+            FunctionSet.SEQUENCE_MATCH, FunctionSet.SEQUENCE_COUNT, FunctionSet.MAP_AGG);</code></pre> 
+<p>Step 3: <a href="https://github.com/apache/doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/FunctionCallExpr.java" title="维护 FunctionCallExpr.java ">维护 FunctionCallExpr.java </a></p> 
+<p>在 <a href="https://github.com/apache/doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/FunctionCallExpr.java" title="FunctionCallExpr.java">FunctionCallExpr.java</a> 中根据 argumentt 强制设置类型，防止丢失 decimal 类型的 scale。</p> 
+<pre><code class="language-java">   if (fnName.getFunction().equalsIgnoreCase("map_agg")) {    
+       fn.setReturnType(new MapType(getChild(0).type, getChild(1).type));  
+   }   </code></pre> 
+<h4>在 BE 中注册函数</h4> 
+<p>这一步是为了让 AggregateFunctionSimpleFactory 可以根据函数名找到对应的函数，函数的创建通过 factory.register_function_both 实现，相关的改动可以在 <a href="https://github.com/xingyingone/doris/blob/b41fcbb7834bf89f9744d351b1cfb9ac2485008b/be/src/vec/aggregate_functions/aggregate_function_map.cpp" title="aggregate_function_map.cc">aggregate_function_map.cc</a> 中 grep register_aggregate_function_map_agg 看到，比较简单，在此不再赘述。</p> 
+<h4>在 BE 实现函数的计算逻辑</h4> 
+<p>重点是如何描述中间结果以及 AggregateFunctionMapAgg 如何实现 IAggregateFunction的核心接口。</p> 
+<p>Step 1：转换类型</p> 
+<p>由于我们最终结果需要返回一系列 map，所以输出类型为 DataTypeMap：</p> 
+<pre><code class="language-cpp">DataTypePtr get_return_type() const override {
+    /// keys and values column of `ColumnMap` are always nullable.
+    return std::make_shared&lt;DataTypeMap&gt;(make_nullable(argument_types[0]),
+                                         make_nullable(argument_types[1]));
+}</code></pre> 
+<p>由于默认的中间状态是 string 类型，如果是 string，需要处理比较复杂的序列化/反序列化操作。</p> 
+<pre><code class="language-java">IAggregateFunction::get_serialized_type(){return std::make_shared&lt;DataTypeString&gt;();}</code></pre> 
+<p>所以在 AggregateFunctionMapAgg 重新了序列化/反序列化的中间类型：</p> 
+<pre><code class="language-cpp">[[nodiscard]] MutableColumnPtr create_serialize_column() const override {
+    return get_return_type()-&gt;create_column();
+}
+
+[[nodiscard]] DataTypePtr get_serialized_type() const override { return get_return_type(); }</code></pre> 
+<p>Step 2：聚合操作</p> 
+<p>代码中需要将每行的数据取出来进行对应的聚合计算，具体是通重写 add 函数来实现的：</p> 
+<ul><li> <p>这里表示将第 row_num 行的数据丢给 AggregateFunctionMapAggData 来执行，这里可以看出来需要对 nullable 和非 nullable 的分开处理。</p> </li><li> <p>在 AggregateFunctionMapAggData 中，将 key 以及 value 分别存储在 _key_column 和 _value_column。由于 key 不为 NULL，所以执行了 remove_nullable；由于 value 允许为 NULL，这里执行了 make_nullable，并通过 _map 来过滤了重复的 key。</p> </li></ul> 
+<p>具体的代码实现如下：</p> 
+<pre><code class="language-cpp">void AggregateFunctionMapAgg::add(AggregateDataPtr __restrict place, const IColumn columns, size_t row_num,
+         Arena* arena) const override {
+    if (columns[0]-&gt;is_nullable()) {
+        auto&amp; nullable_col = assert_cast&lt;const ColumnNullable&amp;&gt;(*columns[0]);
+        auto&amp; nullable_map = nullable_col.get_null_map_data();
+        if (nullable_map[row_num]) {
+            return;
+        }
+        Field value;
+        columns[1]-&gt;get(row_num, value);
+        this-&gt;data(place).add(
+                assert_cast&lt;const KeyColumnType&amp;&gt;(nullable_col.get_nested_column())
+                        .get_data_at(row_num),
+                value);
+    } else {
+        Field value;
+        columns[1]-&gt;get(row_num, value);
+        this-&gt;data(place).add(
+                assert_cast&lt;const KeyColumnType&amp;&gt;(*columns[0]).get_data_at(row_num), value);
+    }
+}
+
+AggregateFunctionMapAggData::add(const StringRef&amp; key, const Field&amp; value){
+    DCHECK(key.data != nullptr);
+   if (UNLIKELY(_map.find(key) != _map.end())) {
+      return;
+    }
+    ArenaKeyHolder key_holder {key, _arena};
+    if (key.size &gt; 0) {
+      key_holder_persist_key(key_holder);
+    }
+    _map.emplace(key_holder.key, _key_column-&gt;size());
+    _key_column-&gt;insert_data(key_holder.key.data, key_holder.key.size);
+    _value_column-&gt;insert(value);
+}</code></pre> 
+<p>Step 3：序列化/反序列化</p> 
+<p>由于中间传输的是 ColumnMap 类型，所以只需进行数据拷贝即可</p> 
+<pre><code class="language-cpp">void deserialize_from_column(AggregateDataPtr places, const IColumn&amp; column, Arena* arena,
+                             size_t num_rows) const override {
+    auto&amp; col = assert_cast&lt;const ColumnMap&amp;&gt;(column);
+    auto* data = &amp;(this-&gt;data(places));
+    for (size_t i = 0; i != num_rows; ++i) {
+        auto map = doris::vectorized::get&lt;Map&gt;(col[i]);
+        data-&gt;add(map[0], map[1]);
+    }
+}
+
+void serialize_to_column(const std::vector&lt;AggregateDataPtr&gt;&amp; places, size_t offset,
+                         MutableColumnPtr&amp; dst, const size_t num_rows) const override {
+    for (size_t i = 0; i != num_rows; ++i) {
+        Data&amp; data_ = this-&gt;data(places[i] + offset);
+        data_.insert_result_into(*dst);
+    }
+}</code></pre> 
+<p>Step 4：输出结果</p> 
+<p>insert_result_into 表示最终的返回，所以里面转换的类型要跟 return_type 里面的一致，所以可以看到我们将类型转换为 ColumnMap 进行处理。</p> 
+<pre><code class="language-cpp">void AggregateFunctionMapAgg::insert_result_into(ConstAggregateDataPtr __restrict place, IColumn&amp; to) const override {
+    this-&gt;data(place).insert_result_into(to);
+}
+
+void AggregateFunctionMapAggData::insert_result_into(IColumn&amp; to) const {
+    auto&amp; dst = assert_cast&lt;ColumnMap&amp;&gt;(to);
+    size_t num_rows = _key_column-&gt;size();
+    auto&amp; offsets = dst.get_offsets();
+    auto&amp; dst_key_column = assert_cast&lt;ColumnNullable&amp;&gt;(dst.get_keys());
+    dst_key_column.get_null_map_data().resize_fill(dst_key_column.get_null_map_data().size() +
+                                                   num_rows);
+    dst_key_column.get_nested_column().insert_range_from(*_key_column, 0, num_rows);
+    dst.get_values().insert_range_from(*_value_column, 0, num_rows);
+    if (offsets.size() == 0) {
+        offsets.push_back(num_rows);
+    } else {
+        offsets.push_back(offsets.back() + num_rows);
+    }
+}</code></pre> 
+<p>Step 5：维护测试用例及文档</p> 
+<p>这块比较简单，可以参考官方文档 <a href="https://doris.apache.org/zh-CN/community/developer-guide/regression-testing/" rel="nofollow" title="回归测试 - Apache Doris">回归测试 - Apache Doris</a></p> 
+<h3>array_agg 源码解析</h3> 
+<p>笔者通过阅读 <a href="https://github.com/apache/doris/pull/22043/files" title="mag_agg ">mag_agg </a> 源码以及社区大佬 @mrhhsg 的答疑解惑，为 Apache Doris 增加了 array_agg 函数支持。下文笔者将从 SQL 执行的角度阐述上文提到的函数执行流程及调用栈，具体代码可以阅读： <a href="https://github.com/apache/doris/pull/23474/files" title="[feature](agg) add the aggregation function 'array_agg' by xingyingone · Pull Request #23474 · apache/doris · GitHub">[feature](agg) add the aggregation function 'array_agg' by xingyingone · Pull Request #23474 · apache/doris · GitHub</a></p> 
+<h4>array_agg 使用介绍</h4> 
+<p>语法：<code>ARRAY_AGG(col)</code></p> 
+<p>功能：将一列中的值（包括空值 null）串联成一个数组，可以用于多行转一行（行转列）。</p> 
+<p>需要注意点：</p> 
+<ul><li> <p>数组中元素不保证顺序；</p> </li><li> <p>返回转换生成的数组，数组中的元素类型与 col类型一致；</p> </li><li> <p>需要显示NULL</p> </li></ul> 
+<p>实验 SQL 如下：</p> 
+<pre><code class="language-sql">   CREATE TABLE `test_array_agg` (
+        `id` int(11) NOT NULL,
+        `label_name` varchar(32) default null,
+        `value_field` string default null,
+    ) ENGINE=OLAP
+    DUPLICATE KEY(`id`)
+    COMMENT 'OLAP'
+    DISTRIBUTED BY HASH(`id`) BUCKETS 1
+    PROPERTIES (
+    "replication_allocation" = "tag.location.default: 1",
+    "storage_format" = "V2",
+    "light_schema_change" = "true",
+    "disable_auto_compaction" = "false",
+    "enable_single_replica_compaction" = "false"
+    );
+ insert into `test_array_agg` values
+ (1, "alex",NULL),
+ (1, "LB", "V1_2"),
+ (1, "LC", "V1_3"),
+ (2, "LA", "V2_1"),
+ (2, "LB", "V2_2"),
+ (2, "LC", "V2_3"),
+ (3, "LA", "V3_1"),
+ (3, NULL, NULL),
+ (3, "LC", "V3_3"),
+ (4, "LA", "V4_1"),
+ (4, "LB", "V4_2"),
+ (4, "LC", "V4_3"),
+ (5, "LA", "V5_1"),
+ (5, "LB", "V5_2"),
+ (5, "LC", "V5_3");</code></pre> 
+<h4>执行流程</h4> 
+<p>group by + 多阶段聚合</p> 
+<pre><code class="language-sql">
+mysql&gt; SELECT label_name, array_agg(label_name) FROM test_array_agg GROUP BY label_name;
++------------+--------------------------------+
+| label_name | array_agg(`label_name`)        |
++------------+--------------------------------+
+| LC         | ["LC", "LC", "LC", "LC", "LC"] |
+| NULL       | [NULL]                         |
+| alex       | ["alex"]                       |
+| LB         | ["LB", "LB", "LB", "LB"]       |
+| LA         | ["LA", "LA", "LA", "LA"]       |
++------------+--------------------------------+
+5 rows in set (11.55 sec)
+
+#执行
+AggregationNode::_pre_agg_with_serialized_key--&gt;add(执行15次，每次处理一行)  
++
+AggregationNode::_merge_with_serialized_key-&gt;deserialize_and_merge_vec(执行5次，每次merge一个分组)
+
+#取结果
+_serialize_with_serialized_key_result--&gt;serialize_to_column 执行一次，处理5个分组
+_get_with_serialized_key_result--&gt;insert_result_info 5次，每次处理一个分组</code></pre> 
+<p>group by + 一阶段聚合</p> 
+<pre><code class="language-sql">mysql&gt; SELECT id, array_agg(label_name) FROM test_array_agg GROUP BY id;
++------+-------------------------+
+| id   | array_agg(`label_name`) |
++------+-------------------------+
+|    1 | ["LC", "LB", "alex"]    |
+|    2 | ["LC", "LB", "LA"]      |
+|    3 | ["LC", NULL, "LA"]      |
+|    4 | ["LC", "LB", "LA"]      |
+|    5 | ["LC", "LB", "LA"]      |
++------+-------------------------+
+5 rows in set (20.12 sec)
+
+#执行
+AggregationNode::_execute_with_serialized_key--&gt;add(执行15次，每次处理一行)
+
+#取结果
+ _get_with_serialized_key_result--&gt;insert_result_info 一次循环，遍历处理5个分组
+</code></pre> 
+<p>无group by + 多阶段聚合</p> 
+<pre><code class="language-sql">mysql&gt;  SELECT array_agg(label_name) FROM test_array_agg;
++----------------------------------------------------------------------------------------------+
+| array_agg(`label_name`)                                                                      |
++----------------------------------------------------------------------------------------------+
+| ["LC", "LB", "alex", "LC", "LB", "LA", "LC", NULL, "LA", "LC", "LB", "LA", "LC", "LB", "LA"] |
++----------------------------------------------------------------------------------------------+
+1 row in set (1 min 21.01 sec)
+
+ #执行
+ AggregationNode::_execute_without_key--&gt;add(执行15次，每次处理一行)
+ AggregationNode::_merge_without_key--&gt;deserialize_and_merge_from_column(执行一次，只有一个分组，这个分组有15个元素)
+ 
+ #取结果
+ AggregationNode::_serialize_without_key--&gt;serialize_without_key_to_column
+ AggregationNode::_get_without_key_result--&gt;AggregateFunctionCollect::insert_result_into (执行一次，只有一个分组，这个分组有15个元素)</code></pre> 
+<h4>函数调用栈</h4> 
+<pre><code class="language-sql">AggregationNode::init
+|--&gt; //初始化_aggregate_evaluators
+|--&gt; _aggregate_evaluators.reserve(tnode.agg_node.aggregate_functions.size());
+|--&gt; //begin loop
+|--&gt; for (int i = 0; i &lt; tnode.agg_node.aggregate_functions.size(); ++i)
+|--&gt;   //为每个聚合函数生成一个evaluator
+|--&gt;   AggFnEvaluator::create(&amp;evaluator)
+|   |--&gt;   agg_fn_evaluator-&gt;_input_exprs_ctxs.push_back(ctx);
+|--&gt;   //将每个聚合函数的evaluator加到vector
+|--&gt;   _aggregate_evaluators.push_back(evaluator);
+|--&gt; //end loop
+
+AggregationNode::prepare
+|--&gt; ExecNode::prepare
+|--&gt; AggregationNode::prepare_profile
+|   |--&gt; //begin loop
+|   |--&gt; for (int i = 0; i &lt; _aggregate_evaluators.size(); ++i, ++j) 
+|   |--&gt; //具体到某一个聚合函数
+|   |--&gt; _aggregate_evaluators[i]-&gt;prepare()
+|   |   |--&gt; //初始化group by信息
+|   |   |--&gt; VExpr::prepare()
+|   |   |--&gt; //初始化
+|   |   |--&gt; AggFnEvaluator::prepare
+|   |   |   |--&gt; //经过一些工厂函数的处理，最终调用到具体的聚合函数的创建
+|   |   |   |--&gt; create_aggregate_function_collect
+|   |   |   |   |--&gt; create_agg_function_map_agg&lt;String&gt;(argument_types, result_is_nullable)
+|   |   |   |   |   |--&gt; //构造函数
+|   |   |   |   |   |--&gt; AggregateFunctionCollect(const DataTypes&amp; argument_types_)
+|   |--&gt; //end loop
+|   |--&gt; //bind各种函数
+
+//调用AggregationNode::sink函数对输入block进行聚合，该步骤会使用前面分配的execute函数进行处理。
+AggregationNode::sink
+|--&gt; //in_block-&gt;rows()=15，就是数据的行数
+|--&gt; _executor.execute(in_block)
+|  |--&gt; //group by+分桶id(一阶段聚合))即可触发
+|  |--&gt; //SELECT id, array_agg(label_name) FROM test_array_agg GROUP BY id;
+|  |--&gt; AggregationNode::_execute_with_serialized_key
+|  |  |--&gt; AggregationNode::_execute_with_serialized_key_helper
+|  |  |  |--&gt; //这个时候num_rows就是所有记录的行数
+|  |  |  |--&gt; //但是这里循环了5次，因为有5个分组需要创建5个AggregateFunctionArrayAggData对象
+|  |  |  |--&gt; AggregationNode::_emplace_into_hash_table
+|  |  |  |  |--&gt; PHHashMap&lt;unsigned int, char*, HashCRC32&lt;unsigned int&gt;, false&gt;::lazy_emplace_keys
+|  |  |  |  |  |--&gt; //开始遍历所有的数据(keys.size()=15行)
+|  |  |  |  |  |--&gt; for (size_t i = 0; i &lt; keys.size(); i++)
+|  |  |  |  |  |--&gt; _hash_map.lazy_emplace_with_hash(keys[i], hash_values[i]..)
+|  |  |  |  |  |  |--&gt; //key不重复才会往下走，所以一共执行了5次AggregateFunctionMapAggData
+|  |  |  |  |  |  |--&gt; creator--&gt;AggregationNode::_create_agg_status
+|  |  |  |  |  |  |  |--&gt; AggregationNode::_create_agg_status
+|  |  |  |  |  |  |  |  |--&gt; AggFnEvaluator::create
+|  |  |  |  |  |  |  |  |  |--&gt; AggregateFunctionCollect::create
+|  |  |  |  |  |  |  |  |  |  |--&gt; //调用构造函数
+|  |  |  |  |  |  |  |  |  |  |--&gt; AggregateFunctionArrayAggData()
+|  |  |  |  |  |--&gt; //结束遍历
+|  |  |  |--&gt; //begin loop
+|  |  |  |--&gt;  for (int i = 0; i &lt; _aggregate_evaluators.size(); ++i)
+|  |  |  |--&gt;  //传入block，此时block有15行
+|  |  |  |--&gt;  _aggregate_evaluators[i]-&gt;execute_batch_add | AggFnEvaluator::execute_batch_add
+|  |  |  |  |--&gt; //block-&gt;rows()=17 offset=0 _agg_columns.data()有两列
+|  |  |  |  |--&gt; IAggregateFunctionHelper::add_batch
+|  |  |  |  |--&gt;  //begin loop
+|  |  |  |  |--&gt;  //batch_size=15，执行15次add
+|  |  |  |  |--&gt;  for (size_t i = 0; i &lt; batch_size; ++i)
+|  |  |  |  |--&gt;   AggregateFunctionCollect::add()
+|  |  |  |  |--&gt;  //end loop
+|  |  |  |--&gt; //end loop
+|  |
+|  |--&gt; //不带group by+一阶段聚合
+|  |--&gt; AggregationNode::_execute_without_key
+|  |  |--&gt; AggFnEvaluator::execute_single_add
+|  |  |  |--&gt; IAggregateFunctionHelper::add_batch_single_place
+|  |  |  |--&gt; /*begin loop*/
+|  |  |  |--&gt; //执行15次
+|  |  |  |--&gt; for (size_t i = 0; i &lt; batch_size; ++i)
+|  |  |  |--&gt; AggregateFunctionCollect::add()
+|  |  |  |--&gt; //end loop
+|  |--&gt; //group by+多阶段聚合
+|  |--&gt; AggregationNode::_merge_with_serialized_key
+|  |  |--&gt; AggregateFunctionCollect::deserialize_and_merge_vec
+|  |--&gt;//无group by + 多阶段聚合
+|  |--&gt;//SELECT  array_agg(label_name) FROM test_array_agg ;
+|  |--&gt; AggregationNode::_merge_without_key
+|  |  |--&gt; AggregateFunctionCollect::deserialize_and_merge_from_column
+|  |--&gt; AggregationNode::_pre_agg_with_serialized_key
+|  |  |--&gt; //如果聚合效果不佳，hash扩容达到阈值，则跳过聚合，直接把每一行输入当作一个分组
+|  |  |--&gt; AggregateFunctionCollect::streaming_agg_serialize_to_column
+|  |  |--&gt; //如果hash扩容没到阈值，还是采用朴素的方法
+|  |  |--&gt; AggFnEvaluator::execute_batch_add
+|  |  |  |--&gt; //执行15次
+|  |  |  |--&gt; for (size_t i = 0; i &lt; batch_size; ++i)
+|  |  |  |--&gt; AggregateFunctionCollect::add()
+|  |  |  |--&gt; //end loop
+
+AggregationNode::pull
+|--&gt; //group by + 且需要finalize
+|--&gt; //SELECT id, array_agg(label_name) FROM test_array_agg GROUP BY id;
+|--&gt; AggregationNode::_get_with_serialized_key_result
+|  |--&gt; AggregationNode::_get_result_with_serialized_key_non_spill
+|  |  |--&gt; //从block里面拿key的列，也就是group by的列
+|  |  |--&gt; key_columns.emplace_back
+|  |  |--&gt; //从block里面拿value的列
+|  |  |--&gt; value_columns.emplace_back
+|  |  |--&gt; //如果是一阶段聚合：这个时候num_rows=5，代表有5个分组
+|  |  |--&gt; //SELECT id, array_agg(label_name) FROM test_array_agg GROUP BY id;
+|  |  |--&gt; //如果是多阶段聚合：这个时候num_rows=1，需要在上层调用5次
+|  |  |--&gt; //SELECT label_name, array_agg(label_name) FROM test_array_agg GROUP BY label_name;
+|  |  |--&gt; AggFnEvaluator::insert_result_info(num_rows)
+|  |  |  |--&gt; for (size_t i = 0; i != num_rows; ++i)
+|  |  |  |--&gt;  IAggregateFunctionHelper::insert_result_into
+|  |  |  |  |--&gt;  AggregateFunctionCollect::insert_result_into
+|  |  |  |  |  |--&gt; AggregateFunctionArrayAggData::insert_result_into
+|  |  |  |--&gt; //循环结束
+|--&gt; //没有group by 且不需要finalize
+|--&gt; AggregationNode::_serialize_without_key
+|  |--&gt; AggregateFunctionCollect::create_serialize_column
+|  |--&gt; AggregateFunctionCollect::serialize_without_key_to_column
+|  |  |--&gt; AggregateFunctionArrayAggData::insert_result_into
+|--&gt; //没有group by 且需要finalize
+|--&gt; AggregationNode::_get_without_key_result
+|  |--&gt;  AggregateFunctionCollect::insert_result_into
+|  |  |--&gt; AggregateFunctionArrayAggData::insert_result_into
+|--&gt; //group by + 且不需要finalize
+|--&gt; AggregationNode::_serialize_with_serialized_key_result
+|  |--&gt; AggregationNode::_serialize_with_serialized_key_result_non_spill
+|  |  |--&gt; //num_rows=5, 处理5个分组
+|  |  |--&gt; AggregateFunctionCollect::serialize_to_column(num_rows)
+|  |  |  |--&gt; AggregateFunctionArrayAggData::insert_result_into</code></pre> 
+<p>注意点：</p> 
+<ul><li> <p>如果是两阶段聚合，在 execute 阶段必然会执行 execute+merge，即在会分别绑定 _merge_with 和 _execute_with，但是一阶段聚合只会绑定 _execute_with；</p> </li><li> <p>如果是两阶段聚合，在 get_result 阶段会有多个 AggregationNode，会根据具体的情况判断是否 _needs_finalize；一阶段聚合只有一个 AggregationNode，会绑定 _needs_finalize。</p> </li></ul> 
+<h3>总结</h3> 
+<p>最近由于工作需要笔者开始调研和使用 Apache Doris，通过阅读聚合函数代码切入 Apache Doris 内核。秉承着开源的精神，开发了 array_agg 函数并贡献给社区。希望通过这篇文章记录下对源码的一些理解，同时也方便后面的新人更快速地上手源码开发。</p> 
+<p>在学习和掌握 Apache Doris 的过程中，作为 OLAP 新人的笔者遇到了很多疑惑点。好在 Apache Doris 不仅功能强大，社区更是十分活跃，社区技术大佬们对于新人的问题也特别热心，不厌其烦帮我们新人们答疑解惑，这无疑为笔者在调研过程中增加了不少信心，在此由衷地感谢社区大佬 @yiguolei @mrhhsg。也期待未来有更多的小伙伴可以参与到社区当中来，一同学习与成长。</p> 
+<h4>作者介绍</h4> 
+<p>隐形(邢颖) 网易资深数据库内核工程师，毕业至今一直从事数据库内核开发工作，目前主要参与 MySQL 与 Apache Doris 的开发维护和业务支持工作。</p> 
+<p>作为 MySQL 内核贡献者，为 MySQL 上报了 50 多个 Bug 及优化项，多个提交被合入 MySQL 8.0 版本。从 2023 年起加入 Apache Doris 社区，Apache Doris Active Contributor，已为社区提交并合入数十个 Commits。</p> 
+<h4>参考链接：</h4> 
+<p></p> 
+<p>[1]https://zhuanlan.zhihu.com/p/614555403</p> 
+<p>[2]https://www.slidestalk.com/doris.apache/Doris22141</p> 
+<p>[3]https://github.com/apache/doris/blob/master/be/src/vec/aggregate_functions/aggregate_function_avg.h</p> 
+<p>[4]https://doris.apache.org/zh-CN/docs/1.2/benchmark/tpch/</p> 
+<p>[5]https://github.com/apache/doris/pull/22043</p> 
+<p>[6]https://github.com/apache/doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/FunctionSet.java</p> 
+<p>[7]https://github.com/apache/doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/catalog/AggregateFunction.java</p> 
+<p>[8]https://github.com/apache/doris/blob/master/fe/fe-core/src/main/java/org/apache/doris/analysis/FunctionCallExpr.java</p> 
+<p>[9]https://github.com/xingyingone/doris/blob/b41fcbb7834bf89f9744d351b1cfb9ac2485008b/be/src/vec/aggregate_functions/aggregate_function_map.cpp</p> 
+<p>[10]https://doris.apache.org/zh-CN/community/developer-guide/regression-testing/</p> 
+<p>[11]https://github.com/apache/doris/pull/22043/files</p> 
+<p>[12]https://github.com/apache/doris/pull/23474/files</p> 
+<p>[13]https://bugs.mysql.com/search.php?cmd=display&amp;status=All&amp;severity=all&amp;reporter=15843759</p> 
+<p>[14]https://github.com/apache/doris/commits/master/?author=xingyingone</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d65246f38d7b72fafcd09fac66b66eef/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">关于@Configuration， @ConfigurationProperties， @EnableConfigurationProperties 注解的使用与关系</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/bb3b00c22f064036d4d4f23a61a68ab8/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Android 软键盘的显示和隐藏</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

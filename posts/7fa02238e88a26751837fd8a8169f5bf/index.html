@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>FreeRTOS任务创建及细节 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="FreeRTOS任务创建及细节" />
+<meta property="og:description" content="目录
+任务创建 简化的TCB结构体
+创建任务堆栈和任务TCB
+初始化任务TCB的成员
+初始化任务堆栈
+把新任务添加到就绪列表
+任务删除
+任务创建 BaseType_t xTaskCreate(	TaskFunction_t pxTaskCode, const char * const pcName,	/*lint !e971 Unqualified char types are allowed for strings and single characters only. */ const configSTACK_DEPTH_TYPE usStackDepth, void * const pvParameters, UBaseType_t uxPriority, TaskHandle_t * const pxCreatedTask ) 这个API函数的作用是创建新的任务并将它加入到任务就绪列表，函数参数含义为：
+pvTaskCode：函数指针，指向任务函数的入口。任务永远不会返回（位于死循环内）。该参数类型TaskFunction_t定义在文件projdefs.h中，定义为：typedef void(*TaskFunction_t)( void * )，即参数为空指针类型并返回空类型。pcName：任务描述。主要用于调试。字符串的最大长度（包括字符串结束字符）由宏configMAX_TASK_NAME_LEN指定，该宏位于FreeRTOSConfig.h文件中。usStackDepth：指定任务堆栈大小，能够支持的堆栈变量数量（堆栈深度），而不是字节数。比如，在16位宽度的堆栈下，usStackDepth定义为100，则实际使用200字节堆栈存储空间。堆栈的宽度乘以深度必须不超过size_t类型所能表示的最大值。比如，size_t为16位，则可以表示堆栈的最大值是65535字节。这是因为堆栈在申请时是以字节为单位的，申请的字节数就是堆栈宽度乘以深度，如果这个乘积超出size_t所表示的范围，就会溢出，分配的堆栈空间也不是我们想要的。pvParameters：指针，当任务创建时，作为一个参数传递给任务。uxPriority：任务的优先级。具有MPU支持的系统，可以通过置位优先级参数的portPRIVILEGE_BIT位，随意的在特权（系统）模式下创建任务。比如，创建一个优先级为2的特权任务，参数uxPriority可以设置为 ( 2 | portPRIVILEGE_BIT )。pvCreatedTask：用于回传一个句柄（ID），创建任务后可以使用这个句柄引用任务。
+虽然xTaskCreate()看上去很像函数，但其实是一个宏，真正被调用的函数是xTaskGenericCreate()，xTaskCreate()宏定义如下所示：
+#define xTaskCreate( pvTaskCode, pcName, usStackDepth,pvParameters, uxPriority, pxCreatedTask ) \ xTaskGenericCreate( ( pvTaskCode ),( pcName ), ( usStackDepth ), ( pvParameters ), ( uxPriority ), ( pxCreatedTask), ( NULL ), ( NULL ), ( NULL ) ) 可以看到,xTaskCreate比xTaskGenericCreate少了三个参数，在宏定义中，这三个参数被设置为NULL。这三个参数用于使用静态变量的方法分配堆栈、任务TCB空间以及设置MPU相关的参数。一般情况下，这三个参数是不使用的，所以任务创建宏xTaskCreate定义的时候，将这三个参数对用户隐藏了。接下来的章节中，为了方便，我们还是称xTaskCreate()为函数，虽然它是一个宏定义。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/7fa02238e88a26751837fd8a8169f5bf/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-11-28T22:48:20+08:00" />
+<meta property="article:modified_time" content="2023-11-28T22:48:20+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">FreeRTOS任务创建及细节</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"></p> 
+<p id="main-toc"><strong>目录</strong></p> 
+<p id="%E4%BB%BB%E5%8A%A1%E5%88%9B%E5%BB%BA%C2%A0-toc" style="margin-left:0px;"><a href="#%E4%BB%BB%E5%8A%A1%E5%88%9B%E5%BB%BA%C2%A0" rel="nofollow">任务创建 </a></p> 
+<p id="%E7%AE%80%E5%8C%96%E7%9A%84TCB%E7%BB%93%E6%9E%84%E4%BD%93-toc" style="margin-left:0px;"><a href="#%E7%AE%80%E5%8C%96%E7%9A%84TCB%E7%BB%93%E6%9E%84%E4%BD%93" rel="nofollow">简化的TCB结构体</a></p> 
+<p id="%E5%88%9B%E5%BB%BA%E4%BB%BB%E5%8A%A1%E5%A0%86%E6%A0%88%E5%92%8C%E4%BB%BB%E5%8A%A1TCB-toc" style="margin-left:0px;"><a href="#%E5%88%9B%E5%BB%BA%E4%BB%BB%E5%8A%A1%E5%A0%86%E6%A0%88%E5%92%8C%E4%BB%BB%E5%8A%A1TCB" rel="nofollow">创建任务堆栈和任务TCB</a></p> 
+<p id="%E5%88%9D%E5%A7%8B%E5%8C%96%E4%BB%BB%E5%8A%A1TCB%E7%9A%84%E6%88%90%E5%91%98-toc" style="margin-left:0px;"><a href="#%E5%88%9D%E5%A7%8B%E5%8C%96%E4%BB%BB%E5%8A%A1TCB%E7%9A%84%E6%88%90%E5%91%98" rel="nofollow">初始化任务TCB的成员</a></p> 
+<p id="%E5%88%9D%E5%A7%8B%E5%8C%96%E4%BB%BB%E5%8A%A1%E5%A0%86%E6%A0%88-toc" style="margin-left:0px;"><a href="#%E5%88%9D%E5%A7%8B%E5%8C%96%E4%BB%BB%E5%8A%A1%E5%A0%86%E6%A0%88" rel="nofollow">初始化任务堆栈</a></p> 
+<p id="%E6%8A%8A%E6%96%B0%E4%BB%BB%E5%8A%A1%E6%B7%BB%E5%8A%A0%E5%88%B0%E5%B0%B1%E7%BB%AA%E5%88%97%E8%A1%A8-toc" style="margin-left:0px;"><a href="#%E6%8A%8A%E6%96%B0%E4%BB%BB%E5%8A%A1%E6%B7%BB%E5%8A%A0%E5%88%B0%E5%B0%B1%E7%BB%AA%E5%88%97%E8%A1%A8" rel="nofollow">把新任务添加到就绪列表</a></p> 
+<p id="%C2%A0%E4%BB%BB%E5%8A%A1%E5%88%A0%E9%99%A4-toc" style="margin-left:0px;"><a href="#%C2%A0%E4%BB%BB%E5%8A%A1%E5%88%A0%E9%99%A4" rel="nofollow"> 任务删除</a></p> 
+<h2 id="%E4%BB%BB%E5%8A%A1%E5%88%9B%E5%BB%BA%C2%A0">任务创建 </h2> 
+<pre><code>	BaseType_t xTaskCreate(	TaskFunction_t pxTaskCode,
+							const char * const pcName,		/*lint !e971 Unqualified char types are allowed for strings and single characters only. */
+							const configSTACK_DEPTH_TYPE usStackDepth,
+							void * const pvParameters,
+							UBaseType_t uxPriority,
+							TaskHandle_t * const pxCreatedTask )</code></pre> 
+<p>这个API函数的作用是创建新的任务并将它加入到任务就绪列表，函数参数含义为：</p> 
+<ul><li>pvTaskCode：函数指针，指向任务函数的入口。任务永远不会返回（位于死循环内）。该参数类型TaskFunction_t定义在文件projdefs.h中，定义为：typedef void(*TaskFunction_t)( void * )，即参数为空指针类型并返回空类型。</li><li>pcName：任务描述。主要用于调试。字符串的最大长度（包括字符串结束字符）由宏configMAX_TASK_NAME_LEN指定，该宏位于FreeRTOSConfig.h文件中。</li><li>usStackDepth：指定任务堆栈大小，能够支持的堆栈变量数量（堆栈深度），而不是字节数。比如，在16位宽度的堆栈下，usStackDepth定义为100，则实际使用200字节堆栈存储空间。堆栈的宽度乘以深度必须不超过size_t类型所能表示的最大值。比如，size_t为16位，则可以表示堆栈的最大值是65535字节。这是因为堆栈在申请时是以字节为单位的，申请的字节数就是堆栈宽度乘以深度，如果这个乘积超出size_t所表示的范围，就会溢出，分配的堆栈空间也不是我们想要的。</li><li>pvParameters：指针，当任务创建时，作为一个参数传递给任务。</li><li>uxPriority：任务的优先级。具有MPU支持的系统，可以通过置位优先级参数的portPRIVILEGE_BIT位，随意的在特权（系统）模式下创建任务。比如，创建一个优先级为2的特权任务，参数uxPriority可以设置为 ( 2 | portPRIVILEGE_BIT )。</li><li>pvCreatedTask：用于回传一个句柄（ID），创建任务后可以使用这个句柄引用任务。<br>  </li></ul> 
+<p> 虽然xTaskCreate()看上去很像函数，但其实是一个宏，真正被调用的函数<a name="OLE_LINK8"></a><a name="OLE_LINK7">是xTaskGenericCreate()</a>，xTaskCreate()宏定义如下所示：</p> 
+<pre><code>#define xTaskCreate( pvTaskCode, pcName, usStackDepth,pvParameters, uxPriority, pxCreatedTask )    \
+      xTaskGenericCreate( ( pvTaskCode ),( pcName ), ( usStackDepth ), ( pvParameters ), ( uxPriority ), ( pxCreatedTask), ( NULL ), ( NULL ), ( NULL ) )</code></pre> 
+<p>可以看到,xTaskCreate比xTaskGenericCreate少了三个参数，在宏定义中，这三个参数被设置为NULL。这三个参数用于使用静态变量的方法分配堆栈、任务TCB空间以及设置MPU相关的参数。一般情况下，这三个参数是不使用的，所以任务创建宏xTaskCreate定义的时候，将这三个参数对用户隐藏了。接下来的章节中，为了方便，我们还是称xTaskCreate()为函数，虽然它是一个宏定义。</p> 
+<p>上面我们提到了任务TCB（任务控制块），这是一个需要重点介绍的关键点。它用于存储任务的状态信息，包括任务运行时的环境。每个任务都有自己的任务TCB。任务TCB是一个相对比较大的数据结构，这也是情理之中的，因为与任务相关的代码占到整个FreeRTOS代码量的一半左右，这些代码大都与任务TCB相关，我们先来介绍一下任务TCB数据结构的定义，任务控制块就相当于每个任务的“<strong>身份证</strong>”。<br>  </p> 
+<h2 id="%E7%AE%80%E5%8C%96%E7%9A%84TCB%E7%BB%93%E6%9E%84%E4%BD%93">简化的TCB结构体</h2> 
+<pre><code>
+/*
+ * Task control block.  A task control block (TCB) is allocated for each task,
+ * and stores task state information, including a pointer to the task's context
+ * (the task's run time environment, including register values)
+ */
+typedef struct tskTaskControlBlock 			/* The old naming convention is used to prevent breaking kernel aware debuggers. */
+{
+	volatile StackType_t	*pxTopOfStack;	/*&lt; Points to the location of the last item placed on the tasks stack.  THIS MUST BE THE FIRST MEMBER OF THE TCB STRUCT. */
+
+	ListItem_t			xStateListItem;	/*&lt; The list that the state list item of a task is reference from denotes the state of that task (Ready, Blocked, Suspended ). */
+	ListItem_t			xEventListItem;		/*&lt; Used to reference a task from an event list. */
+	UBaseType_t			uxPriority;			/*&lt; The priority of the task.  0 is the lowest priority. */
+	StackType_t			*pxStack;			/*&lt; Points to the start of the stack. */
+	char				pcTaskName[ configMAX_TASK_NAME_LEN ];/*&lt; Descriptive name given to the task when created.  Facilitates debugging only. */ /*lint !e971 Unqualified char types are allowed for strings and single characters only. */
+
+
+} tskTCB;
+</code></pre> 
+<p> 指针<a name="OLE_LINK2"></a><a name="OLE_LINK1">pxTopOfStack</a>必须位于结构体的第一项，指向当前堆栈的栈顶，对于向下增长的堆栈，pxTopOfStack总是指向最后一个入栈的项目。</p> 
+<p>然后是状态列表项xStateListItem和事件列表项xEventListItem，有关列表和列表项可以看之前我写的博客：列表被FreeRTOS调度器使用，用于跟踪任务，处于就绪、挂起、延时的任务，都会被挂接到各自的列表中。调度器就是通过把任务TCB中的状态列表项xStateListItem和事件列表项xEventListItem挂接到不同的列表中来实现上述过程的。在task.c中，定义了一些静态列表变量，其中有<strong>3类列表</strong>就绪、阻塞、挂起列表，例如当某个任务处于就绪态时，调度器就将这个任务TCB的xStateListItem列表项挂接到就绪列表。事件列表项也与之类似，当队列满的情况下，任务因入队操作而阻塞时，就会将事件列表项挂接到队列的等待入队列表上。</p> 
+<p>uxPriority用于保存任务的优先级，0为最低优先级。任务创建时，指定的任务优先级就被保存到该变量中。</p> 
+<p>指针pxStack指向堆栈的起始位置，任务创建时会分配指定大小的任务堆栈，申请堆栈内存函数返回的指针就被赋给该变量。很多刚接触FreeRTOS的人会分不清指针pxTopOfStack和pxStack的区别，这里简单说一下：pxTopOfStack指向当前堆栈栈顶，随着进栈出栈，pxTopOfStack指向的位置是会变化的；pxStack指向当前堆栈的起始位置，一经分配后，堆栈起始位置就固定了，不会被改变了。那么为什么需要pxStack变量呢，这是因为随着任务的运行，堆栈可能会溢出，在堆栈向下增长的系统中，这个变量可用于检查堆栈是否溢出；（只需要知道栈一般是向下生长的）</p> 
+<p>字符数组pcTaskName用于保存任务的描述或名字，在任务创建时，由参数指定。名字的长度由宏configMAX_TASK_NAME_LEN（位于FreeRTOSConfig.h中）指定，包含字符串结束标志。</p> 
+<p>这里就可以从任务创建的一个例子引出我们的思考：</p> 
+<pre><code>    TaskHandle_t xHandle；
+    xTaskCreate(vTask_A,”Task A”,120,NULL,1,&amp;xHandle);</code></pre> 
+<p> <strong>个人思考</strong>：<strong>上面是以动态创建任务的方式创建了一个任务"Task A"，我们可以看到创建任务提供的参数有任务的入口函数，任务名字，堆栈大小，任务入口函数参数，优先级，任务句柄。可是通过上面的分析可以知道，任务控制块中好像没有保存任务入口函数，任务入口函数参数。这两个参数都没有在TCB中得到体现，那传进去的任务入口函数以及入口函数参数传进来到哪里去了，以及传进来的栈的大小怎么用？</strong></p> 
+<p>学到这里都知道栈的作用，以及每个任务都有自己的栈，那可以思考两个问题，栈从哪里分配，站的大小怎么确定？</p> 
+<p><strong>栈的大小</strong>：由局部变量的大小和函数调用的深度决定</p> 
+<p><strong>栈从哪里分配</strong></p> 
+<pre><code class="language-cpp">static uint8_t ucHeap[ configTOTAL_HEAP_SIZE ];</code></pre> 
+<p>入口函数地址：执行任务的时候，只需要把PC寄存器赋值为任务的入口函数地址即可， 所以可以得到答案，而对于入口函数的参数，由于参数在Cortex-M中有一套调用规则， 所以参数也是保存在寄存器里面（就比如R0里面）.</p> 
+<h2 id="%E5%88%9B%E5%BB%BA%E4%BB%BB%E5%8A%A1%E5%A0%86%E6%A0%88%E5%92%8C%E4%BB%BB%E5%8A%A1TCB">创建任务堆栈和任务TCB</h2> 
+<p>调用函数prvAllocateTCBAndStack()创建任务堆栈和任务TCB。有两种方式创建任务堆栈和任务TCB，一种是使用动态内存分配方法，这样当任务删除时，任务堆栈和任务控制块空间会被释放，可用于其它任务；另一种是使用静态变量来实现，在创建任务前定义好全局或者静态堆栈数组和任务控制块变量，在调用创建任务API函数时，将这两个变量以参数的形式传递给任务创建函数xTaskGenericCreate()。如果使用默认的xTaskCreate()创建任务函数，则使用动态内存分配，因为与静态内存分配有关的参数不可见（在一开始我们说过xTaskCreate()其实是一个带参数的宏定义，真正被执行的函数是xTaskGenericCreate()，参考宏xTaskCreate()的定义可以知道，xTaskCreate()对外隐藏了使用静态内存分配的参数，在调用xTaskGenericCreate()时，这些参数被设置为NULL）。</p> 
+<p>创建任务首先申请了任务控制块TCB和任务堆栈的内存空间，然后就是初始化堆栈空间的内容，因为，创建任务其实我个人理解就是任务创建属于任务运行时的一种特殊状态，所以创建任务的时候它的栈肯定也是一种形式，所以必须要初始化它的堆栈，然后任务才可以运行。</p> 
+<p><strong>个人理解：程序是一个状态机，任务归根结底也是程序，所以创建任务无非就是设置状态机的初始状态，如同Linux下fork就是复制状态机，所以它必须要构造出属于它自己的栈，到它运行时，直接恢复它的栈</strong>🤣<strong>。</strong></p> 
+<h2 id="%E5%88%9D%E5%A7%8B%E5%8C%96%E4%BB%BB%E5%8A%A1TCB%E7%9A%84%E6%88%90%E5%91%98">初始化任务TCB的成员</h2> 
+<pre><code class="language-cpp">static void prvInitialiseNewTask( 	TaskFunction_t pxTaskCode,
+									const char * const pcName,		/*lint !e971 Unqualified char types are allowed for strings and single characters only. */
+									const uint32_t ulStackDepth,
+									void * const pvParameters,
+									UBaseType_t uxPriority,
+									TaskHandle_t * const pxCreatedTask,
+									TCB_t *pxNewTCB,
+									const MemoryRegion_t * const xRegions )</code></pre> 
+<p> 在上面的函数中</p> 
+<p>设置了栈顶指针：pxTopOfStack = &amp;( pxNewTCB-&gt;pxStack[ ulStackDepth - ( uint32_t ) 1 ] );</p> 
+<p>设置了任务的名字：pxNewTCB-&gt;pcTaskName[ x ] = pcName[ x ];</p> 
+<p>设置了任务优先级：pxNewTCB-&gt;uxPriority = uxPriority;</p> 
+<p>这个函数就是把我们创建任务时的一些信息保存到TCB控制块中，这个函数末尾会调用下面的这个pxPortInitialiseStack函数进行堆栈的初始化，毕竟这个函数一开始只是把栈顶设置成申请内存的末尾。</p> 
+<h2 id="%E5%88%9D%E5%A7%8B%E5%8C%96%E4%BB%BB%E5%8A%A1%E5%A0%86%E6%A0%88">初始化任务堆栈</h2> 
+<pre><code class="language-cpp">StackType_t *pxPortInitialiseStack( StackType_t *pxTopOfStack, TaskFunction_t pxCode, void *pvParameters )
+{
+	/* Simulate the stack frame as it would be created by a context switch
+	interrupt. */
+
+	/* Offset added to account for the way the MCU uses the stack on entry/exit
+	of interrupts, and to ensure alignment. */
+	pxTopOfStack--;
+
+	*pxTopOfStack = portINITIAL_XPSR;	/* xPSR */
+	pxTopOfStack--;
+	*pxTopOfStack = ( ( StackType_t ) pxCode ) &amp; portSTART_ADDRESS_MASK;	/* PC */
+	pxTopOfStack--;
+	*pxTopOfStack = ( StackType_t ) prvTaskExitError;	/* LR */
+
+	/* Save code space by skipping register initialisation. */
+	pxTopOfStack -= 5;	/* R12, R3, R2 and R1. */
+	*pxTopOfStack = ( StackType_t ) pvParameters;	/* R0 */
+
+	/* A save method is being used that requires each task to maintain its
+	own exec return value. */
+	pxTopOfStack--;
+	*pxTopOfStack = portINITIAL_EXC_RETURN;
+
+	pxTopOfStack -= 8;	/* R11, R10, R9, R8, R7, R6, R5 and R4. */
+
+	return pxTopOfStack;
+}</code></pre> 
+<p>上面函数的作用无非就是对栈填充一些寄存器的值，就是保存现场的意思，然后任务执行，只需恢复现场即可。可以看到任务入口函数地址以及参数就被设置到了栈中，其实它就保存在栈中了。这就回答了我们之前的疑惑，创建任务的参数，TCB没有的，被保存到了栈中。</p> 
+<p><img alt="" height="923" src="https://images2.imgbox.com/9c/d7/XCrQkZKu_o.png" width="1200"></p> 
+<p> 这部分内容涉及到比较多Cortex-M架构的内容，需要阅读Cortex-M3和M4权威指南可以比较好理解为什么。</p> 
+<h2 id="%E6%8A%8A%E6%96%B0%E4%BB%BB%E5%8A%A1%E6%B7%BB%E5%8A%A0%E5%88%B0%E5%B0%B1%E7%BB%AA%E5%88%97%E8%A1%A8">把新任务添加到就绪列表</h2> 
+<pre><code class="language-cpp">static void prvAddNewTaskToReadyList( TCB_t *pxNewTCB )</code></pre> 
+<p><img alt="" height="265" src="https://images2.imgbox.com/f5/88/RW2nqKUM_o.png" width="1200"></p> 
+<p> tasks.c中定义了一个任务TCB指针型变量：</p> 
+<p>      PRIVILEGED_DATA TCB_t * volatile pxCurrentTCB= NULL;</p> 
+<p>      这是一个全局变量，在tasks.c中只定义了这一个全局变量。这个变量用来指向当前正在运行的任务TCB，我们需要多了解一下这个变量。FreeRTOS的核心是确保处于优先级最高的就绪任务获得CPU运行权。</p> 
+<p>      如果调度器还没有准备好（程序刚开始运行时，可能会先创建几个任务，之后才会启动调度器），并且新创建的任务优先级大于变量pxCurrentTCB指向的任务优先级，则设置pxCurrentTCB指向当前新创建的任务TCB（确保pxCurrentTCB指向优先级最高的就绪任务）。</p> 
+<p>调用prvAddTaskToReadyList(pxNewTCB)将创建的任务TCB加入到就绪列表数组中，任务的优先级确定了加入到就绪列表数组的哪个下标。比如我们新创建的任务优先级为1，则这个任务被加入到列表pxReadyTasksLists[1]中。</p> 
+<p>       prvAddTaskToReadyList()其实是一个宏，由一系列语句组成，去除其中的跟踪宏外，这个宏定义如下所示：</p> 
+<pre><code class="language-cpp">#defineprvAddTaskToReadyList( pxTCB )                        \
+    taskRECORD_READY_PRIORITY( ( pxTCB)-&gt;uxPriority );       \
+    vListInsertEnd( &amp;( pxReadyTasksLists[ (pxTCB )-&gt;uxPriority ] ), &amp;( ( pxTCB )-&gt;xStateListItem ) );</code></pre> 
+<p>如果上面的步骤都正确执行，并且调度器也开始工作，则判断当前任务的优先级是否大于新创建的任务优先级。如果新创建的任务优先级更高，则调用taskYIELD_IF_USING_PREEMPTION()强制进行一次上下文切换，切换后，新创建的任务将获得CPU控制权，精简后的代码如下所示。</p> 
+<pre><code class="language-cpp"> if( xReturn == pdPASS )
+    {
+        if( xSchedulerRunning != pdFALSE )
+        {
+            /* 如果新创建的任务优先级大于当前任务优先级，则新创建的任务应该被立即执行。*/
+            if(pxCurrentTCB-&gt;uxPriority &lt; uxPriority )
+            {
+                taskYIELD_IF_USING_PREEMPTION();
+            }
+        }
+    }</code></pre> 
+<h2 id="%C2%A0%E4%BB%BB%E5%8A%A1%E5%88%A0%E9%99%A4"> 任务删除</h2> 
+<pre><code class="language-cpp">void vTaskDelete( TaskHandle_t xTaskToDelete )
+	{
+	TCB_t *pxTCB;
+
+		taskENTER_CRITICAL();
+		{
+			/* If null is passed in here then it is the calling task that is
+			being deleted. */
+			pxTCB = prvGetTCBFromHandle( xTaskToDelete );
+
+			/* Remove task from the ready/delayed list. */
+			if( uxListRemove( &amp;( pxTCB-&gt;xStateListItem ) ) == ( UBaseType_t ) 0 )
+			{
+				taskRESET_READY_PRIORITY( pxTCB-&gt;uxPriority );
+			}
+			else
+			{
+				mtCOVERAGE_TEST_MARKER();
+			}
+
+			/* Is the task waiting on an event also? */
+			if( listLIST_ITEM_CONTAINER( &amp;( pxTCB-&gt;xEventListItem ) ) != NULL )
+			{
+				( void ) uxListRemove( &amp;( pxTCB-&gt;xEventListItem ) );
+			}
+			else
+			{
+				mtCOVERAGE_TEST_MARKER();
+			}
+
+			/* Increment the uxTaskNumber also so kernel aware debuggers can
+			detect that the task lists need re-generating.  This is done before
+			portPRE_TASK_DELETE_HOOK() as in the Windows port that macro will
+			not return. */
+			uxTaskNumber++;
+
+			if( pxTCB == pxCurrentTCB )
+			{
+				/* A task is deleting itself.  This cannot complete within the
+				task itself, as a context switch to another task is required.
+				Place the task in the termination list.  The idle task will
+				check the termination list and free up any memory allocated by
+				the scheduler for the TCB and stack of the deleted task. */
+				vListInsertEnd( &amp;xTasksWaitingTermination, &amp;( pxTCB-&gt;xStateListItem ) );
+
+				/* Increment the ucTasksDeleted variable so the idle task knows
+				there is a task that has been deleted and that it should therefore
+				check the xTasksWaitingTermination list. */
+				++uxDeletedTasksWaitingCleanUp;
+
+				/* Call the delete hook before portPRE_TASK_DELETE_HOOK() as
+				portPRE_TASK_DELETE_HOOK() does not return in the Win32 port. */
+				traceTASK_DELETE( pxTCB );
+
+				/* The pre-delete hook is primarily for the Windows simulator,
+				in which Windows specific clean up operations are performed,
+				after which it is not possible to yield away from this task -
+				hence xYieldPending is used to latch that a context switch is
+				required. */
+				portPRE_TASK_DELETE_HOOK( pxTCB, &amp;xYieldPending );
+			}
+			else
+			{
+				--uxCurrentNumberOfTasks;
+				traceTASK_DELETE( pxTCB );
+				prvDeleteTCB( pxTCB );
+
+				/* Reset the next expected unblock time in case it referred to
+				the task that has just been deleted. */
+				prvResetNextTaskUnblockTime();
+			}
+		}
+		taskEXIT_CRITICAL();
+
+		/* Force a reschedule if it is the currently running task that has just
+		been deleted. */
+		if( xSchedulerRunning != pdFALSE )
+		{
+			if( pxTCB == pxCurrentTCB )
+			{
+				configASSERT( uxSchedulerSuspended == 0 );
+				portYIELD_WITHIN_API();
+			}
+			else
+			{
+				mtCOVERAGE_TEST_MARKER();
+			}
+		}
+	}
+</code></pre> 
+<p><img alt="" height="346" src="https://images2.imgbox.com/9a/55/wQFYwZWO_o.png" width="1200"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ac9683c6dbb540ee412cfdda881aec13/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">一文带你读懂PyQt：用Python做出与C&#43;&#43;一样的GUI界面应用程序</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8d404ddceeca77c3f4b7c72739fa6b07/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">001-调用函数访问结构体数组成员，并修改其数值</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

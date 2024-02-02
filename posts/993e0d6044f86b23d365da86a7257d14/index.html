@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>SPDK vhost target - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="SPDK vhost target" />
+<meta property="og:description" content="SPDK vhost target 主流的I/O设备虚拟化的方案1.virtio2.vhost加速1）QEMU virtio-scsiQemu 架构 2）Kernel vhost-scsi3）SPDK vhost-user-scsi 3.SPDK vhost-scsi加速4.SPDK vhost-NVMe加速 主流的I/O设备虚拟化的方案 纯软件模拟：完全利用软件模拟出一些设备给虚拟机使用，主要的工作可以在Simics、Bochs、纯QEMU解决方案中看到。半虚拟（Para-Virtualization）：主要是一种frontend-backend的模型，在虚拟机中的Guest OS中使用frontend的驱动，Hypervisor中暴露出backend接口。这种解决方案需要修改Guest OS，或者提供半虚拟化的前端驱动。硬件虚拟化：主流的方案有SR-IOV、VT-D等，可以把整个设备直接分配给一个虚拟机，或者如果设备支持SR-IOV，就可以把设备的VF（Virtual Function）分配给虚拟机。 1.virtio virtio在QEMU中的总体实现可以分成3层：
+前端是设备层，位于Guest操作系统内部；中间是虚拟队列传输层，Guest和QEMU都包含该层，数据传输及命令下发完成都是通过该层实现的；第3层是virtio后端设备，用于具体落实来自Guest端发送的请求。 2.vhost加速 virtio后端设备用于具体响应Guest的命令请求。
+例如，对virtio-scsi设备来讲，该virtio后端负责SCSI命令的响应，QEMU负责模拟该PCI设备，把该SCSI命令响应的模块在QEMU进程之外实现的方案称为vhost。这里同样分为两种实现方式，在Linux内核中实现的叫作vhost-kernel，而在用户态实现的叫作vhost-user。
+1）QEMU virtio-scsi Qemu 架构 Qemu 是纯软件实现的虚拟化模拟器，几乎可以模拟任何硬件设备，我们最熟悉的就是能够模拟一台能够独立运行操作系统的虚拟机，虚拟机认为自己和硬件打交道，但其实是和 Qemu 模拟出来的硬件打交道，Qemu 将这些指令转译给真正的硬件。
+正因为 Qemu 是纯软件实现的，所有的指令都要经 Qemu 过一手，性能非常低，所以，在生产环境中，大多数的做法都是配合 KVM 来完成虚拟化工作，因为 KVM 是硬件辅助的虚拟化技术，主要负责 比较繁琐的 CPU 和内存虚拟化，而 Qemu 则负责 I/O 虚拟化，两者合作各自发挥自身的优势，相得益彰。
+Guest和QEMU之间通过virtqueue进行数据交换，当Guest提交新的SCSI命令到virtqueue时，根据virtio PCI设备定义，Guest会把该队列的ID写入PCI配置空间中，通知PCI设备有新的SCSI请求已经就绪；
+之后QEMU会得到通知，基于Guest填写的队列ID到指定的virtqueue获取最新的SCSI请求；
+最后发送到该模拟PCI设备的后端，这里后端可以是宿主机系统上的一个文件或块设备分区。
+当SCSI命令在后端的文件或块设备执行完成并返回给virtio-scsi backend模块后QEMU会向该P
+CI设备发送中断通知，从而Guest基于该中断完成整个SCSI命令流程。
+这个方案存在如下两个严重影响性能的因素。
+当Guest提交新的SCSI请求到virtqueue队列时，需要告知QEMU哪个队列含有最新的SCSI命令。在实际处理具体的SCSI读/写命令时（在hostOS 中），存在用户态到内核态的数据副本。 数据副本影响性能，我们比较好理解，因为存储设备中的数据块相对于网络来说都是大包，但是为什么说Guest提交新的SCSI请求时也严重影响性能呢？
+根据virtio协议，Guest提交请求到virtqueue时需要把该队列的ID写入PCI配置空间，所以每个新的命令请求都会写入一次PCI的配置空间。在X86虚拟化环境下，Guest中对PCI空间的读/写是特权指令，需要更高级别的权限，因此会触发VMM的Trap，从而导致VM_EXIT事件，CPU需要切换上下文到QEMU进程去处理该事件，在虚拟化环境下，VM_EXIT对性能有重大影响，而且对系统能够支持VM的密度等方面也有影响，所以下面介绍的方案都是基于对这两点的优化来进行的。
+2）Kernel vhost-scsi 这个方案是QEMU virtio-scsi的后续演进，基于LIO在内核空间实现为虚拟机服务的SCSI设备。实际上vhost-kernel方案并没有完全模拟一个PCI设备，QEMU仍然负责对该PCI设备的模拟，只是把来自virtqueue的数据处理逻辑拿到内核空间了。
+为了实现在内核空间处理virtqueue上的数据，QEMU需要告知内核vhost-scsi模块关于virtqueue的内存信息及Guest的内存映射，这样其实省去了Guest到QEMU用户态空间，再到宿主机内核空间多次数据复制。
+但是由于内核的vhost-scsi模块并不知道什么时候在哪个队列存在新的请求，所以当Guest生成新的请求到virtqueue队列，再更新完PCI配置空间后，由QEMU负责通知vhost-kernel启动内核线程去处理新的队列请求。
+这里我们可以看到Kernel vhost-scsi方案相比QEMU virtio-scsi方案在具体的SCSI命令处理时减少了数据的内存复制过程，从而提高了性能。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/993e0d6044f86b23d365da86a7257d14/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-02-21T17:29:19+08:00" />
+<meta property="article:modified_time" content="2023-02-21T17:29:19+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">SPDK vhost target</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-github-gist">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>SPDK vhost target</h4> 
+ <ul><li><a href="#IO_2" rel="nofollow">主流的I/O设备虚拟化的方案</a></li><li><a href="#1virtio_9" rel="nofollow">1.virtio</a></li><li><a href="#2vhost_29" rel="nofollow">2.vhost加速</a></li><li><ul><li><a href="#1QEMU_virtioscsi_41" rel="nofollow">1）QEMU virtio-scsi</a></li><li><ul><li><a href="#Qemu__43" rel="nofollow">Qemu 架构</a></li></ul> 
+   </li><li><a href="#2Kernel_vhostscsi_74" rel="nofollow">2）Kernel vhost-scsi</a></li><li><a href="#3SPDK_vhostuserscsi_82" rel="nofollow">3）SPDK vhost-user-scsi</a></li></ul> 
+  </li><li><a href="#3SPDK_vhostscsi_96" rel="nofollow">3.SPDK vhost-scsi加速</a></li><li><a href="#4SPDK_vhostNVMe_100" rel="nofollow">4.SPDK vhost-NVMe加速</a></li></ul> 
+</div> 
+<p></p> 
+<h2><a id="IO_2"></a>主流的I/O设备虚拟化的方案</h2> 
+<ul><li>纯软件模拟：完全利用软件模拟出一些设备给虚拟机使用，主要的工作可以在Simics、Bochs、纯QEMU解决方案中看到。</li><li>半虚拟（Para-Virtualization）：主要是一种frontend-backend的模型，<code>在虚拟机中的Guest OS中使用frontend的驱动，Hypervisor中暴露出backend接口</code>。这种解决方案需要修改Guest OS，或者提供半虚拟化的前端驱动。</li><li>硬件虚拟化：主流的方案有SR-IOV、VT-D等，<code>可以把整个设备直接分配给一个虚拟机</code>，或者如果设备支持SR-IOV，就可以把设备的VF（Virtual Function）分配给虚拟机。</li></ul> 
+<h2><a id="1virtio_9"></a>1.virtio</h2> 
+<p><img src="https://images2.imgbox.com/4e/40/iY8Sg3Lh_o.png" alt="在这里插入图片描述"><br> virtio在QEMU中的总体实现可以分成3层：</p> 
+<ul><li>前端是设备层，位于Guest操作系统内部；</li><li>中间是虚拟队列传输层，Guest和QEMU都包含该层，数据传输及命令下发完成都是通过该层实现的；</li><li>第3层是virtio后端设备，用于具体落实来自Guest端发送的请求。</li></ul> 
+<h2><a id="2vhost_29"></a>2.vhost加速</h2> 
+<p>virtio后端设备用于具体响应Guest的命令请求。<br> 例如，对virtio-scsi设备来讲，该virtio后端负责SCSI命令的响应，QEMU负责模拟该PCI设备，<code>把该SCSI命令响应的模块在QEMU进程之外实现的方案称为vhost</code>。这里同样分为两种实现方式，在Linux内核中实现的叫作vhost-kernel，而在用户态实现的叫作vhost-user。</p> 
+<h3><a id="1QEMU_virtioscsi_41"></a>1）QEMU virtio-scsi</h3> 
+<h4><a id="Qemu__43"></a>Qemu 架构</h4> 
+<p><code>Qemu 是纯软件实现的虚拟化模拟器，几乎可以模拟任何硬件设备</code>，我们最熟悉的就是能够模拟一台能够独立运行操作系统的虚拟机，虚拟机认为自己和硬件打交道，但其实是和<code> Qemu 模拟出来的硬件</code>打交道，Qemu 将这些指令<code>转译给真正的硬件</code>。</p> 
+<p><code>正因为 Qemu 是纯软件实现的，所有的指令都要经 Qemu 过一手，性能非常低</code>，所以，在生产环境中，大多数的做法都是配合 KVM 来完成虚拟化工作，因为 <code>KVM 是硬件辅助的虚拟化技术</code>，主要负责 比较<code>繁琐的 CPU 和内存虚拟化</code>，而 <code>Qemu 则负责 I/O 虚拟化</code>，两者合作各自发挥自身的优势，相得益彰。</p> 
+<p><img src="https://images2.imgbox.com/06/58/4lJAEozv_o.png" alt="在这里插入图片描述"><br> Guest和QEMU之间通过virtqueue进行数据交换，当Guest提交新的SCSI命令到virtqueue时，根据virtio PCI设备定义，Guest会把该队列的ID写入PCI配置空间中，通知PCI设备有新的SCSI请求已经就绪；</p> 
+<p>之后QEMU会得到通知，基于Guest填写的队列ID到指定的virtqueue获取最新的SCSI请求；</p> 
+<p>最后发送到该模拟PCI设备的后端，这里后端可以是宿主机系统上的一个文件或块设备分区。</p> 
+<p>当SCSI命令在后端的文件或块设备执行完成并返回给virtio-scsi backend模块后QEMU会向该P<br> CI设备发送中断通知，从而Guest基于该中断完成整个SCSI命令流程。</p> 
+<p>这个方案存在如下两个严重影响性能的因素。</p> 
+<ul><li>当Guest提交新的SCSI请求到virtqueue队列时，需要<code>告知QEMU哪个队列含有最新的SCSI命令</code>。</li><li>在实际处理具体的SCSI读/写命令时（在hostOS 中），<code>存在用户态到内核态的数据副本</code>。</li></ul> 
+<p>数据副本影响性能，我们比较好理解，因为存储设备中的数据块相对于网络来说都是大包，<code>但是为什么说Guest提交新的SCSI请求时也严重影响性能呢？</code><br> 根据virtio协议，Guest提交请求到virtqueue时需要把该队列的ID写入PCI配置空间，所以每个新的命令请求都会写入一次PCI的配置空间。在X86虚拟化环境下，<code>Guest中对PCI空间的读/写是特权指令，需要更高级别的权限，因此会触发VMM的Trap</code>，从而导致VM_EXIT事件，CPU需要切换上下文到QEMU进程去处理该事件，在虚拟化环境下，VM_EXIT对性能有重大影响，而且对系统能够支持VM的密度等方面也有影响，所以下面介绍的方案都是基于对这两点的优化来进行的。</p> 
+<h3><a id="2Kernel_vhostscsi_74"></a>2）Kernel vhost-scsi</h3> 
+<p>这个方案是QEMU virtio-scsi的后续演进，基于LIO在内核空间实现为虚拟机服务的SCSI设备。实际上vhost-kernel方案并没有完全模拟一个PCI设备，<code>QEMU仍然负责对该PCI设备的模拟，只是把来自virtqueue的数据处理逻辑拿到内核空间了</code>。</p> 
+<p>为了实现<code>在内核空间处理virtqueue上的数据</code>，<code>QEMU需要告知</code>内核vhost-scsi模块<code>关于virtqueue的内存信息及Guest的内存映射</code>，这样其实<code>省去了Guest到QEMU用户态空间，再到宿主机内核空间多次数据复制</code>。<br> 但是由于内核的vhost-scsi模块并不知道什么时候在哪个队列存在新的请求，所以当Guest生成新的请求到virtqueue队列，再更新完PCI配置空间后，<code>由QEMU负责通知vhost-kernel启动内核线程去处理新的队列请求</code>。</p> 
+<p>这里我们可以看到Kernel vhost-scsi方案相比QEMU virtio-scsi方案在<code>具体的SCSI命令处理时减少了数据的内存复制过程</code>，从而提高了性能。</p> 
+<h3><a id="3SPDK_vhostuserscsi_82"></a>3）SPDK vhost-user-scsi</h3> 
+<p><img src="https://images2.imgbox.com/45/4d/mDRzMzKu_o.png" alt="在这里插入图片描述"></p> 
+<p>虽然Kernel vhost-scsi方案在数据处理时已经没有数据的复制过程，但是<code>当Guest有新的请求时，仍然需要QEMU通过系统调用通知内核工作线程</code>，<br> 这里存在两方面的开销：<code>Guest内核需要更新PCI配置空间</code>，QEMU需要捕<br> 获Guest的VMM自陷，然后通知<code>Kernel vhost-scsi工作线程</code>。</p> 
+<p>SPDK vhost-user-scsi方案消除了这两方面的影响，后端的I/O处理线程在<code>轮询所有的virtqueue</code>，因此<code>不需要Guest在添加新的请求到virtqueue后更新PCI的配置空间</code>。SPDK vhost-user-scsi的后端I/O处理模块轮询机制<code>加上零拷贝技术</code>基本解决了前面我们提到的阻碍QEMU virtio-scsi性能提升的两个关键点。</p> 
+<h2><a id="3SPDK_vhostscsi_96"></a>3.SPDK vhost-scsi加速</h2> 
+<p>核心的实现就是队列在Guest和SPDK vhost target之间是共享的，那么接下来我们就看一下vhost是如何实现这个内存共享的，以及Guest物理地址到主机的虚拟地址是如何转换的。</p> 
+<p>在vhost-kernel方案中，QEMU使用ioctl系统调用和内核的vhost-scsi模块建立联系，从而把QEMU中模拟的SCSI设备部分传递到了内核态，即内核态对该SCSI设备不是完全模拟的，仅仅负责对virtqueue进行处理，因此这个ioctl的消息主要负责3部分的内容传递：Guest内存映射；Guest Kick Event、vhost-kernel驱动用来接收Guest的消息，当接收到该消息后即可启动工作线程；IRQ Event用于通知Guest的I/O完成情况。同样地，当把内核对virtqueue处理的这个模块迁移到用户态时，以上3个主要部分的内容传递就变成了UNIX Domain socket文件了，消息格式及内容和Kernel的ioctl相比有许多相似和重复的地方。</p> 
+<h2><a id="4SPDK_vhostNVMe_100"></a>4.SPDK vhost-NVMe加速</h2> 
+<p>virtio和NVMe协议在设计时都采用了相同的环型结构，virtio使用avaiable和used ring作<br> 为请求和响应，而NVMe使用提交队列和完成队列作为请求和响应。</p> 
+<p>QEMU NVMe存在相同的性能瓶颈,Guest都要写NVMe PCI配置空间寄存器，因此会存在VMM<br> Trap自陷问题，由于后端主机使用文件来承载I/O命令，同样存在用户态到内核态数据副本的问题</p> 
+<p>NVMe驱动会首先更新shadow doorbell，基于从后端模拟设备获取到的反馈，<code>来决定是否更新PCI的doorbell</code>，也就是说Guest是否更新PCI doorbell是由模拟设备后端来决定的</p> 
+<p>内存副本，于物理的NVMe设备需要使用控制器内部的<code>DMA引擎搬移数据</code>，要求所有的I/O命令对应的数据区域都是物理内存连续的</p> 
+<p>推荐一个零声学院免费公开课程，个人觉得老师讲得不错，分享给大家：<a href="https://ke.qq.com/course/417774?flowToken=1041943" rel="nofollow">Linux，Nginx，ZeroMQ，MySQL，Redis，fastdfs，MongoDB，ZK，流媒体，CDN，P2P，K8S，Docker，TCP/IP，协程，DPDK等技术内容，立即学习</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a863fe7ba0374c0a94ab62ca384285a2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">实时渲染新技术能给业主带来哪些价值？点量云</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8592eceeb62553a214bbfe7e8998cd42/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">OSS上传（Java和Js）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

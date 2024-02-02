@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>结合芯片exynos 4412介绍V4L2用来视频编解码的驱动 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="结合芯片exynos 4412介绍V4L2用来视频编解码的驱动" />
+<meta property="og:description" content="这里结合芯片exynos 4412介绍一下V4L2用来视频编解码的驱动结构 内核代码基于3.4.106 linux-3.4.106\drivers\media\video\s5p-mfc linux-3.4.106\drivers\media\video 1，V4L2结构
+2，几个主要接口 主要接口（ioctl下面的一层） vidioc_qbuf vidioc_dqbuf vidioc_reqbufs vidioc_s_fmt 3，主要数据结构 struct vb2_queue struct v4l2_buffer struct s5p_mfc_ctx struct vb2_buffer 4，接口调用链 V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE是未解码数据，存放ES流数据 V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE是已经解码数据，存放frame data buffer v4l2_qbuf流程 vidioc_qbuf--vb2_qbuf
+--- __enqueue_in_driver
+---- q-&gt;ops-&gt;buf_queue(vb);
+---- s5p_mfc_buf_queue
+---- list_add_tail(&amp;mfc_buf-&gt;list, &amp;ctx-&gt;dst_queue);
+---- s5p_mfc_try_run
+v4l2_dqbuf流程
+解出来一帧： s5p_mfc_irq
+--- s5p_mfc_handle_frame
+--- s5p_mfc_handle_frame_new
+--- vb2_buffer_done
+--- wake_up(&amp;q-&gt;done_wq);
+---- list_add_tail(&amp;vb-&gt;done_entry, &amp;q-&gt;done_list); 把解出来的一帧挂上队列
+vidioc_dqbuf
+--- vb2_dqbuf
+--- __vb2_get_done_vb
+--- __vb2_wait_for_done_vb（查找是否有可用的vb）
+--- wait_event_interruptible(q-&gt;done_wq,
+5，内存管理方式
+主要队列： 分为capture plane(解码后)和output plane（解码前） 从另外一个维度看， 每个plane都有一个done_list队列，表示解码完比的，不用的ES buffer,或者存有有效YUV数据的Frame data buffer,用户态dqbuffer就从这里面取 每个plane都有一个另外的queue队列，表示要解码的ES buffer,或者已经显示完毕的YUV数据的Frame data buffer,用户态qbuffer就从这里取 v4l2-core操作的是vb2-buffer, 这只是个handle而已，实际给MFC的是5p_mfc_buf ， 这两种buffer通过v4l2-buffer里面的index来对应起来" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/67baed4c9a266536214555173de7d8e5/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2016-06-21T23:06:02+08:00" />
+<meta property="article:modified_time" content="2016-06-21T23:06:02+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">结合芯片exynos 4412介绍V4L2用来视频编解码的驱动</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>这里结合芯片<span style="font-size:13.3333px">exynos 4412介绍一下V4L2用来视频编解码的驱动结构</span><br style="font-size:13.3333px"> <span style="font-size:13.3333px">内核代码基于3.4.106</span><br style="font-size:13.3333px"> <span style="font-size:13.3333px"> linux-3.4.106\drivers\media\video\s5p-mfc</span><br style="font-size:13.3333px"> <span style="font-size:13.3333px"> linux-3.4.106\drivers\media\video</span><br style="font-size:13.3333px"> <br> </p> 
+<p><strong><span style="font-size:32px">1，V4L2结构</span></strong></p> 
+<p><img src="https://images2.imgbox.com/8d/02/xsY6rftT_o.png" alt=""><br> </p> 
+<p><br> </p> 
+<p><span style="font-size:32px"><br> </span></p> 
+<strong><span style="font-size:32px">2，几个主要接口</span></strong> 
+<br> 主要接口（ioctl下面的一层） 
+<br> vidioc_qbuf 
+<br> vidioc_dqbuf 
+<br> vidioc_reqbufs 
+<br> vidioc_s_fmt 
+<br> 
+<br style="font-size:13.3333px"> 
+<br style="font-size:13.3333px"> 
+<strong><span style="font-size:32px">3，主要数据结构</span></strong> 
+<br style="font-size:13.3333px"> 
+<span style="font-size:13.3333px">struct vb2_queue</span> 
+<br style="font-size:13.3333px"> 
+<span style="font-size:13.3333px">struct v4l2_buffer</span> 
+<br style="font-size:13.3333px"> 
+<span style="font-size:13.3333px">struct s5p_mfc_ctx</span> 
+<br style="font-size:13.3333px"> 
+<span style="font-size:13.3333px">struct vb2_buffer</span> 
+<br> 
+<p><br> </p> 
+<p><br> </p> 
+<strong><span style="font-size:32px">4，接口调用链</span></strong> 
+<br> 
+<br> V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE是未解码数据，存放ES流数据 
+<br> V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE是已经解码数据，存放frame data buffer 
+<br> 
+<br> 
+<strong><span style="white-space:pre"></span>v4l2_qbuf流程</strong> 
+<br> 
+<img src="https://images2.imgbox.com/d5/38/r0uhPdT3_o.png" alt=""> 
+<br> 
+<p><br> </p> 
+<p><br> </p> 
+<p><br> </p> 
+<p><br> </p> 
+<p></p> 
+<p style="font-size:13.3333px">vidioc_qbuf--vb2_qbuf</p> 
+<p style="font-size:13.3333px">---  __enqueue_in_driver</p> 
+<p style="font-size:13.3333px">----  q-&gt;ops-&gt;buf_queue(vb);</p> 
+<p style="font-size:13.3333px">----  s5p_mfc_buf_queue</p> 
+<p style="font-size:13.3333px">----   list_add_tail(&amp;mfc_buf-&gt;list, &amp;ctx-&gt;dst_queue);</p> 
+<p style="font-size:13.3333px">----    s5p_mfc_try_run</p> 
+<p><br> </p> 
+<p><br> </p> 
+<p><br> </p> 
+<p><strong><br style="font-size:13.3333px"> <span style="font-size:13.3333px"><span style="white-space:pre"></span>v4l2_dqbuf流程</span></strong><br> </p> 
+<p><img src="https://images2.imgbox.com/1b/c6/dKNx55KI_o.png" alt=""><br> </p> 
+<p><br> </p> 
+<p><br> </p> 
+<p><br> </p> 解出来一帧： 
+<br> 
+<p>s5p_mfc_irq</p> 
+<p>---   s5p_mfc_handle_frame</p> 
+<p>---   s5p_mfc_handle_frame_new</p> 
+<p>---  vb2_buffer_done</p> 
+<p>---    wake_up(&amp;q-&gt;done_wq);</p> 
+<p>----   list_add_tail(&amp;vb-&gt;done_entry, &amp;q-&gt;done_list); 把解出来的一帧挂上队列</p> 
+<p><br> </p> 
+<p>vidioc_dqbuf</p> 
+<p>---  vb2_dqbuf</p> 
+<p>---  __vb2_get_done_vb</p> 
+<p>---  __vb2_wait_for_done_vb（查找是否有可用的vb）</p> 
+<p>---   wait_event_interruptible(q-&gt;done_wq,</p> 
+<br> 
+<br> 
+<br> 
+<br> 
+<span style="font-size:32px"><strong>5，内存管理方式</strong><br> </span> 
+<p><br> </p> 
+<p><span style="font-size:13.3333px">主要队列：</span><br style="font-size:13.3333px"> <span style="font-size:13.3333px">分为capture plane(解码后)和output plane（解码前）</span><br style="font-size:13.3333px"> <br style="font-size:13.3333px"> <span style="font-size:13.3333px">从另外一个维度看，</span><br style="font-size:13.3333px"> <span style="font-size:13.3333px">每个plane都有一个done_list队列，表示解码完比的，不用的ES buffer,或者存有有效YUV数据的Frame data buffer,用户态dqbuffer就从这里面取</span><br style="font-size:13.3333px"> <span style="font-size:13.3333px">每个plane都有一个另外的queue队列，表示要解码的ES buffer,或者已经显示完毕的YUV数据的Frame data buffer,用户态qbuffer就从这里取</span><br style="font-size:13.3333px"> <br style="font-size:13.3333px"> <span style="font-size:13.3333px">v4l2-core操作的是vb2-buffer,  这只是个handle而已，实际给MFC的是5p_mfc_buf ， 这两种buffer通过v4l2-buffer里面的index来对应起来</span><br> </p> 
+<br> 
+<br> 
+<span style="white-space:pre"></span> 
+<br> 
+<br> 
+<br> 
+<img src="https://images2.imgbox.com/c4/c6/c9VcThAx_o.png" alt=""> 
+<br> 
+<br> 
+<p><span style="white-space:pre"></span></p> 
+<p><strong><br style="font-size:13.3333px"> <span style="font-size:13.3333px">初始化分配 input buffer:</span></strong><br style="font-size:13.3333px"> <span style="font-size:13.3333px">vidioc_reqbufs</span></p> 
+<p><span style="font-size:13.3333px">----vb2_reqbufs</span></p> 
+<p><span style="font-size:13.3333px">----__vb2_queue_alloc（挂到q-&gt;bufs）</span></p> 
+<p><span style="font-size:13.3333px">---__vb2_buf_mem_alloc</span></p> 
+<p><span style="font-size:13.3333px">---- call_memop(q, alloc, q-&gt;alloc_ctx[plane]</span></p> 
+<p><span style="font-size:13.3333px">----vb2_dma_contig_alloc</span></p> 
+<p><span style="font-size:13.3333px">----dma_alloc_coherent分配dmabuffer</span><br style="font-size:13.3333px"> <span style="font-size:13.3333px"><br> </span></p> 
+<p><span style="font-size:13.3333px"><span style="font-size:13.3333px">----  </span>call_qop(q, buf_init, vb);</span></p> 
+<p><span style="font-size:13.3333px">---  s5p_mfc_buf_init（相关信息填充到 ctx-&gt;src_bufs[i]）    这里申请的内存，存放解吗前的数据</span><br> </p> 
+<p><br> </p> 
+<p><br> </p> 
+<strong>初始化分配 out buffer</strong> 
+<span style="white-space:pre"><strong> </strong> </span> 
+<br> 
+<p>vidioc_reqbufs</p> 
+<p>----vb2_reqbufs</p> 
+<p>----__vb2_queue_alloc（挂到q-&gt;bufs）</p> 
+<p>---__vb2_buf_mem_alloc</p> 
+<p>---- call_memop(q, alloc, q-&gt;alloc_ctx[plane]</p> 
+<p><span style="font-size:12px">--- vb2_dma_contig_alloc</span></p> 
+<p><span style="font-size:12px">----dma_alloc_coherent分配dmabuffer</span></p> 
+<p>---- call_qop(q, buf_init, vb);</p> 
+<p>---s5p_mfc_buf_init（相关信息填充到 ctx-&gt;src_bufs[i]）<span style="white-space:pre"> </span> 这里申请的内存，存放解码完的数据</p> 
+<p><br> </p> 
+<p><span style="font-size:13.3333px"><strong>分配buffer给mfc用</strong></span><br> </p> vidioc_reqbufs---s5p_mfc_alloc_codec_buffers---vb2_dma_contig_alloc //分配buffer给mfc用。 
+<br> 
+<br> 
+<br> 
+<strong><br> 中断处理流程<br> </strong> 
+<p>s5p_mfc_irq</p> 
+<p>---s5p_mfc_handle_seq_done</p> 
+<p>---s5p_mfc_try_run</p> 
+<p>----s5p_mfc_set_dec_frame_buffer</p> 
+<p>---mfc_write(dev, OFFSETA(ctx-&gt;dst_bufs[i].cookie.raw.chroma),S5P_FIMV_DEC_CHROMA_ADR + i * 4);</p> 
+<span style="white-space:pre"></span>把所有out buffer的地址写进MFC 
+<br> 
+<p><span style="font-size:13.3333px">---</span>s5p_mfc_set_dec_stream_buffer</p> 
+<p>---把此次要解码的原始数据in buffer地址写进MFC</p> 
+<br> 
+<strong><br> 有效数据存在哪里？</strong> 
+<br> 解码前的和解码后的，都在vb-&gt;planes[plane].mem_priv里面，这个mem_priv是struct vb2_dc_buf ，里面记录了这块DMA内存的虚拟地址和物理地址，都是在vidioc_reqbufs----vb2_reqbufs----__vb2_queue_alloc（挂到q-&gt;bufs）---__vb2_buf_mem_alloc---- call_memop(q, alloc, q-&gt;alloc_ctx[plane]---------vb2_dma_contig_alloc的时候记录好的。 
+<br> 然后这些内存的物理地址，在vidioc_reqbufs----vb2_reqbufs----__vb2_queue_alloc（挂到q-&gt;bufs）--&gt; call_qop(q, buf_init, vb);---&gt;s5p_mfc_buf_init时候，赋给了ctx-&gt;dst_bufs[i].cookie.raw.luma （解码后）   ctx-&gt;dst_bufs[i].cookie.raw.chroma（解码后）    ctx-&gt;src_bufs[i].cookie.stream ，（解码前） 
+<br> 然后这些地址，在s5p_mfc_set_dec_stream_buffer   ，s5p_mfc_set_dec_frame_buffer时候写进了寄存器，告诉MFC具体地址 
+<br> 
+<br> 
+<br> 
+<br> 
+<br style="font-size:13.3333px"> 
+<span style="font-size:13.3333px"><strong>Mmap/ querybuf</strong></span> 
+<br style="font-size:13.3333px"> 
+<span style="font-size:13.3333px">s5p_mfc_mmap通过</span> 
+<span style="font-size:13.3333px; white-space:pre"> </span> 
+<span style="font-size:13.3333px">(offset 与 DST_QUEUE_OFF_BASE)来判断是vq_src还是vq_dst ，这个offset是querybuf的时候填上buf-&gt;m.planes[i].m.mem_offset的。</span> 
+<br style="font-size:13.3333px"> 
+<span style="font-size:13.3333px">buf-&gt;m.planes[i].m.mem_offset 是__vb2_queue_alloc里面__setup_offsets的时候，为每个plane的内存写上的vb-&gt;v4l2_planes[plane].m.mem_offset = off;  这个mem_offset实际上没什么用。实际上就是个标志位。就是为了mmap的时候能通过这个mem_offset找到每个plane的内存__find_plane_by_offset</span> 
+<br style="font-size:13.3333px"> 
+<span style="font-size:13.3333px">这样s5p_mfc_mmap里面通过这个offset判断是ctx-&gt;vq_src还是ctx-&gt;vq_dst，然后调用vb2_mmap，通过__find_plane_by_offset找到对应vb2_buffer和vb2_buffer里面的plane，然后通过相应的vb-&gt;planes[plane].mem_priv，就可以调用vb2_dma_contig_mmap---remap_pfn_range调用标准内核API来mmap了</span> 
+<br style="font-size:13.3333px"> 
+<span style="font-size:13.3333px">实际上整个mmap的过程就是找到对应的buffer和plane，一个个的mmap的</span> 
+<br style="font-size:13.3333px"> 
+<span style="font-size:32px"><br> <strong><br> <br> 6 ，编解码参数设置在那里？</strong></span> 
+<br> 
+<br> vidioc_s_fmt里面通过fmt = find_format(f, MFC_FMT_DEC);找到static struct s5p_mfc_fmt formats[]里面对应的要解码的格式，然后对struct s5p_mfc_ctx *ctx进行赋值，以便后面使用 
+<br> 
+<p><strong style="font-size:12px"><br> </strong></p> 
+<p><strong style="font-size:12px">V4L2最终要通过对MFC的寄存器读写来控制解码过程</strong></p> 1，启动需要操作的寄存器 
+<br> 
+<span style="white-space:pre"></span>MFC poweron  
+<br> 
+<span style="white-space:pre"></span>clk 
+<br> 
+<span style="white-space:pre"></span>载入固件 
+<br> 
+<span style="white-space:pre"></span>重启MFC 
+<br> 
+<span style="white-space:pre"></span>判断固件版本 
+<br> 
+<span style="white-space:pre"></span>为两个plane分配内存 
+<br> 
+<span style="white-space:pre"></span>初始化各种等待，以及数据队列 
+<br> 
+<p><br> </p> 
+<p>2，开始播放需要的寄存器</p> 
+<span style="white-space:pre"></span>s5p_mfc_run_init_dec 
+<br> 
+<span style="white-space:pre"></span>分配一个tmp buffer，给MFC用 
+<br> 
+<span style="white-space:pre"></span>设置sharememory 
+<br> 
+<span style="white-space:pre"></span>设置slice，delay之类的 
+<br> 
+<span style="white-space:pre"></span> 
+<span style="white-space:pre"></span>设置第一帧 
+<br> 
+<span style="white-space:pre"></span>  
+<br> 3，播放一帧： 
+<br> 
+<span style="white-space:pre"></span>s5p_mfc_run_dec_frame 
+<br> 
+<span style="white-space:pre"></span>设置ES流数据的地址和size 
+<span style="white-space:pre"> </span> 
+<br> 
+<span style="white-space:pre"></span>告诉MFC哪些buffer不能用 
+<br> 
+<span style="white-space:pre"></span>设置第一帧还是中间真还是最后一针 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a10082e7a311caf12d41d69e63e678d5/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">exynos 4412 mfc 介绍</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/783f6f87c05298d023c09c18ac60c1aa/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">真阳率(tp)、假阳率(np)</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

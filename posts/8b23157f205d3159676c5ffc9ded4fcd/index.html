@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>使用双异步后，如何保证数据一致性？ - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="使用双异步后，如何保证数据一致性？" />
+<meta property="og:description" content="目录 一、前情提要二、通过Future获取异步返回值1、FutureTask 是基于 AbstractQueuedSynchronizer实现的2、FutureTask执行流程3、get()方法执行流程 三、FutureTask源码具体分析1、FutureTask源码2、将异步方法的返回值改为```Future&lt;Integer&gt;```，将返回值放到```new AsyncResult&lt;&gt;();```中； 3、通过```Future&lt;Integer&gt;.get()```获取返回值：4、这里也可以通过新线程&#43;Future获取Future返回值在BUG中磨砺，在优化中成长 大家好，我是哪吒。
+一、前情提要 在上一篇文章中，我们通过双异步的方式导入了10万行的Excel，有个小伙伴在评论区问我，如何保证插入后数据的一致性呢？
+很简单，通过对比Excel文件行数和入库数量是否相等即可。
+那么，如何获取异步线程的返回值呢？
+二、通过Future获取异步返回值 我们可以通过给异步方法添加Future返回值的方式获取结果。
+FutureTask 除了实现 Future 接口外，还实现了 Runnable 接口。因此，FutureTask 可以交给 Executor 执行，也可以由调用线程直接执行FutureTask.run(）。
+1、FutureTask 是基于 AbstractQueuedSynchronizer实现的 AbstractQueuedSynchronizer简称AQS，它是一个同步框架，它提供通用机制来原子性管理同步状态、阻塞和唤醒线程，以及 维护被阻塞线程的队列。
+基于 AQS 实现的同步器包括： ReentrantLock、Semaphore、ReentrantReadWriteLock、 CountDownLatch 和 FutureTask。
+基于 AQS实现的同步器包含两种操作：
+acquire，阻塞调用线程，直到AQS的状态允许这个线程继续执行，在FutureTask中，get()就是这个方法；release，改变AQS的状态，使state变为非阻塞状态，在FutureTask中，可以通过run()和cancel()实现。 2、FutureTask执行流程 执行@Async异步方法；建立新线程async-executor-X，执行Runnable的run()方法，（FutureTask实现RunnableFuture，RunnableFuture实现Runnable）；判断状态state； 如果未新建或者不处于AQS，直接返回；否则进入COMPLETING状态，执行异步线程代码； 如果执行cancel()方法改变AQS的状态时，会唤醒AQS等待队列中的第一个线程线程async-executor-1；线程async-executor-1被唤醒后 将自己从AQS队列中移除；然后唤醒next线程async-executor-2；改变线程async-executor-1的state；等待get()线程取值。 next等待线程被唤醒后，循环线程async-executor-1的步骤 被唤醒从AQS队列中移除唤醒next线程改变异步线程状态 新建线程async-executor-N，监听异步方法的state 如果处于EXCEPTIONAL以上状态，抛出异常；如果处于COMPLETING状态，加入AQS队列等待；如果处于NORMAL状态，返回结果； 3、get()方法执行流程 get()方法通过判断状态state观测异步线程是否已结束，如果结束直接将结果返回，否则会将等待节点扔进等待队列自旋，阻塞住线程。
+自旋直至异步线程执行完毕，获取另一边的线程计算出结果或取消后，将等待队列里的所有节点依次唤醒并移除队列。
+如果state小于等于COMPLETING，表示任务还在执行中； 如果线程被中断，从等待队列中移除等待节点WaitNode，抛出中断异常；如果state大于COMPLETING； 如果已有等待节点WaitNode，将线程置空；返回当前状态； 如果任务正在执行，让出时间片；如果还未构造等待节点，则new一个新的等待节点；如果未入队列，CAS尝试入队；如果有超时时间参数； 计算超时时间；如果超时，则从等待队列中移除等待节点WaitNode，返回当前状态state；阻塞队列nanos毫秒。 否则阻塞队列； 如果state大于COMPLETING； 如果执行完毕，返回结果；如果大于等于取消状态，则抛出异常。 很多小朋友对读源码，嗤之以鼻，工作3年、5年，还是没认真读过任何源码，觉得读了也没啥用，或者读了也看不懂~
+其实，只要把源码的执行流程通过画图的形式呈现出来，你就会幡然醒悟，原来是这样的~
+简而言之：
+1. 如果异步线程还没执行完，则进入CAS自旋；
+2. 其它线程获取结果或取消后，重新唤醒CAS队列中等待的线程；
+3. 再通过get()判断状态state；
+4. 直至返回结果或（取消、超时、异常）为止。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/8b23157f205d3159676c5ffc9ded4fcd/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-22T08:18:17+08:00" />
+<meta property="article:modified_time" content="2024-01-22T08:18:17+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">使用双异步后，如何保证数据一致性？</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p><img src="https://images2.imgbox.com/1f/3a/2q3sFLUG_o.gif" alt="在这里插入图片描述"></p> 
+<p></p> 
+<div class="toc"> 
+ <h4>目录</h4> 
+ <ul><li><ul><li><a href="#_5" rel="nofollow">一、前情提要</a></li><li><a href="#Future_14" rel="nofollow">二、通过Future获取异步返回值</a></li><li><ul><li><a href="#1FutureTask__AbstractQueuedSynchronizer_19" rel="nofollow">1、FutureTask 是基于 AbstractQueuedSynchronizer实现的</a></li><li><a href="#2FutureTask_29" rel="nofollow">2、FutureTask执行流程</a></li><li><a href="#3get_54" rel="nofollow">3、get()方法执行流程</a></li></ul> 
+   </li><li><a href="#FutureTask_91" rel="nofollow">三、FutureTask源码具体分析</a></li><li><ul><li><a href="#1FutureTask_92" rel="nofollow">1、FutureTask源码</a></li><li><ul><li><a href="#2FutureIntegernew_AsyncResult_188" rel="nofollow">2、将异步方法的返回值改为```Future&lt;Integer&gt;```，将返回值放到```new AsyncResult&lt;&gt;();```中；</a></li></ul> 
+    </li><li><a href="#3FutureIntegerget_218" rel="nofollow">3、通过```Future&lt;Integer&gt;.get()```获取返回值：</a></li><li><a href="#4FutureFuture_249" rel="nofollow">4、这里也可以通过新线程+Future获取Future返回值</a></li><li><a href="#BUG_279" rel="nofollow">在BUG中磨砺，在优化中成长</a></li></ul> 
+  </li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<p>大家好，我是哪吒。</p> 
+<h3><a id="_5"></a>一、前情提要</h3> 
+<p>在上一篇文章中，我们<a href="https://blog.csdn.net/guorui_java/article/details/135143234"><strong>通过双异步的方式导入了10万行的Excel</strong></a>，有个小伙伴在评论区问我，<strong>如何保证插入后数据的一致性呢？</strong></p> 
+<p>很简单，通过对比Excel文件行数和入库数量是否相等即可。</p> 
+<p><font face="楷体" size="5" color="#dd0000">那么，如何获取异步线程的返回值呢？</font></p> 
+<p><img src="https://images2.imgbox.com/41/38/QfEzJSHD_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="Future_14"></a>二、通过Future获取异步返回值</h3> 
+<p>我们可以通过给异步方法添加Future返回值的方式获取结果。</p> 
+<p>FutureTask 除了实现 Future 接口外，还实现了 Runnable 接口。因此，FutureTask 可以交给 Executor 执行，也可以由调用线程直接执行FutureTask.run(）。</p> 
+<h4><a id="1FutureTask__AbstractQueuedSynchronizer_19"></a>1、FutureTask 是基于 AbstractQueuedSynchronizer实现的</h4> 
+<blockquote> 
+ <p>AbstractQueuedSynchronizer简称AQS，它是一个同步框架，它提供通用机制来原子性管理同步状态、阻塞和唤醒线程，以及 维护被阻塞线程的队列。<br> 基于 AQS 实现的同步器包括： ReentrantLock、Semaphore、ReentrantReadWriteLock、 CountDownLatch 和 FutureTask。</p> 
+</blockquote> 
+<p>基于 AQS实现的同步器包含两种操作：</p> 
+<ol><li>acquire，阻塞调用线程，直到AQS的状态允许这个线程继续执行，在FutureTask中，get()就是这个方法；</li><li>release，改变AQS的状态，使state变为非阻塞状态，在FutureTask中，可以通过run()和cancel()实现。</li></ol> 
+<h4><a id="2FutureTask_29"></a>2、FutureTask执行流程</h4> 
+<p><img src="https://images2.imgbox.com/2c/38/YeOHHmny_o.png" alt="在这里插入图片描述"></p> 
+<ol><li>执行@Async异步方法；</li><li>建立新线程async-executor-X，执行Runnable的run()方法，（FutureTask实现RunnableFuture，RunnableFuture实现Runnable）；</li><li>判断状态state； 
+  <ul><li>如果未新建或者不处于AQS，直接返回；</li><li>否则进入COMPLETING状态，执行异步线程代码；</li></ul> </li><li>如果执行cancel()方法改变AQS的状态时，会唤醒AQS等待队列中的第一个线程线程async-executor-1；</li><li>线程async-executor-1被唤醒后 
+  <ul><li>将自己从AQS队列中移除；</li><li>然后唤醒next线程async-executor-2；</li><li>改变线程async-executor-1的state；</li><li>等待get()线程取值。</li></ul> </li><li>next等待线程被唤醒后，循环线程async-executor-1的步骤 
+  <ul><li>被唤醒</li><li>从AQS队列中移除</li><li>唤醒next线程</li><li>改变异步线程状态</li></ul> </li><li>新建线程async-executor-N，监听异步方法的state 
+  <ul><li>如果处于EXCEPTIONAL以上状态，抛出异常；</li><li>如果处于COMPLETING状态，加入AQS队列等待；</li><li>如果处于NORMAL状态，返回结果；</li></ul> </li></ol> 
+<h4><a id="3get_54"></a>3、get()方法执行流程</h4> 
+<p>get()方法通过判断状态state观测异步线程是否已结束，如果结束直接将结果返回，否则会将等待节点扔进等待队列自旋，阻塞住线程。</p> 
+<p>自旋直至异步线程执行完毕，获取另一边的线程计算出结果或取消后，将等待队列里的所有节点依次唤醒并移除队列。</p> 
+<p><img src="https://images2.imgbox.com/af/7d/2gmlaoCj_o.png" alt="在这里插入图片描述"></p> 
+<ol><li>如果state小于等于COMPLETING，表示任务还在执行中； 
+  <ul><li>如果线程被中断，从等待队列中移除等待节点WaitNode，抛出中断异常；</li><li>如果state大于COMPLETING； 
+    <ul><li>如果已有等待节点WaitNode，将线程置空；</li><li>返回当前状态；</li></ul> </li><li>如果任务正在执行，让出时间片；</li><li>如果还未构造等待节点，则new一个新的等待节点；</li><li>如果未入队列，CAS尝试入队；</li><li>如果有超时时间参数； 
+    <ul><li>计算超时时间；</li><li>如果超时，则从等待队列中移除等待节点WaitNode，返回当前状态state；</li><li>阻塞队列nanos毫秒。</li></ul> </li><li>否则阻塞队列；</li></ul> </li><li>如果state大于COMPLETING； 
+  <ul><li>如果执行完毕，返回结果；</li><li>如果大于等于取消状态，则抛出异常。</li></ul> </li></ol> 
+<p>很多小朋友对读源码，嗤之以鼻，工作3年、5年，还是没认真读过任何源码，觉得读了也没啥用，或者读了也看不懂~</p> 
+<p>其实，只要把源码的执行流程通过画图的形式呈现出来，你就会幡然醒悟，原来是这样的~</p> 
+<p><font face="楷体" size="4" color="#dd0000">简而言之：</font></p> 
+<p><font face="楷体" size="4" color="#dd0000">1. 如果异步线程还没执行完，则进入CAS自旋；</font><br> <font face="楷体" size="4" color="#dd0000">2. 其它线程获取结果或取消后，重新唤醒CAS队列中等待的线程；</font><br> <font face="楷体" size="4" color="#dd0000">3. 再通过get()判断状态state；</font><br> <font face="楷体" size="4" color="#dd0000">4. 直至返回结果或（取消、超时、异常）为止。</font></p> 
+<h3><a id="FutureTask_91"></a>三、FutureTask源码具体分析</h3> 
+<h4><a id="1FutureTask_92"></a>1、FutureTask源码</h4> 
+<p>通过定义整形状态值，判断state大小，这个思想很有意思，值得学习。</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">interface</span> <span class="token class-name">RunnableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">V</span><span class="token punctuation">&gt;</span></span> <span class="token keyword">extends</span> <span class="token class-name">Runnable</span><span class="token punctuation">,</span> <span class="token class-name">Future</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">V</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">/**
+     * Sets this Future to the result of its computation
+     * unless it has been cancelled.
+     */</span>
+    <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">FutureTask</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">V</span><span class="token punctuation">&gt;</span></span> <span class="token keyword">implements</span> <span class="token class-name">RunnableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">V</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+	<span class="token comment">// 最初始的状态是new 新建状态</span>
+	<span class="token keyword">private</span> <span class="token keyword">volatile</span> <span class="token keyword">int</span> state<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">int</span> <span class="token constant">NEW</span>          <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> <span class="token comment">// 新建状态</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">int</span> <span class="token constant">COMPLETING</span>   <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span> <span class="token comment">// 完成中</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">int</span> <span class="token constant">NORMAL</span>       <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">;</span> <span class="token comment">// 正常执行完</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">int</span> <span class="token constant">EXCEPTIONAL</span>  <span class="token operator">=</span> <span class="token number">3</span><span class="token punctuation">;</span> <span class="token comment">// 异常</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">int</span> <span class="token constant">CANCELLED</span>    <span class="token operator">=</span> <span class="token number">4</span><span class="token punctuation">;</span> <span class="token comment">// 取消</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">int</span> <span class="token constant">INTERRUPTING</span> <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">;</span> <span class="token comment">// 正在中断</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">int</span> <span class="token constant">INTERRUPTED</span>  <span class="token operator">=</span> <span class="token number">6</span><span class="token punctuation">;</span> <span class="token comment">// 已中断</span>
+
+	<span class="token keyword">public</span> <span class="token class-name">V</span> <span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">InterruptedException</span><span class="token punctuation">,</span> <span class="token class-name">ExecutionException</span> <span class="token punctuation">{<!-- --></span>
+	    <span class="token keyword">int</span> s <span class="token operator">=</span> state<span class="token punctuation">;</span>
+	    <span class="token comment">// 任务还在执行中</span>
+	    <span class="token keyword">if</span> <span class="token punctuation">(</span>s <span class="token operator">&lt;=</span> <span class="token constant">COMPLETING</span><span class="token punctuation">)</span>
+	        s <span class="token operator">=</span> <span class="token function">awaitDone</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">,</span> <span class="token number">0L</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	    <span class="token keyword">return</span> <span class="token function">report</span><span class="token punctuation">(</span>s<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	
+	<span class="token keyword">private</span> <span class="token keyword">int</span> <span class="token function">awaitDone</span><span class="token punctuation">(</span><span class="token keyword">boolean</span> timed<span class="token punctuation">,</span> <span class="token keyword">long</span> nanos<span class="token punctuation">)</span>
+        <span class="token keyword">throws</span> <span class="token class-name">InterruptedException</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">final</span> <span class="token keyword">long</span> deadline <span class="token operator">=</span> timed <span class="token operator">?</span> <span class="token class-name">System</span><span class="token punctuation">.</span><span class="token function">nanoTime</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> nanos <span class="token operator">:</span> <span class="token number">0L</span><span class="token punctuation">;</span>
+        <span class="token class-name">WaitNode</span> q <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+        <span class="token keyword">boolean</span> queued <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span><span class="token punctuation">;</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        	<span class="token comment">// 线程被中断，从等待队列中移除等待节点WaitNode，抛出中断异常</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token class-name">Thread</span><span class="token punctuation">.</span><span class="token function">interrupted</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token function">removeWaiter</span><span class="token punctuation">(</span>q<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">InterruptedException</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+            <span class="token keyword">int</span> s <span class="token operator">=</span> state<span class="token punctuation">;</span>
+            <span class="token comment">// 任务已执行完毕或取消</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>s <span class="token operator">&gt;</span> <span class="token constant">COMPLETING</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            	<span class="token comment">// 如果已有等待节点WaitNode，将线程置空</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>q <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span>
+                    q<span class="token punctuation">.</span>thread <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+                <span class="token keyword">return</span> s<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">// 任务正在执行，让出时间片</span>
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>s <span class="token operator">==</span> <span class="token constant">COMPLETING</span><span class="token punctuation">)</span> <span class="token comment">// cannot time out yet</span>
+                <span class="token class-name">Thread</span><span class="token punctuation">.</span><span class="token keyword">yield</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 还未构造等待节点，则new一个新的等待节点</span>
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>q <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span>
+                q <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">WaitNode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 未入队列，CAS尝试入队</span>
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>queued<span class="token punctuation">)</span>
+                queued <span class="token operator">=</span> <span class="token constant">UNSAFE</span><span class="token punctuation">.</span><span class="token function">compareAndSwapObject</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">,</span> waitersOffset<span class="token punctuation">,</span>
+                                                     q<span class="token punctuation">.</span>next <span class="token operator">=</span> waiters<span class="token punctuation">,</span> q<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 如果有超时时间参数</span>
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>timed<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            	<span class="token comment">// 计算超时时间</span>
+                nanos <span class="token operator">=</span> deadline <span class="token operator">-</span> <span class="token class-name">System</span><span class="token punctuation">.</span><span class="token function">nanoTime</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">// 如果超时，则从等待队列中移除等待节点WaitNode，返回当前状态state</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>nanos <span class="token operator">&lt;=</span> <span class="token number">0L</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token function">removeWaiter</span><span class="token punctuation">(</span>q<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">return</span> state<span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token comment">// 阻塞队列nanos毫秒</span>
+                <span class="token class-name">LockSupport</span><span class="token punctuation">.</span><span class="token function">parkNanos</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">,</span> nanos<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">else</span>
+            	<span class="token comment">// 阻塞队列</span>
+                <span class="token class-name">LockSupport</span><span class="token punctuation">.</span><span class="token function">park</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    
+	<span class="token keyword">private</span> <span class="token class-name">V</span> <span class="token function">report</span><span class="token punctuation">(</span><span class="token keyword">int</span> s<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">ExecutionException</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">// 获取outcome中记录的返回结果</span>
+        <span class="token class-name">Object</span> x <span class="token operator">=</span> outcome<span class="token punctuation">;</span>
+        <span class="token comment">// 如果执行完毕，返回结果</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>s <span class="token operator">==</span> <span class="token constant">NORMAL</span><span class="token punctuation">)</span>
+            <span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token class-name">V</span><span class="token punctuation">)</span>x<span class="token punctuation">;</span>
+            <span class="token comment">// 如果大于等于取消状态，则抛出异常</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>s <span class="token operator">&gt;=</span> <span class="token constant">CANCELLED</span><span class="token punctuation">)</span>
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">CancellationException</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">ExecutionException</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">Throwable</span><span class="token punctuation">)</span>x<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h5><a id="2FutureIntegernew_AsyncResult_188"></a>2、将异步方法的返回值改为<code>Future&lt;Integer&gt;</code>，将返回值放到<code>new AsyncResult&lt;&gt;();</code>中；</h5> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Async</span><span class="token punctuation">(</span><span class="token string">"async-executor"</span><span class="token punctuation">)</span>
+<span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">readXls</span><span class="token punctuation">(</span><span class="token class-name">String</span> filePath<span class="token punctuation">,</span> <span class="token class-name">String</span> filename<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+    	<span class="token comment">// 此代码为简化关键性代码</span>
+        <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Future</span><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> futureList <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> time <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> time <span class="token operator">&lt;</span> times<span class="token punctuation">;</span> time<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">Future</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">&gt;</span></span> sumFuture <span class="token operator">=</span> readExcelDataAsyncFutureService<span class="token punctuation">.</span><span class="token function">readXlsCacheAsync</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            futureList<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>sumFuture<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span><span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+        logger<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"readXlsCacheAsync---插入数据异常："</span><span class="token punctuation">,</span>e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Async</span><span class="token punctuation">(</span><span class="token string">"async-executor"</span><span class="token punctuation">)</span>
+<span class="token keyword">public</span> <span class="token class-name">Future</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">&gt;</span></span> <span class="token function">readXlsCacheAsync</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 此代码为简化关键性代码</span>
+        <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">AsyncResult</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>sum<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span><span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">AsyncResult</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="3FutureIntegerget_218"></a>3、通过<code>Future&lt;Integer&gt;.get()</code>获取返回值：</h4> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">boolean</span> <span class="token function">getFutureResult</span><span class="token punctuation">(</span><span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Future</span><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> futureList<span class="token punctuation">,</span> <span class="token keyword">int</span> excelRow<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span><span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span><span class="token punctuation">[</span><span class="token punctuation">]</span> futureSumArr <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token keyword">int</span><span class="token punctuation">[</span>futureList<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>i<span class="token operator">&lt;</span>futureList<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">Future</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">&gt;</span></span> future <span class="token operator">=</span> futureList<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>future<span class="token punctuation">.</span><span class="token function">isDone</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>future<span class="token punctuation">.</span><span class="token function">isCancelled</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token class-name">Integer</span> futureSum <span class="token operator">=</span> future<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    logger<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"获取Future返回值成功"</span><span class="token operator">+</span><span class="token string">"----Future:"</span> <span class="token operator">+</span> future
+                            <span class="token operator">+</span> <span class="token string">",Result:"</span> <span class="token operator">+</span> futureSum<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    futureSumArr<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">+=</span> futureSum<span class="token punctuation">;</span>
+                    <span class="token keyword">break</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+                    logger<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"Future正在执行---获取Future返回值中---等待3秒"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token class-name">Thread</span><span class="token punctuation">.</span><span class="token function">sleep</span><span class="token punctuation">(</span><span class="token number">3000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            logger<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"获取Future返回值异常: "</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    
+    <span class="token keyword">boolean</span> insertFlag <span class="token operator">=</span> <span class="token function">getInsertSum</span><span class="token punctuation">(</span>futureSumArr<span class="token punctuation">,</span> excelRow<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    logger<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"获取所有异步线程Future的返回值成功，Excel插入结果="</span><span class="token operator">+</span>insertFlag<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> insertFlag<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="4FutureFuture_249"></a>4、这里也可以通过新线程+Future获取Future返回值</h4> 
+<p>不过感觉多此一举了，就当练习Future异步取返回值了~</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token class-name">Future</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Boolean</span><span class="token punctuation">&gt;</span></span> <span class="token function">getFutureResultThreadFuture</span><span class="token punctuation">(</span><span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Future</span><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> futureList<span class="token punctuation">,</span> <span class="token keyword">int</span> excelRow<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token class-name">ExecutorService</span> service <span class="token operator">=</span> <span class="token class-name">Executors</span><span class="token punctuation">.</span><span class="token function">newSingleThreadExecutor</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">final</span> <span class="token keyword">boolean</span><span class="token punctuation">[</span><span class="token punctuation">]</span> insertFlag <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token boolean">false</span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+    service<span class="token punctuation">.</span><span class="token function">execute</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Runnable</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                insertFlag<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">getFutureResult</span><span class="token punctuation">(</span>futureList<span class="token punctuation">,</span> excelRow<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                logger<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"新线程+Future获取Future返回值异常: "</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                insertFlag<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    service<span class="token punctuation">.</span><span class="token function">shutdown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">AsyncResult</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>insertFlag<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>获取异步线程结果后，我们可以通过添加事务的方式，实现Excel入库操作的数据一致性。</p> 
+<p><font face="楷体" size="5" color="#dd0000">但Future会造成主线程的阻塞，这个就很不友好了，有没有更优解呢？</font></p> 
+<br> 
+<h4><a id="BUG_279"></a>在BUG中磨砺，在优化中成长</h4> 
+<p><a href="https://blog.csdn.net/guorui_java/article/details/135143234">使用双异步后，从 191s 优化到 2s</a></p> 
+<p><a href="https://blog.csdn.net/guorui_java/article/details/135423211">增加索引 + 异步 + 不落地后，从 12h 优化到 15 min</a></p> 
+<p><a href="https://blog.csdn.net/guorui_java/article/details/135511089">使用懒加载 + 零拷贝后，程序的秒开率提升至99.99%</a></p> 
+<p><a href="https://blog.csdn.net/guorui_java/article/details/135538341">性能优化2.0，新增缓存后，程序的秒开率不升反降</a></p> 
+<br> 
+<p>🏆文章收录于：<a href="https://blog.csdn.net/guorui_java/category_12196381.html">100天精通Java从入门到就业</a></p> 
+<p>全网最细Java零基础手把手入门教程，系列课程包括：Java基础、Java8新特性、Java集合、高并发、性能优化等，适合零基础和进阶提升的同学。</p> 
+<p>🏆哪吒多年工作总结：<a href="https://blog.csdn.net/guorui_java/article/details/120098618"><strong>Java学习路线总结，搬砖工逆袭Java架构师</strong></a>。</p> 
+<blockquote> 
+ <p><font face="楷体" size="4">华为OD机试 2023B卷题库疯狂收录中，刷题<a href="https://blog.csdn.net/guorui_java/article/details/132683473"><font color="#dd0000"><u><strong>点这里</strong></u></font></a></font></p> 
+</blockquote> 
+<p><strong>刷的越多，抽中的概率越大</strong>，每一题都有详细的答题思路、详细的代码注释、样例测试，发现新题目，随时更新，全天CSDN在线答疑。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e31e059c2d5b5377eff3021e8cda33de/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">springboot第51集：lombok，Swagger，k8s，缓存，sentinel周刊</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/183e944ed8161fda149040c3bf8c54d5/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">（附源码）django影院客服订票系统 毕业设计43697</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

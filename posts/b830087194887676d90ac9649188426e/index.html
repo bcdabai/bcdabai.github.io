@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Java NIO之DirectByteBuffer - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Java NIO之DirectByteBuffer" />
+<meta property="og:description" content="转载自：tomas家的小拨浪鼓 堆外内存 之 DirectByteBuffer 详解
+堆外内存 堆外内存是相对于堆内内存的一个概念。堆内内存是由JVM所管控的Java进程内存，我们平时在Java中创建的对象都处于堆内内存中，并且它们遵循JVM的内存管理机制，JVM会采用垃圾回收机制统一管理它们的内存。那么堆外内存就是存在于JVM管控之外的一块内存区域，因此它是不受JVM的管控。
+在讲解DirectByteBuffer之前，需要先简单了解两个知识点 java引用类型，因为DirectByteBuffer是通过虚引用(Phantom Reference)来实现堆外内存的释放的。 PhantomReference 是所有“弱引用”中最弱的引用类型。不同于软引用和弱引用，虚引用无法通过 get() 方法来取得目标对象的强引用从而使用目标对象，观察源码可以发现 get() 被重写为永远返回 null。
+那虚引用到底有什么作用？其实虚引用主要被用来 跟踪对象被垃圾回收的状态，通过查看引用队列中是否包含对象所对应的虚引用来判断它是否 即将被垃圾回收，从而采取行动。它并不被期待用来取得目标对象的引用，而目标对象被回收前，它的引用会被放入一个 ReferenceQueue 对象中，从而达到跟踪对象垃圾回收的作用。
+关于java引用类型的实现和原理可以阅读之前的文章Reference 、ReferenceQueue 详解 和Java 引用类型简述
+关于linux的内核态和用户态 内核态：控制计算机的硬件资源，并提供上层应用程序运行的环境。比如socket I/0操作或者文件的读写操作等用户态：上层应用程序的活动空间，应用程序的执行必须依托于内核提供的资源。系统调用：为了使上层应用能够访问到这些资源，内核为上层应用提供访问的接口。 因此我们可以得知当我们通过JNI调用的native方法实际上就是从用户态切换到了内核态的一种方式。并且通过该系统调用使用操作系统所提供的功能。
+Q：为什么需要用户进程(位于用户态中)要通过系统调用(Java中即使JNI)来调用内核态中的资源，或者说调用操作系统的服务了？
+A：intel cpu提供Ring0-Ring3四种级别的运行模式，Ring0级别最高，Ring3最低。Linux使用了Ring3级别运行用户态，Ring0作为内核态。Ring3状态不能访问Ring0的地址空间，包括代码和数据。因此用户态是没有权限去操作内核态的资源的，它只能通过系统调用外完成用户态到内核态的切换，然后在完成相关操作后再有内核态切换回用户态。
+DirectByteBuffer ———— 直接缓冲 DirectByteBuffer是Java用于实现堆外内存的一个重要类，我们可以通过该类实现堆外内存的创建、使用和销毁。
+DirectByteBuffer该类本身还是位于Java内存模型的堆中。堆内内存是JVM可以直接管控、操纵。
+而DirectByteBuffer中的unsafe.allocateMemory(size);是个一个native方法，这个方法分配的是堆外内存，通过C的malloc来进行分配的。分配的内存是系统本地的内存，并不在Java的内存中，也不属于JVM管控范围，所以在DirectByteBuffer一定会存在某种方式来操纵堆外内存。
+在DirectByteBuffer的父类Buffer中有个address属性：
+// Used only by direct buffers // NOTE: hoisted here for speed in JNI GetDirectBufferAddress long address; address只会被直接缓存给使用到。之所以将address属性升级放在Buffer中，是为了在JNI调用GetDirectBufferAddress时提升它调用的速率。
+address表示分配的堆外内存的地址。
+unsafe.allocateMemory(size);分配完堆外内存后就会返回分配的堆外内存基地址，并将这个地址赋值给了address属性。这样我们后面通过JNI对这个堆外内存操作时都是通过这个address来实现的了。
+在前面我们说过，在linux中内核态的权限是最高的，那么在内核态的场景下，操作系统是可以访问任何一个内存区域的，所以操作系统是可以访问到Java堆的这个内存区域的。
+Q：那为什么操作系统不直接访问Java堆内的内存区域了？
+A：这是因为JNI方法访问的内存区域是一个已经确定了的内存区域地质，那么该内存地址指向的是Java堆内内存的话，那么如果在操作系统正在访问这个内存地址的时候，Java在这个时候进行了GC操作，而GC操作会涉及到数据的移动操作[GC经常会进行先标志在压缩的操作。即，将可回收的空间做标志，然后清空标志位置的内存，然后会进行一个压缩，压缩就会涉及到对象的移动，移动的目的是为了腾出一块更加完整、连续的内存空间，以容纳更大的新对象]，数据的移动会使JNI调用的数据错乱。所以JNI调用的内存是不能进行GC操作的。
+Q：如上面所说，JNI调用的内存是不能进行GC操作的，那该如何解决了？
+A：①堆内内存与堆外内存之间数据拷贝的方式(并且在将堆内内存拷贝到堆外内存的过程JVM会保证不会进行GC操作)：比如我们要完成一个从文件中读数据到堆内内存的操作，即FileChannelImpl.read(HeapByteBuffer)。这里实际上File I/O会将数据读到堆外内存中，然后堆外内存再讲数据拷贝到堆内内存，这样我们就读到了文件中的内存。
+static int read(FileDescriptor var0, ByteBuffer var1, long var2, NativeDispatcher var4) throws IOException { if (var1." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/b830087194887676d90ac9649188426e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-07-10T18:04:47+08:00" />
+<meta property="article:modified_time" content="2018-07-10T18:04:47+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Java NIO之DirectByteBuffer</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p></p> 
+<div> 
+ <div> 
+  <p>转载自：<a href="https://www.jianshu.com/p/007052ee3773" rel="nofollow">tomas家的小拨浪鼓 堆外内存 之 DirectByteBuffer 详解</a></p> 
+  <h4>堆外内存</h4> 
+  <p>堆外内存是相对于堆内内存的一个概念。堆内内存是由JVM所管控的Java进程内存，我们平时在Java中创建的对象都处于堆内内存中，并且它们遵循JVM的内存管理机制，JVM会采用垃圾回收机制统一管理它们的内存。那么堆外内存就是存在于JVM管控之外的一块内存区域，因此它是不受JVM的管控。<br><br></p> 
+  <h4>在讲解DirectByteBuffer之前，需要先简单了解两个知识点</h4> 
+  <h5>java引用类型，因为DirectByteBuffer是通过虚引用(Phantom Reference)来实现堆外内存的释放的。</h5> 
+  <p>PhantomReference 是所有“弱引用”中最弱的引用类型。不同于软引用和弱引用，虚引用无法通过 get() 方法来取得目标对象的强引用从而使用目标对象，观察源码可以发现 get() 被重写为永远返回 null。<br>那虚引用到底有什么作用？其实虚引用主要被用来 跟踪对象被垃圾回收的状态，通过查看引用队列中是否包含对象所对应的虚引用来判断它是否 即将被垃圾回收，从而采取行动。它并不被期待用来取得目标对象的引用，而目标对象被回收前，它的引用会被放入一个 ReferenceQueue 对象中，从而达到跟踪对象垃圾回收的作用。<br>关于java引用类型的实现和原理可以阅读之前的文章<a href="https://www.jianshu.com/p/f86d3a43eec5" rel="nofollow">Reference 、ReferenceQueue 详解</a> 和<a href="https://www.jianshu.com/p/9a089a37f78d" rel="nofollow">Java 引用类型简述</a></p> 
+  <h5>关于linux的内核态和用户态</h5> 
+ </div> 
+ <img src="https://images2.imgbox.com/dd/7d/3GRPpLuK_o.png" alt=""> 
+ <br> 
+</div> 
+<div> 
+ <ul style="margin-left:20px;color:rgb(47,47,47);font-family:'-apple-system', 'SF UI Text', Arial, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'WenQuanYi Micro Hei', sans-serif;background-color:rgb(255,255,255);"><li style="line-height:30px;">内核态：控制计算机的硬件资源，并提供上层应用程序运行的环境。比如socket I/0操作或者文件的读写操作等</li><li style="line-height:30px;">用户态：上层应用程序的活动空间，应用程序的执行必须依托于内核提供的资源。</li><li style="line-height:30px;">系统调用：为了使上层应用能够访问到这些资源，内核为上层应用提供访问的接口。</li></ul> 
+ <img src="https://images2.imgbox.com/bf/ff/NWZeTanG_o.png" alt=""> 
+ <br> 
+</div> 
+<div> 
+ <div> 
+  <div> 
+   <p>因此我们可以得知当我们通过JNI调用的native方法实际上就是从用户态切换到了内核态的一种方式。并且通过该系统调用使用操作系统所提供的功能。</p> 
+   <p>Q：为什么需要用户进程(位于用户态中)要通过系统调用(Java中即使JNI)来调用内核态中的资源，或者说调用操作系统的服务了？<br>A：intel cpu提供Ring0-Ring3四种级别的运行模式，Ring0级别最高，Ring3最低。Linux使用了Ring3级别运行用户态，Ring0作为内核态。Ring3状态不能访问Ring0的地址空间，包括代码和数据。因此用户态是没有权限去操作内核态的资源的，它只能通过系统调用外完成用户态到内核态的切换，然后在完成相关操作后再有内核态切换回用户态。<br><br></p> 
+   <h4>DirectByteBuffer ———— 直接缓冲</h4> 
+   <p>DirectByteBuffer是Java用于实现堆外内存的一个重要类，我们可以通过该类实现堆外内存的创建、使用和销毁。</p> 
+  </div> 
+  <img src="https://images2.imgbox.com/e2/a6/7gY0Jz2g_o.png" alt=""> 
+ </div> 
+ <div> 
+  <div> 
+   <div> 
+    <p>DirectByteBuffer该类本身还是位于Java内存模型的堆中。堆内内存是JVM可以直接管控、操纵。<br>而DirectByteBuffer中的unsafe.allocateMemory(size);是个一个native方法，这个方法分配的是堆外内存，通过C的malloc来进行分配的。分配的内存是系统本地的内存，并不在Java的内存中，也不属于JVM管控范围，所以在DirectByteBuffer一定会存在某种方式来操纵堆外内存。<br>在DirectByteBuffer的父类Buffer中有个address属性：</p> 
+    <pre><code class="language-java"><code class="java">    <span class="hljs-comment">// Used only by direct buffers</span>
+    <span class="hljs-comment">// <span class="hljs-doctag">NOTE:</span> hoisted here for speed in JNI GetDirectBufferAddress</span>
+    <span class="hljs-keyword">long</span> address;
+</code></code></pre> 
+    <p>address只会被直接缓存给使用到。之所以将address属性升级放在Buffer中，是为了在JNI调用GetDirectBufferAddress时提升它调用的速率。<br>address表示分配的堆外内存的地址。</p> 
+   </div> 
+   <img src="https://images2.imgbox.com/b1/52/x94jD3Ws_o.png" alt=""> 
+   <br> 
+   <br> 
+  </div> 
+  <div> 
+   <div> 
+    <p>unsafe.allocateMemory(size);分配完堆外内存后就会返回分配的堆外内存基地址，并将这个地址赋值给了address属性。这样我们后面通过JNI对这个堆外内存操作时都是通过这个address来实现的了。</p> 
+    <p>在前面我们说过，在linux中内核态的权限是最高的，那么在内核态的场景下，操作系统是可以访问任何一个内存区域的，所以操作系统是可以访问到Java堆的这个内存区域的。<br>Q：那为什么操作系统不直接访问Java堆内的内存区域了？<br>A：这是因为JNI方法访问的内存区域是一个已经确定了的内存区域地质，那么该内存地址指向的是Java堆内内存的话，那么如果在操作系统正在访问这个内存地址的时候，Java在这个时候进行了GC操作，而GC操作会涉及到数据的移动操作[GC经常会进行先标志在压缩的操作。即，将可回收的空间做标志，然后清空标志位置的内存，然后会进行一个压缩，压缩就会涉及到对象的移动，移动的目的是为了腾出一块更加完整、连续的内存空间，以容纳更大的新对象]，数据的移动会使JNI调用的数据错乱。所以JNI调用的内存是不能进行GC操作的。</p> 
+    <p>Q：如上面所说，JNI调用的内存是不能进行GC操作的，那该如何解决了？<br>A：①堆内内存与堆外内存之间数据拷贝的方式(并且在将堆内内存拷贝到堆外内存的过程JVM会保证不会进行GC操作)：比如我们要完成一个从文件中读数据到堆内内存的操作，即FileChannelImpl.read(HeapByteBuffer)。这里实际上File I/O会将数据读到堆外内存中，然后堆外内存再讲数据拷贝到堆内内存，这样我们就读到了文件中的内存。</p> 
+   </div> 
+   <img src="https://images2.imgbox.com/70/02/77Rt0rKw_o.png" alt=""> 
+  </div> 
+  <div> 
+   <br> 
+  </div> 
+  <div> 
+   <div> 
+    <div> 
+     <pre><code class="language-java"><code class="java">    <span class="hljs-function"><span class="hljs-keyword">static</span> <span class="hljs-keyword">int</span> <span class="hljs-title">read</span><span class="hljs-params">(FileDescriptor var0, ByteBuffer var1, <span class="hljs-keyword">long</span> var2, NativeDispatcher var4)</span> <span class="hljs-keyword">throws</span> IOException </span>{
+        <span class="hljs-keyword">if</span> (var1.isReadOnly()) {
+            <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> IllegalArgumentException(<span class="hljs-string">"Read-only buffer"</span>);
+        } <span class="hljs-keyword">else</span> <span class="hljs-keyword">if</span> (var1 <span class="hljs-keyword">instanceof</span> DirectBuffer) {
+            <span class="hljs-keyword">return</span> readIntoNativeBuffer(var0, var1, var2, var4);
+        } <span class="hljs-keyword">else</span> {
+            <span class="hljs-comment">// 分配临时的堆外内存</span>
+            ByteBuffer var5 = Util.getTemporaryDirectBuffer(var1.remaining());
+
+            <span class="hljs-keyword">int</span> var7;
+            <span class="hljs-keyword">try</span> {
+                <span class="hljs-comment">// File I/O 操作会将数据读入到堆外内存中</span>
+                <span class="hljs-keyword">int</span> var6 = readIntoNativeBuffer(var0, var5, var2, var4);
+                var5.flip();
+                <span class="hljs-keyword">if</span> (var6 &gt; <span class="hljs-number">0</span>) {
+                    <span class="hljs-comment">// 将堆外内存的数据拷贝到堆外内存中</span>
+                    var1.put(var5);
+                }
+
+                var7 = var6;
+            } <span class="hljs-keyword">finally</span> {
+                <span class="hljs-comment">// 里面会调用DirectBuffer.cleaner().clean()来释放临时的堆外内存</span>
+                Util.offerFirstTemporaryDirectBuffer(var5);
+            }
+
+            <span class="hljs-keyword">return</span> var7;
+        }
+    }
+</code></code></pre> 
+     <p>而写操作则反之，我们会将堆内内存的数据线写到对堆外内存中，然后操作系统会将堆外内存的数据写入到文件中。<br>② 直接使用堆外内存，如DirectByteBuffer：这种方式是直接在堆外分配一个内存(即，native memory)来存储数据，程序通过JNI直接将数据读/写到堆外内存中。因为数据直接写入到了堆外内存中，所以这种方式就不会再在JVM管控的堆内再分配内存来存储数据了，也就不存在堆内内存和堆外内存数据拷贝的操作了。这样在进行I/O操作时，只需要将这个堆外内存地址传给JNI的I/O的函数就好了。<br><br></p> 
+     <h4>DirectByteBuffer堆外内存的创建和回收的源码解读</h4> 
+     <h5>堆外内存分配</h5> 
+    </div> 
+    <div> 
+     <div> 
+      <pre><code class="language-java"><code class="java"> DirectByteBuffer(<span class="hljs-keyword">int</span> cap) {                   <span class="hljs-comment">// package-private</span>
+        <span class="hljs-keyword">super</span>(-<span class="hljs-number">1</span>, <span class="hljs-number">0</span>, cap, cap);
+        <span class="hljs-keyword">boolean</span> pa = VM.isDirectMemoryPageAligned();
+        <span class="hljs-keyword">int</span> ps = Bits.pageSize();
+        <span class="hljs-keyword">long</span> size = Math.max(<span class="hljs-number">1L</span>, (<span class="hljs-keyword">long</span>)cap + (pa ? ps : <span class="hljs-number">0</span>));
+        <span class="hljs-comment">// 保留总分配内存(按页分配)的大小和实际内存的大小</span>
+        Bits.reserveMemory(size, cap);
+
+        <span class="hljs-keyword">long</span> base = <span class="hljs-number">0</span>;
+        <span class="hljs-keyword">try</span> {
+            <span class="hljs-comment">// 通过unsafe.allocateMemory分配堆外内存，并返回堆外内存的基地址</span>
+            base = unsafe.allocateMemory(size);
+        } <span class="hljs-keyword">catch</span> (OutOfMemoryError x) {
+            Bits.unreserveMemory(size, cap);
+            <span class="hljs-keyword">throw</span> x;
+        }
+        unsafe.setMemory(base, size, (<span class="hljs-keyword">byte</span>) <span class="hljs-number">0</span>);
+        <span class="hljs-keyword">if</span> (pa &amp;&amp; (base % ps != <span class="hljs-number">0</span>)) {
+            <span class="hljs-comment">// Round up to page boundary</span>
+            address = base + ps - (base &amp; (ps - <span class="hljs-number">1</span>));
+        } <span class="hljs-keyword">else</span> {
+            address = base;
+        }
+        <span class="hljs-comment">// 构建Cleaner对象用于跟踪DirectByteBuffer对象的垃圾回收，以实现当DirectByteBuffer被垃圾回收时，堆外内存也会被释放</span>
+        cleaner = Cleaner.create(<span class="hljs-keyword">this</span>, <span class="hljs-keyword">new</span> Deallocator(base, size, cap));
+        att = <span class="hljs-keyword">null</span>;
+    }
+</code></code></pre> 
+      <h5>Bits.reserveMemory(size, cap) 方法</h5> 
+      <pre><code class="language-java"><code class="java">    <span class="hljs-function"><span class="hljs-keyword">static</span> <span class="hljs-keyword">void</span> <span class="hljs-title">reserveMemory</span><span class="hljs-params">(<span class="hljs-keyword">long</span> size, <span class="hljs-keyword">int</span> cap)</span> </span>{
+
+        <span class="hljs-keyword">if</span> (!memoryLimitSet &amp;&amp; VM.isBooted()) {
+            maxMemory = VM.maxDirectMemory();
+            memoryLimitSet = <span class="hljs-keyword">true</span>;
+        }
+
+        <span class="hljs-comment">// optimist!</span>
+        <span class="hljs-keyword">if</span> (tryReserveMemory(size, cap)) {
+            <span class="hljs-keyword">return</span>;
+        }
+
+        <span class="hljs-keyword">final</span> JavaLangRefAccess jlra = SharedSecrets.getJavaLangRefAccess();
+
+        <span class="hljs-comment">// retry while helping enqueue pending Reference objects</span>
+        <span class="hljs-comment">// which includes executing pending Cleaner(s) which includes</span>
+        <span class="hljs-comment">// Cleaner(s) that free direct buffer memory</span>
+        <span class="hljs-keyword">while</span> (jlra.tryHandlePendingReference()) {
+            <span class="hljs-keyword">if</span> (tryReserveMemory(size, cap)) {
+                <span class="hljs-keyword">return</span>;
+            }
+        }
+
+        <span class="hljs-comment">// trigger VM's Reference processing</span>
+        System.gc();
+
+        <span class="hljs-comment">// a retry loop with exponential back-off delays</span>
+        <span class="hljs-comment">// (this gives VM some time to do it's job)</span>
+        <span class="hljs-keyword">boolean</span> interrupted = <span class="hljs-keyword">false</span>;
+        <span class="hljs-keyword">try</span> {
+            <span class="hljs-keyword">long</span> sleepTime = <span class="hljs-number">1</span>;
+            <span class="hljs-keyword">int</span> sleeps = <span class="hljs-number">0</span>;
+            <span class="hljs-keyword">while</span> (<span class="hljs-keyword">true</span>) {
+                <span class="hljs-keyword">if</span> (tryReserveMemory(size, cap)) {
+                    <span class="hljs-keyword">return</span>;
+                }
+                <span class="hljs-keyword">if</span> (sleeps &gt;= MAX_SLEEPS) {
+                    <span class="hljs-keyword">break</span>;
+                }
+                <span class="hljs-keyword">if</span> (!jlra.tryHandlePendingReference()) {
+                    <span class="hljs-keyword">try</span> {
+                        Thread.sleep(sleepTime);
+                        sleepTime &lt;&lt;= <span class="hljs-number">1</span>;
+                        sleeps++;
+                    } <span class="hljs-keyword">catch</span> (InterruptedException e) {
+                        interrupted = <span class="hljs-keyword">true</span>;
+                    }
+                }
+            }
+
+            <span class="hljs-comment">// no luck</span>
+            <span class="hljs-keyword">throw</span> <span class="hljs-keyword">new</span> OutOfMemoryError(<span class="hljs-string">"Direct buffer memory"</span>);
+
+        } <span class="hljs-keyword">finally</span> {
+            <span class="hljs-keyword">if</span> (interrupted) {
+                <span class="hljs-comment">// don't swallow interrupts</span>
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+</code></code></pre> 
+      <p>该方法用于在系统中保存总分配内存(按页分配)的大小和实际内存的大小。</p> 
+      <p>其中，如果系统中内存( 即，堆外内存 )不够的话：</p> 
+      <pre><code class="language-java"><code class="java">        <span class="hljs-keyword">final</span> JavaLangRefAccess jlra = SharedSecrets.getJavaLangRefAccess();
+
+        <span class="hljs-comment">// retry while helping enqueue pending Reference objects</span>
+        <span class="hljs-comment">// which includes executing pending Cleaner(s) which includes</span>
+        <span class="hljs-comment">// Cleaner(s) that free direct buffer memory</span>
+        <span class="hljs-keyword">while</span> (jlra.tryHandlePendingReference()) {
+            <span class="hljs-keyword">if</span> (tryReserveMemory(size, cap)) {
+                <span class="hljs-keyword">return</span>;
+            }
+        }
+</code></code></pre> 
+      <p>jlra.tryHandlePendingReference()会触发一次非堵塞的Reference#tryHandlePending(false)。该方法会将已经被JVM垃圾回收的DirectBuffer对象的堆外内存释放。<br>因为在Reference的静态代码块中定义了：</p> 
+      <pre><code class="language-java"><code class="java">        SharedSecrets.setJavaLangRefAccess(<span class="hljs-keyword">new</span> JavaLangRefAccess() {
+            <span class="hljs-meta">@Override</span>
+            <span class="hljs-function"><span class="hljs-keyword">public</span> <span class="hljs-keyword">boolean</span> <span class="hljs-title">tryHandlePendingReference</span><span class="hljs-params">()</span> </span>{
+                <span class="hljs-keyword">return</span> tryHandlePending(<span class="hljs-keyword">false</span>);
+            }
+        });
+</code></code></pre> 
+      <p>如果在进行一次堆外内存资源回收后，还不够进行本次堆外内存分配的话，则</p> 
+      <pre><code class="language-java"><code class="java">        <span class="hljs-comment">// trigger VM's Reference processing</span>
+        System.gc();
+</code></code></pre> 
+      <p>System.gc()会触发一个full gc，当然前提是你没有显示的设置-XX:+DisableExplicitGC来禁用显式GC。并且你需要知道，调用System.gc()并不能够保证full gc马上就能被执行。<br>所以在后面打代码中，会进行最多9次尝试，看是否有足够的可用堆外内存来分配堆外内存。并且每次尝试之前，都对延迟等待时间，已给JVM足够的时间去完成full gc操作。如果9次尝试后依旧没有足够的可用堆外内存来分配本次堆外内存，则抛出OutOfMemoryError("Direct buffer memory”)异常。</p> 
+     </div> 
+     <img src="https://images2.imgbox.com/4e/c6/rUcLZkJS_o.png" alt=""> 
+    </div> 
+    <div> 
+     <div> 
+      <div> 
+       <p>注意，这里之所以用使用full gc的很重要的一个原因是：System.gc()会对新生代的老生代都会进行内存回收，这样会比较彻底地回收DirectByteBuffer对象以及他们关联的堆外内存.<br>DirectByteBuffer对象本身其实是很小的，但是它后面可能关联了一个非常大的堆外内存，因此我们通常称之为冰山对象.<br>我们做ygc的时候会将新生代里的不可达的DirectByteBuffer对象及其堆外内存回收了，但是无法对old里的DirectByteBuffer对象及其堆外内存进行回收，这也是我们通常碰到的最大的问题。( 并且堆外内存多用于生命期中等或较长的对象 )<br>如果有大量的DirectByteBuffer对象移到了old，但是又一直没有做cms gc或者full gc，而只进行ygc，那么我们的物理内存可能被慢慢耗光，但是我们还不知道发生了什么，因为heap明明剩余的内存还很多(前提是我们禁用了System.gc – JVM参数DisableExplicitGC)。</p> 
+       <p>总的来说，Bits.reserveMemory(size, cap)方法在可用堆外内存不足以分配给当前要创建的堆外内存大小时，会实现以下的步骤来尝试完成本次堆外内存的创建：<br>① 触发一次非堵塞的Reference#tryHandlePending(false)。该方法会将已经被JVM垃圾回收的DirectBuffer对象的堆外内存释放。<br>② 如果进行一次堆外内存资源回收后，还不够进行本次堆外内存分配的话，则进行 System.gc()。System.gc()会触发一个full gc，但你需要知道，调用System.gc()并不能够保证full gc马上就能被执行。所以在后面打代码中，会进行最多9次尝试，看是否有足够的可用堆外内存来分配堆外内存。并且每次尝试之前，都对延迟等待时间，已给JVM足够的时间去完成full gc操作。<br>注意，如果你设置了-XX:+DisableExplicitGC，将会禁用显示GC，这会使System.gc()调用无效。<br>③ 如果9次尝试后依旧没有足够的可用堆外内存来分配本次堆外内存，则抛出OutOfMemoryError("Direct buffer memory”)异常。</p> 
+       <p>那么可用堆外内存到底是多少了？，即默认堆外存内存有多大：<br>① 如果我们没有通过-XX:MaxDirectMemorySize来指定最大的堆外内存。则</p> 
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/167850292a1edd50db196db092b8043a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">nginx负载均衡反向代理tar包安装，添加nginx_upstream_check_module模块</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/57df5f85f181375a5bd3b93a535bf5a8/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">sqlplus不是内部或外部命令</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

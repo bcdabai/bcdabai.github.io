@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>CUDA 程序的优化(3) 任务划分 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="CUDA 程序的优化(3) 任务划分" />
+<meta property="og:description" content="4.3.1任务划分原则 首先，需要将要处理的任务划分为几个连续的步骤，并将其划分为CPU端程序和GPU端程序。划分时需要考虑的原则有:
+列出每个步骤的所有可以选择的算法，并比较不同算法在效率和计算复杂度上的差异。
+能够并行实现的算法并不一定比串行算法快。在问题规模较小时，计算复杂度阶数更高的算法也有可能比计算复杂度阶数较低的算法耗费更短的时间。根据问题规模，选择适当算法，将任务中耗费时间最多的大规模数据并行、高计算密集度步骤映射到GPU上。
+在CPU上可以并行实现的算法不一定适用于GPU。CPU程序主要考虑的是指令间并行和粗粒度的软件线程并行，在每个CPU线程内还是串行的。由于CPU线程粒度往往太大，因此尽量不要将CPU线程直接映射为GPU线程。每个GPU线程完成的任务更加类似于CPU的多轮循环中的一轮。但也不是所有的循环都能映射为一个内核程序，因为有的循环中每一轮运算都依赖上一轮的结果，而GPU的线程之间是并行的。此时，需要采取其他方式对任务进行分解。
+在两次主机一设备通信之间进行尽量多的计算。由于主机与设备间的数据传输带宽远低于显存带宽，因此最好在两次通信之间让GPU进行尽可能多的运算。如果在两次大规模数据并行运算之间存在少量的串行运算，有时即使是在GPU上以较低的效率进行这些串行运算也比增加两次主机一设备通信要划算。在GPU进行运算的同时，如果可能，也可以让CPU进行一些计算，比如准备下一次计算需要的数据。
+应该考虑使用流运算隐藏主机一设备通信时间，以及通过pinned memory, zero-copy,write-combined memory等手段提高实际传输带宽。在集群中使用CUDA，还需要考虑节点之间的任务分配与通信问题。
+对每个并行步骤进行划分，从不同角度分析有不同的划分方式。
+从对显存的访问方向来说，可以按照输入划分或者按照输出划分。如果每个block中输入和输出的数据的比例和位置是固定的，并且能够比较容易地满足合并访问要求，那么这种划分方式既是按照输入划分的，也是按照输出划分的。这种情况是最理想的，通过shared memory和指针类型转换，大多数输入输出都能够很好地满足合并访问条件。
+但如果block的输入和输出的数据不相同，或者输入和输出无法同时满足合并访问要求，就必须设法使可用带宽最大化，只按照输入或者只按照输出划分。
+按照输入划分的情况有:
+输入参数很多而输出结果很少，如规约、直方图。输入满足合并访问条件，但是输出位置随机，或者输出时需要进行显存原子操作，在流体力学、分子动力学仿真中可能遇到这种情况。 按照输出划分的情况有:
+输入参数很少而输出结果很多，如随机数发生器。Block内每个线程的输入与其他线程共用，比如卷积、滤波中，每个线程的输入与周围线程的输入有公共部分，此时应该先按照合并访问的形式将一块数据读入shared memory，再由每个线程计算一定数量的输出，可以参考SDK中与滤波和卷积有关的几个例子。输入数据在存储器中的位置是随机的，而输出数据时可以满足合并访问条件的情况，大多数使用纹理的应用，以及一些需要查表的运算都属于这种情况。 从显存访问的形式来说，在一个block内可以进行一维的带状划分、二维的棋盘划分或者三维的域划分。如果要处理的任务不需要线程间通信，并且对显存的访问都能满足合并访问，那么采用棋盘划分还是带状划分对性能影响并不大。不过，应该尽量使每个block中的线程数量是犯的整数倍，并根据任务的具体情况确定每个维度上的大小，以减少计算访存地址时的整数除法和求模运算。
+如果需要使用纹理的特殊功能进行图像处理，使用二维棋盘划分是比较自然的。
+如果问题在一个或者几个维度方向上有局部性，可以利用shared memory提高性能或者必须在某几个维度内进行线程间通信，那么block的维度应该与需要通信的维度一致。比如本章4.7.1节的矩阵乘法例子中，既可以进行一维带状划分，也可以按照二维棋盘划分，但二维划分的算法利用了shared memory，有效减小了访存次数，并且满足合并访问条件。
+对一个block的任务进行划分后，再按照block的维度和尺寸要求对grid进行划分。此时需要考虑的问题是:
+考虑分区冲突问题，使每个block的访存要求均匀分布在显存的各个分区中，例如4.7.3节中介绍的矩阵转置，在解决分支冲突问题后，性能有了几倍的提升。Block间负载可以存在一定程度的不均衡，按照block为单位分支性能损失也很小比如，对网络中的数据进行分析时，可以由一个grid处理其中缓冲中的多个包，再由每个SM处理长度和内容都不同的包。 4.3.2 grid和block维度设计 按照CUDA的执行模型，grid中的各个block会被分配到GPU的各个SM中执行。下面的一些建议能够帮助读者确定合适的Grid与block尺寸。在设计时，应该优先考虑block的尺寸，而grid的尺寸一般来说越大越好。
+由3.2.2.3小节可知，在Tesla架构GPU的每个SM中，至少要有6个active warp才能有效地隐藏流水线延迟。此外，如果所有的active warp都来自同一block，当这个block中的线程进行存储器访问或者同步时，执行单元就会闲置。基于以上原因，最好让每个SM上拥有至少2个active block。
+一个SM上的active warp和active block数量计算方法如下:
+（1)确定每个SM使用的资源数量。
+使用nvcc的–keep编译选项，或者在.cu编译规则(cuda build rule)中选择保留中间文件（keep preprocessed files），得到.cubin文件。用写字板打开.cubin文件，在每个内核函数的开始部分，可以看到以下几行:
+lmem = 0 smem = 256 reg = 8 其中，lmem和reg分别代表内核函数中每个线程使用的local memory数量和寄存器数量，smem代表每个block使用的shared memory数量。以上数据告诉我们:这个内核函数的每个线程使用了 0 Byte local memory, 8个寄存器文件(每个寄存器文件的大小是32bit);每个block使用了256Byte的shared memory.
+（2)根据硬件确定SM上的可用资源。
+可以用SDK中的deviceQuery获得每个SM中的资源。要注意的是，在程序编译时，要使目标代码和目标硬件版本与实际使用的硬件一致(使用一arch、-gencode和一code编译选项)。
+在G80和GT200架构上，这些限制如表4-1所示。
+此外，每个block中的线程数量不能超过512个。
+（3)计算每个block使用的资源，并确定active block和active warp数量。
+假设每个block中有64个线程，每个block使用256 Byte shared memory, 8个寄存器文件，那么就有:" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/32a253e1e4b85af9c94ce3a9d92b96ea/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-09-25T11:33:53+08:00" />
+<meta property="article:modified_time" content="2020-09-25T11:33:53+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">CUDA 程序的优化(3) 任务划分</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-github-gist">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="431_0"></a>4.3.1任务划分原则</h3> 
+<p>首先，需要将要处理的任务划分为几个连续的步骤，并将其划分为CPU端程序和GPU端程序。划分时需要考虑的原则有:</p> 
+<p>列出每个步骤的所有可以选择的算法，并比较不同算法在效率和计算复杂度上的差异。<br> 能够并行实现的算法并不一定比串行算法快。在问题规模较小时，计算复杂度阶数更高的算法也有可能比计算复杂度阶数较低的算法耗费更短的时间。根据问题规模，选择适当算法，将任务中耗费时间最多的大规模数据并行、高计算密集度步骤映射到GPU上。</p> 
+<p>在CPU上可以并行实现的算法不一定适用于GPU。CPU程序主要考虑的是指令间并行和粗粒度的软件线程并行，在每个CPU线程内还是串行的。由于CPU线程粒度往往太大，因此尽量不要将CPU线程直接映射为GPU线程。每个GPU线程完成的任务更加类似于CPU的多轮循环中的一轮。但也不是所有的循环都能映射为一个内核程序，因为有的循环中每一轮运算都依赖上一轮的结果，而GPU的线程之间是并行的。此时，需要采取其他方式对任务进行分解。</p> 
+<p>在两次主机一设备通信之间进行尽量多的计算。由于主机与设备间的数据传输带宽远低于显存带宽，因此最好在两次通信之间让GPU进行尽可能多的运算。如果在两次大规模数据并行运算之间存在少量的串行运算，有时即使是在GPU上以较低的效率进行这些串行运算也比增加两次主机一设备通信要划算。在GPU进行运算的同时，如果可能，也可以让CPU进行一些计算，比如准备下一次计算需要的数据。</p> 
+<p>应该考虑使用流运算隐藏主机一设备通信时间，以及通过pinned memory, zero-copy,write-combined memory等手段提高实际传输带宽。在集群中使用CUDA，还需要考虑节点之间的任务分配与通信问题。</p> 
+<p>对每个并行步骤进行划分，从不同角度分析有不同的划分方式。</p> 
+<p>从对显存的访问方向来说，可以按照输入划分或者按照输出划分。如果每个block中输入和输出的数据的比例和位置是固定的，并且能够比较容易地满足合并访问要求，那么这种划分方式既是按照输入划分的，也是按照输出划分的。这种情况是最理想的，通过shared memory和指针类型转换，大多数输入输出都能够很好地满足合并访问条件。</p> 
+<p>但如果block的输入和输出的数据不相同，或者输入和输出无法同时满足合并访问要求，就必须设法使可用带宽最大化，只按照输入或者只按照输出划分。<br> 按照输入划分的情况有:</p> 
+<ol><li>输入参数很多而输出结果很少，如规约、直方图。</li><li>输入满足合并访问条件，但是输出位置随机，或者输出时需要进行显存原子操作，在流体力学、分子动力学仿真中可能遇到这种情况。</li></ol> 
+<p>按照输出划分的情况有:</p> 
+<ol><li>输入参数很少而输出结果很多，如随机数发生器。Block内每个线程的输入与其他线程共用，比如卷积、滤波中，每个线程的输入与周围线程的输入有公共部分，此时应该先按照合并访问的形式将一块数据读入shared memory，再由每个线程计算一定数量的输出，可以参考SDK中与滤波和卷积有关的几个例子。</li><li>输入数据在存储器中的位置是随机的，而输出数据时可以满足合并访问条件的情况，大多数使用纹理的应用，以及一些需要查表的运算都属于这种情况。</li></ol> 
+<p>从显存访问的形式来说，在一个block内可以进行一维的带状划分、二维的棋盘划分或者三维的域划分。如果要处理的任务不需要线程间通信，并且对显存的访问都能满足合并访问，那么采用棋盘划分还是带状划分对性能影响并不大。不过，应该尽量使每个block中的线程数量是犯的整数倍，并根据任务的具体情况确定每个维度上的大小，以减少计算访存地址时的整数除法和求模运算。</p> 
+<p>如果需要使用纹理的特殊功能进行图像处理，使用二维棋盘划分是比较自然的。</p> 
+<p>如果问题在一个或者几个维度方向上有局部性，可以利用shared memory提高性能或者必须在某几个维度内进行线程间通信，那么block的维度应该与需要通信的维度一致。比如本章4.7.1节的矩阵乘法例子中，既可以进行一维带状划分，也可以按照二维棋盘划分，但二维划分的算法利用了shared memory，有效减小了访存次数，并且满足合并访问条件。</p> 
+<p>对一个block的任务进行划分后，再按照block的维度和尺寸要求对grid进行划分。此时需要考虑的问题是:</p> 
+<ol><li>考虑分区冲突问题，使每个block的访存要求均匀分布在显存的各个分区中，例如4.7.3节中介绍的矩阵转置，在解决分支冲突问题后，性能有了几倍的提升。</li><li>Block间负载可以存在一定程度的不均衡，按照block为单位分支性能损失也很小比如，对网络中的数据进行分析时，可以由一个grid处理其中缓冲中的多个包，再由每个SM处理长度和内容都不同的包。</li></ol> 
+<h3><a id="432_gridblock_40"></a>4.3.2 grid和block维度设计</h3> 
+<p>按照CUDA的执行模型，grid中的各个block会被分配到GPU的各个SM中执行。下面的一些建议能够帮助读者确定合适的Grid与block尺寸。在设计时，应该优先考虑block的尺寸，而grid的尺寸一般来说越大越好。</p> 
+<p>由3.2.2.3小节可知，在Tesla架构GPU的每个SM中，至少要有6个active warp才能有效地隐藏流水线延迟。此外，如果所有的active warp都来自同一block，当这个block中的线程进行存储器访问或者同步时，执行单元就会闲置。基于以上原因，最好让每个SM上拥有至少2个active block。<br> 一个SM上的active warp和active block数量计算方法如下:</p> 
+<p>（1)确定每个SM使用的资源数量。<br> 使用nvcc的–keep编译选项，或者在.cu编译规则(cuda build rule)中选择保留中间文件（keep preprocessed files），得到.cubin文件。用写字板打开.cubin文件，在每个内核函数的开始部分，可以看到以下几行:</p> 
+<pre><code class="prism language-cpp">lmem <span class="token operator">=</span> <span class="token number">0</span> 
+smem <span class="token operator">=</span> <span class="token number">256</span> 
+reg   <span class="token operator">=</span> <span class="token number">8</span> 
+
+</code></pre> 
+<p>其中，lmem和reg分别代表内核函数中每个线程使用的local memory数量和寄存器数量，smem代表每个block使用的shared memory数量。以上数据告诉我们:这个内核函数的每个线程使用了 0 Byte local memory, 8个寄存器文件(每个寄存器文件的大小是32bit);每个block使用了256Byte的shared memory.</p> 
+<p>（2)根据硬件确定SM上的可用资源。<br> 可以用SDK中的deviceQuery获得每个SM中的资源。要注意的是，在程序编译时，要使目标代码和目标硬件版本与实际使用的硬件一致(使用一arch、-gencode和一code编译选项)。<br> 在G80和GT200架构上，这些限制如表4-1所示。</p> 
+<p><img src="https://images2.imgbox.com/24/16/0tAolbYU_o.png" alt="在这里插入图片描述"></p> 
+<p>此外，每个block中的线程数量不能超过512个。</p> 
+<p>（3)计算每个block使用的资源，并确定active block和active warp数量。<br> 假设每个block中有64个线程，每个block使用256 Byte shared memory, 8个寄存器文件，那么就有:</p> 
+<ol><li>每个block使用的shared memory是:256Byte</li><li>每个block使用的寄存器文件数量:8X64=512</li><li>每个block中的warp数量:64/32=2</li></ol> 
+<p>然后，根据每个block使用的资源，就可以计算出由每个因素限制的最大active block数量。这里，假设在G80/G92 GPU中运行这个内核程序:</p> 
+<ol><li>.由shared memory数量限制的active block数量:16384/256=64</li><li>由寄存器数量限制的active block数量:8192/512 = 16</li><li>由warp数量限制的active block数量:24/2=12</li><li>每个SM中的最大active block数量:8</li></ol> 
+<p>注意，在计算每个因素限制的active block数量时如果发现有除不尽的情况，应该只取结果的整数部分。取上述计算结果中的最小值，可以知道每个SM的active block数量为8</p> 
+<p>NVIDIA在CUDA SDK中提供的CUDA occupancy calculator也可以完成上面的计算。<br> CUDA occupancy calculator是一个Excel文件，存储在 SDK的tools目录下。只要在这个Excel表格中输入目标硬件的架构，以及每个block中的线程数量、每个block使用的shared memory数量和每个thread使用的寄存器数量，就可以自动计算出SM的资源占用率，并以图表的形式显示，十分方便。</p> 
+<p>block的尺寸与数据划分紧密相关，在上一节己经进行了一些探讨。较小的block使用的资源较少，一般在一个SM中能够有更多的active block;而较大的block中有更多的线程可以进行通信，可以获得更高的指令流效率。为了有效利用执行单元，应该让每个block中的线程数量是32的整数倍，最好让线程数量保持在64^-256之间。此时，SM中通常还有足够多的资源来执行至少两个active block。</p> 
+<p>block的维度和每个维度上的尺寸的主要作用是避免做整数除法和求模运算，对执行单元效率没有什么显著影响。在使用中，读者可以按照问题的具体情况自行确定。如果问题的规模对划分方式并不敏感，应该让blockDim.x为16或者16的整数倍，提高访问global memory和shared memory的效率。</p> 
+<p>确定block的尺寸和维度以后，就可以按照问题的规模确定grid中的block数量。通常，使用下面的方法来计算grid在某个维度上的block数量(以x轴为例):</p> 
+<pre><code class="prism language-cpp">grid 在 x 轴上的 block 数量<span class="token operator">=</span>（问题在 x 轴上的尺寸<span class="token operator">+</span>每个 block 在 x 轴上的尺寸<span class="token operator">-</span><span class="token number">1</span>）<span class="token operator">/</span>每个 block 在 x 轴上的尺寸 
+</code></pre> 
+<p>加上(每个block在x轴上的尺寸-1)是因为整数除法只会取结果的整数部分，这样可<br> 能使问题的边界得不到处理，引起错误。按照这种方法计算block数量，实际的线程数量就会比需要的线程数量更多。因此，在内核程序中，也要对边界部分进行判断，让边界外的线程不参与计算。使用与线性存储器绑定的纹理时，访问边界外时的返回值是0，可以用来简化边界处理。</p> 
+<p>理想情况下，grid中的block数量应该至少要比GPU的SM数量X每个SM中active block数量大几倍。为了让程序在未来的GPU上运行也能获得高效率，应该让block的数量尽可能得大。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e0dbe2682b16429760c299ece2c9bf87/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">（精简理解）DPDK的无锁环形队列Ring</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/fab27aedb2d33f47e460d511868cc1a8/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">yaml 格式错误 did not find expected key</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

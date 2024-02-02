@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>六.卡尔曼滤波器开发实践之六: 无损卡尔曼滤波器(UKF)进阶-白话讲解篇 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="六.卡尔曼滤波器开发实践之六: 无损卡尔曼滤波器(UKF)进阶-白话讲解篇" />
+<meta property="og:description" content="本系列文章主要介绍如何在工程实践中使用卡尔曼滤波器,分七个小节介绍: 一.卡尔曼滤波器开发实践之一: 五大公式 二.卡尔曼滤波器开发实践之二: 一个简单的位置估计卡尔曼滤波器 三.卡尔曼滤波器(EKF)开发实践之三: 基于三个传感器的海拔高度数据融合
+四.卡尔曼滤波器(EKF)开发实践之四: ROS系统位姿估计包robot_pose_ekf详解
+五.卡尔曼滤波器(EKF)开发实践之五: 编写自己的EKF替换robot_pose_ekf中EKF滤波器
+六.卡尔曼滤波器(UKF)开发实践之六: 无损卡尔曼滤波器(UKF)进阶-白话讲解篇 也就是本文
+七.卡尔曼滤波器(UKF)开发实践之七: 无损卡尔曼滤波器(UKF)进阶-实例篇
+-----------------------------------------正文开始-------------------------------------------------
+序言: 什么是无损卡尔曼滤波器? 无损卡尔曼滤器(Unscented Kalman Filter)是在卡尔曼滤波和变换的基础上发展而来的，它是利用无损变换(UT)使线性假设下的卡尔曼滤波应用于非线性系统。
+KF/EKF算法简单易操作，在工业中有广泛的应用。但是它也存在很多缺点：
+需要计算非线性模型的雅克比矩阵，计算大，易出错，难得到；忽略高阶项，估计精度大受影响；模型不确定性的鲁棒性很差；在系统达到平稳状态时，将丧失对突变状态的跟踪能力；如果系统的误差传播函数不能很好的话用线性函数来逼近，可能会导致滤波器发散。因为偏导数高阶导数省略问题和雅克比矩阵计算难度的问题，让EKF的效果不是很好。 无损变换(UT)就是针对EKF算法的缺点提出的，UT的主要思想是“近似概率分布要比近似非线性函数更容易”。UT变换计算均值和协方差，通过含有均值和协方差的确定的点集（称作sigma points）来近似概率分布，通过系统的非线性模型，产生繁衍的sigma point，经过选择合适的权值估计均值和协方差。避免了求解雅克比矩阵。这种方法把系统当作“黑盒”来处理，因而不依赖于非线性的具体形式。
+UKF和EKF计算复杂度相当，但是UKF具有更高的估计精度，满足了具有各种特殊要求的非线性滤波和控制方面的应用，在实现上也比EKF更为简单。
+上面这段话,大家要记住要点:
+UKF是对非线性函数的概率分布(均值μ和方差σ^2)进行近似(sigma points)，用一系列确定的样本来逼近状态的后验概率分布;EKF 是通过偏导数或连续差分,经雅克比矩阵,对非线性函数( f(x) )本身进行近似(线性化)，但是忽略了高阶导数. 再简单回顾下高斯分布: 高斯分布一般指正态分布, 若随机变量X服从一个数学期望为μ、方差为σ2的正态分布或高斯分布，记为N(μ，σ2)。其概率密度函数(PDF)为正态分布的期望值μ决定了其位置，其标准差σ决定了分布的幅度。
+一维正态分布
+若随机变量X服从一个位置参数为μ 、尺度参数为σ的概率分布，且其概率密度函数为 :
+而方差σ2则表示高斯分布的曲线的横向尺度程度.如图:
+而实际使用中符合高斯分布的数据形态一般如下:
+而对于一个非线性数据分布,可能会是这样:
+-----------------------------------------------------------------------------------------------------------
+好了, 上面介绍了准备知识,下面我们将进入正题.
+------------------------------------------------------------------------------------------------------------
+据UKF中系统的噪声的存在方式，将其分为加性噪声算法和隐含噪声算法，对于两种噪声算法，UKF滤波的处理方式分为两种，分别是简化的UKF算法(加性噪声)和扩维的UKF算法(隐含噪声)，这里仍然假设噪声是高斯分布的。
+加性噪声算法: 我们可以理解为直接加噪声矩阵,就像前几节介绍的KF和EKF中对Q_k和R_k的处理那样.其实也就是那样处理预测过程噪音和传感器噪音的.
+隐含噪声算法: 不是直接加噪声矩阵,而是把预测过程噪音直接放到扩维后的系统状态列向量X_k中,把传感器噪音直接放到扩维后的测量值列向量Z_k中, 和系统真实的状态值和测量值一起参与计算.
+Note: 本文将以加性噪声算法为例,来介绍UKF的算法思想. 一. 先展示下UKF算法流程公式: 首先,确定系统的状态转移函数(矩阵)和预测协方差矩阵,控制矩阵和控制向量 预测过程噪音矩阵, 状态值转测量值函数和传感器噪音矩阵：
+系统状态列向量,维数:n; :系统测量值列向量,维数m;: 系统的状态转移函数f(x). 一般就是系统状态转移方程,比如运动学方程等形式. 如果你仍然习惯于KF/EKF中公式(1)的形式,就需要提供,,,也是可以的,各有好处; :状态值转测量值函数h(x),注意:这里写的仍然是函数,而不是之前的矩阵H_k.准备好预测过程噪音矩阵(nxn),传感器噪音矩阵: (mxm).初始化最优估计值列向量: ; 最优预测协方差矩阵." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/79af2e5dce97b6b58a748f80f2ce0d49/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-09-11T10:47:09+08:00" />
+<meta property="article:modified_time" content="2021-09-11T10:47:09+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">六.卡尔曼滤波器开发实践之六: 无损卡尔曼滤波器(UKF)进阶-白话讲解篇</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h4>本系列文章主要介绍如何在工程实践中使用卡尔曼滤波器,分七个小节介绍:</h4> 
+<p><a class="link-info" href="https://blog.csdn.net/okgwf/article/details/119940610" title="一.卡尔曼滤波器开发实践之一: 五大公式">一.卡尔曼滤波器开发实践之一: 五大公式</a>    </p> 
+<p><a class="link-info" href="https://blog.csdn.net/okgwf/article/details/119972644" title="二.卡尔曼滤波器开发实践之二:  一个简单的位置估计卡尔曼滤波器">二.卡尔曼滤波器开发实践之二:  一个简单的位置估计卡尔曼滤波器</a>    </p> 
+<p><a class="link-info" href="https://blog.csdn.net/okgwf/article/details/120005962" title="三.卡尔曼滤波器(EKF)开发实践之三:  基于三个传感器的海拔高度数据融合">三.卡尔曼滤波器(EKF)开发实践之三:  基于三个传感器的海拔高度数据融合</a></p> 
+<p><a class="link-info" href="https://blog.csdn.net/okgwf/article/details/120048613" title="四.卡尔曼滤波器(EKF)开发实践之四:  ROS系统位姿估计包robot_pose_ekf详解">四.卡尔曼滤波器(EKF)开发实践之四:  ROS系统位姿估计包robot_pose_ekf详解</a></p> 
+<p><a class="link-info" href="https://blog.csdn.net/okgwf/article/details/120115697" title="五.卡尔曼滤波器(EKF)开发实践之五:  编写自己的EKF替换robot_pose_ekf中EKF滤波器">五.卡尔曼滤波器(EKF)开发实践之五:  编写自己的EKF替换robot_pose_ekf中EKF滤波器</a></p> 
+<p><a class="link-info" href="https://blog.csdn.net/okgwf/article/details/120234521" title="六.卡尔曼滤波器(UKF)开发实践之六: 无损卡尔曼滤波器(UKF)进阶-白话讲解篇">六.卡尔曼滤波器(UKF)开发实践之六: 无损卡尔曼滤波器(UKF)进阶-白话讲解篇</a>  也就是本文</p> 
+<p><a class="link-info" href="https://blog.csdn.net/okgwf/article/details/120234546" title="七.卡尔曼滤波器(UKF)开发实践之七: 无损卡尔曼滤波器(UKF)进阶-实例篇">七.卡尔曼滤波器(UKF)开发实践之七: 无损卡尔曼滤波器(UKF)进阶-实例篇</a></p> 
+<p>-----------------------------------------正文开始-------------------------------------------------</p> 
+<h3 style="margin-left:0px;text-align:left;"><strong>序言:</strong></h3> 
+<h4 style="margin-left:0px;text-align:left;"><strong>什么是无损卡尔曼滤波器?</strong></h4> 
+<p style="margin-left:0;text-align:justify;">无损卡尔曼滤器<span style="background-color:#ffffff;"><span style="color:#333333;">(Unscented Kalman Filter)</span></span>是在卡尔曼滤波和变换的基础上发展而来的，它是利用无损变换(UT)使线性假设下的卡尔曼滤波应用于非线性系统。</p> 
+<p style="margin-left:0;text-align:justify;"><span style="color:#333333;">KF/EKF</span><span style="color:#333333;">算法简单易操作，在工业中有广泛的应用。但是它也存在很多缺点：</span></p> 
+<ol><li style="text-align:justify;"><span style="color:#333333;">需要计算非线性模型的雅克比矩阵，计算大，易出错，难得到；</span></li><li style="text-align:justify;"><span style="color:#333333;">忽略高阶项，估计精度大受影响；</span></li><li style="text-align:justify;"><span style="color:#333333;">模型不确定性的鲁棒性很差；</span></li><li style="text-align:justify;"><span style="color:#333333;">在系统达到平稳状态时，将丧失对突变状态的跟踪能力；</span></li><li style="text-align:justify;"><span style="color:#333333;">如果系统的误差传播函数不能很好的话用线性函数来逼近，可能会导致滤波器发散。</span></li><li style="text-align:justify;"><span style="color:#333333;">因为偏导数高阶导数<strong>省略问题</strong>和雅克比矩阵<strong>计算难度</strong>的问题，让</span><span style="color:#333333;">EKF</span><span style="color:#333333;">的效果不是很好。</span></li></ol> 
+<p style="margin-left:0;text-align:justify;"><strong><span style="color:#2e74b5;">无损变换</span></strong><strong><span style="color:#2e74b5;">(UT)</span></strong><span style="color:#333333;">就是针对</span><span style="color:#333333;">EKF</span><span style="color:#333333;">算法的缺点提出的，</span><span style="color:#333333;">UT</span><span style="color:#333333;">的主要思想是</span><span style="color:#333333;">“</span><strong><span style="color:#2e74b5;">近似<u>概率分布</u>要比近似<u>非线性函数</u>更容易</span></strong><span style="color:#333333;">”</span><span style="color:#333333;">。</span><strong><span style="color:#333333;">UT</span></strong><strong><span style="color:#333333;">变换计算均值和协方差</span></strong><span style="color:#333333;">，通过含有<strong>均值和协方差</strong>的确定的<strong>点集</strong>（称作</span><span style="color:#333333;">sigma points</span><span style="color:#333333;">）来<strong>近似概率分布</strong>，通过<strong>系统的非线性模型，产生繁衍的</strong></span><strong><span style="color:#333333;">sigma point</span></strong><span style="color:#333333;">，经过<strong>选择合适的权值</strong>估计<strong>均值和协方差</strong>。</span><strong><span style="color:#2e74b5;">避免了求解雅克比矩阵</span></strong><span style="color:#333333;">。这种方法把系统当作</span><span style="color:#333333;">“</span><strong><span style="color:#333333;">黑盒</span></strong><span style="color:#333333;">”</span><span style="color:#333333;">来处理，<strong>因而不依赖于非线性的具体形式</strong>。</span></p> 
+<p style="margin-left:0;text-align:justify;"><span style="color:#333333;">UKF</span><span style="color:#333333;">和</span><span style="color:#333333;">EKF</span><span style="color:#333333;">计算复杂度相当，但是</span><strong><span style="color:#333333;">UKF</span></strong><strong><span style="color:#333333;">具有更高的估计精度</span></strong><span style="color:#333333;">，满足了具有各种特殊要求的非线性滤波和控制方面的应用，在实现上也比</span><span style="color:#333333;">EKF</span><span style="color:#333333;">更为简单。</span></p> 
+<p style="margin-left:0;text-align:left;"><strong>       </strong>上面这段话,大家要记住要点:</p> 
+<ol><li style="text-align:left;"><span style="color:#000000;">UKF</span><span style="color:#000000;">是对<strong>非线性函数</strong>的<strong>概率分布</strong></span><span style="color:#000000;">(</span><strong><span style="color:#2e74b5;">均值</span></strong><strong><span style="color:#2e74b5;">μ</span></strong><span style="color:#000000;">和</span><strong><span style="color:#2e74b5;">方差σ^2</span></strong><span style="color:#000000;">)</span><span style="color:#000000;">进行<strong>近似</strong></span><strong><span style="color:#000000;">(sigma points)</span></strong><span style="color:#000000;">，用一系列确定的样本来逼近状态的后验概率分布</span><span style="color:#000000;">;</span></li><li style="text-align:left;"><span style="color:#000000;">EKF </span><span style="color:#000000;">是通过<strong>偏导数或连续差分</strong></span><strong><span style="color:#000000;">,</span></strong><strong><span style="color:#000000;">经雅克比矩阵</span></strong><span style="color:#000000;">,</span><span style="color:#000000;">对<strong>非线性函数</strong></span><span style="color:#000000;">( </span><span style="color:#2e74b5;">f(x) </span><span style="color:#000000;">)</span><span style="color:#000000;">本身进行<strong>近似</strong></span><strong><span style="color:#000000;">(</span></strong><strong><span style="color:#000000;">线性化</span></strong><strong><span style="color:#000000;">)</span></strong><span style="color:#000000;">，但是忽略了高阶导数</span><span style="color:#000000;">.</span></li></ol> 
+<h4><strong>再简单回顾下高斯分布:</strong></h4> 
+<p style="margin-left:0;text-align:left;"><span style="background-color:#ffffff;"><span style="color:#579be0;">高斯分布</span></span><span style="background-color:#ffffff;"><span style="color:#888888;">一般指正态分布,</span></span> <span style="color:#333333;">若</span><a href="https://baike.baidu.com/item/%E9%9A%8F%E6%9C%BA%E5%8F%98%E9%87%8F/828980" rel="nofollow" title="随机变量">随机变量</a><span style="color:#333333;">X</span><span style="color:#333333;">服从一个</span><a href="https://baike.baidu.com/item/%E6%95%B0%E5%AD%A6%E6%9C%9F%E6%9C%9B/5362790" rel="nofollow" title="数学期望">数学期望</a><span style="color:#333333;">为</span><span style="color:#333333;">μ</span><span style="color:#333333;">、</span><a href="https://baike.baidu.com/item/%E6%96%B9%E5%B7%AE/3108412" rel="nofollow" title="方差">方差</a><span style="color:#333333;">为</span><span style="color:#333333;">σ</span><span style="color:#333333;">2</span><span style="color:#333333;">的正态分布或高斯分布，记为</span><span style="color:#333333;">N(μ</span><span style="color:#333333;">，</span><span style="color:#333333;">σ</span><span style="color:#333333;">2</span><span style="color:#333333;">)</span><span style="color:#333333;">。其</span><a href="https://baike.baidu.com/item/%E6%A6%82%E7%8E%87%E5%AF%86%E5%BA%A6%E5%87%BD%E6%95%B0/5021996" rel="nofollow" title="概率密度函数">概率密度函数</a><span style="color:#136ec2;">(PDF)</span><span style="color:#333333;">为正态分布的</span><a href="https://baike.baidu.com/item/%E6%9C%9F%E6%9C%9B%E5%80%BC/8664642" rel="nofollow" title="期望值">期望值</a><span style="color:#333333;">μ</span><span style="color:#333333;">决定了其位置，其</span><a href="https://baike.baidu.com/item/%E6%A0%87%E5%87%86%E5%B7%AE/1415772" rel="nofollow" title="标准差">标准差</a><span style="color:#333333;">σ</span><span style="color:#333333;">决定了分布的幅度。</span></p> 
+<p style="margin-left:0;text-align:left;"><span style="background-color:#ffffff;"><span style="color:#333333;">一维正态分布</span></span></p> 
+<p style="margin-left:0;text-align:left;"><span style="background-color:#ffffff;"><span style="color:#333333;">若</span><span style="color:#000000;"><a href="https://baike.baidu.com/item/%E9%9A%8F%E6%9C%BA%E5%8F%98%E9%87%8F" rel="nofollow" title="随机变量">随机变量</a></span><span style="color:#333333;">X</span><span style="color:#333333;">服从一个位置参数为</span><span style="color:#333333;">μ</span> <span style="color:#333333;">、尺度参数为</span><span style="color:#333333;">σ</span><span style="color:#333333;">的概率分布，且其</span><span style="color:#000000;"><a href="https://baike.baidu.com/item/%E6%A6%82%E7%8E%87%E5%AF%86%E5%BA%A6%E5%87%BD%E6%95%B0" rel="nofollow" title="概率密度函数">概率密度函数</a></span><span style="color:#333333;">为</span><span style="color:#3366cc;"> <a name="ref_3"></a><br><br> :</span></span></p> 
+<p style="margin-left:0;text-align:left;"><img alt="" height="59" src="https://images2.imgbox.com/c7/bb/uGkunNuC_o.png" width="245"></p> 
+<p><span style="color:#000000;">而方差</span><span style="color:#333333;">σ</span><span style="color:#333333;">2</span><span style="color:#333333;">则表示高斯分布的曲线的横向尺度程度</span><span style="color:#333333;">.</span><span style="color:#333333;">如图</span><span style="color:#333333;">:</span></p> 
+<p><img alt="" height="324" src="https://images2.imgbox.com/95/3d/qZvZBFYd_o.png" width="498"></p> 
+<p> 而<span style="color:#333333;">实际使用中符合高斯分布的数据形态一般如下</span><span style="color:#333333;">:</span></p> 
+<p><img alt="" height="231" src="https://images2.imgbox.com/ed/d0/m8UcnrgN_o.png" width="306"></p> 
+<p><span style="color:#333333;">而对于一个非线性数据分布</span><span style="color:#333333;">,</span><span style="color:#333333;">可能会是这样:</span></p> 
+<p><img alt="" height="231" src="https://images2.imgbox.com/4f/9d/LUDEELQ2_o.png" width="283"></p> 
+<p></p> 
+<p style="margin-left:0;text-align:left;"><span style="color:#333333;">-----------------------------------------------------------------------------------------------------------</span></p> 
+<p style="margin-left:0;text-align:left;"><span style="color:#333333;">好了</span><span style="color:#333333;">, </span><span style="color:#333333;">上面介绍了准备知识</span><span style="color:#333333;">,</span><span style="color:#333333;">下面我们将进入正题</span><span style="color:#333333;">.</span></p> 
+<p style="margin-left:0;text-align:left;"><span style="color:#333333;">------------------------------------------------------------------------------------------------------------</span></p> 
+<p style="margin-left:0;text-align:left;"><span style="color:#333333;">据</span><span style="color:#333333;">UKF</span><span style="color:#333333;">中系统的噪声的存在方式，将其分为<strong>加性噪声算法</strong>和<strong>隐含噪声算法</strong>，对于两种噪声算法，</span><span style="color:#333333;">UKF</span><span style="color:#333333;">滤波的处理方式分为两种，分别是<strong>简化的</strong></span><strong><span style="color:#333333;">UKF</span></strong><strong><span style="color:#333333;">算法</span></strong><strong><span style="color:#333333;">(</span></strong><strong><span style="color:#333333;">加性噪声</span></strong><strong><span style="color:#333333;">)</span></strong><span style="color:#333333;">和<strong>扩维的</strong></span><strong><span style="color:#333333;">UKF</span></strong><strong><span style="color:#333333;">算法</span></strong><strong><span style="color:#333333;">(</span></strong><strong><span style="color:#333333;">隐含噪声</span></strong><strong><span style="color:#333333;">)</span></strong><span style="color:#333333;">，这里仍然假设噪声是高斯分布的。</span></p> 
+<p style="margin-left:0;text-align:left;">         <strong><span style="color:#333333;">加性噪声算法</span></strong><strong><span style="color:#333333;">: </span></strong><span style="color:#333333;">我们可以理解为直接加噪声矩阵</span><span style="color:#333333;">,</span><span style="color:#333333;">就像前几节介绍的</span><span style="color:#333333;">KF</span><span style="color:#333333;">和</span><span style="color:#333333;">EKF</span><span style="color:#333333;">中对</span><span style="color:#333333;">Q_k</span><span style="color:#333333;">和</span><span style="color:#333333;">R_k</span><span style="color:#333333;">的处理那样</span><span style="color:#333333;">.</span><span style="color:#333333;">其实也就是那样处理预测过程噪音和传感器噪音的</span><span style="color:#333333;">.</span></p> 
+<p style="margin-left:0;text-align:left;"><strong><span style="color:#333333;">        隐含噪声算法</span></strong><strong><span style="color:#333333;">: </span></strong><span style="color:#333333;">不是直接加噪声矩阵</span><span style="color:#333333;">,</span><span style="color:#333333;">而是把预测过程噪音直接放到扩维后的系统状态列向量</span><span style="color:#333333;">X_k</span><span style="color:#333333;">中</span><span style="color:#333333;">,</span><span style="color:#333333;">把传感器噪音直接放到扩维后的测量值列向量</span><span style="color:#333333;">Z_k</span><span style="color:#333333;">中</span><span style="color:#333333;">, </span><span style="color:#333333;">和系统真实的状态值和测量值一起参与计算</span><span style="color:#333333;">.</span></p> 
+<h3 style="margin-left:0px;text-align:left;"><span style="color:#333333;"><strong>Note:</strong> <strong>本文将以加性噪声算法为例,来介绍</strong></span><strong><span style="color:#333333;">UKF</span><span style="color:#333333;">的算法思想.</span></strong></h3> 
+<p></p> 
+<h4 style="text-align:left;"><span style="color:#333333;">一. 先展示下UKF算法流程</span><span style="color:#333333;">公式:</span></h4> 
+<p style="text-align:left;"><span style="color:#333333;">    首先,确定系统的状态转移函数(矩阵)和预测协方差矩阵</span><span style="color:#333333;">,</span><span style="color:#333333;">控制矩阵和控制向量</span> <span style="color:#333333;">预测过程噪音矩阵</span><span style="color:#333333;">, </span><span style="color:#333333;">状态值转测量值函数和传感器噪音矩阵：</span></p> 
+<ul><li style="text-align:left;"><img alt="" height="25" src="https://images2.imgbox.com/7f/33/QjACkDEy_o.png" width="39">系统状态列向量,维数:n;     <img alt="" height="28" src="https://images2.imgbox.com/12/81/075ZZHwd_o.png" width="31">:系统测量值列向量,维数m;</li><li style="text-align:left;"><img alt="" height="31" src="https://images2.imgbox.com/64/0f/tnZa6FED_o.png" width="125">: <span style="color:#333333;">系统的状态转移函数f(x)</span><span style="color:#333333;">. 一般就是系统状态转移方程,比如运动学方程等形式.</span>   如果你仍然习惯于KF/EKF中公式(1)的形式,就需要提供<img alt="" height="33" src="https://images2.imgbox.com/c0/d6/18nnnkDs_o.png" width="32">,<img alt="" height="35" src="https://images2.imgbox.com/38/51/rOcOJgJh_o.png" width="39">,<img alt="" height="31" src="https://images2.imgbox.com/eb/1e/ollOnqsv_o.png" width="29">,也是可以的,各有好处;  </li><li style="text-align:left;"><img alt="" height="26" src="https://images2.imgbox.com/cf/bf/TlaeoJuD_o.png" width="115"><span style="color:#333333;">:状态值转测量值函数h(x),注意:这里写的仍然是函数,而不是之前的矩阵H_k.</span></li><li style="text-align:left;"><span style="color:#333333;">准备好预测过程噪音矩阵</span><img alt="" height="26" src="https://images2.imgbox.com/e6/40/lAAVtUdl_o.png" width="40">(nxn),传感器噪音矩阵:<img alt="" height="33" src="https://images2.imgbox.com/72/71/BRetgKWR_o.png" width="53"> (mxm).</li><li style="text-align:left;">初始化最优估计值列向量: <img alt="" height="33" src="https://images2.imgbox.com/68/28/W1VshiC0_o.png" width="46">; 最优预测协方差矩阵<img alt="" height="36" src="https://images2.imgbox.com/6e/69/Wu39nsRe_o.png" width="65">.</li></ul> 
+<p style="margin-left:.0001pt;text-align:left;"><strong><span style="color:#333333;">        Note</span></strong><span style="color:#333333;">: </span><span style="color:#ff0000;">这里</span><span style="color:#ff0000;">f(x),h(x), </span><span style="color:#ff0000;">已经完全代替之前的状态转移矩阵</span><span style="color:#ff0000;">F_k</span><span style="color:#ff0000;">和雅各比矩阵</span><span style="color:#ff0000;">H_k. </span><span style="color:#ff0000;">不管</span><span style="color:#ff0000;">f(x)</span><span style="color:#ff0000;">和</span><span style="color:#ff0000;">h(x)</span><span style="color:#ff0000;">线性还是非线性</span><span style="color:#ff0000;">,</span><span style="color:#ff0000;">正如上面所说</span><span style="color:#ff0000;">: </span><span style="color:#ff0000;">UKF</span><span style="color:#ff0000;">是对<strong>非线性函数</strong>的<strong>概率分布</strong></span><span style="color:#ff0000;">(</span><strong><span style="color:#ff0000;">均值</span></strong><strong><span style="color:#ff0000;">μ</span></strong><span style="color:#ff0000;">和<strong>方差σ^2</strong></span><span style="color:#ff0000;">)</span><span style="color:#ff0000;">进行<strong>近似</strong></span><strong><span style="color:#ff0000;">(sigma points),</span></strong><strong><span style="color:#ff0000;">而不是对非线性函数进行线性化近似</span></strong><strong><span style="color:#ff0000;">.</span></strong> </p> 
+<p style="margin-left:.0001pt;text-align:left;">其次,需要准备算法需要的参数:</p> 
+<p style="margin-left:.0001pt;text-align:left;"><img alt="" height="32" src="https://images2.imgbox.com/11/ba/F9Ds0Dsl_o.png" width="199"></p> 
+<p> <img alt="" height="102" src="https://images2.imgbox.com/89/fa/JbFQkwQa_o.png" width="378"></p> 
+<ul><li><span style="color:#333333;">λ为尺度参数，调整其值可以提高逼近精度，</span><span style="color:#333333;">n</span><span style="color:#333333;">为状态列向量</span><span style="color:#333333;">x_k</span><span style="color:#333333;">的维度。</span></li><li><span style="color:#333333;">a</span><span style="color:#333333;">的取值一般在</span><span style="color:#333333;">[1e−4,1)</span><span style="color:#333333;">区间内</span><span style="color:#333333;">. </span><span style="color:#333333;">比如我们取</span><span style="color:#333333;">: a = 1e-3</span></li><li><span style="color:#333333;"> k</span><span style="color:#333333;">为第二个尺度参数，通常设置为</span><span style="color:#333333;">3</span><span style="color:#333333;">或</span><span style="color:#333333;">3-n</span><span style="color:#333333;">。</span><span style="color:#333333;">  n</span><span style="color:#333333;">为状态列向量维数，或状态值个数</span></li><li><span style="color:#333333;"> β</span><span style="color:#333333;">为状态分布参数</span><span style="color:#333333;">, </span><span style="color:#333333;">高斯分布的变量</span><span style="color:#333333;">. β = 2 </span><span style="color:#333333;">时最优</span><span style="color:#333333;">.</span> <span style="color:#333333;">如果状态变量是标量的话，则</span> <span style="color:#333333;">β</span><span style="color:#333333;">=0</span><span style="color:#333333;">最优</span></li></ul> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="color:#333333;">上面参数配置好后,</span><span style="color:#333333;">我们知道</span><span style="color:#333333;">UKF</span><span style="color:#333333;">会生成</span><span style="color:#333333;">2n</span><span style="color:#333333;">个</span><span style="color:#333333;">sigma points</span><span style="color:#333333;">点</span><span style="color:#333333;">,</span><span style="color:#333333;">加上最优期望值列向量自己</span><span style="color:#333333;">,</span><span style="color:#333333;">共</span><span style="color:#333333;">2n+1</span><span style="color:#333333;">个</span><span style="color:#333333;">.</span><span style="color:#333333;">形成一个</span><span style="color:#333333;">n x (2n+1)</span><span style="color:#333333;">的矩阵</span><span style="color:#333333;">Xsig. </span><span style="color:#333333;">矩阵</span><span style="color:#333333;">Xsig</span><span style="color:#333333;">具有如下结构</span><span style="color:#333333;">:</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><img alt="" height="35" src="https://images2.imgbox.com/23/36/aEcYpAyN_o.png" width="635"></p> 
+<p> <span style="color:#333333;">对于第一个</span><span style="color:#333333;">sigma points</span><span style="color:#333333;">点</span><span style="color:#333333;">,</span><span style="color:#333333;">求其期望值时</span><span style="color:#333333;">,</span><span style="color:#333333;">使用</span><span style="color:#333333;">:</span></p> 
+<p><img alt="" height="57" src="https://images2.imgbox.com/55/3c/6iOiREWC_o.png" width="130"></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="color:#333333;">对于第一个</span><span style="color:#333333;">sigma points</span><span style="color:#333333;">点</span><span style="color:#333333;">,</span><span style="color:#333333;">求其方差时</span><span style="color:#333333;">,</span><span style="color:#333333;">使用</span><span style="color:#333333;">:</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><img alt="" height="46" src="https://images2.imgbox.com/81/bf/qhL4sLXR_o.png" width="231"></p> 
+<p> <span style="color:#333333;">除第一个点以外的其他</span><span style="color:#333333;">sigma points</span><span style="color:#333333;">点</span><span style="color:#333333;">, </span><span style="color:#333333;">求其期望或求方差都用</span><span style="color:#333333;">:</span></p> 
+<p> <img alt="" height="51" src="https://images2.imgbox.com/df/f3/6GgnySJl_o.png" width="347"></p> 
+<p>以上,必要的参数准备完毕. </p> 
+<p>以下是我总结的UKF算法公式.</p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:675px;"><tbody><tr><td>第1步</td><td style="width:653px;"> <p><img alt="" height="30" src="https://images2.imgbox.com/75/f2/s2nZwpIi_o.png" width="143"></p> <p><img alt="" height="33" src="https://images2.imgbox.com/85/45/jhLghxtF_o.png" width="220"></p> <p><img alt="" height="45" src="https://images2.imgbox.com/51/71/D4cQuHei_o.png" width="516"></p> <p><img alt="" height="42" src="https://images2.imgbox.com/9f/d6/49nn3AhG_o.png" width="625"></p> </td></tr><tr><td>第2步</td><td style="width:653px;"> <p><img alt="" height="26" src="https://images2.imgbox.com/3b/1e/dxJzDaUB_o.png" width="430"></p> <p>或 </p> <p><img alt="" height="24" src="https://images2.imgbox.com/28/27/d08iEv72_o.png" width="536"></p> </td></tr><tr><td>第3步</td><td style="width:653px;"> <p><img alt="" height="73" src="https://images2.imgbox.com/ec/63/vkcmSt0E_o.png" width="316">     <img alt="" height="57" src="https://images2.imgbox.com/9a/8e/gBHk71Xm_o.png" width="130"><span style="color:#333333;">                         </span>  </p> <p></p> <p><img alt="" height="63" src="https://images2.imgbox.com/a6/c6/5L8wLCsj_o.png" width="683"></p> <p>                                                                                     <img alt="" height="46" src="https://images2.imgbox.com/bb/ae/E1yoro4j_o.png" width="231">   </p> <p></p> </td></tr><tr><td>第4步</td><td style="width:653px;"><img alt="" height="27" src="https://images2.imgbox.com/c9/fd/0LXZ50wW_o.png" width="543"></td></tr><tr><td>第5步</td><td style="width:653px;"> <p><img alt="" height="68" src="https://images2.imgbox.com/0d/57/rUKXqOgQ_o.png" width="324"></p> <p><img alt="" height="59" src="https://images2.imgbox.com/e1/dd/AhB9Zxu5_o.png" width="629"></p> <p></p> </td></tr><tr><td>第6步</td><td style="width:653px;"> <p><img alt="" height="62" src="https://images2.imgbox.com/bd/8e/DumRvBTw_o.png" width="630"></p> <p><img alt="" height="28" src="https://images2.imgbox.com/58/73/2VbZK38b_o.png" width="215"></p> <p><img alt="" height="36" src="https://images2.imgbox.com/64/ee/qmQJdi7Y_o.png" width="246"></p> <p><img alt="" height="32" src="https://images2.imgbox.com/6a/fc/dA5LFcLB_o.png" width="266"></p> <p></p> </td></tr></tbody></table> 
+<p></p> 
+<p>上述,根据我对UKF的理解,编的公式, 不, 是编辑的公式, 不知道大家是否能理解.</p> 
+<p></p> 
+<h4><strong> 二. <span style="color:#333333;">白话讲解UKF的算法思想及6个步骤.</span></strong></h4> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="color:#333333;">        根据方差</span><strong><span style="color:#2e74b5;">σ^2</span></strong><span style="color:#333333;">和标准差</span><strong><span style="color:#2e74b5;">σ</span></strong><span style="color:#333333;">概念的定义</span><span style="color:#333333;">, </span><span style="color:#000000;">标准差</span><strong><span style="color:#2e74b5;">σ</span></strong><span style="color:#000000;">是各数据偏离平均值</span><span style="color:#000000;">(</span><span style="color:#000000;">均值</span><span style="color:#000000;">)</span><span style="color:#000000;">的距离的平均数</span><span style="color:#000000;">.</span> <span style="color:#000000;">而均值就是最理想中心值,</span> 在高斯分布中<span style="color:#000000;">用</span><strong><span style="color:#2e74b5;">μ</span></strong><span style="color:#000000;">表示分布的均值.</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="color:#000000;">用高斯分布曲线表示一般是这样:</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><img alt="" height="155" src="https://images2.imgbox.com/70/f7/GNLIBb0t_o.png" width="238"></p> 
+<p style="margin-left:.0001pt;text-align:left;">但通过这样形态来理解UKF算法,比较抽象.  <span style="color:#333333;">我们用高斯分布的时域图来表示(因为UKF思路是把非线性分布近似为线性分布.).</span></p> 
+<p><img alt="" height="538" src="https://images2.imgbox.com/b8/5a/p6s8nRDq_o.png" width="971"></p> 
+<p>        如图: 对于我们的状态列向量X_k(d,v),d:表示位移,v:表速度.当状态向量X_k在我们的kf系统中状态转移时, 假如它们都符合高斯分布,那么状态值,d和v分量都有自己的分布: 以<span style="color:#333333;">位置参数为:</span><span style="color:#333333;">μ</span> <span style="color:#333333;">、尺度参数为:</span><span style="color:#333333;">σ的概率分布N(μ</span><span style="color:#333333;">，</span><span style="color:#333333;">σ</span><span style="color:#333333;">2</span><span style="color:#333333;">).</span></p> 
+<p>         不管各自的方差在分布中具体是个圆还是个椭圆,但它总有个标准差<span style="color:#333333;">σ. 而</span><span style="color:#000000;">标准差是各数据偏离平均值</span><span style="color:#000000;">(</span><span style="color:#000000;">均值</span><span style="color:#000000;">)</span><span style="color:#000000;">的距离的平均数</span><span style="color:#000000;">.  以下我就以上图为依据,介绍下UKF算法.</span></p> 
+<h4><span style="color:#000000;">第(0)步, 任何时候我们总有一个最优估计值和最优协方差矩阵,哪怕它只是初始状态(各个状态分量都有自己的均值</span><span style="color:#333333;">μ和方差σ</span><span style="color:#333333;">2</span><span style="color:#000000;">).</span></h4> 
+<p><img alt="" height="392" src="https://images2.imgbox.com/cc/0b/Cm7exqBp_o.png" width="681"></p> 
+<h4><span style="color:#000000;">第(1)步,  生成sigma point矩阵</span><img alt="" height="30" src="https://images2.imgbox.com/ac/4e/Lf7pMe98_o.png" width="143">,公式如下:</h4> 
+<p><img alt="" height="33" src="https://images2.imgbox.com/2c/bd/aoPYbdvi_o.png" width="220"></p> 
+<p><img alt="" height="45" src="https://images2.imgbox.com/cd/2d/WQsrlBnK_o.png" width="516"></p> 
+<p><img alt="" height="42" src="https://images2.imgbox.com/2e/69/ICbe5SZj_o.png" width="562"></p> 
+<p>        我们对当前状态x_k-1生成的Xsig矩阵,具有n行an+1列, 每列对应一个类似状态向量X_post 的列向量.第0列是X_post本身,第1至n列是对应于均值<span style="color:#333333;">μ</span>上方约等于(-<span style="color:#333333;">σ)若干倍位置的n个sigma points(没有point是要理解为一个类似X_post的列向量);</span>第n+1至2n列是对应于均值<span style="color:#333333;">μ下</span>方约等于<span style="color:#333333;">σ若干倍位置的n个sigma points.</span></p> 
+<p>        以上面图为例,Xsig矩阵大致结构为:</p> 
+<p> <img alt="" height="89" src="https://images2.imgbox.com/59/a6/4UfjF64C_o.png" width="1076"></p> 
+<p>生成sigma points Xsig矩阵后,我们通过系统状态列向量在时域状态转移来看:    (注: 为了方便分析我们放大了状态分量位移d. 图中红色部分). 而分量速度v其实也在做同样的事.):</p> 
+<p><img alt="" height="620" src="https://images2.imgbox.com/28/8a/8jr4AuT4_o.png" width="1076"></p> 
+<p> 如图: 现在我们有2n+1个sigma point了(每个sigma point都是一个(d,v)列向量,图中只画出d分量的).</p> 
+<h4>第(2)步, <span style="color:#333333;">对生成的</span><span style="color:#333333;">矩阵Xsig中每个sigma points 按照状态转移方程进行预测</span><span style="color:#333333;">,得到矩阵Xsig_pred.你可以只用系统状态方程,也可以用EKF中熟悉的公式(1): x_k = F_k * x_k-1 + B_k * u_k  (B_k * u_k</span><span style="color:#333333;">按需要</span><span style="color:#333333;">,</span><span style="color:#333333;">非必需</span><span style="color:#333333;">).</span></h4> 
+<p><img alt="" height="26" src="https://images2.imgbox.com/36/7d/MwkhSO8V_o.png" width="430"></p> 
+<p>或</p> 
+<p><img alt="" height="26" src="https://images2.imgbox.com/46/32/UePOxr5e_o.png" width="430"></p> 
+<p><img alt="" height="620" src="https://images2.imgbox.com/2d/04/UA8I5m3V_o.png" width="1076"></p> 
+<p>如图: 我们将得到经系统状态转移方程预测到新的2n+1个(d,v) sigma point. 得到新的矩阵<span style="color:#333333;">Xsig_pred.</span></p> 
+<h4><span style="color:#333333;">第(3)步,对预测出的矩阵Xsig_pred中每个(d,v)向量,按照预先设置的权值列向量</span><span style="color:#333333;">W,</span><span style="color:#333333;">计算其先验估计值</span><span style="color:#333333;">x_k</span><span style="color:#333333;">和先验协方差矩阵</span><span style="color:#333333;">P_k.</span></h4> 
+<p> <img alt="" height="73" src="https://images2.imgbox.com/34/1e/kJGfK1Vf_o.png" width="316">     <span style="color:#333333;">当</span><span style="color:#333333;">i=0</span><span style="color:#333333;">时:</span> <img alt="" height="57" src="https://images2.imgbox.com/61/4a/OmQHHonJ_o.png" width="130"></p> 
+<p> <img alt="" height="63" src="https://images2.imgbox.com/22/d0/MEnNivov_o.png" width="683"></p> 
+<p><span style="color:#333333;">当</span><span style="color:#333333;">i=0时: </span><img alt="" height="46" src="https://images2.imgbox.com/d3/16/9fN2Nnhh_o.png" width="231"></p> 
+<p><img alt="" height="620" src="https://images2.imgbox.com/3d/e3/8LZ33cnB_o.png" width="1076"> 到这里,我们得到一个预测的先验估计值x_k(图中粉色圆圈)和先验协方差矩阵P_k(图中粉色<span style="color:#333333;">σ</span>).</p> 
+<h4>第(4)步,<span style="color:#333333;">根据第(2)步得到的</span><span style="color:#333333;">Xsig_pred, </span><span style="color:#333333;">经状态值转测量值函数h</span><span style="color:#333333;">(x),(</span><span style="color:#333333;">看我们这里说h(x)</span><span style="color:#333333;">是函数)</span><span style="color:#333333;">,</span><span style="color:#333333;">转换</span><span style="color:#333333;">2n+1</span><span style="color:#333333;">个</span><span style="color:#333333;">sigma</span><span style="color:#333333;">预测测量值矩阵</span><span style="color:#333333;">Zsig_pred:</span></h4> 
+<p><img alt="" height="27" src="https://images2.imgbox.com/ce/41/pU9yI6Ym_o.png" width="543"></p> 
+<p><img alt="" height="620" src="https://images2.imgbox.com/86/43/fJaQwxFH_o.png" width="1076"></p> 
+<p> 我们把从预测的2n+1个sigma point,经状态值转测量值函数h(x),得到了预测测量值m行,2n+1列的<span style="color:#333333;">Zsig_pred.  </span><span style="color:#6eaad7;">这里要主要你的h(x)函数组,保证最终生成和测量值列向量行数m一样的Zsig_pred</span><span style="color:#333333;">.</span></p> 
+<h4><span style="color:#333333;">第(5)步, 把上一步得到的n</span><span style="color:#333333;">行</span><span style="color:#333333;">2n+1</span><span style="color:#333333;">列的</span><span style="color:#333333;">Zsig_pred,</span><span style="color:#333333;">按照预先设置的权值列向量</span><span style="color:#333333;">W,</span><span style="color:#333333;">计算其估计值向量</span><span style="color:#333333;">zz_k</span><span style="color:#333333;">和协方差矩阵</span><span style="color:#333333;">ZP_k(这一步和第3步类似, 但要主要对第0列设置权值注意事项,和预测先验估计值是不一样的):</span></h4> 
+<p><img alt="" height="68" src="https://images2.imgbox.com/fa/8e/XRmDIycU_o.png" width="324"></p> 
+<p><img alt="" height="59" src="https://images2.imgbox.com/f9/05/qfOcNZHM_o.png" width="629"></p> 
+<p> <img alt="" height="620" src="https://images2.imgbox.com/bf/5b/PjKhYwz4_o.png" width="1076"></p> 
+<p> 到这里,我们得到一个预测的测量值zz_k(图中绿色圆圈z')和先验协方差矩阵ZP_k(图中绿色<span style="color:#333333;">σ</span>).</p> 
+<h4>第(6)步, 现在我们已经有了三个分布.</h4> 
+<p>第一个分布:  先验估计值x_k和先验协方差矩阵P_k; </p> 
+<p>第二个分布: 预测测量值zz_k和预测测量值协方差矩阵ZP_k.</p> 
+<p>第三个分布: 测量值z_k和测量值噪音协方差矩阵.</p> 
+<p>而算法通过一个cross-correlation 公式对预测的先验估计值和预测测量值之间的差来平衡kalman gain,其中细节我也有待弄清楚,但有公式在套用即可. </p> 
+<p><img alt="" height="62" src="https://images2.imgbox.com/ba/20/LdUFaTlC_o.png" width="630"></p> 
+<p><img alt="" height="28" src="https://images2.imgbox.com/6d/6d/apy6Xy7K_o.png" width="215"></p> 
+<p><img alt="" height="36" src="https://images2.imgbox.com/9e/fb/ToSGMkJl_o.png" width="246"></p> 
+<p> <img alt="" height="32" src="https://images2.imgbox.com/df/f4/7Kj7ktUJ_o.png" width="266"></p> 
+<p></p> 
+<p><img alt="" height="620" src="https://images2.imgbox.com/bd/68/rVUQTEt3_o.png" width="1076"></p> 
+<p> 如图: 我们得到了新的最优估计值x_post(d_k,v_k)和最优协方差矩阵P_post.  <span style="color:#fe2c24;">Note: 请忽略各点在水平时域的间距,只是为了演示步骤</span>.</p> 
+<p></p> 
+<p>          个人感觉第(6)步总思想和KF/EKF后三个方程的思路很类似:  我们有2个高斯分布N1<span style="color:#0d0016;">(<strong>μ1,(σ)^2), </strong>N2(<strong>μ2,(σ_2)^2),  对同一个状态进行了预测,那我们是应该更相信分布N1还是更相信分布N2呢?   最好的办法就是求两个分布的交集. 也就是把两个分布的高斯方程相乘得到一个新的分布,即</strong></span>N1<span style="color:#0d0016;">(<strong>μ1,(σ)^2) * </strong>N2(<strong>μ2,(σ_2)^2) = </strong>N3(<strong>μ3,(σ_3)^2)这个新的分布就是最优估计分布.  如下来自网上图:</strong></span></p> 
+<p><img alt="" height="325" src="https://images2.imgbox.com/2b/61/ps67iT1n_o.png" width="451"></p> 
+<p>推导工程大致如下:</p> 
+<p><img alt="" height="556" src="https://images2.imgbox.com/9c/02/nrH8GYs9_o.png" width="893"></p> 
+<p>进一步可以推导出:</p> 
+<p><img alt="" height="405" src="https://images2.imgbox.com/5a/66/RizPxvnn_o.png" width="948"></p> 
+<p> 进一步手工鼠标画笔推导:</p> 
+<p> <img alt="" height="463" src="https://images2.imgbox.com/f0/80/oVFN72xr_o.png" width="721"></p> 
+<p><img alt="" height="730" src="https://images2.imgbox.com/b5/c1/pdyKcZn3_o.png" width="747"></p> 
+<p> 上面两个推导,我们设置公共项为K,有:</p> 
+<p><img alt="" height="257" src="https://images2.imgbox.com/07/67/JUetYmss_o.png" width="375">这里<span style="color:#0d0016;"><strong>σ和μ下标: </strong></span>0改成1, 1改成2</p> 
+<p> 当然,这是对KF/EKF五大公式的推导,但对比UKF最后一步.很是相似,可见也是利用了两个高斯分布相乘求交集的一种推导.</p> 
+<p></p> 
+<p>写的不好,请多包涵!</p> 
+<p>有不足之处欢迎留言指正,共同进步,谢谢!</p> 
+<p>另外别忘了点个赞哦.</p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p style="text-align:left;"></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p style="margin-left:0;text-align:left;">参考:</p> 
+<p style="margin-left:0;text-align:left;"><a href="https://blog.csdn.net/weixin_44060636/article/details/108150848" title="无损卡尔曼滤波器（Unscented Kalman Filter, UKF)#附MATLAB代码_小伟啊的博客-CSDN博客">无损卡尔曼滤波器（Unscented Kalman Filter, UKF)#附MATLAB代码_小伟啊的博客-CSDN博客</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/fa8078a8ebf0b99f458262701ad507e4/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">讲一些关于Spark的Broadcast你不知道的细节</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/60e2d4ef12e47ab9925d6f5d8affe80f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Condition 测试记录</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

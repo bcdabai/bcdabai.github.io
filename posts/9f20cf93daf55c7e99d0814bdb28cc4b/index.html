@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>stm32学习笔记—旋转编码器计次 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="stm32学习笔记—旋转编码器计次" />
+<meta property="og:description" content="（看正点原子的教程没有看懂，这周换成江协科技的视频重新学）
+一、中断基本知识
+中断：在主程序的运行过程中，出现了特定的中断触发条件（中断源），使得CPU暂停当前正在运行的程序，转而去处理中断程序，处理完后又返回原来被暂停的位置继续运行；
+中断优先级：当有多个中断源同时申请中断时，中CPU会根据中断源的轻重缓急进行裁决，优先响应更加紧急的中断源；
+中断嵌套：当一个中断源正在进行时，又有新的更高优先级的中断源申请中断，CPU再次暂停当前中断程序，转而去处理新的中断程序，处理完成后依次进行返回。
+二、旋转编码器介绍
+用来测量位置、速度或旋转方向的装置，当其旋转轴旋转时，其输出端可以输出与旋转速度和方向对应的方波信号，读取方波信号的频率和相位信息即可得知旋转轴的速度和方向。
+一般编码器有A、B、C三个输出通道，其中A、B两相输出正交信号，相位差为90°，C相输出零脉冲信号，用于标识位置。当编码器正转时，A相的输出信号超前B相90°；当编码器反转时，A相滞后B相90°。我们在程序中可以根据A、B两相信号输出的先后顺序，来判断旋转编码器是正转还是反转。但在实际实验过程中，旋转编码器输出的波形会存在抖动，需要进行消抖。
+三、检测思路
+1、在原代码中断服务函数的转动判断里，加一个很短的延时来实现消抖。但是我们一般不在中断函数里加延时，因为延时会占用CPU，对中断造成影响。这种方法虽然能解决抖动问题，但在编码器转动比较快时，容易漏判，不建议使用该方法。
+2、A相下降沿触发中断，在A相低电平期间死循环，直到A相恢复高电平后循环结束，然后通过检测B相在这期间产生了上升沿还是下降沿来判断正、反转。判断B相是上升沿还是下降沿的方法为：每次进入中断后立即保存B相的上一个状态（Last_status），同时在A相低电平期间更新B相的当前状态（Current_status），若上一个状态是高电平，而当前状态是低电平，则为下降沿；若上一个状态是低电平，而当前状态是高电平，则为上升沿。
+3、增加判断正、反转的条件，读取一个周期内的电平变化再进行判断。首先将最小系统板的PB0引脚与A相连接，触发方式选择上升/下降沿触发，用A相的输出信号来触发中断，然后在A相下降沿触发第一次中断后读取B相电平，紧接着A相上升沿触发第二次中断后读取B相电平，结合两次读取到的电平来判断是正转还是反转，这种检测方法和第二种方法的原理相同，即从A相的下降沿触发到上升沿触发期间，若B相电平发生了变化，则判定编码器转动，反之未转动，波形抖动时B相的电平保持不变，能够实现消抖。
+4、STM32有一个专门的编码器接口，定时器开启编码器模式，调用标准库中的TIM_EncoderInterfaceConfig()编码器函数进行参数的配置，然后通过TIM_GetCounter()函数直接读取计数值即可。编码器模式下计数器的计数方式如下图所示，有三种模式可选择。例如：第一种模式中，当TI1FP1为上升沿(Rising)时，若TI2FP2为高电平，则计数器向下计数，若TI2FP2为低电平，则计数器向上计数；而当TI1FP1为下降沿(Falling)时，若TI2FP2为高电平，则计数器向上计数，若TI2FP2为低电平，则计数器向下计数；TI2FP2的边沿触发不计数。这种计数方式下，毛刺信号的下降沿和上升沿产生的误判之间能够相互抵消。
+引脚连接： 旋转编码器最小系统板VCC3.3VGNDGNDAPB0BPB1CGND 四、编程思路
+1、配置RCC，打开时钟；
+2、配置GPIO；
+GPIO_PinLockConfig() 函数用以锁定GPIO配置，防止意外更改 3、配置AFIO（嵌套中断向量控制器）；
+GPIO_AFIODeInit() 函数用于复位AFIO外设
+GPIO_EventOutputConfig() 和GPIO_EventOutputCmd() 函数用于配置事件输出功能 GPIO_PinRemapconfig() 函数进行用于引脚的重映射
+4、配置EXTI（外部中断），选择边沿触发方式和触发响应方式；
+GPIO_EXTILineConfig() 配置AFIO的数据选择器来选择中断引脚
+EXTI_DeInit() 清除EXTI配置，恢复或上电默认状态
+EXTI_Init() 配置EXTI外设
+EXTI_StructInit() 把参数传递的结构体配一个默认值
+5、配置NVIC，选择合适的优先级。
+五、cubemx配置定时器的旋转编码器模式
+目标效果：顺时针旋转编码器计数值&#43;1，逆时针旋转编码器计数值-1
+1.配置时钟：外部高速时钟源HSE
+2.配置引脚为外部中断模式：选择中断模式触发下降沿有效，默认上拉输入，使能NVIC
+3.配置定时器，选择编码器模式，分频值为2-1，计数值为1，自动重装在值1，自动重载使能，通道1、2都计数且都是上升沿有效
+4.配置时钟到72MHz，生成工程文件
+5.修改定时器代码
+/* USER CODE BEGIN Private defines */ typedef struct { int Encoder_Val; /*编码器计数值*/ int Encoder_Dir; /*编码器旋转方向*/ }EC11_t; extern EC11_t EC11; /* USER CODE END Private defines */ /* USER CODE BEGIN 0 */ EC11_t EC11; /* USER CODE END 0 */ /* USER CODE BEGIN 1 */ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) { uint8_t dir = 0; if(htim == &amp;htim3) { dir = __HAL_TIM_IS_TIM_COUNTING_DOWN(&amp;htim3); if(dir==1) { EC11." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/9f20cf93daf55c7e99d0814bdb28cc4b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-12-10T23:03:16+08:00" />
+<meta property="article:modified_time" content="2023-12-10T23:03:16+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">stm32学习笔记—旋转编码器计次</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>（看正点原子的教程没有看懂，这周换成江协科技的视频重新学）</p> 
+<p><strong>一、中断基本知识</strong></p> 
+<p>中断：在主程序的运行过程中，出现了特定的中断触发条件（中断源），使得CPU暂停当前正在运行的程序，转而去处理中断程序，处理完后又返回原来被暂停的位置继续运行；</p> 
+<p>中断优先级：当有多个中断源同时申请中断时，中CPU会根据中断源的轻重缓急进行裁决，优先响应更加紧急的中断源；</p> 
+<p>中断嵌套：当一个中断源正在进行时，又有新的更高优先级的中断源申请中断，CPU再次暂停当前中断程序，转而去处理新的中断程序，处理完成后依次进行返回。</p> 
+<p><strong>二、旋转编码器介绍</strong></p> 
+<p>用来测量位置、速度或旋转方向的装置，当其旋转轴旋转时，其输出端可以输出与旋转速度和方向对应的方波信号，读取方波信号的频率和相位信息即可得知旋转轴的速度和方向。</p> 
+<p>一般编码器有A、B、C三个输出通道，其中A、B两相输出正交信号，相位差为90°，C相输出零脉冲信号，用于标识位置。当编码器正转时，A相的输出信号超前B相90°；当编码器反转时，A相滞后B相90°。我们在程序中可以根据A、B两相信号输出的先后顺序，来判断旋转编码器是正转还是反转。但在实际实验过程中，旋转编码器输出的波形会存在抖动，需要进行消抖。</p> 
+<p><strong>三、检测思路</strong></p> 
+<p>1、在原代码中断服务函数的转动判断里，加一个很短的延时来实现消抖。但是我们一般不在中断函数里加延时，因为延时会占用CPU，对中断造成影响。这种方法虽然能解决抖动问题，但在编码器转动比较快时，容易漏判，不建议使用该方法。</p> 
+<p>2、A相下降沿触发中断，在A相低电平期间死循环，直到A相恢复高电平后循环结束，然后通过检测B相在这期间产生了上升沿还是下降沿来判断正、反转。判断B相是上升沿还是下降沿的方法为：每次进入中断后立即保存B相的上一个状态（Last_status），同时在A相低电平期间更新B相的当前状态（Current_status），若上一个状态是高电平，而当前状态是低电平，则为下降沿；若上一个状态是低电平，而当前状态是高电平，则为上升沿。</p> 
+<p>3、增加判断正、反转的条件，读取一个周期内的电平变化再进行判断。首先将最小系统板的PB0引脚与A相连接，触发方式选择上升/下降沿触发，用A相的输出信号来触发中断，然后在A相下降沿触发第一次中断后读取B相电平，紧接着A相上升沿触发第二次中断后读取B相电平，结合两次读取到的电平来判断是正转还是反转，这种检测方法和第二种方法的原理相同，即从A相的下降沿触发到上升沿触发期间，若B相电平发生了变化，则判定编码器转动，反之未转动，波形抖动时B相的电平保持不变，能够实现消抖。</p> 
+<p><br> 4、STM32有一个专门的编码器接口，定时器开启编码器模式，调用标准库中的TIM_EncoderInterfaceConfig()编码器函数进行参数的配置，然后通过TIM_GetCounter()函数直接读取计数值即可。编码器模式下计数器的计数方式如下图所示，有三种模式可选择。例如：第一种模式中，当TI1FP1为上升沿(Rising)时，若TI2FP2为高电平，则计数器向下计数，若TI2FP2为低电平，则计数器向上计数；而当TI1FP1为下降沿(Falling)时，若TI2FP2为高电平，则计数器向上计数，若TI2FP2为低电平，则计数器向下计数；TI2FP2的边沿触发不计数。这种计数方式下，毛刺信号的下降沿和上升沿产生的误判之间能够相互抵消。<img alt="" src="https://images2.imgbox.com/0c/b6/Mfz1TWPC_o.png"></p> 
+<p>引脚连接： </p> 
+<table align="center" border="1" cellpadding="1" cellspacing="1" style="width:650px;"><tbody><tr><td>旋转编码器</td><td>最小系统板</td></tr><tr><td>VCC</td><td>3.3V</td></tr><tr><td>GND</td><td>GND</td></tr><tr><td>A</td><td>PB0</td></tr><tr><td>B</td><td>PB1</td></tr><tr><td>C</td><td>GND</td></tr></tbody></table> 
+<p></p> 
+<p><strong>四、编程思路</strong></p> 
+<p>1、配置RCC，打开时钟；</p> 
+<p>2、配置GPIO；</p> 
+<p>GPIO_PinLockConfig() 函数用以锁定GPIO配置，防止意外更改 </p> 
+<p>3、配置AFIO（嵌套中断向量控制器）；</p> 
+<p>GPIO_AFIODeInit() 函数用于复位AFIO外设</p> 
+<p>GPIO_EventOutputConfig() 和GPIO_EventOutputCmd() 函数用于配置事件输出功能 </p> 
+<p>GPIO_PinRemapconfig() 函数进行用于引脚的重映射</p> 
+<p>4、配置EXTI（外部中断），选择边沿触发方式和触发响应方式；</p> 
+<p>GPIO_EXTILineConfig() 配置AFIO的数据选择器来选择中断引脚</p> 
+<p>EXTI_DeInit() 清除EXTI配置，恢复或上电默认状态</p> 
+<p>EXTI_Init() 配置EXTI外设</p> 
+<p>EXTI_StructInit() 把参数传递的结构体配一个默认值</p> 
+<p>5、配置NVIC，选择合适的优先级。</p> 
+<p><strong>五、cubemx配置定时器的旋转编码器模式</strong></p> 
+<p>目标效果：顺时针旋转编码器计数值+1，逆时针旋转编码器计数值-1</p> 
+<p>1.配置时钟：外部高速时钟源HSE</p> 
+<p>2.配置引脚为外部中断模式：选择中断模式触发下降沿有效，默认上拉输入，使能NVIC</p> 
+<p>3.配置定时器，选择编码器模式，分频值为2-1，计数值为1，自动重装在值1，自动重载使能，通道1、2都计数且都是上升沿有效<img alt="" src="https://images2.imgbox.com/34/5b/JwUi3qTd_o.png"></p> 
+<p>4.配置时钟到72MHz，生成工程文件</p> 
+<p>5.修改定时器代码</p> 
+<pre><code class="language-cpp">
+/* USER CODE BEGIN Private defines */
+
+typedef struct
+{
+	int Encoder_Val;  /*编码器计数值*/
+	int Encoder_Dir;  /*编码器旋转方向*/
+}EC11_t;
+
+extern EC11_t EC11;
+/* USER CODE END Private defines */
+</code></pre> 
+<p> </p> 
+<pre><code class="language-cpp">/* USER CODE BEGIN 0 */
+EC11_t                   EC11;
+/* USER CODE END 0 */
+
+/* USER CODE BEGIN 1 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+	 uint8_t dir = 0;
+	 if(htim == &amp;htim3)
+	 {
+		 dir =  __HAL_TIM_IS_TIM_COUNTING_DOWN(&amp;htim3);
+		 if(dir==1)
+		 {
+			 EC11.Encoder_Val++;
+			 EC11.Encoder_Dir =  1;
+		 }
+		 if(dir==0)
+		 {
+			 EC11.Encoder_Val--;
+			 EC11.Encoder_Dir = -1;
+		 }
+	 }
+}
+/* USER CODE END 1 */
+
+</code></pre> 
+<p>修改外部中断代码</p> 
+<pre><code class="language-cpp">/* USER CODE BEGIN 1 */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+	EC11.Encoder_Val = 0;
+}
+/* USER CODE END 1 */
+</code></pre> 
+<p> 修改初始化代码</p> 
+<pre><code class="language-cpp">  /* USER CODE BEGIN TIM3_Init 2 */
+	__HAL_TIM_CLEAR_IT(&amp;htim3,TIM_IT_UPDATE);
+	HAL_TIM_Encoder_Start(&amp;htim3, TIM_CHANNEL_ALL);
+	__HAL_TIM_ENABLE_IT(&amp;htim3,TIM_IT_UPDATE);
+  /* USER CODE END TIM3_Init 2 */
+
+</code></pre> 
+<p> 最后进行下载调试，由于没有设备，所以只学习了理论部分，还未进行调试。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/b0e7298de08533d9b6d74147982af419/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">原来JMeter 分布式执行原理这么简单，为什么没有早点看到呢！</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e25c9e7a54ff8fe883b458791dc98d08/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">SVN的下载的文件/文件夹，绿色图标没出来的解决办法</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

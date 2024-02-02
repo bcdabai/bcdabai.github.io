@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Kubernetes源码学习-Kubelet-P1-启动流程 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Kubernetes源码学习-Kubelet-P1-启动流程" />
+<meta property="og:description" content="前言 在大致分析过k8s的Scheduler、Controller、APIServer三个控制平面组件后，本篇开始进入数据交互平面的daemon组件kubelet部分，看看kubelet是如何在控制平面和数据平面中以承上启下的模式工作的。
+启动流程 启动入口照旧，位于项目的cmd路径下，使用cobra做cmd封装：
+cmd/kubelet/kubelet.go:39
+func main() { rand.Seed(time.Now().UnixNano()) command := app.NewKubeletCommand(server.SetupSignalHandler()) logs.InitLogs() defer logs.FlushLogs() if err := command.Execute(); err != nil { fmt.Fprintf(os.Stderr, &#34;%v\n&#34;, err) os.Exit(1) } } cmd/kubelet/app/server.go:112
+NewKubeletFlags和NewKubeletConfiguration方法会初始化kubelet的很多默认flag和参数，来分别看下：
+cmd/kubelet/app/options/options.go:214
+func NewKubeletFlags() *KubeletFlags { remoteRuntimeEndpoint := &#34;&#34; if runtime.GOOS == &#34;linux&#34; { remoteRuntimeEndpoint = &#34;unix:///var/run/dockershim.sock&#34; } else if runtime.GOOS == &#34;windows&#34; { remoteRuntimeEndpoint = &#34;npipe:./pipe/dockershim&#34; } return &amp;KubeletFlags{ EnableServer: true, // 容器运行时这个参数需要留意下 ContainerRuntimeOptions: *NewContainerRuntimeOptions(), CertDirectory: &#34;/var/lib/kubelet/pki&#34;, RootDirectory: defaultRootDir, MasterServiceNamespace: metav1." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/342a8d8764bda818f92a6ad8673b9e1a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-05-05T22:16:27+08:00" />
+<meta property="article:modified_time" content="2021-05-05T22:16:27+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Kubernetes源码学习-Kubelet-P1-启动流程</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="_1"></a>前言</h3> 
+<p>在大致分析过k8s的Scheduler、Controller、APIServer三个控制平面组件后，本篇开始进入数据交互平面的daemon组件kubelet部分，看看kubelet是如何在控制平面和数据平面中以承上启下的模式工作的。</p> 
+<h3><a id="_7"></a>启动流程</h3> 
+<p>启动入口照旧，位于项目的cmd路径下，使用cobra做cmd封装：</p> 
+<p><code>cmd/kubelet/kubelet.go:39</code></p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	rand<span class="token punctuation">.</span><span class="token function">Seed</span><span class="token punctuation">(</span>time<span class="token punctuation">.</span><span class="token function">Now</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">UnixNano</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+	command <span class="token operator">:=</span> app<span class="token punctuation">.</span><span class="token function">NewKubeletCommand</span><span class="token punctuation">(</span>server<span class="token punctuation">.</span><span class="token function">SetupSignalHandler</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+	logs<span class="token punctuation">.</span><span class="token function">InitLogs</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+	<span class="token keyword">defer</span> logs<span class="token punctuation">.</span><span class="token function">FlushLogs</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+	<span class="token keyword">if</span> err <span class="token operator">:=</span> command<span class="token punctuation">.</span><span class="token function">Execute</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		fmt<span class="token punctuation">.</span><span class="token function">Fprintf</span><span class="token punctuation">(</span>os<span class="token punctuation">.</span>Stderr<span class="token punctuation">,</span> <span class="token string">"%v\n"</span><span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+		os<span class="token punctuation">.</span><span class="token function">Exit</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><code>cmd/kubelet/app/server.go:112</code></p> 
+<p><code>NewKubeletFlags</code>和<code>NewKubeletConfiguration</code>方法会初始化kubelet的很多默认flag和参数，来分别看下：</p> 
+<p><code>cmd/kubelet/app/options/options.go:214</code></p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">NewKubeletFlags</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">*</span>KubeletFlags <span class="token punctuation">{<!-- --></span>
+	remoteRuntimeEndpoint <span class="token operator">:=</span> <span class="token string">""</span>
+	<span class="token keyword">if</span> runtime<span class="token punctuation">.</span>GOOS <span class="token operator">==</span> <span class="token string">"linux"</span> <span class="token punctuation">{<!-- --></span>
+		remoteRuntimeEndpoint <span class="token operator">=</span> <span class="token string">"unix:///var/run/dockershim.sock"</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> runtime<span class="token punctuation">.</span>GOOS <span class="token operator">==</span> <span class="token string">"windows"</span> <span class="token punctuation">{<!-- --></span>
+		remoteRuntimeEndpoint <span class="token operator">=</span> <span class="token string">"npipe:./pipe/dockershim"</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">return</span> <span class="token operator">&amp;</span>KubeletFlags<span class="token punctuation">{<!-- --></span>
+		EnableServer<span class="token punctuation">:</span>                        <span class="token boolean">true</span><span class="token punctuation">,</span>
+    <span class="token comment">// 容器运行时这个参数需要留意下</span>
+		ContainerRuntimeOptions<span class="token punctuation">:</span>             <span class="token operator">*</span><span class="token function">NewContainerRuntimeOptions</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+		CertDirectory<span class="token punctuation">:</span>                       <span class="token string">"/var/lib/kubelet/pki"</span><span class="token punctuation">,</span>
+		RootDirectory<span class="token punctuation">:</span>                       defaultRootDir<span class="token punctuation">,</span>
+		MasterServiceNamespace<span class="token punctuation">:</span>              metav1<span class="token punctuation">.</span>NamespaceDefault<span class="token punctuation">,</span>
+		MaxContainerCount<span class="token punctuation">:</span>                   <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">,</span>
+		MaxPerPodContainerCount<span class="token punctuation">:</span>             <span class="token number">1</span><span class="token punctuation">,</span>
+		MinimumGCAge<span class="token punctuation">:</span>                        metav1<span class="token punctuation">.</span>Duration<span class="token punctuation">{<!-- --></span>Duration<span class="token punctuation">:</span> <span class="token number">0</span><span class="token punctuation">}</span><span class="token punctuation">,</span>
+		NonMasqueradeCIDR<span class="token punctuation">:</span>                   <span class="token string">"10.0.0.0/8"</span><span class="token punctuation">,</span>
+		RegisterSchedulable<span class="token punctuation">:</span>                 <span class="token boolean">true</span><span class="token punctuation">,</span>
+		ExperimentalKernelMemcgNotification<span class="token punctuation">:</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+		RemoteRuntimeEndpoint<span class="token punctuation">:</span>               remoteRuntimeEndpoint<span class="token punctuation">,</span>
+		NodeLabels<span class="token punctuation">:</span>                          <span class="token function">make</span><span class="token punctuation">(</span><span class="token keyword">map</span><span class="token punctuation">[</span><span class="token builtin">string</span><span class="token punctuation">]</span><span class="token builtin">string</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+		VolumePluginDir<span class="token punctuation">:</span>                     <span class="token string">"/usr/libexec/kubernetes/kubelet-plugins/volume/exec/"</span><span class="token punctuation">,</span>
+		RegisterNode<span class="token punctuation">:</span>                        <span class="token boolean">true</span><span class="token punctuation">,</span>
+		SeccompProfileRoot<span class="token punctuation">:</span>                  filepath<span class="token punctuation">.</span><span class="token function">Join</span><span class="token punctuation">(</span>defaultRootDir<span class="token punctuation">,</span> <span class="token string">"seccomp"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+		HostNetworkSources<span class="token punctuation">:</span>                  <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">string</span><span class="token punctuation">{<!-- --></span>kubetypes<span class="token punctuation">.</span>AllSource<span class="token punctuation">}</span><span class="token punctuation">,</span>
+		HostPIDSources<span class="token punctuation">:</span>                      <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">string</span><span class="token punctuation">{<!-- --></span>kubetypes<span class="token punctuation">.</span>AllSource<span class="token punctuation">}</span><span class="token punctuation">,</span>
+		HostIPCSources<span class="token punctuation">:</span>                      <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">string</span><span class="token punctuation">{<!-- --></span>kubetypes<span class="token punctuation">.</span>AllSource<span class="token punctuation">}</span><span class="token punctuation">,</span>
+		<span class="token comment">// TODO(#58010:v1.13.0): Remove --allow-privileged, it is deprecated</span>
+		AllowPrivileged<span class="token punctuation">:</span> <span class="token boolean">true</span><span class="token punctuation">,</span>
+		<span class="token comment">// prior to the introduction of this flag, there was a hardcoded cap of 50 images</span>
+		NodeStatusMaxImages<span class="token punctuation">:</span> <span class="token number">50</span><span class="token punctuation">,</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>ContainerRuntimeOptions有必要看看：</p> 
+<p><code>cmd/kubelet/app/options/container_runtime.go:41</code></p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">NewContainerRuntimeOptions</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">*</span>config<span class="token punctuation">.</span>ContainerRuntimeOptions <span class="token punctuation">{<!-- --></span>
+	dockerEndpoint <span class="token operator">:=</span> <span class="token string">""</span>
+	<span class="token keyword">if</span> runtime<span class="token punctuation">.</span>GOOS <span class="token operator">!=</span> <span class="token string">"windows"</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 默认的容器驱动是docker</span>
+		dockerEndpoint <span class="token operator">=</span> <span class="token string">"unix:///var/run/docker.sock"</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">return</span> <span class="token operator">&amp;</span>config<span class="token punctuation">.</span>ContainerRuntimeOptions<span class="token punctuation">{<!-- --></span>
+		ContainerRuntime<span class="token punctuation">:</span>           kubetypes<span class="token punctuation">.</span>DockerContainerRuntime<span class="token punctuation">,</span>
+		RedirectContainerStreaming<span class="token punctuation">:</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+		DockerEndpoint<span class="token punctuation">:</span>             dockerEndpoint<span class="token punctuation">,</span>
+    <span class="token comment">// dockershim路径，dockershim是容器运行中的实际载体，每个docker容器都会产生一个shim进程</span>
+		DockershimRootDirectory<span class="token punctuation">:</span>    <span class="token string">"/var/lib/dockershim"</span><span class="token punctuation">,</span>
+    <span class="token comment">// pause容器</span>
+		PodSandboxImage<span class="token punctuation">:</span>            defaultPodSandboxImage<span class="token punctuation">,</span>
+		ImagePullProgressDeadline<span class="token punctuation">:</span>  metav1<span class="token punctuation">.</span>Duration<span class="token punctuation">{<!-- --></span>Duration<span class="token punctuation">:</span> <span class="token number">1</span> <span class="token operator">*</span> time<span class="token punctuation">.</span>Minute<span class="token punctuation">}</span><span class="token punctuation">,</span>
+		ExperimentalDockershim<span class="token punctuation">:</span>     <span class="token boolean">false</span><span class="token punctuation">,</span>
+
+		<span class="token comment">// 这个目录下都是网络相关功能工具的执行文件</span>
+		CNIBinDir<span class="token punctuation">:</span>  <span class="token string">"/opt/cni/bin"</span><span class="token punctuation">,</span>
+    <span class="token comment">// 这里是cni的配置文件，如pod网段、网关、bridge等，一般由cni动态生成</span>
+		CNIConfDir<span class="token punctuation">:</span> <span class="token string">"/etc/cni/net.d"</span><span class="token punctuation">,</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><code>cmd/kubelet/app/options/options.go:293</code></p> 
+<p>–&gt; <code>cmd/kubelet/app/options/options.go:311</code></p> 
+<pre><code class="prism language-go"><span class="token comment">// `NewKubeletConfiguration`方法则会默认设置一些参数</span>
+<span class="token keyword">func</span> <span class="token function">applyLegacyDefaults</span><span class="token punctuation">(</span>kc <span class="token operator">*</span>kubeletconfig<span class="token punctuation">.</span>KubeletConfiguration<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">// --anonymous-auth</span>
+	kc<span class="token punctuation">.</span>Authentication<span class="token punctuation">.</span>Anonymous<span class="token punctuation">.</span>Enabled <span class="token operator">=</span> <span class="token boolean">true</span>
+	<span class="token comment">// --authentication-token-webhook</span>
+	kc<span class="token punctuation">.</span>Authentication<span class="token punctuation">.</span>Webhook<span class="token punctuation">.</span>Enabled <span class="token operator">=</span> <span class="token boolean">false</span>
+	<span class="token comment">// --authorization-mode</span>
+  <span class="token comment">// apiserver认证篇提到的针对node设计的AlwaysAllow认证模式</span>
+	kc<span class="token punctuation">.</span>Authorization<span class="token punctuation">.</span>Mode <span class="token operator">=</span> kubeletconfig<span class="token punctuation">.</span>KubeletAuthorizationModeAlwaysAllow
+	<span class="token comment">// 10255采集信息的接口，如prometheus采集cadvisor的metrics</span>
+	kc<span class="token punctuation">.</span>ReadOnlyPort <span class="token operator">=</span> ports<span class="token punctuation">.</span>KubeletReadOnlyPort
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>再来看看Run方法里面做了哪些操作:</p> 
+<p>–&gt; <code>cmd/kubelet/app/server.go:148</code></p> 
+<pre><code class="prism language-go">		Run<span class="token punctuation">:</span> <span class="token keyword">func</span><span class="token punctuation">(</span>cmd <span class="token operator">*</span>cobra<span class="token punctuation">.</span>Command<span class="token punctuation">,</span> args <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">string</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token operator">...</span>
+			<span class="token comment">// 上面百来行代码都是默认的init flag和config相关处理，例如featureGates等，略过</span>
+      
+      <span class="token comment">// 加载kubelet配置文件，展开进去看可以看到即是--config参数对应指定的文件，一般kubeadm部署时使用的是/var/lib/kubelet/config.yaml</span>
+			<span class="token keyword">if</span> configFile <span class="token operator">:=</span> kubeletFlags<span class="token punctuation">.</span>KubeletConfigFile<span class="token punctuation">;</span> <span class="token function">len</span><span class="token punctuation">(</span>configFile<span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+				kubeletConfig<span class="token punctuation">,</span> err <span class="token operator">=</span> <span class="token function">loadConfigFile</span><span class="token punctuation">(</span>configFile<span class="token punctuation">)</span>
+				<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+					klog<span class="token punctuation">.</span><span class="token function">Fatal</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span>
+				<span class="token punctuation">}</span>
+      <span class="token operator">...</span> 
+			<span class="token punctuation">}</span>
+      
+			<span class="token comment">// 实例化KubeletServer</span>
+			kubeletServer <span class="token operator">:=</span> <span class="token operator">&amp;</span>options<span class="token punctuation">.</span>KubeletServer<span class="token punctuation">{<!-- --></span>
+				KubeletFlags<span class="token punctuation">:</span>         <span class="token operator">*</span>kubeletFlags<span class="token punctuation">,</span>
+				KubeletConfiguration<span class="token punctuation">:</span> <span class="token operator">*</span>kubeletConfig<span class="token punctuation">,</span>
+			<span class="token punctuation">}</span>
+
+			<span class="token comment">// 构建一些kubelet的依赖插件，例如nsenter，连接dockershim的client端</span>
+			kubeletDeps<span class="token punctuation">,</span> err <span class="token operator">:=</span> <span class="token function">UnsecuredDependencies</span><span class="token punctuation">(</span>kubeletServer<span class="token punctuation">)</span>
+			<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+				klog<span class="token punctuation">.</span><span class="token function">Fatal</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span>
+			<span class="token punctuation">}</span>
+
+			<span class="token comment">// add the kubelet config controller to kubeletDeps</span>
+			kubeletDeps<span class="token punctuation">.</span>KubeletConfigController <span class="token operator">=</span> kubeletConfigController
+
+			<span class="token comment">// start the experimental docker shim, if enabled</span>
+			<span class="token keyword">if</span> kubeletServer<span class="token punctuation">.</span>KubeletFlags<span class="token punctuation">.</span>ExperimentalDockershim <span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">if</span> err <span class="token operator">:=</span> <span class="token function">RunDockershim</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>kubeletServer<span class="token punctuation">.</span>KubeletFlags<span class="token punctuation">,</span> kubeletConfig<span class="token punctuation">,</span> stopCh<span class="token punctuation">)</span><span class="token punctuation">;</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+					klog<span class="token punctuation">.</span><span class="token function">Fatal</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span>
+				<span class="token punctuation">}</span>
+				<span class="token keyword">return</span>
+			<span class="token punctuation">}</span>
+
+			<span class="token comment">// 启动kubelet</span>
+			klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Infof</span><span class="token punctuation">(</span><span class="token string">"KubeletConfiguration: %#v"</span><span class="token punctuation">,</span> kubeletServer<span class="token punctuation">.</span>KubeletConfiguration<span class="token punctuation">)</span>
+			<span class="token keyword">if</span> err <span class="token operator">:=</span> <span class="token function">Run</span><span class="token punctuation">(</span>kubeletServer<span class="token punctuation">,</span> kubeletDeps<span class="token punctuation">,</span> stopCh<span class="token punctuation">)</span><span class="token punctuation">;</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+				klog<span class="token punctuation">.</span><span class="token function">Fatal</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span><span class="token punctuation">,</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token comment">// 下面是一些cmd help信息，省略</span>
+  <span class="token operator">...</span>
+
+	<span class="token keyword">return</span> cmd
+</code></pre> 
+<p>–&gt; <code>cmd/kubelet/app/server.go:416</code></p> 
+<p>–&gt; <code>cmd/kubelet/app/server.go:479</code> 这个函数代码段很长，两百多行，挑主要片段</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">run</span><span class="token punctuation">(</span>s <span class="token operator">*</span>options<span class="token punctuation">.</span>KubeletServer<span class="token punctuation">,</span> kubeDeps <span class="token operator">*</span>kubelet<span class="token punctuation">.</span>Dependencies<span class="token punctuation">,</span> stopCh <span class="token operator">&lt;-</span><span class="token keyword">chan</span> <span class="token keyword">struct</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>err <span class="token builtin">error</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+ <span class="token operator">...</span>
+
+  <span class="token comment">// 独立模式指的是不与外部(如apiserver)交互的模式，一般在调试中使用，所以独立模式不需要起client</span>
+	standaloneMode <span class="token operator">:=</span> <span class="token boolean">true</span>
+	<span class="token keyword">if</span> <span class="token function">len</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>KubeConfig<span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+		standaloneMode <span class="token operator">=</span> <span class="token boolean">false</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">if</span> kubeDeps <span class="token operator">==</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		kubeDeps<span class="token punctuation">,</span> err <span class="token operator">=</span> <span class="token function">UnsecuredDependencies</span><span class="token punctuation">(</span>s<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> err
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+
+  <span class="token comment">// 取得注册node名</span>
+	hostName<span class="token punctuation">,</span> err <span class="token operator">:=</span> nodeutil<span class="token punctuation">.</span><span class="token function">GetHostname</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>HostnameOverride<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> err
+	<span class="token punctuation">}</span>
+	nodeName<span class="token punctuation">,</span> err <span class="token operator">:=</span> <span class="token function">getNodeName</span><span class="token punctuation">(</span>kubeDeps<span class="token punctuation">.</span>Cloud<span class="token punctuation">,</span> hostName<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> err
+	<span class="token punctuation">}</span>
+
+	
+	<span class="token keyword">switch</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 独立模式，则所有client设为nil</span>
+	<span class="token keyword">case</span> standaloneMode<span class="token punctuation">:</span>
+		kubeDeps<span class="token punctuation">.</span>KubeClient <span class="token operator">=</span> <span class="token boolean">nil</span>
+		kubeDeps<span class="token punctuation">.</span>EventClient <span class="token operator">=</span> <span class="token boolean">nil</span>
+		kubeDeps<span class="token punctuation">.</span>HeartbeatClient <span class="token operator">=</span> <span class="token boolean">nil</span>
+		klog<span class="token punctuation">.</span><span class="token function">Warningf</span><span class="token punctuation">(</span><span class="token string">"standalone mode, no API client"</span><span class="token punctuation">)</span>
+	
+   <span class="token comment">// 正常模式，则初始化client，包括kubeClient/eventClient/heartBeatClient</span>
+	<span class="token keyword">case</span> kubeDeps<span class="token punctuation">.</span>KubeClient <span class="token operator">==</span> <span class="token boolean">nil</span><span class="token punctuation">,</span> kubeDeps<span class="token punctuation">.</span>EventClient <span class="token operator">==</span> <span class="token boolean">nil</span><span class="token punctuation">,</span> kubeDeps<span class="token punctuation">.</span>HeartbeatClient <span class="token operator">==</span> <span class="token boolean">nil</span><span class="token punctuation">:</span>
+    <span class="token comment">// client的配置，主要是连接apiserver的cert相关的配置，cert文件默认放在/var/lib/kubelet/pki下，如果开启了循环续期证书，则相应的异步进程会从cert manager循环检测和更新证书。其他的配置诸如超时时间，长连接时间等。closeAllConns接收的是一个方法，用来断开连接。</span>
+		clientConfig<span class="token punctuation">,</span> closeAllConns<span class="token punctuation">,</span> err <span class="token operator">:=</span> <span class="token function">buildKubeletClientConfig</span><span class="token punctuation">(</span>s<span class="token punctuation">,</span> nodeName<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> err
+		<span class="token punctuation">}</span>
+		<span class="token keyword">if</span> closeAllConns <span class="token operator">==</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> errors<span class="token punctuation">.</span><span class="token function">New</span><span class="token punctuation">(</span><span class="token string">"closeAllConns must be a valid function other than nil"</span><span class="token punctuation">)</span>
+		<span class="token punctuation">}</span>
+		kubeDeps<span class="token punctuation">.</span>OnHeartbeatFailure <span class="token operator">=</span> closeAllConns
+		<span class="token comment">// 构建一个client-go里的clientset实例，访问各个GV和GVR对象使用</span>
+		kubeDeps<span class="token punctuation">.</span>KubeClient<span class="token punctuation">,</span> err <span class="token operator">=</span> clientset<span class="token punctuation">.</span><span class="token function">NewForConfig</span><span class="token punctuation">(</span>clientConfig<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> fmt<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"failed to initialize kubelet client: %v"</span><span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+		<span class="token punctuation">}</span>
+
+		<span class="token comment">// event事件使用独立的client，与上面的访问GVR使用的client区分开</span>
+		eventClientConfig <span class="token operator">:=</span> <span class="token operator">*</span>clientConfig
+		eventClientConfig<span class="token punctuation">.</span>QPS <span class="token operator">=</span> <span class="token function">float32</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>EventRecordQPS<span class="token punctuation">)</span>
+		eventClientConfig<span class="token punctuation">.</span>Burst <span class="token operator">=</span> <span class="token function">int</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>EventBurst<span class="token punctuation">)</span>
+		kubeDeps<span class="token punctuation">.</span>EventClient<span class="token punctuation">,</span> err <span class="token operator">=</span> v1core<span class="token punctuation">.</span><span class="token function">NewForConfig</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>eventClientConfig<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> fmt<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"failed to initialize kubelet event client: %v"</span><span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+		<span class="token punctuation">}</span>
+
+		<span class="token comment">// 再开启一个心跳检测的client</span>
+		heartbeatClientConfig <span class="token operator">:=</span> <span class="token operator">*</span>clientConfig
+		heartbeatClientConfig<span class="token punctuation">.</span>Timeout <span class="token operator">=</span> s<span class="token punctuation">.</span>KubeletConfiguration<span class="token punctuation">.</span>NodeStatusUpdateFrequency<span class="token punctuation">.</span>Duration
+    <span class="token comment">// 如果开启了NodeLease(node定期向apiserver汇报运行状态)，那么心跳间隔最大不超过NodeLease duration</span>
+		<span class="token keyword">if</span> utilfeature<span class="token punctuation">.</span>DefaultFeatureGate<span class="token punctuation">.</span><span class="token function">Enabled</span><span class="token punctuation">(</span>features<span class="token punctuation">.</span>NodeLease<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			leaseTimeout <span class="token operator">:=</span> time<span class="token punctuation">.</span><span class="token function">Duration</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>KubeletConfiguration<span class="token punctuation">.</span>NodeLeaseDurationSeconds<span class="token punctuation">)</span> <span class="token operator">*</span> time<span class="token punctuation">.</span>Second
+			<span class="token keyword">if</span> heartbeatClientConfig<span class="token punctuation">.</span>Timeout <span class="token operator">&gt;</span> leaseTimeout <span class="token punctuation">{<!-- --></span>
+				heartbeatClientConfig<span class="token punctuation">.</span>Timeout <span class="token operator">=</span> leaseTimeout
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+    <span class="token comment">// 心跳1次/s</span>
+		heartbeatClientConfig<span class="token punctuation">.</span>QPS <span class="token operator">=</span> <span class="token function">float32</span><span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+		kubeDeps<span class="token punctuation">.</span>HeartbeatClient<span class="token punctuation">,</span> err <span class="token operator">=</span> clientset<span class="token punctuation">.</span><span class="token function">NewForConfig</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>heartbeatClientConfig<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> fmt<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"failed to initialize kubelet heartbeat client: %v"</span><span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+  <span class="token comment">// 向apiserver发起认证建立会话</span>
+	<span class="token keyword">if</span> kubeDeps<span class="token punctuation">.</span>Auth <span class="token operator">==</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		auth<span class="token punctuation">,</span> err <span class="token operator">:=</span> <span class="token function">BuildAuth</span><span class="token punctuation">(</span>nodeName<span class="token punctuation">,</span> kubeDeps<span class="token punctuation">.</span>KubeClient<span class="token punctuation">,</span> s<span class="token punctuation">.</span>KubeletConfiguration<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> err
+		<span class="token punctuation">}</span>
+		kubeDeps<span class="token punctuation">.</span>Auth <span class="token operator">=</span> auth
+	<span class="token punctuation">}</span>
+  <span class="token comment">// 填充cadvisor接口</span>
+	<span class="token keyword">if</span> kubeDeps<span class="token punctuation">.</span>CAdvisorInterface <span class="token operator">==</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		imageFsInfoProvider <span class="token operator">:=</span> cadvisor<span class="token punctuation">.</span><span class="token function">NewImageFsInfoProvider</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>ContainerRuntime<span class="token punctuation">,</span> s<span class="token punctuation">.</span>RemoteRuntimeEndpoint<span class="token punctuation">)</span>
+		kubeDeps<span class="token punctuation">.</span>CAdvisorInterface<span class="token punctuation">,</span> err <span class="token operator">=</span> cadvisor<span class="token punctuation">.</span><span class="token function">New</span><span class="token punctuation">(</span>imageFsInfoProvider<span class="token punctuation">,</span> s<span class="token punctuation">.</span>RootDirectory<span class="token punctuation">,</span> cadvisor<span class="token punctuation">.</span><span class="token function">UsingLegacyCadvisorStats</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>ContainerRuntime<span class="token punctuation">,</span> s<span class="token punctuation">.</span>RemoteRuntimeEndpoint<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> err
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token comment">// Setup event recorder if required.</span>
+	<span class="token function">makeEventRecorder</span><span class="token punctuation">(</span>kubeDeps<span class="token punctuation">,</span> nodeName<span class="token punctuation">)</span>
+
+	<span class="token keyword">if</span> kubeDeps<span class="token punctuation">.</span>ContainerManager <span class="token operator">==</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">if</span> s<span class="token punctuation">.</span>CgroupsPerQOS <span class="token operator">&amp;&amp;</span> s<span class="token punctuation">.</span>CgroupRoot <span class="token operator">==</span> <span class="token string">""</span> <span class="token punctuation">{<!-- --></span>
+			klog<span class="token punctuation">.</span><span class="token function">Info</span><span class="token punctuation">(</span><span class="token string">"--cgroups-per-qos enabled, but --cgroup-root was not specified.  defaulting to /"</span><span class="token punctuation">)</span>
+			s<span class="token punctuation">.</span>CgroupRoot <span class="token operator">=</span> <span class="token string">"/"</span>
+		<span class="token punctuation">}</span>
+    <span class="token comment">// /var/lib/kubelt/config.yaml里可以指定，为系统和kube组件指定不同的cgroup，为它们预留资源</span>
+    <span class="token comment">// kubeReserved即为kube组件指定cgroup预留的资源</span>
+		kubeReserved<span class="token punctuation">,</span> err <span class="token operator">:=</span> <span class="token function">parseResourceList</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>KubeReserved<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> err
+		<span class="token punctuation">}</span>
+    <span class="token comment">// kubeReserved即为宿主机系统进程指定cgroup预留的资源</span>
+		systemReserved<span class="token punctuation">,</span> err <span class="token operator">:=</span> <span class="token function">parseResourceList</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>SystemReserved<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> err
+		<span class="token punctuation">}</span>
+    <span class="token comment">// 硬驱逐容器的资源阈值</span>
+		<span class="token keyword">var</span> hardEvictionThresholds <span class="token punctuation">[</span><span class="token punctuation">]</span>evictionapi<span class="token punctuation">.</span>Threshold
+		<span class="token comment">// If the user requested to ignore eviction thresholds, then do not set valid values for hardEvictionThresholds here.</span>
+		<span class="token keyword">if</span> <span class="token operator">!</span>s<span class="token punctuation">.</span>ExperimentalNodeAllocatableIgnoreEvictionThreshold <span class="token punctuation">{<!-- --></span>
+			hardEvictionThresholds<span class="token punctuation">,</span> err <span class="token operator">=</span> eviction<span class="token punctuation">.</span><span class="token function">ParseThresholdConfig</span><span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">string</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">,</span> s<span class="token punctuation">.</span>EvictionHard<span class="token punctuation">,</span> <span class="token boolean">nil</span><span class="token punctuation">,</span> <span class="token boolean">nil</span><span class="token punctuation">,</span> <span class="token boolean">nil</span><span class="token punctuation">)</span>
+			<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">return</span> err
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+		experimentalQOSReserved<span class="token punctuation">,</span> err <span class="token operator">:=</span> cm<span class="token punctuation">.</span><span class="token function">ParseQOSReserved</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>QOSReserved<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> err
+		<span class="token punctuation">}</span>
+
+		devicePluginEnabled <span class="token operator">:=</span> utilfeature<span class="token punctuation">.</span>DefaultFeatureGate<span class="token punctuation">.</span><span class="token function">Enabled</span><span class="token punctuation">(</span>features<span class="token punctuation">.</span>DevicePlugins<span class="token punctuation">)</span>
+    
+    <span class="token comment">// 上面的参数汇集起来，初始化容器管理器</span>
+		kubeDeps<span class="token punctuation">.</span>ContainerManager<span class="token punctuation">,</span> err <span class="token operator">=</span> cm<span class="token punctuation">.</span><span class="token function">NewContainerManager</span><span class="token punctuation">(</span>
+			kubeDeps<span class="token punctuation">.</span>Mounter<span class="token punctuation">,</span>
+			kubeDeps<span class="token punctuation">.</span>CAdvisorInterface<span class="token punctuation">,</span>
+			cm<span class="token punctuation">.</span>NodeConfig<span class="token punctuation">{<!-- --></span>
+				RuntimeCgroupsName<span class="token punctuation">:</span>    s<span class="token punctuation">.</span>RuntimeCgroups<span class="token punctuation">,</span>
+				SystemCgroupsName<span class="token punctuation">:</span>     s<span class="token punctuation">.</span>SystemCgroups<span class="token punctuation">,</span>
+				KubeletCgroupsName<span class="token punctuation">:</span>    s<span class="token punctuation">.</span>KubeletCgroups<span class="token punctuation">,</span>
+				ContainerRuntime<span class="token punctuation">:</span>      s<span class="token punctuation">.</span>ContainerRuntime<span class="token punctuation">,</span>
+				CgroupsPerQOS<span class="token punctuation">:</span>         s<span class="token punctuation">.</span>CgroupsPerQOS<span class="token punctuation">,</span>
+				CgroupRoot<span class="token punctuation">:</span>            s<span class="token punctuation">.</span>CgroupRoot<span class="token punctuation">,</span>
+				CgroupDriver<span class="token punctuation">:</span>          s<span class="token punctuation">.</span>CgroupDriver<span class="token punctuation">,</span>
+				KubeletRootDir<span class="token punctuation">:</span>        s<span class="token punctuation">.</span>RootDirectory<span class="token punctuation">,</span>
+				ProtectKernelDefaults<span class="token punctuation">:</span> s<span class="token punctuation">.</span>ProtectKernelDefaults<span class="token punctuation">,</span>
+				NodeAllocatableConfig<span class="token punctuation">:</span> cm<span class="token punctuation">.</span>NodeAllocatableConfig<span class="token punctuation">{<!-- --></span>
+					KubeReservedCgroupName<span class="token punctuation">:</span>   s<span class="token punctuation">.</span>KubeReservedCgroup<span class="token punctuation">,</span>
+					SystemReservedCgroupName<span class="token punctuation">:</span> s<span class="token punctuation">.</span>SystemReservedCgroup<span class="token punctuation">,</span>
+					EnforceNodeAllocatable<span class="token punctuation">:</span>   sets<span class="token punctuation">.</span><span class="token function">NewString</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>EnforceNodeAllocatable<span class="token operator">...</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+					KubeReserved<span class="token punctuation">:</span>             kubeReserved<span class="token punctuation">,</span>
+					SystemReserved<span class="token punctuation">:</span>           systemReserved<span class="token punctuation">,</span>
+					HardEvictionThresholds<span class="token punctuation">:</span>   hardEvictionThresholds<span class="token punctuation">,</span>
+				<span class="token punctuation">}</span><span class="token punctuation">,</span>
+				QOSReserved<span class="token punctuation">:</span>                           <span class="token operator">*</span>experimentalQOSReserved<span class="token punctuation">,</span>
+				ExperimentalCPUManagerPolicy<span class="token punctuation">:</span>          s<span class="token punctuation">.</span>CPUManagerPolicy<span class="token punctuation">,</span>
+				ExperimentalCPUManagerReconcilePeriod<span class="token punctuation">:</span> s<span class="token punctuation">.</span>CPUManagerReconcilePeriod<span class="token punctuation">.</span>Duration<span class="token punctuation">,</span>
+				ExperimentalPodPidsLimit<span class="token punctuation">:</span>              s<span class="token punctuation">.</span>PodPidsLimit<span class="token punctuation">,</span>
+				EnforceCPULimits<span class="token punctuation">:</span>                      s<span class="token punctuation">.</span>CPUCFSQuota<span class="token punctuation">,</span>
+				CPUCFSQuotaPeriod<span class="token punctuation">:</span>                     s<span class="token punctuation">.</span>CPUCFSQuotaPeriod<span class="token punctuation">.</span>Duration<span class="token punctuation">,</span>
+			<span class="token punctuation">}</span><span class="token punctuation">,</span>
+			s<span class="token punctuation">.</span>FailSwapOn<span class="token punctuation">,</span>
+			devicePluginEnabled<span class="token punctuation">,</span>
+			kubeDeps<span class="token punctuation">.</span>Recorder<span class="token punctuation">)</span>
+
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> err
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+   
+	<span class="token keyword">if</span> err <span class="token operator">:=</span> <span class="token function">checkPermissions</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		klog<span class="token punctuation">.</span><span class="token function">Error</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+
+	utilruntime<span class="token punctuation">.</span>ReallyCrash <span class="token operator">=</span> s<span class="token punctuation">.</span>ReallyCrashForTesting
+
+	rand<span class="token punctuation">.</span><span class="token function">Seed</span><span class="token punctuation">(</span>time<span class="token punctuation">.</span><span class="token function">Now</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">UnixNano</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+	<span class="token comment">// oom判定器给当前进程设置oom分数，容器内存资源管控的手段就是使用的oom，这里待会儿拎出来单独分析</span>
+	oomAdjuster <span class="token operator">:=</span> kubeDeps<span class="token punctuation">.</span>OOMAdjuster
+	<span class="token keyword">if</span> err <span class="token operator">:=</span> oomAdjuster<span class="token punctuation">.</span><span class="token function">ApplyOOMScoreAdj</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token function">int</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>OOMScoreAdj<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		klog<span class="token punctuation">.</span><span class="token function">Warning</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+  <span class="token comment">// RunKubelet接往下文</span>
+	<span class="token keyword">if</span> err <span class="token operator">:=</span> <span class="token function">RunKubelet</span><span class="token punctuation">(</span>s<span class="token punctuation">,</span> kubeDeps<span class="token punctuation">,</span> s<span class="token punctuation">.</span>RunOnce<span class="token punctuation">)</span><span class="token punctuation">;</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> err
+	<span class="token punctuation">}</span>
+  <span class="token comment">// 起一个健康检查的http服务</span>
+	<span class="token keyword">if</span> s<span class="token punctuation">.</span>HealthzPort <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+		healthz<span class="token punctuation">.</span><span class="token function">DefaultHealthz</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+		<span class="token keyword">go</span> wait<span class="token punctuation">.</span><span class="token function">Until</span><span class="token punctuation">(</span><span class="token keyword">func</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			err <span class="token operator">:=</span> http<span class="token punctuation">.</span><span class="token function">ListenAndServe</span><span class="token punctuation">(</span>net<span class="token punctuation">.</span><span class="token function">JoinHostPort</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>HealthzBindAddress<span class="token punctuation">,</span> strconv<span class="token punctuation">.</span><span class="token function">Itoa</span><span class="token punctuation">(</span><span class="token function">int</span><span class="token punctuation">(</span>s<span class="token punctuation">.</span>HealthzPort<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token boolean">nil</span><span class="token punctuation">)</span>
+			<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+				klog<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"Starting health server failed: %v"</span><span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token operator">*</span>time<span class="token punctuation">.</span>Second<span class="token punctuation">,</span> wait<span class="token punctuation">.</span>NeverStop<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">if</span> s<span class="token punctuation">.</span>RunOnce <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> <span class="token boolean">nil</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token comment">// If systemd is used, notify it that we have started</span>
+	<span class="token keyword">go</span> daemon<span class="token punctuation">.</span><span class="token function">SdNotify</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">,</span> <span class="token string">"READY=1"</span><span class="token punctuation">)</span>
+
+	<span class="token keyword">select</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">case</span> <span class="token operator">&lt;-</span>done<span class="token punctuation">:</span>
+		<span class="token keyword">break</span>
+	<span class="token keyword">case</span> <span class="token operator">&lt;-</span>stopCh<span class="token punctuation">:</span>
+		<span class="token keyword">break</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">return</span> <span class="token boolean">nil</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<h4><a id="OOMAdjuster_401"></a>OOMAdjuster</h4> 
+<p>–&gt; <code>pkg/util/oom/oom.go:22</code>上面提到的oom判定器，这里分析一下，这个结构体有三个方法:</p> 
+<pre><code class="prism language-go"><span class="token comment">// 这里目前用的还是结构体，看todo描述是后面要改成interface</span>
+<span class="token comment">// TODO: make this an interface, and inject a mock ioutil struct for testing.</span>
+<span class="token keyword">type</span> OOMAdjuster <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+	pidLister                 <span class="token keyword">func</span><span class="token punctuation">(</span>cgroupName <span class="token builtin">string</span><span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">int</span><span class="token punctuation">,</span> <span class="token builtin">error</span><span class="token punctuation">)</span>
+	ApplyOOMScoreAdj          <span class="token keyword">func</span><span class="token punctuation">(</span>pid <span class="token builtin">int</span><span class="token punctuation">,</span> oomScoreAdj <span class="token builtin">int</span><span class="token punctuation">)</span> <span class="token builtin">error</span>
+	ApplyOOMScoreAdjContainer <span class="token keyword">func</span><span class="token punctuation">(</span>cgroupName <span class="token builtin">string</span><span class="token punctuation">,</span> oomScoreAdj<span class="token punctuation">,</span> maxTries <span class="token builtin">int</span><span class="token punctuation">)</span> <span class="token builtin">error</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<p>–&gt; <code>pkg/util/oom/oom_linux.go:35</code>实现方法</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">NewOOMAdjuster</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">*</span>OOMAdjuster <span class="token punctuation">{<!-- --></span>
+	oomAdjuster <span class="token operator">:=</span> <span class="token operator">&amp;</span>OOMAdjuster<span class="token punctuation">{<!-- --></span>
+		pidLister<span class="token punctuation">:</span>        getPids<span class="token punctuation">,</span>
+		ApplyOOMScoreAdj<span class="token punctuation">:</span> applyOOMScoreAdj<span class="token punctuation">,</span>
+	<span class="token punctuation">}</span>
+	oomAdjuster<span class="token punctuation">.</span>ApplyOOMScoreAdjContainer <span class="token operator">=</span> oomAdjuster<span class="token punctuation">.</span>applyOOMScoreAdjContainer
+	<span class="token keyword">return</span> oomAdjuster
+<span class="token punctuation">}</span>
+<span class="token comment">// 获取cgroup下所有进程的pid</span>
+<span class="token keyword">func</span> <span class="token function">getPids</span><span class="token punctuation">(</span>cgroupName <span class="token builtin">string</span><span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">int</span><span class="token punctuation">,</span> <span class="token builtin">error</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">return</span> cmutil<span class="token punctuation">.</span><span class="token function">GetPids</span><span class="token punctuation">(</span>filepath<span class="token punctuation">.</span><span class="token function">Join</span><span class="token punctuation">(</span><span class="token string">"/"</span><span class="token punctuation">,</span> cgroupName<span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">// 修改oom分数，在linux下即是修改/proc/&lt;pid&gt;/oom_score_adj对应的值，当内存紧张时由linux系统的oom机制去杀掉oom score最高的进程，默认情况下是使用内存越多的进程oom score越高越容易被kill，applyOOMScoreAdj函数就是用来修改oom score的。</span>
+
+<span class="token comment">// Writes 'value' to /proc/&lt;pid&gt;/oom_score_adj. PID = 0 means self</span>
+<span class="token comment">// Returns os.ErrNotExist if the `pid` does not exist.</span>
+<span class="token keyword">func</span> <span class="token function">applyOOMScoreAdj</span><span class="token punctuation">(</span>pid <span class="token builtin">int</span><span class="token punctuation">,</span> oomScoreAdj <span class="token builtin">int</span><span class="token punctuation">)</span> <span class="token builtin">error</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">if</span> pid <span class="token operator">&lt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> fmt<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"invalid PID %d specified for oom_score_adj"</span><span class="token punctuation">,</span> pid<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">var</span> pidStr <span class="token builtin">string</span>
+	<span class="token keyword">if</span> pid <span class="token operator">==</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+		pidStr <span class="token operator">=</span> <span class="token string">"self"</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+		pidStr <span class="token operator">=</span> strconv<span class="token punctuation">.</span><span class="token function">Itoa</span><span class="token punctuation">(</span>pid<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+
+	maxTries <span class="token operator">:=</span> <span class="token number">2</span>
+	oomScoreAdjPath <span class="token operator">:=</span> path<span class="token punctuation">.</span><span class="token function">Join</span><span class="token punctuation">(</span><span class="token string">"/proc"</span><span class="token punctuation">,</span> pidStr<span class="token punctuation">,</span> <span class="token string">"oom_score_adj"</span><span class="token punctuation">)</span>
+	value <span class="token operator">:=</span> strconv<span class="token punctuation">.</span><span class="token function">Itoa</span><span class="token punctuation">(</span>oomScoreAdj<span class="token punctuation">)</span>
+	klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">4</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Infof</span><span class="token punctuation">(</span><span class="token string">"attempting to set %q to %q"</span><span class="token punctuation">,</span> oomScoreAdjPath<span class="token punctuation">,</span> value<span class="token punctuation">)</span>
+	<span class="token keyword">var</span> err <span class="token builtin">error</span>
+	<span class="token keyword">for</span> i <span class="token operator">:=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> maxTries<span class="token punctuation">;</span> i<span class="token operator">++</span> <span class="token punctuation">{<!-- --></span>
+		err <span class="token operator">=</span> ioutil<span class="token punctuation">.</span><span class="token function">WriteFile</span><span class="token punctuation">(</span>oomScoreAdjPath<span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token function">byte</span><span class="token punctuation">(</span>value<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">0700</span><span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">if</span> os<span class="token punctuation">.</span><span class="token function">IsNotExist</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Infof</span><span class="token punctuation">(</span><span class="token string">"%q does not exist"</span><span class="token punctuation">,</span> oomScoreAdjPath<span class="token punctuation">)</span>
+				<span class="token keyword">return</span> os<span class="token punctuation">.</span>ErrNotExist
+			<span class="token punctuation">}</span>
+
+			klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">3</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Info</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span>
+			time<span class="token punctuation">.</span><span class="token function">Sleep</span><span class="token punctuation">(</span><span class="token number">100</span> <span class="token operator">*</span> time<span class="token punctuation">.</span>Millisecond<span class="token punctuation">)</span>
+			<span class="token keyword">continue</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">return</span> <span class="token boolean">nil</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Infof</span><span class="token punctuation">(</span><span class="token string">"failed to set %q to %q: %v"</span><span class="token punctuation">,</span> oomScoreAdjPath<span class="token punctuation">,</span> value<span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">return</span> err
+<span class="token punctuation">}</span>
+
+<span class="token comment">// 修改整个容器的oom评分，即修改某个cgroup下所有进程的评分，getPids取得所有pid遍历执行applyOOMScoreAdj</span>
+<span class="token comment">// Writes 'value' to /proc/&lt;pid&gt;/oom_score_adj for all processes in cgroup cgroupName.</span>
+<span class="token comment">// Keeps trying to write until the process list of the cgroup stabilizes, or until maxTries tries.</span>
+<span class="token keyword">func</span> <span class="token punctuation">(</span>oomAdjuster <span class="token operator">*</span>OOMAdjuster<span class="token punctuation">)</span> <span class="token function">applyOOMScoreAdjContainer</span><span class="token punctuation">(</span>cgroupName <span class="token builtin">string</span><span class="token punctuation">,</span> oomScoreAdj<span class="token punctuation">,</span> maxTries <span class="token builtin">int</span><span class="token punctuation">)</span> <span class="token builtin">error</span> <span class="token punctuation">{<!-- --></span>
+	adjustedProcessSet <span class="token operator">:=</span> <span class="token function">make</span><span class="token punctuation">(</span><span class="token keyword">map</span><span class="token punctuation">[</span><span class="token builtin">int</span><span class="token punctuation">]</span><span class="token builtin">bool</span><span class="token punctuation">)</span>
+	<span class="token keyword">for</span> i <span class="token operator">:=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> maxTries<span class="token punctuation">;</span> i<span class="token operator">++</span> <span class="token punctuation">{<!-- --></span>
+		continueAdjusting <span class="token operator">:=</span> <span class="token boolean">false</span>
+		pidList<span class="token punctuation">,</span> err <span class="token operator">:=</span> oomAdjuster<span class="token punctuation">.</span><span class="token function">pidLister</span><span class="token punctuation">(</span>cgroupName<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">if</span> os<span class="token punctuation">.</span><span class="token function">IsNotExist</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token comment">// Nothing to do since the container doesn't exist anymore.</span>
+				<span class="token keyword">return</span> os<span class="token punctuation">.</span>ErrNotExist
+			<span class="token punctuation">}</span>
+			continueAdjusting <span class="token operator">=</span> <span class="token boolean">true</span>
+			klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">10</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Infof</span><span class="token punctuation">(</span><span class="token string">"Error getting process list for cgroup %s: %+v"</span><span class="token punctuation">,</span> cgroupName<span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+		<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token function">len</span><span class="token punctuation">(</span>pidList<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+			klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">10</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Infof</span><span class="token punctuation">(</span><span class="token string">"Pid list is empty"</span><span class="token punctuation">)</span>
+			continueAdjusting <span class="token operator">=</span> <span class="token boolean">true</span>
+		<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">for</span> <span class="token boolean">_</span><span class="token punctuation">,</span> pid <span class="token operator">:=</span> <span class="token keyword">range</span> pidList <span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">if</span> <span class="token operator">!</span>adjustedProcessSet<span class="token punctuation">[</span>pid<span class="token punctuation">]</span> <span class="token punctuation">{<!-- --></span>
+					klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">10</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Infof</span><span class="token punctuation">(</span><span class="token string">"pid %d needs to be set"</span><span class="token punctuation">,</span> pid<span class="token punctuation">)</span>
+					<span class="token keyword">if</span> err <span class="token operator">=</span> oomAdjuster<span class="token punctuation">.</span><span class="token function">ApplyOOMScoreAdj</span><span class="token punctuation">(</span>pid<span class="token punctuation">,</span> oomScoreAdj<span class="token punctuation">)</span><span class="token punctuation">;</span> err <span class="token operator">==</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+						adjustedProcessSet<span class="token punctuation">[</span>pid<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token boolean">true</span>
+					<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> err <span class="token operator">==</span> os<span class="token punctuation">.</span>ErrNotExist <span class="token punctuation">{<!-- --></span>
+						<span class="token keyword">continue</span>
+					<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+						klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">10</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Infof</span><span class="token punctuation">(</span><span class="token string">"cannot adjust oom score for pid %d - %v"</span><span class="token punctuation">,</span> pid<span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+						continueAdjusting <span class="token operator">=</span> <span class="token boolean">true</span>
+					<span class="token punctuation">}</span>
+					<span class="token comment">// Processes can come and go while we try to apply oom score adjust value. So ignore errors here.</span>
+				<span class="token punctuation">}</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">if</span> <span class="token operator">!</span>continueAdjusting <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> <span class="token boolean">nil</span>
+		<span class="token punctuation">}</span>
+		<span class="token comment">// There's a slight race. A process might have forked just before we write its OOM score adjust.</span>
+		<span class="token comment">// The fork might copy the parent process's old OOM score, then this function might execute and</span>
+		<span class="token comment">// update the parent's OOM score, but the forked process id might not be reflected in cgroup.procs</span>
+		<span class="token comment">// for a short amount of time. So this function might return without changing the forked process's</span>
+		<span class="token comment">// OOM score. Very unlikely race, so ignoring this for now.</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">return</span> fmt<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"exceeded maxTries, some processes might not have desired OOM score"</span><span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="RunKubelet_522"></a>RunKubelet</h4> 
+<p>–&gt; <code>cmd/kubelet/app/server.go:955</code> 回到主线</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">RunKubelet</span><span class="token punctuation">(</span>kubeServer <span class="token operator">*</span>options<span class="token punctuation">.</span>KubeletServer<span class="token punctuation">,</span> kubeDeps <span class="token operator">*</span>kubelet<span class="token punctuation">.</span>Dependencies<span class="token punctuation">,</span> runOnce <span class="token builtin">bool</span><span class="token punctuation">)</span> <span class="token builtin">error</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token operator">...</span>
+  
+  <span class="token comment">// 这里的几个source都是"*"，意为接收api/file/http来源的pod更新</span>
+	hostNetworkSources<span class="token punctuation">,</span> err <span class="token operator">:=</span> kubetypes<span class="token punctuation">.</span><span class="token function">GetValidatedSources</span><span class="token punctuation">(</span>kubeServer<span class="token punctuation">.</span>HostNetworkSources<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> err
+	<span class="token punctuation">}</span>
+
+	hostPIDSources<span class="token punctuation">,</span> err <span class="token operator">:=</span> kubetypes<span class="token punctuation">.</span><span class="token function">GetValidatedSources</span><span class="token punctuation">(</span>kubeServer<span class="token punctuation">.</span>HostPIDSources<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> err
+	<span class="token punctuation">}</span>
+
+	hostIPCSources<span class="token punctuation">,</span> err <span class="token operator">:=</span> kubetypes<span class="token punctuation">.</span><span class="token function">GetValidatedSources</span><span class="token punctuation">(</span>kubeServer<span class="token punctuation">.</span>HostIPCSources<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> err
+	<span class="token punctuation">}</span>
+
+	privilegedSources <span class="token operator">:=</span> capabilities<span class="token punctuation">.</span>PrivilegedSources<span class="token punctuation">{<!-- --></span>
+		HostNetworkSources<span class="token punctuation">:</span> hostNetworkSources<span class="token punctuation">,</span>
+		HostPIDSources<span class="token punctuation">:</span>     hostPIDSources<span class="token punctuation">,</span>
+		HostIPCSources<span class="token punctuation">:</span>     hostIPCSources<span class="token punctuation">,</span>
+	<span class="token punctuation">}</span>
+	capabilities<span class="token punctuation">.</span><span class="token function">Setup</span><span class="token punctuation">(</span>kubeServer<span class="token punctuation">.</span>AllowPrivileged<span class="token punctuation">,</span> privilegedSources<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span>
+
+	credentialprovider<span class="token punctuation">.</span><span class="token function">SetPreferredDockercfgPath</span><span class="token punctuation">(</span>kubeServer<span class="token punctuation">.</span>RootDirectory<span class="token punctuation">)</span>
+	klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Infof</span><span class="token punctuation">(</span><span class="token string">"Using root directory: %v"</span><span class="token punctuation">,</span> kubeServer<span class="token punctuation">.</span>RootDirectory<span class="token punctuation">)</span>
+
+	<span class="token keyword">if</span> kubeDeps<span class="token punctuation">.</span>OSInterface <span class="token operator">==</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		kubeDeps<span class="token punctuation">.</span>OSInterface <span class="token operator">=</span> kubecontainer<span class="token punctuation">.</span>RealOS<span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+  
+  <span class="token comment">// kubelet初始化，这个函数比较复杂，下面拎出来分析</span>
+	k<span class="token punctuation">,</span> err <span class="token operator">:=</span> <span class="token function">createAndInitKubelet</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>kubeServer<span class="token punctuation">.</span>KubeletConfiguration<span class="token punctuation">,</span>
+		kubeDeps<span class="token punctuation">,</span>
+		<span class="token operator">&amp;</span>kubeServer<span class="token punctuation">.</span>ContainerRuntimeOptions<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>ContainerRuntime<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>RuntimeCgroups<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>HostnameOverride<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>NodeIP<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>ProviderID<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>CloudProvider<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>CertDirectory<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>RootDirectory<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>RegisterNode<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>RegisterWithTaints<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>AllowedUnsafeSysctls<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>RemoteRuntimeEndpoint<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>RemoteImageEndpoint<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>ExperimentalMounterPath<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>ExperimentalKernelMemcgNotification<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>ExperimentalCheckNodeCapabilitiesBeforeMount<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>ExperimentalNodeAllocatableIgnoreEvictionThreshold<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>MinimumGCAge<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>MaxPerPodContainerCount<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>MaxContainerCount<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>MasterServiceNamespace<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>RegisterSchedulable<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>NonMasqueradeCIDR<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>KeepTerminatedPodVolumes<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>NodeLabels<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>SeccompProfileRoot<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>BootstrapCheckpointPath<span class="token punctuation">,</span>
+		kubeServer<span class="token punctuation">.</span>NodeStatusMaxImages<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> fmt<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"failed to create kubelet: %v"</span><span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token comment">// NewMainKubelet should have set up a pod source config if one didn't exist</span>
+	<span class="token comment">// when the builder was run. This is just a precaution.</span>
+	<span class="token keyword">if</span> kubeDeps<span class="token punctuation">.</span>PodConfig <span class="token operator">==</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> fmt<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"failed to create kubelet, pod source config was nil"</span><span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+	podCfg <span class="token operator">:=</span> kubeDeps<span class="token punctuation">.</span>PodConfig
+
+	rlimit<span class="token punctuation">.</span><span class="token function">RlimitNumFiles</span><span class="token punctuation">(</span><span class="token function">uint64</span><span class="token punctuation">(</span>kubeServer<span class="token punctuation">.</span>MaxOpenFiles<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+	<span class="token comment">// 只运行一次处理完pod就退出</span>
+	<span class="token keyword">if</span> runOnce <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">if</span> <span class="token boolean">_</span><span class="token punctuation">,</span> err <span class="token operator">:=</span> k<span class="token punctuation">.</span><span class="token function">RunOnce</span><span class="token punctuation">(</span>podCfg<span class="token punctuation">.</span><span class="token function">Updates</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> fmt<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"runonce failed: %v"</span><span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+		<span class="token punctuation">}</span>
+		klog<span class="token punctuation">.</span><span class="token function">Info</span><span class="token punctuation">(</span><span class="token string">"Started kubelet as runonce"</span><span class="token punctuation">)</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 正常运行</span>
+		<span class="token function">startKubelet</span><span class="token punctuation">(</span>k<span class="token punctuation">,</span> podCfg<span class="token punctuation">,</span> <span class="token operator">&amp;</span>kubeServer<span class="token punctuation">.</span>KubeletConfiguration<span class="token punctuation">,</span> kubeDeps<span class="token punctuation">,</span> kubeServer<span class="token punctuation">.</span>EnableServer<span class="token punctuation">)</span>
+		klog<span class="token punctuation">.</span><span class="token function">Info</span><span class="token punctuation">(</span><span class="token string">"Started kubelet"</span><span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">return</span> <span class="token boolean">nil</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="createAndInitKubelet_620"></a>createAndInitKubelet</h4> 
+<p>–&gt; <code>cmd/kubelet/app/server.go:1078</code>，这里主要走到NewMainKubelet函数:</p> 
+<p>–&gt; <code>pkg/kubelet/kubelet.go:326</code> God！这个函数简直了，500+行代码…挑重要的说一下吧</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">NewMainKubelet</span><span class="token punctuation">(</span><span class="token operator">...</span><span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token operator">...</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token operator">...</span>
+  <span class="token comment">// 加载service informer</span>
+  serviceIndexer <span class="token operator">:=</span> cache<span class="token punctuation">.</span><span class="token function">NewIndexer</span><span class="token punctuation">(</span>cache<span class="token punctuation">.</span>MetaNamespaceKeyFunc<span class="token punctuation">,</span> cache<span class="token punctuation">.</span>Indexers<span class="token punctuation">{<!-- --></span>cache<span class="token punctuation">.</span>NamespaceIndex<span class="token punctuation">:</span> cache<span class="token punctuation">.</span>MetaNamespaceIndexFunc<span class="token punctuation">}</span><span class="token punctuation">)</span>
+	<span class="token keyword">if</span> kubeDeps<span class="token punctuation">.</span>KubeClient <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		serviceLW <span class="token operator">:=</span> cache<span class="token punctuation">.</span><span class="token function">NewListWatchFromClient</span><span class="token punctuation">(</span>kubeDeps<span class="token punctuation">.</span>KubeClient<span class="token punctuation">.</span><span class="token function">CoreV1</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">RESTClient</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">"services"</span><span class="token punctuation">,</span> metav1<span class="token punctuation">.</span>NamespaceAll<span class="token punctuation">,</span> fields<span class="token punctuation">.</span><span class="token function">Everything</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+		r <span class="token operator">:=</span> cache<span class="token punctuation">.</span><span class="token function">NewReflector</span><span class="token punctuation">(</span>serviceLW<span class="token punctuation">,</span> <span class="token operator">&amp;</span>v1<span class="token punctuation">.</span>Service<span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">,</span> serviceIndexer<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span>
+		<span class="token keyword">go</span> r<span class="token punctuation">.</span><span class="token function">Run</span><span class="token punctuation">(</span>wait<span class="token punctuation">.</span>NeverStop<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+	serviceLister <span class="token operator">:=</span> corelisters<span class="token punctuation">.</span><span class="token function">NewServiceLister</span><span class="token punctuation">(</span>serviceIndexer<span class="token punctuation">)</span>
+  
+  <span class="token comment">// 加载node informer</span>
+	nodeIndexer <span class="token operator">:=</span> cache<span class="token punctuation">.</span><span class="token function">NewIndexer</span><span class="token punctuation">(</span>cache<span class="token punctuation">.</span>MetaNamespaceKeyFunc<span class="token punctuation">,</span> cache<span class="token punctuation">.</span>Indexers<span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">)</span>
+	<span class="token keyword">if</span> kubeDeps<span class="token punctuation">.</span>KubeClient <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		fieldSelector <span class="token operator">:=</span> fields<span class="token punctuation">.</span>Set<span class="token punctuation">{<!-- --></span>api<span class="token punctuation">.</span>ObjectNameField<span class="token punctuation">:</span> <span class="token function">string</span><span class="token punctuation">(</span>nodeName<span class="token punctuation">)</span><span class="token punctuation">}</span><span class="token punctuation">.</span><span class="token function">AsSelector</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+		nodeLW <span class="token operator">:=</span> cache<span class="token punctuation">.</span><span class="token function">NewListWatchFromClient</span><span class="token punctuation">(</span>kubeDeps<span class="token punctuation">.</span>KubeClient<span class="token punctuation">.</span><span class="token function">CoreV1</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">RESTClient</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">"nodes"</span><span class="token punctuation">,</span> metav1<span class="token punctuation">.</span>NamespaceAll<span class="token punctuation">,</span> fieldSelector<span class="token punctuation">)</span>
+		r <span class="token operator">:=</span> cache<span class="token punctuation">.</span><span class="token function">NewReflector</span><span class="token punctuation">(</span>nodeLW<span class="token punctuation">,</span> <span class="token operator">&amp;</span>v1<span class="token punctuation">.</span>Node<span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">,</span> nodeIndexer<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span>
+		<span class="token keyword">go</span> r<span class="token punctuation">.</span><span class="token function">Run</span><span class="token punctuation">(</span>wait<span class="token punctuation">.</span>NeverStop<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+	nodeInfo <span class="token operator">:=</span> <span class="token operator">&amp;</span>predicates<span class="token punctuation">.</span>CachedNodeInfo<span class="token punctuation">{<!-- --></span>NodeLister<span class="token punctuation">:</span> corelisters<span class="token punctuation">.</span><span class="token function">NewNodeLister</span><span class="token punctuation">(</span>nodeIndexer<span class="token punctuation">)</span><span class="token punctuation">}</span>
+
+  <span class="token operator">...</span>
+  
+  <span class="token comment">// secretManager和configMapManager初始化，因为这两者被使用都是需要往容器内挂载目录的，需要kubelet来参与</span>
+  <span class="token keyword">var</span> secretManager secret<span class="token punctuation">.</span>Manager
+	<span class="token keyword">var</span> configMapManager configmap<span class="token punctuation">.</span>Manager
+	<span class="token keyword">switch</span> kubeCfg<span class="token punctuation">.</span>ConfigMapAndSecretChangeDetectionStrategy <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">case</span> kubeletconfiginternal<span class="token punctuation">.</span>WatchChangeDetectionStrategy<span class="token punctuation">:</span>
+		secretManager <span class="token operator">=</span> secret<span class="token punctuation">.</span><span class="token function">NewWatchingSecretManager</span><span class="token punctuation">(</span>kubeDeps<span class="token punctuation">.</span>KubeClient<span class="token punctuation">)</span>
+		configMapManager <span class="token operator">=</span> configmap<span class="token punctuation">.</span><span class="token function">NewWatchingConfigMapManager</span><span class="token punctuation">(</span>kubeDeps<span class="token punctuation">.</span>KubeClient<span class="token punctuation">)</span>
+	<span class="token keyword">case</span> kubeletconfiginternal<span class="token punctuation">.</span>TTLCacheChangeDetectionStrategy<span class="token punctuation">:</span>
+		secretManager <span class="token operator">=</span> secret<span class="token punctuation">.</span><span class="token function">NewCachingSecretManager</span><span class="token punctuation">(</span>
+			kubeDeps<span class="token punctuation">.</span>KubeClient<span class="token punctuation">,</span> manager<span class="token punctuation">.</span><span class="token function">GetObjectTTLFromNodeFunc</span><span class="token punctuation">(</span>klet<span class="token punctuation">.</span>GetNode<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		configMapManager <span class="token operator">=</span> configmap<span class="token punctuation">.</span><span class="token function">NewCachingConfigMapManager</span><span class="token punctuation">(</span>
+			kubeDeps<span class="token punctuation">.</span>KubeClient<span class="token punctuation">,</span> manager<span class="token punctuation">.</span><span class="token function">GetObjectTTLFromNodeFunc</span><span class="token punctuation">(</span>klet<span class="token punctuation">.</span>GetNode<span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token keyword">case</span> kubeletconfiginternal<span class="token punctuation">.</span>GetChangeDetectionStrategy<span class="token punctuation">:</span>
+		secretManager <span class="token operator">=</span> secret<span class="token punctuation">.</span><span class="token function">NewSimpleSecretManager</span><span class="token punctuation">(</span>kubeDeps<span class="token punctuation">.</span>KubeClient<span class="token punctuation">)</span>
+		configMapManager <span class="token operator">=</span> configmap<span class="token punctuation">.</span><span class="token function">NewSimpleConfigMapManager</span><span class="token punctuation">(</span>kubeDeps<span class="token punctuation">.</span>KubeClient<span class="token punctuation">)</span>
+	<span class="token keyword">default</span><span class="token punctuation">:</span>
+		<span class="token keyword">return</span> <span class="token boolean">nil</span><span class="token punctuation">,</span> fmt<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"unknown configmap and secret manager mode: %v"</span><span class="token punctuation">,</span> kubeCfg<span class="token punctuation">.</span>ConfigMapAndSecretChangeDetectionStrategy<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+
+	klet<span class="token punctuation">.</span>secretManager <span class="token operator">=</span> secretManager
+	klet<span class="token punctuation">.</span>configMapManager <span class="token operator">=</span> configMapManager
+
+  <span class="token comment">// 初始化存活探针管理器</span>
+  klet<span class="token punctuation">.</span>livenessManager <span class="token operator">=</span> proberesults<span class="token punctuation">.</span><span class="token function">NewManager</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+  
+  <span class="token comment">//专为dockershim开辟的网络插件集 </span>
+	pluginSettings <span class="token operator">:=</span> dockershim<span class="token punctuation">.</span>NetworkPluginSettings<span class="token punctuation">{<!-- --></span>
+		HairpinMode<span class="token punctuation">:</span>        kubeletconfiginternal<span class="token punctuation">.</span><span class="token function">HairpinMode</span><span class="token punctuation">(</span>kubeCfg<span class="token punctuation">.</span>HairpinMode<span class="token punctuation">)</span><span class="token punctuation">,</span>
+		NonMasqueradeCIDR<span class="token punctuation">:</span>  nonMasqueradeCIDR<span class="token punctuation">,</span>
+		PluginName<span class="token punctuation">:</span>         crOptions<span class="token punctuation">.</span>NetworkPluginName<span class="token punctuation">,</span>
+		PluginConfDir<span class="token punctuation">:</span>      crOptions<span class="token punctuation">.</span>CNIConfDir<span class="token punctuation">,</span>  <span class="token comment">// 默认在/etc/cni/net.d/下存放cni配置文件</span>
+		PluginBinDirString<span class="token punctuation">:</span> crOptions<span class="token punctuation">.</span>CNIBinDir<span class="token punctuation">,</span>   <span class="token comment">// 默认在/opt/cni/bin/下存放cni二进制文件，如bridge/tuning/vlan/dhcp/macvlan等等</span>
+		MTU<span class="token punctuation">:</span>                <span class="token function">int</span><span class="token punctuation">(</span>crOptions<span class="token punctuation">.</span>NetworkPluginMTU<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token comment">// 网卡mtu</span>
+	<span class="token punctuation">}</span>  
+  
+  <span class="token comment">// kubelet相关运行时初始化 </span>
+	runtime<span class="token punctuation">,</span> err <span class="token operator">:=</span> kuberuntime<span class="token punctuation">.</span><span class="token function">NewKubeGenericRuntimeManager</span><span class="token punctuation">(</span>
+		kubecontainer<span class="token punctuation">.</span><span class="token function">FilterEventRecorder</span><span class="token punctuation">(</span>kubeDeps<span class="token punctuation">.</span>Recorder<span class="token punctuation">)</span><span class="token punctuation">,</span>
+		klet<span class="token punctuation">.</span>livenessManager<span class="token punctuation">,</span>
+		seccompProfileRoot<span class="token punctuation">,</span>
+		containerRefManager<span class="token punctuation">,</span>
+		machineInfo<span class="token punctuation">,</span>
+		klet<span class="token punctuation">,</span>
+		kubeDeps<span class="token punctuation">.</span>OSInterface<span class="token punctuation">,</span>
+		klet<span class="token punctuation">,</span>
+		httpClient<span class="token punctuation">,</span>
+		imageBackOff<span class="token punctuation">,</span>
+		kubeCfg<span class="token punctuation">.</span>SerializeImagePulls<span class="token punctuation">,</span>
+		<span class="token function">float32</span><span class="token punctuation">(</span>kubeCfg<span class="token punctuation">.</span>RegistryPullQPS<span class="token punctuation">)</span><span class="token punctuation">,</span>
+		<span class="token function">int</span><span class="token punctuation">(</span>kubeCfg<span class="token punctuation">.</span>RegistryBurst<span class="token punctuation">)</span><span class="token punctuation">,</span>
+		kubeCfg<span class="token punctuation">.</span>CPUCFSQuota<span class="token punctuation">,</span>
+		kubeCfg<span class="token punctuation">.</span>CPUCFSQuotaPeriod<span class="token punctuation">,</span>
+		runtimeService<span class="token punctuation">,</span>
+		imageService<span class="token punctuation">,</span>
+		kubeDeps<span class="token punctuation">.</span>ContainerManager<span class="token punctuation">.</span><span class="token function">InternalContainerLifecycle</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+		legacyLogProvider<span class="token punctuation">,</span>
+		klet<span class="token punctuation">.</span>runtimeClassManager<span class="token punctuation">,</span>
+	<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> <span class="token boolean">nil</span><span class="token punctuation">,</span> err
+	<span class="token punctuation">}</span>
+	klet<span class="token punctuation">.</span>containerRuntime <span class="token operator">=</span> runtime
+	klet<span class="token punctuation">.</span>streamingRuntime <span class="token operator">=</span> runtime
+	klet<span class="token punctuation">.</span>runner <span class="token operator">=</span> runtime
+
+	runtimeCache<span class="token punctuation">,</span> err <span class="token operator">:=</span> kubecontainer<span class="token punctuation">.</span><span class="token function">NewRuntimeCache</span><span class="token punctuation">(</span>klet<span class="token punctuation">.</span>containerRuntime<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> <span class="token boolean">nil</span><span class="token punctuation">,</span> err
+	<span class="token punctuation">}</span>
+	klet<span class="token punctuation">.</span>runtimeCache <span class="token operator">=</span> runtimeCache  
+  
+  <span class="token comment">// pleg初始化(Pod Lifecycle Event Generator)</span>
+  klet<span class="token punctuation">.</span>pleg <span class="token operator">=</span> pleg<span class="token punctuation">.</span><span class="token function">NewGenericPLEG</span><span class="token punctuation">(</span>klet<span class="token punctuation">.</span>containerRuntime<span class="token punctuation">,</span> plegChannelCapacity<span class="token punctuation">,</span>      plegRelistPeriod<span class="token punctuation">,</span> klet<span class="token punctuation">.</span>podCache<span class="token punctuation">,</span> clock<span class="token punctuation">.</span>RealClock<span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">)</span>
+  
+  <span class="token comment">// pod workQueue初始化</span>
+  klet<span class="token punctuation">.</span>workQueue <span class="token operator">=</span> queue<span class="token punctuation">.</span><span class="token function">NewBasicWorkQueue</span><span class="token punctuation">(</span>klet<span class="token punctuation">.</span>clock<span class="token punctuation">)</span>
+  <span class="token comment">// pod worker初始化，worker从workQueue中取队首，根据指令对pod进行相应的直接操作，另外还有更新pod cache的操作</span>
+	klet<span class="token punctuation">.</span>podWorkers <span class="token operator">=</span> <span class="token function">newPodWorkers</span><span class="token punctuation">(</span>klet<span class="token punctuation">.</span>syncPod<span class="token punctuation">,</span> kubeDeps<span class="token punctuation">.</span>Recorder<span class="token punctuation">,</span> klet<span class="token punctuation">.</span>workQueue<span class="token punctuation">,</span> klet<span class="token punctuation">.</span>resyncInterval<span class="token punctuation">,</span> backOffPeriod<span class="token punctuation">,</span> klet<span class="token punctuation">.</span>podCache<span class="token punctuation">)</span>
+
+	klet<span class="token punctuation">.</span>backOff <span class="token operator">=</span> flowcontrol<span class="token punctuation">.</span><span class="token function">NewBackOff</span><span class="token punctuation">(</span>backOffPeriod<span class="token punctuation">,</span> MaxContainerBackOff<span class="token punctuation">)</span>
+	klet<span class="token punctuation">.</span>podKillingCh <span class="token operator">=</span> <span class="token function">make</span><span class="token punctuation">(</span><span class="token keyword">chan</span> <span class="token operator">*</span>kubecontainer<span class="token punctuation">.</span>PodPair<span class="token punctuation">,</span> podKillingChannelCapacity<span class="token punctuation">)</span>
+
+	<span class="token comment">// 初始化驱逐管理器</span>
+	evictionManager<span class="token punctuation">,</span> evictionAdmitHandler <span class="token operator">:=</span> eviction<span class="token punctuation">.</span><span class="token function">NewManager</span><span class="token punctuation">(</span>klet<span class="token punctuation">.</span>resourceAnalyzer<span class="token punctuation">,</span> evictionConfig<span class="token punctuation">,</span> <span class="token function">killPodNow</span><span class="token punctuation">(</span>klet<span class="token punctuation">.</span>podWorkers<span class="token punctuation">,</span> kubeDeps<span class="token punctuation">.</span>Recorder<span class="token punctuation">)</span><span class="token punctuation">,</span> klet<span class="token punctuation">.</span>podManager<span class="token punctuation">.</span>GetMirrorPodByPod<span class="token punctuation">,</span> klet<span class="token punctuation">.</span>imageManager<span class="token punctuation">,</span> klet<span class="token punctuation">.</span>containerGC<span class="token punctuation">,</span> kubeDeps<span class="token punctuation">.</span>Recorder<span class="token punctuation">,</span> nodeRef<span class="token punctuation">,</span> klet<span class="token punctuation">.</span>clock<span class="token punctuation">)</span>
+
+	klet<span class="token punctuation">.</span>evictionManager <span class="token operator">=</span> evictionManager
+	klet<span class="token punctuation">.</span>admitHandlers<span class="token punctuation">.</span><span class="token function">AddPodAdmitHandler</span><span class="token punctuation">(</span>evictionAdmitHandler<span class="token punctuation">)</span>
+  
+  <span class="token operator">...</span>
+<span class="token punctuation">}</span>	
+
+</code></pre> 
+<p>再次回到主线，进入最后的k.Run()函数循环逻辑：</p> 
+<p>–&gt; <code>cmd/kubelet/app/server.go:1058</code></p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">startKubelet</span><span class="token punctuation">(</span>k kubelet<span class="token punctuation">.</span>Bootstrap<span class="token punctuation">,</span> podCfg <span class="token operator">*</span>config<span class="token punctuation">.</span>PodConfig<span class="token punctuation">,</span> kubeCfg <span class="token operator">*</span>kubeletconfiginternal<span class="token punctuation">.</span>KubeletConfiguration<span class="token punctuation">,</span> kubeDeps <span class="token operator">*</span>kubelet<span class="token punctuation">.</span>Dependencies<span class="token punctuation">,</span> enableServer <span class="token builtin">bool</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">// start the kubelet</span>
+  <span class="token comment">// 循环执行kubelet的工作逻辑k.Run()方法</span>
+	<span class="token keyword">go</span> wait<span class="token punctuation">.</span><span class="token function">Until</span><span class="token punctuation">(</span><span class="token keyword">func</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		k<span class="token punctuation">.</span><span class="token function">Run</span><span class="token punctuation">(</span>podCfg<span class="token punctuation">.</span><span class="token function">Updates</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token punctuation">}</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> wait<span class="token punctuation">.</span>NeverStop<span class="token punctuation">)</span>
+
+	<span class="token comment">// start the kubelet server</span>
+  <span class="token comment">// 提供诸如/metrics /health等api</span>
+	<span class="token keyword">if</span> enableServer <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">go</span> k<span class="token punctuation">.</span><span class="token function">ListenAndServe</span><span class="token punctuation">(</span>net<span class="token punctuation">.</span><span class="token function">ParseIP</span><span class="token punctuation">(</span>kubeCfg<span class="token punctuation">.</span>Address<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">uint</span><span class="token punctuation">(</span>kubeCfg<span class="token punctuation">.</span>Port<span class="token punctuation">)</span><span class="token punctuation">,</span> kubeDeps<span class="token punctuation">.</span>TLSOptions<span class="token punctuation">,</span> kubeDeps<span class="token punctuation">.</span>Auth<span class="token punctuation">,</span> kubeCfg<span class="token punctuation">.</span>EnableDebuggingHandlers<span class="token punctuation">,</span> kubeCfg<span class="token punctuation">.</span>EnableContentionProfiling<span class="token punctuation">)</span>
+
+	<span class="token punctuation">}</span>
+  <span class="token comment">// 配置查询api</span>
+	<span class="token keyword">if</span> kubeCfg<span class="token punctuation">.</span>ReadOnlyPort <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">go</span> k<span class="token punctuation">.</span><span class="token function">ListenAndServeReadOnly</span><span class="token punctuation">(</span>net<span class="token punctuation">.</span><span class="token function">ParseIP</span><span class="token punctuation">(</span>kubeCfg<span class="token punctuation">.</span>Address<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">uint</span><span class="token punctuation">(</span>kubeCfg<span class="token punctuation">.</span>ReadOnlyPort<span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">if</span> utilfeature<span class="token punctuation">.</span>DefaultFeatureGate<span class="token punctuation">.</span><span class="token function">Enabled</span><span class="token punctuation">(</span>features<span class="token punctuation">.</span>KubeletPodResources<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">go</span> k<span class="token punctuation">.</span><span class="token function">ListenAndServePodResources</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>wait.Until()循环执行函数前面的文章中已经分析过多次了，不再赘述，来分析一下k.Run(podCfg.Updates())传的实参是什么:</p> 
+<p>–&gt; <code>pkg/kubelet/config/config.go:105</code></p> 
+<pre><code>func (c *PodConfig) Updates() &lt;-chan kubetypes.PodUpdate {
+   return c.updates
+}
+</code></pre> 
+<p>接着看<code>c.updates</code> --&gt; <code>pkg/kubelet/config/config.go:58</code></p> 
+<pre><code class="prism language-go"><span class="token keyword">type</span> PodConfig <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+   pods <span class="token operator">*</span>podStorage
+   mux  <span class="token operator">*</span>config<span class="token punctuation">.</span>Mux
+
+   <span class="token comment">// the channel of denormalized changes passed to listeners</span>
+   updates <span class="token keyword">chan</span> kubetypes<span class="token punctuation">.</span>PodUpdate
+
+   <span class="token comment">// contains the list of all configured sources</span>
+   sourcesLock       sync<span class="token punctuation">.</span>Mutex
+   sources           sets<span class="token punctuation">.</span>String
+   checkpointManager checkpointmanager<span class="token punctuation">.</span>CheckpointManager
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>–&gt; <code>pkg/kubelet/types/pod_update.go:80</code></p> 
+<pre><code class="prism language-go"><span class="token keyword">type</span> PodUpdate <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+   Pods   <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">*</span>v1<span class="token punctuation">.</span>Pod
+   Op     PodOperation
+   Source <span class="token builtin">string</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>猜测是将pod的写(删查改)请求转换成结构体，放入chan中，然后由k.Run()方法来处理这些写请求，k.Run()的实现在这里``pkg/kubelet/kubelet.go:1382`，留作下回分析，本篇启动流程篇到此结束。</p> 
+<h3><a id="_812"></a>小结</h3> 
+<p>kubelet的源码果真是相当的复杂，一个函数动辄数百行，也难怪，毕竟作为daemon端执行数据平面工作的它要承担着很多职责，先到这吧</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ef01830f83400a5002698d893b6f9c50/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">手把手教你用Java实现一套简单的鉴权服务（SpringBoot，SSM）（万字长文）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c4688f37e4fdf45f3eeb0590c57f410d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">如何在Mac上升级iCloud存储计划？</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

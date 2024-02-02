@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>沧小海笔记之XILINX 7系列的时钟架构（上） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="沧小海笔记之XILINX 7系列的时钟架构（上）" />
+<meta property="og:description" content="目录
+一、概述
+二、时钟资源
+三、时钟路由资源与架构
+一、概述 该文章主要是对《ug472》内容的理解和延伸，ug472主要讲的是7系列FPGA的时钟架构。一般我们根据原理图将时钟引入，通过PLL或MMCM产生所需时钟就可劲用了，除非有了时序违规或者特殊要求才去注意下，否则我们是不关心时钟在FPGA内部是怎样干活的，似乎也并没什么问题。但总有用到的时候，而且作为对FPGA整体框架的一部分，我们也应该了解下FPGA内部些原理。
+《ug472》一文初看略感晦涩，但确实很有内容，对7系列FPGA的内部时钟架构和资源进行了详细阐述。总的来说可以从两方面来理解，一方面是资源，也就是7系列FPGA内部包含这哪些路由资源和硬核资源，硬核资源指的是引入时钟的引脚、可实现时钟分倍频的CMT以及起到连接作用的各种BUF，而路由资源指的是7系列FPGA所包含的时钟路由路径，也就是可以走时钟的线，而这两种的结合就是时钟架构。对于时钟架构其中7系列FPGA又分为全局时钟和区域时钟两种，这两种的配置是实现硬核资源连接和时钟路由的方案。
+本文会分四个章节进行阐述，第一章讲述7系列FPGA有哪些时钟、路由资源及其应用特点。第二章阐述7系列FPGA的时钟架构及路由方案。第三章讲述7系列FPGA硬核资源的应用，阐明在如何去使用。第四章讲述7系列FPGA硬核资源中的CMT以及对应的MMCME2_ADV原语介绍。第五章讲述时钟相关的IP核，也就是“Clocking Wizard”的相关配置和使用介绍。
+二、时钟资源 如下图是xilinx的A7芯片的“device”部分截图。时钟相关的主要是下面这几个部分，随便找个工程打开都可以看到如下内容，另外还有高速串行接口的时钟没有表示出来，那个不影响对整体的理解。在图中标有6个地方，这就是包括了FPGA的所有时钟资源（GTPE2_COMMON除外），主要有CC、BUFR、BUFIO、BUFMR、CMT、BUFG和BUFH，下面就对其依次进行介绍。
+一、CC
+标有1的白色框圈住的内容称之为“CC”，它是“Clock-Capable”即时钟功能的缩写，表示具有时钟功能的引脚，换句话说，并不是所有的引脚都可以接时钟的，有只有通过特定的引脚才能将外部时钟信号引入FPGA内部的时钟资源，这个引脚有两种，分别称之为MRCC（Multi-region clock-capable I/O）和SRCC（Single-region clock-capable I/O）。Multi-region译为多区域，Single-region译为单区域，而者的直观区别在于MRCC可以连接到BUFMR上，但SR不可以，BUFMR具有扩展功能，可以将本BANK时钟引入到其它BANK上，所以称可以连接到BUFMR的CC为MRCC。
+每个BANK有50个引脚，不信你可以数一下，这五十个里面有两对用于SRCC，有两对用于MRCC，如下图原理图所示。它们都是差分的，如果接单端时钟则需接到“P”上，对应的“N”引脚不可用。这些信号可以连接到本bank的BUFR、BUFIO、CMT以及同侧的16个BUFG，这些会在后文阐述。
+二、 BUFR、BUFIO和BUFMR
+红色框圈住标有2的是BUFIO和BUFR，放大是如下图左所示的，白色圆圈圈住标有3的是BUFMR，放大是如下图右所示。它们都位于I/O BANK，所以它们是与引脚相关的区域时钟缓冲器，可有助于实现时钟源的同步采集，串并之间的转换等等。每个有引脚的BANK都有四个BUFIO和BUFR、两个BUFMRCE。
+BUFIO也是区域时钟缓冲器，它的作用是用来驱动I/O BANK里面的ILOGIC和OLOGIC，（一般会用为OSERDESE2 和ISERDESE2），也就是在我《I/O BANK》文章中所阐述的内容。所以BUFIO适合用于采集源同步数据，但不能用来驱动任何其它资源。
+BUFR区域时钟缓冲器，与BUFIO不同在于可以驱动BUFG可以驱动的同一时钟区域中的任何时钟点。如下图很好的解释了BUFIO和BUFR的区别。而这BUFR还具有分频功能，可以实现1到8倍的分频，可用于串并转换。
+BUFMR还是区域时钟缓冲器，之所以只有两个是对应MRCC，MRCC就两个，所以BUFMR多了也没多啥用。它的作用就是扩展时钟区域，可以将某BANK的时钟引入到上下相邻的BANK中去，如下图所示，这里将MRCC直连到了BUFMR，但在实际应用情况下，MRCC需要先进过IOBUF，才可以连接到BUFMR。
+三、CMT
+黄色方框圈住标有4的这部分称之为CMT，即clock management tiles 的缩写，每个BANK都有一个，这里面主要包括了一个MMCM和一个PLL，PLL可以理解为是MMCM的子集，都是可以视为锁相环，用于产生不同频率、相位的时钟以供使用，具体接口介绍会在第四、五章介绍。
+四、BUFH
+黄色方框圈住标有5的这部分部分是区域水平时钟缓冲器BUFH，原本人家是竖着的，但太占地我就让它躺下了。经过该BUF的时钟只在本区域有效，其中H是Horizontal的缩写。每个BANK有12个BUFH，它们位于BANK的一侧，且在水平中间位置排成一列，所以下图是左右相邻两个BANK的BUFH。
+如下图是一个BANK的整体，BUFH可以驱动同一BANK的所有资源，我们可以看出“上”和“下”是对称分布的，BUFH位于BANK的一侧垂直居中，中间的分割线是有12条水平时钟线，与12个BUFH相连。BUFG也是通过连接到BUFH进而通过这12条水平时钟线驱动整个BANK的逻辑资源。每个BANK资源是按照一定的规律进行排列，也就是每列有50个CLB、50个引脚、10个BRAM，它们均匀的分布在水平时钟线两侧。不同型号芯片每个BANK的资源是不一样的，但每列资源确实固定的，只不过行数的多少。
+5、BUFG
+黄色方框圈住标有6的是全局时钟缓冲器，如下图所示，由于水平放置太占地，我也让它躺倒了，一竖溜有32个，而且每个芯片都会有32个BUFG。它是我们用的最多的时钟buff，经过BUFG的时钟可以连接到任意资源上去，BUFG不仅可以实现时钟缓冲，还有时钟选择、控制等功能。
+BUFG从竖直方向看位于中间，两侧类似对称形式分布，从水平方向看是尽可能的位于中间，由于BANK数量原因，可能是偏下些，在ug472中也有下图为我们举例说明。
+三、时钟路由资源与架构 时钟资源包括路由资源和硬核资源，时钟架构是以全局时钟和区域时钟组合搭配而成，总体思路就是以BANK为单元组建区域时钟，以BUFG为纽带连接各个BANK，依次实现模块化的时钟架构。
+图2-1-1是《ug472》提供的时钟架构图，自我感觉这图描述得还是有些晦涩。首先我们需要了解下FPGA内部的大致结构，xilinx的FPGA逻辑资源大致可分为两个部分，一部分是I/O BANK，即下图中的“I/O Column”、“CMT Backbone”和“CMT Column”这三部分组成，这里的时钟BUF、IOBUF及I/O LOGIC的不同组合实现FPGA内部数据与外部的交互，另一部分就是以CLB和BRAM为主的资源来实现我们的逻辑功能，不同BANK可能有些其他硬核资源，例如PCIE、XADC、GTP等等。
+图2-1-1 时钟架构
+HROW即水平时钟线，也就是在第二章中所阐述的BUFH或BUFG所走的线，由下图我们可以看到，很明显在每个BANK中间有一条白色线，这就是HROW，时钟沿着水平中心线向两侧延伸以为其他器件提供时钟。而左右BANK对称的中心线即为“Clock Backbone”，BUFG在一定长程度上水平分别在“Clock Backbone”中间，一般来讲上部分16个BUFG时钟源来自上半部分的所有BANK，下部分16个BUFG时钟源来自下半部分的所有BANK，而他们的输出可以到整个device的任意位置。
+如下图是在第二章描述的各种BUF的大致路由概念图，其中黑点表示连接，竖线带箭头表示可驱动区域，箭头延伸出虚线框表示本BANK以外的其它BANK。BUFG可以通过水平时钟线（HROW）驱动片上任意可接时钟资源，BUFH通过HROW可以驱动本BANK的任意可接时钟资源，它们是共享HROW。BUFIO仅可驱动I/O BANK中的可接时钟资源，BUFR可驱动I/O BANK及其它逻辑资源，BUFMR可驱动多BANK的BUFIO和BUFR。
+如下图是较为详细的各时钟资源驱动图，暗红色线来自CC，每个BANK有4个，可以驱动本bank及上下相邻bank的CMT、BUFH和BUFG。“GT Quad”也就是高速接口可以通过十条专用时钟线驱动CMT 、BUFG和BUFH，BUFH，如橘黄色线所描述。CMT的前四个输出时钟信号的取反信号“CLKOUTB[3:0]”可以具有反馈功能亦可驱动其他时钟网络，CMT的输出时钟“黑色线”则可连接到BUFG、BUFH等资源。绿色线是CLKFBOUT，用来做反馈电路或可驱动其他资源，但这个信号都不重要，或可有些具体逻辑用到，到时候因知道这些再去研究其使用方法。
+如下图是《UG472》提供的更为详细的时钟架构，可以瞅瞅~。
+具体的时钟资源的驱动关系如下表所示
+对象
+驱动源
+驱动对象
+MRCC
+外部时钟
+1、同BANK的4个BUFIO、BUFR和两个BUFMR
+2、同BANK或上下BANK的CMT
+3、16个BUFG或BUFH
+SRCC" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/04c46719229554fc9b92ce1b87fd0f88/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-11-13T19:24:05+08:00" />
+<meta property="article:modified_time" content="2021-11-13T19:24:05+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">沧小海笔记之XILINX 7系列的时钟架构（上）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="-toc" style="margin-left:0px;"></p> 
+<p id="%E2%80%8B%E2%80%8B%E2%80%8B%E2%80%8B%E2%80%8B%E2%80%8B%E2%80%8B%E4%B8%80%E3%80%81%E6%A6%82%E8%BF%B0-toc" style="margin-left:0px;"><a href="#%E2%80%8B%E2%80%8B%E2%80%8B%E2%80%8B%E2%80%8B%E2%80%8B%E2%80%8B%E4%B8%80%E3%80%81%E6%A6%82%E8%BF%B0" rel="nofollow" title="一、概述">一、概述</a></p> 
+<p id="%E4%BA%8C%E3%80%81%E6%97%B6%E9%92%9F%E8%B5%84%E6%BA%90-toc" style="margin-left:0px;"><a href="#%E4%BA%8C%E3%80%81%E6%97%B6%E9%92%9F%E8%B5%84%E6%BA%90" rel="nofollow" title="二、时钟资源">二、时钟资源</a></p> 
+<p id="%E4%B8%89%E3%80%81%E6%97%B6%E9%92%9F%E8%B7%AF%E7%94%B1%E8%B5%84%E6%BA%90%E4%B8%8E%E6%9E%B6%E6%9E%84-toc" style="margin-left:0px;"><a href="#%E4%B8%89%E3%80%81%E6%97%B6%E9%92%9F%E8%B7%AF%E7%94%B1%E8%B5%84%E6%BA%90%E4%B8%8E%E6%9E%B6%E6%9E%84" rel="nofollow" title="三、时钟路由资源与架构">三、时钟路由资源与架构</a></p> 
+<hr id="hr-toc"> 
+<h2 id="%E2%80%8B%E2%80%8B%E2%80%8B%E2%80%8B%E2%80%8B%E2%80%8B%E2%80%8B%E4%B8%80%E3%80%81%E6%A6%82%E8%BF%B0" style="margin-left:0;"><a name="_Toc68068137" title="一、概述">一、概述</a></h2> 
+<p style="margin-left:.0001pt;">         该文章主要是对《ug472》内容的理解和延伸，ug472主要讲的是7系列FPGA的时钟架构。一般我们根据原理图将时钟引入，通过PLL或MMCM产生所需时钟就可劲用了，除非有了时序违规或者特殊要求才去注意下，否则我们是不关心时钟在FPGA内部是怎样干活的，似乎也并没什么问题。但总有用到的时候，而且作为对FPGA整体框架的一部分，我们也应该了解下FPGA内部些原理。</p> 
+<p style="margin-left:.0001pt;">         《ug472》一文初看略感晦涩，但确实很有内容，对7系列FPGA的内部时钟架构和资源进行了详细阐述。总的来说可以从两方面来理解，一方面是资源，也就是7系列FPGA内部包含这哪些路由资源和硬核资源，硬核资源指的是引入时钟的引脚、可实现时钟分倍频的CMT以及起到连接作用的各种BUF，而路由资源指的是7系列FPGA所包含的时钟路由路径，也就是可以走时钟的线，而这两种的结合就是时钟架构。对于时钟架构其中7系列FPGA又分为全局时钟和区域时钟两种，这两种的配置是实现硬核资源连接和时钟路由的方案。</p> 
+<p style="margin-left:.0001pt;">         本文会分四个章节进行阐述，第一章讲述7系列FPGA有哪些时钟、路由资源及其应用特点。第二章阐述7系列FPGA的时钟架构及路由方案。第三章讲述7系列FPGA硬核资源的应用，阐明在如何去使用。第四章讲述7系列FPGA硬核资源中的CMT以及对应的MMCME2_ADV原语介绍。第五章讲述时钟相关的IP核，也就是“Clocking Wizard”的相关配置和使用介绍。</p> 
+<p></p> 
+<p style="margin-left:.0001pt;"></p> 
+<h2 id="%E4%BA%8C%E3%80%81%E6%97%B6%E9%92%9F%E8%B5%84%E6%BA%90" style="margin-left:0;"><a name="_Toc68068138" title="二、时钟资源">二、时钟资源</a></h2> 
+<p style="margin-left:.0001pt;">         如下图是xilinx的A7芯片的“device”部分截图。时钟相关的主要是下面这几个部分，随便找个工程打开都可以看到如下内容，另外还有高速串行接口的时钟没有表示出来，那个不影响对整体的理解。在图中标有6个地方，这就是包括了FPGA的所有时钟资源（GTPE2_COMMON除外），主要有CC、BUFR、BUFIO、BUFMR、CMT、BUFG和BUFH，下面就对其依次进行介绍。</p> 
+<p style="margin-left:.0001pt;"><img alt="" height="311" src="https://images2.imgbox.com/4d/5f/MUCJr5DG_o.png" width="369"> </p> 
+<p style="margin-left:.0001pt;"><strong>一、</strong><strong>CC</strong></p> 
+<p style="margin-left:.0001pt;">标有1的白色框圈住的内容称之为“CC”，它是“Clock-Capable”即时钟功能的缩写，表示具有时钟功能的引脚，换句话说，并不是所有的引脚都可以接时钟的，有只有通过特定的引脚才能将外部时钟信号引入FPGA内部的时钟资源，这个引脚有两种，分别称之为MRCC（Multi-region clock-capable I/O）和SRCC（Single-region clock-capable I/O）。Multi-region译为多区域，Single-region译为单区域，而者的直观区别在于MRCC可以连接到BUFMR上，但SR不可以，BUFMR具有扩展功能，可以将本BANK时钟引入到其它BANK上，所以称可以连接到BUFMR的CC为MRCC。</p> 
+<p style="margin-left:.0001pt;">每个BANK有50个引脚，不信你可以数一下，这五十个里面有两对用于SRCC，有两对用于MRCC，如下图原理图所示。它们都是差分的，如果接单端时钟则需接到“P”上，对应的“N”引脚不可用。这些信号可以连接到本bank的BUFR、BUFIO、CMT以及同侧的16个BUFG，这些会在后文阐述。</p> 
+<p style="margin-left:.0001pt;"><img alt="" height="150" src="https://images2.imgbox.com/88/1b/ROJWYerd_o.png" width="270"></p> 
+<p style="margin-left:.0001pt;"><strong>二、</strong><strong> BUFR</strong><strong>、</strong><strong>BUFIO</strong><strong>和</strong><strong>BUFMR</strong></p> 
+<p style="margin-left:.0001pt;">红色框圈住标有2的是BUFIO和BUFR，放大是如下图左所示的，白色圆圈圈住标有3的是BUFMR，放大是如下图右所示。它们都位于I/O BANK，所以它们是与引脚相关的区域时钟缓冲器，可有助于实现时钟源的同步采集，串并之间的转换等等。每个有引脚的BANK都有四个BUFIO和BUFR、两个BUFMRCE。</p> 
+<p style="margin-left:.0001pt;"><img alt="" height="159" src="https://images2.imgbox.com/3c/d6/DcTaK1kz_o.png" width="368"></p> 
+<p style="margin-left:.0001pt;">         BUFIO也是区域时钟缓冲器，它的作用是用来驱动I/O BANK里面的ILOGIC和OLOGIC，（一般会用为OSERDESE2 和ISERDESE2），也就是在我《I/O BANK》文章中所阐述的内容。所以BUFIO适合用于采集源同步数据，但不能用来驱动任何其它资源。</p> 
+<p style="margin-left:.0001pt;">BUFR区域时钟缓冲器，与BUFIO不同在于可以驱动BUFG可以驱动的同一时钟区域中的任何时钟点。如下图很好的解释了BUFIO和BUFR的区别。而这BUFR还具有分频功能，可以实现1到8倍的分频，可用于串并转换。</p> 
+<p style="margin-left:.0001pt;"><img alt="" height="274" src="https://images2.imgbox.com/45/29/UyGv06vJ_o.png" width="457"> </p> 
+<p style="margin-left:.0001pt;">         BUFMR还是区域时钟缓冲器，之所以只有两个是对应MRCC，MRCC就两个，所以BUFMR多了也没多啥用。它的作用就是扩展时钟区域，可以将某BANK的时钟引入到上下相邻的BANK中去，如下图所示，这里将MRCC直连到了BUFMR，但在实际应用情况下，MRCC需要先进过IOBUF，才可以连接到BUFMR。</p> 
+<p style="margin-left:.0001pt;"><img alt="" height="351" src="https://images2.imgbox.com/d7/b2/b36BdSdg_o.png" width="632"> </p> 
+<p style="margin-left:.0001pt;"><strong>三、</strong><strong>CMT</strong></p> 
+<p style="margin-left:.0001pt;">黄色方框圈住标有4的这部分称之为CMT，即clock management tiles 的缩写，每个BANK都有一个，这里面主要包括了一个MMCM和一个PLL，PLL可以理解为是MMCM的子集，都是可以视为锁相环，用于产生不同频率、相位的时钟以供使用，具体接口介绍会在第四、五章介绍。</p> 
+<p style="margin-left:.0001pt;"><strong>四、</strong><strong>BUFH</strong></p> 
+<p style="margin-left:.0001pt;">黄色方框圈住标有5的这部分部分是区域水平时钟缓冲器BUFH，原本人家是竖着的，但太占地我就让它躺下了。经过该BUF的时钟只在本区域有效，其中H是Horizontal的缩写。每个BANK有12个BUFH，它们位于BANK的一侧，且在水平中间位置排成一列，所以下图是左右相邻两个BANK的BUFH。</p> 
+<p style="margin-left:.0001pt;"><img alt="" height="189" src="https://images2.imgbox.com/b0/fe/U8w7BVEL_o.png" width="506"> </p> 
+<p style="margin-left:.0001pt;">         如下图是一个BANK的整体，BUFH可以驱动同一BANK的所有资源，我们可以看出“上”和“下”是对称分布的，BUFH位于BANK的一侧垂直居中，中间的分割线是有12条水平时钟线，与12个BUFH相连。BUFG也是通过连接到BUFH进而通过这12条水平时钟线驱动整个BANK的逻辑资源。每个BANK资源是按照一定的规律进行排列，也就是每列有50个CLB、50个引脚、10个BRAM，它们均匀的分布在水平时钟线两侧。不同型号芯片每个BANK的资源是不一样的，但每列资源确实固定的，只不过行数的多少。</p> 
+<p style="margin-left:.0001pt;text-align:center;"><img alt="" height="358" src="https://images2.imgbox.com/d9/c8/lg5Ee1NW_o.png" width="564">  </p> 
+<p> </p> 
+<p style="margin-left:.0001pt;"><strong>5</strong><strong>、</strong><strong>BUFG</strong></p> 
+<p style="margin-left:.0001pt;">         黄色方框圈住标有6的是全局时钟缓冲器，如下图所示，由于水平放置太占地，我也让它躺倒了，一竖溜有32个，而且每个芯片都会有32个BUFG。它是我们用的最多的时钟buff，经过BUFG的时钟可以连接到任意资源上去，BUFG不仅可以实现时钟缓冲，还有时钟选择、控制等功能。</p> 
+<p style="margin-left:.0001pt;"><img alt="" height="160" src="https://images2.imgbox.com/3c/85/czixKx72_o.png" width="394"></p> 
+<p style="margin-left:.0001pt;">BUFG从竖直方向看位于中间，两侧类似对称形式分布，从水平方向看是尽可能的位于中间，由于BANK数量原因，可能是偏下些，在ug472中也有下图为我们举例说明。</p> 
+<p><img alt="" height="235" src="https://images2.imgbox.com/55/82/b9d1IYrs_o.png" width="406"></p> 
+<p> </p> 
+<p style="margin-left:.0001pt;"></p> 
+<h2 id="%E4%B8%89%E3%80%81%E6%97%B6%E9%92%9F%E8%B7%AF%E7%94%B1%E8%B5%84%E6%BA%90%E4%B8%8E%E6%9E%B6%E6%9E%84" style="margin-left:0;"><a name="_Toc68068139" title="三、时钟路由资源与架构">三、时钟路由资源与架构</a></h2> 
+<p style="margin-left:.0001pt;">         时钟资源包括路由资源和硬核资源，时钟架构是以全局时钟和区域时钟组合搭配而成，总体思路就是以BANK为单元组建区域时钟，以BUFG为纽带连接各个BANK，依次实现模块化的时钟架构。</p> 
+<p style="margin-left:.0001pt;">图2-1-1是《ug472》提供的时钟架构图，自我感觉这图描述得还是有些晦涩。首先我们需要了解下FPGA内部的大致结构，xilinx的FPGA逻辑资源大致可分为两个部分，一部分是I/O BANK，即下图中的“I/O Column”、“CMT Backbone”和“CMT Column”这三部分组成，这里的时钟BUF、IOBUF及I/O LOGIC的不同组合实现FPGA内部数据与外部的交互，另一部分就是以CLB和BRAM为主的资源来实现我们的逻辑功能，不同BANK可能有些其他硬核资源，例如PCIE、XADC、GTP等等。</p> 
+<p style="margin-left:.0001pt;text-align:center;"><img alt="" height="361" src="https://images2.imgbox.com/c1/85/CgitCZ6C_o.png" width="467"></p> 
+<p style="text-align:center;">图2-1-1 时钟架构</p> 
+<p style="margin-left:.0001pt;">HROW即水平时钟线，也就是在第二章中所阐述的BUFH或BUFG所走的线，由下图我们可以看到，很明显在每个BANK中间有一条白色线，这就是HROW，时钟沿着水平中心线向两侧延伸以为其他器件提供时钟。而左右BANK对称的中心线即为“Clock Backbone”，BUFG在一定长程度上水平分别在“Clock Backbone”中间，一般来讲上部分16个BUFG时钟源来自上半部分的所有BANK，下部分16个BUFG时钟源来自下半部分的所有BANK，而他们的输出可以到整个device的任意位置。</p> 
+<p style="margin-left:.0001pt;"><img alt="" height="352" src="https://images2.imgbox.com/c8/a3/GyZLqM7c_o.png" width="360"></p> 
+<p> </p> 
+<p style="margin-left:.0001pt;">如下图是在第二章描述的各种BUF的大致路由概念图，其中黑点表示连接，竖线带箭头表示可驱动区域，箭头延伸出虚线框表示本BANK以外的其它BANK。BUFG可以通过水平时钟线（HROW）驱动片上任意可接时钟资源，BUFH通过HROW可以驱动本BANK的任意可接时钟资源，它们是共享HROW。BUFIO仅可驱动I/O BANK中的可接时钟资源，BUFR可驱动I/O BANK及其它逻辑资源，BUFMR可驱动多BANK的BUFIO和BUFR。</p> 
+<p style="margin-left:.0001pt;"><img alt="" height="419" src="https://images2.imgbox.com/6d/60/yiVtaNNq_o.png" width="442"> </p> 
+<p style="margin-left:.0001pt;">如下图是较为详细的各时钟资源驱动图，暗红色线来自CC，每个BANK有4个，可以驱动本bank及上下相邻bank的CMT、BUFH和BUFG。“GT Quad”也就是高速接口可以通过十条专用时钟线驱动CMT 、BUFG和BUFH，BUFH，如橘黄色线所描述。CMT的前四个输出时钟信号的取反信号“CLKOUTB[3:0]”可以具有反馈功能亦可驱动其他时钟网络，CMT的输出时钟“黑色线”则可连接到BUFG、BUFH等资源。绿色线是CLKFBOUT，用来做反馈电路或可驱动其他资源，但这个信号都不重要，或可有些具体逻辑用到，到时候因知道这些再去研究其使用方法。</p> 
+<p style="margin-left:.0001pt;"><img alt="" height="363" src="https://images2.imgbox.com/32/25/7vVPEoTJ_o.png" width="456"> </p> 
+<p style="margin-left:.0001pt;">         如下图是《UG472》提供的更为详细的时钟架构，可以瞅瞅~。</p> 
+<p style="margin-left:.0001pt;"><img alt="" height="390" src="https://images2.imgbox.com/e5/7d/got9Ci58_o.png" width="488"></p> 
+<p> </p> 
+<p style="margin-left:.0001pt;">         具体的时钟资源的驱动关系如下表所示</p> 
+<table border="1" cellspacing="0"><tbody><tr><td style="border-color:#000000;vertical-align:top;width:56.45pt;"> <p style="margin-left:.0001pt;">对象</p> </td><td style="border-color:#000000;vertical-align:top;width:212.65pt;"> <p style="margin-left:.0001pt;">驱动源</p> </td><td style="border-color:#000000;vertical-align:top;width:253.7pt;"> <p style="margin-left:.0001pt;">驱动对象</p> </td></tr><tr><td style="border-color:#000000;vertical-align:top;width:56.45pt;"> <p style="margin-left:.0001pt;">MRCC</p> </td><td style="vertical-align:top;width:212.65pt;"> <p style="margin-left:.0001pt;">外部时钟</p> </td><td style="vertical-align:top;width:253.7pt;"> <p style="margin-left:.0001pt;">1、同BANK的4个BUFIO、BUFR和两个BUFMR</p> <p style="margin-left:.0001pt;">2、同BANK或上下BANK的CMT</p> <p style="margin-left:.0001pt;">3、16个BUFG或BUFH</p> </td></tr><tr><td style="border-color:#000000;vertical-align:top;width:56.45pt;"> <p style="margin-left:.0001pt;">SRCC</p> </td><td style="vertical-align:top;width:212.65pt;"> <p style="margin-left:.0001pt;">外部时钟</p> </td><td style="vertical-align:top;width:253.7pt;"> <p style="margin-left:.0001pt;">同MRCC，但不能驱动BUFMR</p> </td></tr><tr><td style="border-color:#000000;vertical-align:top;width:56.45pt;"> <p style="margin-left:.0001pt;">BUFIO</p> </td><td style="vertical-align:top;width:212.65pt;"> <p style="margin-left:.0001pt;">CC、MMCM的CLKOUT0—3、CLKFBOUT或同BANK及上下相邻BANK的BUFMR</p> </td><td style="vertical-align:top;width:253.7pt;"> <p style="margin-left:.0001pt;">可以驱动同BANK的ILOGIC或OLOGIC</p> </td></tr><tr><td style="border-color:#000000;vertical-align:top;width:56.45pt;"> <p style="margin-left:.0001pt;">BUFR</p> </td><td style="vertical-align:top;width:212.65pt;"> <p style="margin-left:.0001pt;">同BUFIO</p> </td><td style="vertical-align:top;width:253.7pt;"> <p style="margin-left:.0001pt;">可以驱动CMT、任何BUFG可驱动的资源以及16个BUFG</p> </td></tr><tr><td style="border-color:#000000;vertical-align:top;width:56.45pt;"> <p style="margin-left:.0001pt;">BUFMR</p> </td><td style="vertical-align:top;width:212.65pt;"> <p style="margin-left:.0001pt;">MRCC和GT输出时钟可驱动</p> </td><td style="vertical-align:top;width:253.7pt;"> <p style="margin-left:.0001pt;">可以驱动上下bank的BUFIO或BUFR</p> </td></tr><tr><td style="border-color:#000000;vertical-align:top;width:56.45pt;"> <p style="margin-left:.0001pt;">BUFG</p> </td><td style="vertical-align:top;width:212.65pt;"> <p style="margin-left:.0001pt;">同一侧的CC、CMT、GT时钟、BUFR和邻近的BUFG</p> </td><td style="vertical-align:top;width:253.7pt;"> <p style="margin-left:.0001pt;">可以驱动CMT、GT时钟，同侧BUFG和其他任何可接时钟的资源</p> </td></tr><tr><td style="border-color:#000000;vertical-align:top;width:56.45pt;"> <p style="margin-left:.0001pt;">BUFH</p> </td><td style="vertical-align:top;width:212.65pt;"> <p style="margin-left:.0001pt;">CC、CMT、BUFG和GT时钟可驱动</p> </td><td style="vertical-align:top;width:253.7pt;"> <p style="margin-left:.0001pt;">可驱动CMT、GT和统一时钟域的任何时钟点</p> </td></tr></tbody></table> 
+<p></p> 
+<p style="margin-left:.0001pt;"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e419bbaba1fb2c23f734ff5f3f2f8efd/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">关于React中函数组件中父子组件函数执行顺序</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/acb0f18030a17b4eb929115bbf0dbfb0/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">沧小海笔记之xilinx 7系列的时钟架构（下）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

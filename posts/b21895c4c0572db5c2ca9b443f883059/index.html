@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【redis13】集群前奏：sentinel模式 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【redis13】集群前奏：sentinel模式" />
+<meta property="og:description" content="1.哨兵sentinel引入背景 我们现在来思考一个问题：如何实现服务的高可用。我们首先想到至少要满足两个要求：1.服务端能够实现主从自动切换；2.对于客户端来说，如果发生了主从切换，则能够自动连接到最新的master节点。
+我们首先想到一个思路：增加一个领导者角色，能够管理redis节点存活状态，而且具备路由功能。比如master节点超过一定时间没有给监控服务器发送心跳报文，就把master标记为下线，然后将某个slave变成master。应用每一次都是从这个监控服务器骂道master的地址。
+那问题来了？如果这个监控服务器本身出问题了怎么办？或者网络不同了，链接不到监控服务器了？
+那是不是应该再创建一个监控服务器，来监控监控服务器？这个似乎无解了？因此如果采取哨兵sentinel的模式，我们该如何设计就是很重要的问题了。
+这篇博客内容还不错，我们直接拿来用啦！
+对于sentinel机制，我们的问题可以细分为以下几个方面：
+什么是Redis的哨兵模式？哨兵模式的优点是什么？哨兵模式的工作原理是什么？如何配置Redis的哨兵模式？哨兵模式中的故障转移是如何实现的？ 我们先来了解一下哨兵机制实现了以下主要功能，进一步了解这些功能的实现原理。
+监控：哨兵节点定期检查Redis主节点和从节点的健康状态。它们发送命令并等待响应，以确保Redis实例正常运行。如果一个节点没有响应，哨兵节点会将其标记为下线。故障检测和转移：当一个哨兵节点检测到主节点下线时，它会将这个信息广播给其他哨兵节点。当大多数哨兵节点都确认主节点下线后，它们会开始选举出一个新的主节点。这个过程称为故障转移，它可以确保Redis集群在主节点故障时仍然能够正常运行。自动故障转移：一旦新的主节点选出，哨兵节点会更新Redis从节点的配置，使它们切换到新的主节点。这个过程是自动进行的，无需人工干预。配置提供和更新：哨兵节点会监控Redis集群的配置，并在需要时提供给客户端。当主节点发生故障转移时，哨兵节点会更新从节点的配置，使它们正确地连接到新的主节点。提供集群信息：哨兵节点可以提供有关Redis集群的信息，如主节点、从节点和哨兵节点的地址和状态。 根据上面的描述，我们可以将哨兵的功能总结为以下几点：
+哨兵机制可以提供高可用性和故障转移能力，确保Redis集群在主节点故障时仍然可用。
+2. 哨兵机制的原理 2.1 基本过程 哨兵实例之间可以相互发现，要归功于 Redis 提供的 pub/sub 机制，也就是发布/订阅机制。哨兵只要和主库建立起了连接，就可以在主库上发布消息了，比如说发布它自己的连接信息（IP 和端口）。同时，它也可以从主库上订阅消息，获得其他哨兵发布的连接信息。当多个哨兵实例都在主库上做了发布和订阅操作后，它们之间就能知道彼此的 IP 地址和端口。除了哨兵实例，我们自己编写的应用程序也可以通过 Redis 进行消息的发布和订阅。所以，为了区分不同应用的消息，Redis 会以频道的形式，对这些消息进行分门别类的管理。所谓的频道，实际上就是消息的类别。当消息类别相同时，它们就属于同一个频道。反之，就属于不同的频道。只有订阅了同一个频道的应用，才能通过发布的消息进行信息交换。
+在主从集群中，主库上有一个名为__sentinel__:hello的频道，不同哨兵就是通过它来相互发现，实现互相通信的。我来举个例子，具体说明一下。在下图中，哨兵 1 把自己的 IP（172.16.19.3）和端口（26579）发布到__sentinel__:hello频道上，哨兵 2 和 3 订阅了该频道。那么此时，哨兵 2 和 3 就可以从这个频道直接获取哨兵 1 的 IP 地址和端口号。然后，哨兵 2、3 可以和哨兵 1 建立网络连接。通过这个方式，哨兵 2 和 3 也可以建立网络连接，这样一来，哨兵集群就形成了。它们相互间可以通过网络连接进行通信，比如说对主库有没有下线这件事儿进行判断和协商。
+通过上面的讲解我们可以总结出来如下几点：
+1. 哨兵集群的组建步骤
+步骤1：启动哨兵节点。步骤2：配置哨兵节点的监控对象。步骤3：哨兵节点之间的通信和协调。 2.哨兵节点的角色和作用
+Master节点：负责处理读写请求的主节点。Slave节点：通过复制Master节点的数据实现数据备份和读取。Sentinel节点：监控Redis集群的状态，负责主库下线判定和故障转移。 哨兵是如何知道从库的信息
+哨兵向主库发送INFO命令，主库将从库列表发送给从库，哨兵跟从库列表中的从库建立连接，以便监控从库。
+2.2. 主库下线的判定 在Redis Sentinel中，主从切换的执行由哨兵集群中的多个哨兵节点共同协作完成。当哨兵集群中的某个哨兵节点检测到主节点下线时，它会向其他哨兵节点发送消息，然后所有哨兵节点共同达成一致，选举出一个新的主节点，并将其他从节点指向新的主节点。选举的过程中，哨兵节点会通过投票和心跳机制来确定新的主节点。选举出的新主节点会广播给所有的客户端，以便它们能够与新的主节点进行通信。所以，主从切换的执行是由所有的哨兵节点共同参与的。 哨兵节点通过心跳机制监控主库的状态。当哨兵节点判定主库下线时，会广播通知其他哨兵节点。哨兵节点通过共识算法，确定主库是否真的下线。 2.3. 哨兵集群选举 当一个哨兵节点检测到主节点下线时，它会向其他哨兵节点发送消息，通知它们主节点已经下线。其他哨兵节点接收到消息后，它们也会检查主节点是否下线。如果它们同意主节点已下线，它们会进入选举过程。在选举过程中，哨兵节点会相互通信，通过投票和心跳机制来决定新的主节点。每个哨兵节点会为自己选举一个优先级最高的候选节点，然后它们会将自己选举的候选节点发送给其他哨兵节点。哨兵节点会根据候选节点的优先级来选出一个新的主节点。如果有多个候选节点具有相同的优先级，那么将根据配置文件中的故障转移超时属性来决定。选举出的新主节点将会广播给所有的客户端，以便它们能够与新的主节点进行通信。 需要注意的是，在选举过程中，哨兵节点需要达成多数派的共识才能选出新的主节点。例如，如果哨兵节点的总数为5，那么至少需要3个哨兵节点同意选举结果才能生效。
+这个选举过程确保了在主节点下线的情况下，哨兵集群能够自动选举出一个新的主节点，从而保证了Redis的高可用性。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/b21895c4c0572db5c2ca9b443f883059/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-20T23:25:54+08:00" />
+<meta property="article:modified_time" content="2024-01-20T23:25:54+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【redis13】集群前奏：sentinel模式</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p></p> 
+<p></p> 
+<h2>1.哨兵sentinel引入背景</h2> 
+<p>我们现在来思考一个问题：如何实现服务的高可用。我们首先想到至少要满足两个要求：1.服务端能够实现主从自动切换；2.对于客户端来说，如果发生了主从切换，则能够自动连接到最新的master节点。<br> 我们首先想到一个思路：增加一个领导者角色，能够管理redis节点存活状态，而且具备路由功能。比如master节点超过一定时间没有给监控服务器发送心跳报文，就把master标记为下线，然后将某个slave变成master。应用每一次都是从这个监控服务器骂道master的地址。<br> 那问题来了？如果这个监控服务器本身出问题了怎么办？或者网络不同了，链接不到监控服务器了？<br> 那是不是应该再创建一个监控服务器，来监控监控服务器？这个似乎无解了？因此如果采取哨兵sentinel的模式，我们该如何设计就是很重要的问题了。</p> 
+<p><a class="link-info" href="https://blog.csdn.net/wangshuai6707/article/details/131708763" title="这篇博客内容还不错">这篇博客内容还不错</a>，我们直接拿来用啦！</p> 
+<p>对于sentinel机制，我们的问题可以细分为以下几个方面：</p> 
+<ol><li>什么是Redis的哨兵模式？</li><li>哨兵模式的优点是什么？</li><li>哨兵模式的工作原理是什么？</li><li>如何配置Redis的哨兵模式？</li><li>哨兵模式中的故障转移是如何实现的？</li></ol> 
+<p>我们先来了解一下哨兵机制实现了以下主要功能，进一步了解这些功能的实现原理。</p> 
+<p class="img-center"><img alt="" height="318" src="https://images2.imgbox.com/46/ce/QnqsaJIT_o.png" width="436"></p> 
+<p></p> 
+<ol><li>监控：哨兵节点定期检查Redis主节点和从节点的健康状态。它们发送命令并等待响应，以确保Redis实例正常运行。如果一个节点没有响应，哨兵节点会将其标记为下线。</li><li>故障检测和转移：当一个哨兵节点检测到主节点下线时，它会将这个信息广播给其他哨兵节点。当大多数哨兵节点都确认主节点下线后，它们会开始选举出一个新的主节点。这个过程称为故障转移，它可以确保Redis集群在主节点故障时仍然能够正常运行。</li><li>自动故障转移：一旦新的主节点选出，哨兵节点会更新Redis从节点的配置，使它们切换到新的主节点。这个过程是自动进行的，无需人工干预。</li><li>配置提供和更新：哨兵节点会监控Redis集群的配置，并在需要时提供给客户端。当主节点发生故障转移时，哨兵节点会更新从节点的配置，使它们正确地连接到新的主节点。</li><li>提供集群信息：哨兵节点可以提供有关Redis集群的信息，如主节点、从节点和哨兵节点的地址和状态。</li></ol> 
+<p>根据上面的描述，我们可以将哨兵的功能总结为以下几点：</p> 
+<p>哨兵机制可以提供高可用性和故障转移能力，确保Redis集群在主节点故障时仍然可用。</p> 
+<h2>2. 哨兵机制的原理</h2> 
+<h3>2.1 基本过程</h3> 
+<p>哨兵实例之间可以相互发现，要归功于 Redis 提供的 pub/sub 机制，也就是发布/订阅机制。哨兵只要和主库建立起了连接，就可以在主库上发布消息了，比如说发布它自己的连接信息（IP 和端口）。同时，它也可以从主库上订阅消息，获得其他哨兵发布的连接信息。当多个哨兵实例都在主库上做了发布和订阅操作后，它们之间就能知道彼此的 IP 地址和端口。除了哨兵实例，我们自己编写的应用程序也可以通过 Redis 进行消息的发布和订阅。所以，为了区分不同应用的消息，Redis 会以频道的形式，对这些消息进行分门别类的管理。所谓的频道，实际上就是消息的类别。当消息类别相同时，它们就属于同一个频道。反之，就属于不同的频道。只有订阅了同一个频道的应用，才能通过发布的消息进行信息交换。<br> 在主从集群中，主库上有一个名为__sentinel__:hello的频道，不同哨兵就是通过它来相互发现，实现互相通信的。我来举个例子，具体说明一下。在下图中，哨兵 1 把自己的 IP（172.16.19.3）和端口（26579）发布到__sentinel__:hello频道上，哨兵 2 和 3 订阅了该频道。那么此时，哨兵 2 和 3 就可以从这个频道直接获取哨兵 1 的 IP 地址和端口号。然后，哨兵 2、3 可以和哨兵 1 建立网络连接。通过这个方式，哨兵 2 和 3 也可以建立网络连接，这样一来，哨兵集群就形成了。它们相互间可以通过网络连接进行通信，比如说对主库有没有下线这件事儿进行判断和协商。<img alt="" height="1200" src="https://images2.imgbox.com/3a/f7/bYoYcAAB_o.png" width="1200"></p> 
+<p>通过上面的讲解我们可以总结出来如下几点：</p> 
+<p> 1. 哨兵集群的组建步骤</p> 
+<blockquote> 
+ <ul><li>步骤1：启动哨兵节点。</li><li>步骤2：配置哨兵节点的监控对象。</li><li>步骤3：哨兵节点之间的通信和协调。</li></ul> 
+</blockquote> 
+<p>2.哨兵节点的角色和作用</p> 
+<blockquote> 
+ <ul><li>Master节点：负责处理读写请求的主节点。</li><li>Slave节点：通过复制Master节点的数据实现数据备份和读取。</li><li>Sentinel节点：监控Redis集群的状态，负责主库下线判定和故障转移。</li></ul> 
+</blockquote> 
+<p style="background-color:transparent;">哨兵是如何知道从库的信息</p> 
+<p>哨兵向主库发送INFO命令，主库将从库列表发送给从库，哨兵跟从库列表中的从库建立连接，以便监控从库。</p> 
+<p><img alt="" height="1200" src="https://images2.imgbox.com/69/54/B7IJXLc2_o.png" width="1200"></p> 
+<h3>2.2. 主库下线的判定</h3> 
+<p>在Redis Sentinel中，主从切换的执行由哨兵集群中的多个哨兵节点共同协作完成。当哨兵集群中的某个哨兵节点检测到主节点下线时，它会向其他哨兵节点发送消息，然后所有哨兵节点共同达成一致，选举出一个新的主节点，并将其他从节点指向新的主节点。选举的过程中，哨兵节点会通过投票和心跳机制来确定新的主节点。选举出的新主节点会广播给所有的客户端，以便它们能够与新的主节点进行通信。所以，主从切换的执行是由所有的哨兵节点共同参与的。 </p> 
+<p><img alt="" height="1200" src="https://images2.imgbox.com/a2/74/IWMgP4X1_o.png" width="1200"></p> 
+<ol><li>哨兵节点通过心跳机制监控主库的状态。</li><li>当哨兵节点判定主库下线时，会广播通知其他哨兵节点。</li><li>哨兵节点通过共识算法，确定主库是否真的下线。</li></ol> 
+<h3>2.3. 哨兵集群选举</h3> 
+<ol><li>当一个哨兵节点检测到主节点下线时，它会向其他哨兵节点发送消息，通知它们主节点已经下线。</li><li>其他哨兵节点接收到消息后，它们也会检查主节点是否下线。如果它们同意主节点已下线，它们会进入选举过程。</li><li>在选举过程中，哨兵节点会相互通信，通过投票和心跳机制来决定新的主节点。</li><li>每个哨兵节点会为自己选举一个优先级最高的候选节点，然后它们会将自己选举的候选节点发送给其他哨兵节点。</li><li>哨兵节点会根据候选节点的优先级来选出一个新的主节点。如果有多个候选节点具有相同的优先级，那么将根据配置文件中的故障转移超时属性来决定。</li><li>选举出的新主节点将会广播给所有的客户端，以便它们能够与新的主节点进行通信。</li></ol> 
+<p>需要注意的是，在选举过程中，哨兵节点需要达成多数派的共识才能选出新的主节点。例如，如果哨兵节点的总数为5，那么至少需要3个哨兵节点同意选举结果才能生效。</p> 
+<p>这个选举过程确保了在主节点下线的情况下，哨兵集群能够自动选举出一个新的主节点，从而保证了Redis的高可用性。</p> 
+<p>总结一下</p> 
+<ol><li>当主库下线后，哨兵节点会开始选举新的主库。</li><li>哨兵节点通过共识算法选出新的主库。</li><li>新主库被选出后，哨兵节点会通知其他节点进行切换。</li></ol> 
+<p><img alt="" height="1200" src="https://images2.imgbox.com/cd/54/WqPUWkrq_o.png" width="1200"></p> 
+<h2>3. Redis哨兵模式面试题</h2> 
+<p>根据上面的学习，我们来简答一下常见的Redis高可用相关面试题</p> 
+<h3>3.1. 什么是Redis的哨兵模式？</h3> 
+<p>Redis的哨兵模式是一种用于实现高可用性的机制。在哨兵模式中，多个Redis实例组成一个哨兵集群，其中一个实例作为主服务器，其他实例作为从服务器。哨兵监控主服务器的状态，并在主服务器宕机时自动将某个从服务器提升为新的主服务器，以保证系统的持续可用性。</p> 
+<h3 style="background-color:transparent;">3.2. 哨兵模式的优点是什么？</h3> 
+<p>自动故障转移：当主服务器宕机时，哨兵可以自动选举一个新的主服务器，从而保证系统的高可用性。<br> 实时监控：哨兵可以实时监控Redis实例的状态，并在发现异常时及时采取措施，如自动切换主服务器。<br> 灵活性：哨兵模式可以根据实际需求配置哨兵集群的大小，以适应不同规模的系统。</p> 
+<h3>3.3. 哨兵模式的工作原理是什么？</h3> 
+<p>哨兵集群中的哨兵不断地监控Redis实例的状态。<br> 每个哨兵通过发送PING命令来检测Redis实例的存活状态。<br> 如果一个哨兵发现主服务器宕机，它会通过选举算法选出一个新的主服务器，并将这一信息广播给其他哨兵。<br> 其他哨兵收到广播后，也会更新自己的配置，以适应新的主服务器。<br> 客户端可以通过连接任意一个哨兵来获取当前的主服务器地址，并与主服务器建立连接。</p> 
+<h3>3.4. 如何配置Redis的哨兵模式？</h3> 
+<p>在每个Redis实例的配置文件中设置sentinel参数，指定哨兵模式的相关配置。<br> 启动每个Redis实例，并指定相应的配置文件。<br> 在哨兵集群中的任意一个哨兵上运行redis-sentinel命令，启动哨兵进程。<br> 哨兵进程会自动发现其他哨兵和Redis实例，并开始监控它们的状态。</p> 
+<h3>4. 5. 哨兵模式中的故障转移是如何实现的？</h3> 
+<p>当一个哨兵发现主服务器宕机时，它会向其他哨兵发送选举请求。<br> 哨兵集群中的所有哨兵会进行选举，选出一个新的主服务器。<br> 选举规则通常是根据优先级、最近一次复制偏移量等因素进行评估。<br> 选举完成后，新的主服务器地址会被广播给其他哨兵和客户端。<br> 客户端可以通过连接任意一个哨兵来获取新的主服务器地址，并与其建立连接。</p> 
+<p></p> 
+<p>内容参考：</p> 
+<p><a href="https://blog.csdn.net/wangshuai6707/article/details/131708763" title="redis哨兵模式高可用">redis哨兵模式高可用</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/def4be7fd56c4baca8641a5b0cb14637/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">蓝桥杯练习题（十二）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/4706e0dc091c0b6e2927e9bd2f722017/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">html5——前端笔记</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

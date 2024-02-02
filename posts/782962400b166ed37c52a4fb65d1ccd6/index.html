@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>操作系统Ucore:Lab2内存管理(六) - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="操作系统Ucore:Lab2内存管理(六)" />
+<meta property="og:description" content="进入Lab2，Lab2的主要内容是内存的管理
+0.新的bug 按照文档上的说明，我们要把lab1中写的代码复制到Lab2中。我一开始并不想这样做，因为我想保留我在Lab1中写的注释，所以我就merge了lab2到lab1中，经过了艰难的处理冲突之后，make qemu 。但悲剧的是qemu的控制台没有输出，我仔细的再次比对代码，还是没有找出为什么。无奈之下，只好复制lab1的代码到lab2…
+但这还没完
+源代码中由好几个像注释部分这样初始化的位置，但是我前文已经验证了这样是无法正常初始化的啊…用gdb看这些值都是0，而且程序也无法正常运行。把这种代码搬到自己电脑上用gcc编译都是不过的,不知道ucore里使用了什么样的魔法可以编译通过。
+所以只能手动修改了，把初始化放到使用这个变量之前的函数体中，但是这个几个引用的函数还都是static的，那就只好在对应的文件里写一个init函数，仔细一看，这个default_pmm_manager还是const的…还得用一个其他变量去初始化…
+ps：关于这个初始化问题，我是这样想的，我发现错误是在编译阶段报的，所以应该是编译器认为初始化的变量没有办法算出来（因为具体的地址需要在链接阶段才能算出来），所以拒绝初始化。在我的机器上实验(gcc version= 9.3.0 )这种情况是会报error的，但是不知道ucore的哪个选项让它可以无视错误继续编译，我也没有深入研究了，要是有谁知道可以在评论里留言。
+总之，经过了一番和gcc的斗智斗勇之后，程序总算是能跑起来了…
+1.探测内存 在bootasm中，加入了探测内存的功能，可以得到机器中可用的内存分布。
+具体的位置在probe_memory标号处，具体是怎么探测的，其实并不重要，只需要知道
+这个功能是由BIOS来完成的，我们只需要使用int指令加上参数调用就行。
+最终返回的结果在内存位置0x8000处，我们这时候还是在实模式下的，所以这是物理内存的位置。
+我们使用一个结构体来描述内存分布，即e820map
+注意：我们只是定义了这个结构体，并没有实例化，也不需要实例化，只需要让其指向0x8000就行了（这个过程在page_init里执行）。定义这个结构体的目的在于方便我们访问内存分布的信息。
+我们只需要知道实际的输出是什么就行了
+得到的结果如图，第一列是内存大小，第二列是范围，第三列是类型。（根据文档的描述，这里报告的也不是全部，比如现存的额映射地址就不会报告）
+文档在这里
+这里的类型由1和2两种，简而言之，只可以使用type = 1的内存
+一共可以用两块内存，从0x0开始的640KB和从0x100000开始的126MB.第一部分，装了bootblock，我们主要管理的是第二部分大约128MB的内存。
+2.Entry.S bootmain还是熟悉的配方，读取磁盘，载入ELF，跳到内核段代码。
+这里有一点，就是编译的时候链接脚本变了，程序的入口地址不再是0x100000了，而是0xc010_0000。
+但这并不影响我们加载
+bootmain里加载的时候都只取了低30位，所以实际加载和跳转的地址和Lab1是一样的。
+转到e_entry之后，在kern_init之前要先执行entry.s
+这一套操作是熟悉的加载gdt表，唯一不同的就是gdt使用了REALLOC宏修饰，这样做的原因是，我们在链接的时候给的起始地址是0xc010_0000，所以__gdtdesc这个标号的值是0xc010_0000加上偏移量，这对于我们来说是个虚拟地址，实际上的__gdtdesc是在0x0010_0000开头的位置上，所以要减去0xc000_0000
+我们再看gdt的内容
+基址是 （-0xc000_0000），界限是4G。为什么会这样呢，原因就是我们现在需要把0xc010_0000 的地址都映射到0x0010_0000位置
+而寻址的方式是CS&#43;IP，所以我们需要把CS设置位-0xc000_0000就可以完成映射。
+这里一定要清楚：
+执行完ljmp指令之后，EIP的值就是0xc010_0000开头的了
+但是实际上我们访问的物理地址还是0x0010_0000位置（因为CS基址映射）
+设置新的内核栈，这次和Lab1不一样了，新的栈空间为
+data段的开头 ---- data段开头&#43;8KB。
+这里有一个小问题，就是同时链接这么多文件的时候，这么确保栈在data段的开头。
+我们可以看到，链接时entry.o是在开头的。我们做一个实验
+step1.在1.c文件中写main函数，在2.c文件中写func函数。
+step2.分别编译成1.obj和2.obj
+step3. ld 1.obj 2.obj -o 12 和 ld 2.obj 1.obj -o 21
+step4.查看反汇编(省略了具体汇编代码)
+12.hex
+21.hex
+我们发现，函数的位置和链接的顺序是一样的。所以entry.s总是在data段的开头（这样的实验不太严谨，毕竟我也没有看ld的文档…但大概就是这样吧）
+最后，call kern_init
+3.pmm_init pmm_init前都没有什么变化." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/782962400b166ed37c52a4fb65d1ccd6/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-12-11T22:04:32+08:00" />
+<meta property="article:modified_time" content="2021-12-11T22:04:32+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">操作系统Ucore:Lab2内存管理(六)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>进入Lab2，Lab2的主要内容是内存的管理</p> 
+<h2><a id="0bug_1"></a>0.新的bug</h2> 
+<p>按照文档上的说明，我们要把lab1中写的代码复制到Lab2中。我一开始并不想这样做，因为我想保留我在Lab1中写的注释，所以我就merge了lab2到lab1中，经过了艰难的处理冲突之后，make qemu 。但悲剧的是qemu的控制台没有输出，我仔细的再次比对代码，还是没有找出为什么。无奈之下，只好复制lab1的代码到lab2…</p> 
+<p>但这还没完<br> <img src="https://images2.imgbox.com/d8/91/BBK5BB9b_o.png" alt="在这里插入图片描述"></p> 
+<p>源代码中由好几个像注释部分这样初始化的位置，但是我前文已经验证了这样是无法正常初始化的啊…用gdb看这些值都是0，而且程序也无法正常运行。把这种代码搬到自己电脑上用gcc编译都是不过的,不知道ucore里使用了什么样的魔法可以编译通过。</p> 
+<p>所以只能手动修改了，把初始化放到使用这个变量之前的函数体中，但是这个几个引用的函数还都是static的，那就只好在对应的文件里写一个init函数，仔细一看，这个default_pmm_manager还是const的…还得用一个其他变量去初始化…</p> 
+<p>ps：关于这个初始化问题，我是这样想的，我发现错误是在编译阶段报的，所以应该是编译器认为初始化的变量没有办法算出来（因为具体的地址需要在链接阶段才能算出来），所以拒绝初始化。在我的机器上实验(gcc version= 9.3.0 )这种情况是会报error的，但是不知道ucore的哪个选项让它可以无视错误继续编译，我也没有深入研究了，要是有谁知道可以在评论里留言。</p> 
+<p>总之，经过了一番和gcc的斗智斗勇之后，程序总算是能跑起来了…</p> 
+<h2><a id="1_15"></a>1.探测内存</h2> 
+<p>在bootasm中，加入了探测内存的功能，可以得到机器中可用的内存分布。</p> 
+<p>具体的位置在probe_memory标号处，具体是怎么探测的，其实并不重要，只需要知道</p> 
+<ul><li> <p>这个功能是由BIOS来完成的，我们只需要使用int指令加上参数调用就行。</p> </li><li> <p>最终返回的结果在内存位置0x8000处，我们这时候还是在实模式下的，所以这是物理内存的位置。</p> </li><li> <p>我们使用一个结构体来描述内存分布，即e820map</p> </li></ul> 
+<p><img src="https://images2.imgbox.com/67/ec/rWqlSjjC_o.png" alt="在这里插入图片描述"><br> 注意：我们只是定义了这个结构体，并没有实例化，也不需要实例化，只需要让其指向0x8000就行了（这个过程在page_init里执行）。定义这个结构体的目的在于方便我们访问内存分布的信息。</p> 
+<p>我们只需要知道实际的输出是什么就行了<br> <img src="https://images2.imgbox.com/fd/24/zjVvGGso_o.png" alt="在这里插入图片描述"><br> 得到的结果如图，第一列是内存大小，第二列是范围，第三列是类型。（根据文档的描述，这里报告的也不是全部，比如现存的额映射地址就不会报告）<br> 文档在<a href="http://www.uruk.org/orig-grub/mem64mb.html" rel="nofollow">这里</a><br> <img src="https://images2.imgbox.com/68/da/WO5AS2wv_o.png" alt="在这里插入图片描述"><br> 这里的类型由1和2两种，简而言之，只可以使用type = 1的内存</p> 
+<p>一共可以用两块内存，从0x0开始的640KB和从0x100000开始的126MB.第一部分，装了bootblock，我们主要管理的是第二部分大约128MB的内存。</p> 
+<h2><a id="2EntryS_37"></a>2.Entry.S</h2> 
+<p>bootmain还是熟悉的配方，读取磁盘，载入ELF，跳到内核段代码。</p> 
+<p>这里有一点，就是编译的时候链接脚本变了，程序的入口地址不再是0x100000了，而是0xc010_0000。<br> <img src="https://images2.imgbox.com/9b/8a/6VlJC9lv_o.png" alt="在这里插入图片描述"><br> 但这并不影响我们加载<br> <img src="https://images2.imgbox.com/14/da/Nw1HA281_o.png" alt="在这里插入图片描述"><br> bootmain里加载的时候都只取了低30位，所以实际加载和跳转的地址和Lab1是一样的。</p> 
+<p>转到e_entry之后，在kern_init之前要先执行entry.s</p> 
+<p><img src="https://images2.imgbox.com/98/37/0ahu7y5t_o.png" alt="在这里插入图片描述"><br> 这一套操作是熟悉的加载gdt表，唯一不同的就是gdt使用了REALLOC宏修饰，这样做的原因是，我们在链接的时候给的起始地址是0xc010_0000，所以__gdtdesc这个标号的值是0xc010_0000加上偏移量，这对于我们来说是个虚拟地址，实际上的__gdtdesc是在0x0010_0000开头的位置上，所以要减去0xc000_0000</p> 
+<p>我们再看gdt的内容<br> <img src="https://images2.imgbox.com/90/c8/qcTJ3CFa_o.png" alt="在这里插入图片描述"><br> 基址是 （-0xc000_0000），界限是4G。为什么会这样呢，原因就是我们现在需要把0xc010_0000 的地址都映射到0x0010_0000位置</p> 
+<p>而寻址的方式是CS+IP，所以我们需要把CS设置位-0xc000_0000就可以完成映射。</p> 
+<p>这里一定要清楚：</p> 
+<p>执行完ljmp指令之后，EIP的值就是0xc010_0000开头的了</p> 
+<p>但是实际上我们访问的物理地址还是0x0010_0000位置（因为CS基址映射）<br> <img src="https://images2.imgbox.com/e3/92/nUdh2PeQ_o.png" alt="在这里插入图片描述"><br> 设置新的内核栈，这次和Lab1不一样了，新的栈空间为</p> 
+<p>data段的开头 ---- data段开头+8KB。</p> 
+<p>这里有一个小问题，就是同时链接这么多文件的时候，这么确保栈在data段的开头。<br> <img src="https://images2.imgbox.com/db/bb/6sRBjySb_o.png" alt="在这里插入图片描述"><br> 我们可以看到，链接时entry.o是在开头的。我们做一个实验</p> 
+<p>step1.在1.c文件中写main函数，在2.c文件中写func函数。</p> 
+<p>step2.分别编译成1.obj和2.obj</p> 
+<p>step3. ld 1.obj 2.obj -o 12 和 ld 2.obj 1.obj -o 21</p> 
+<p>step4.查看反汇编(省略了具体汇编代码)</p> 
+<p>12.hex<br> <img src="https://images2.imgbox.com/96/03/EOybiQhT_o.png" alt="在这里插入图片描述"><br> 21.hex<br> <img src="https://images2.imgbox.com/b3/07/2pSYGtFM_o.png" alt="在这里插入图片描述"><br> 我们发现，函数的位置和链接的顺序是一样的。所以entry.s总是在data段的开头（这样的实验不太严谨，毕竟我也没有看ld的文档…但大概就是这样吧）</p> 
+<p>最后，call kern_init</p> 
+<h2><a id="3pmm_init_87"></a>3.pmm_init</h2> 
+<p>pmm_init前都没有什么变化.</p> 
+<p>这里还有一个问题，就是如果使用gdb在经过entry.s中的ljmp之后，每一步返汇编的值就不对了，而且使用b 函数名称这种方式也打不上断点了。原因是gdb好像并不会看CS的值，只会看EIP，但是实际的地址和EIP并不一样，所以无法正确显示信息。</p> 
+<p><s>解决的办法为：<br> 1.对于单步反汇编<br> define rawsi<br> si<br> x/i ($eip - 0xc0000000)<br> end<br> 定义这个宏，手动反汇编实际内存位置<br> 2.对于函数断点<br> 这个暂时还没有找到好办法，去反汇编出来的kern的asm里找地址吧<br> 经过半个小时的研究，终于找到一种奇妙的方法<br> define pb<br> set $pfunc = (uint32_t)$arg0 - 0xc0000000<br> b *($pfunc)<br> end<br> 使用pb func_name 就可以了</s></p> 
+<h4><a id="_108"></a>别想了，这些虽然能正确的打上断点，但是并不能单步执行和查看变量值。</h4> 
+<p>所以我们只能手动debug了，首先我们要善其器，来一个DEBUG起手式</p> 
+<pre><code class="prism language-C">#define SPLIT cprintf("------------------------\n")
+
+#define DEBUG_LEVEL 2
+#define __output(...) \
+    cprintf(__VA_ARGS__); 
+
+#if DEBUG_LEVEL == 1
+#define __format(__fmt__) "&lt;%s&gt;: " __fmt__ "\n"
+#define DEBUG(__fmt__, ...) \
+         __output(__format(__fmt__), __FUNCTION__, ##__VA_ARGS__);
+#elif DEBUG_LEVEL == 2
+#define __format(__fmt__) "(%d)-&lt;%s&gt;: " __fmt__ "\n"
+#define DEBUG(__fmt__, ...) \
+         __output(__format(__fmt__), __LINE__, __FUNCTION__, ##__VA_ARGS__);
+#else 
+#define __format(__fmt__) "%s(%d)-&lt;%s&gt;: " __fmt__ "\n"
+#define DEBUG(__fmt__, ...) \
+         __output(__format(__fmt__), __FILE__, __LINE__, __FUNCTION__, ##__VA_ARGS__);
+#endif
+</code></pre> 
+<p>定义完这些之后，就可以方便的看出输出的位置了</p> 
+<p>我们使用一个叫做 pmm_manager的结构体来代表现在正在使用的管理方式<br> <img src="https://images2.imgbox.com/f6/f1/F9xOmYXa_o.png" alt="在这里插入图片描述"><br> 此结构体里有数据和可供调用的方法，可以理解为一个类，我们在管理内存过程中会调用这些方法。</p> 
+<h2><a id="4page_init_139"></a>4.page_init</h2> 
+<p>此函数的开头是探测内存，这里就不在解释了。</p> 
+<p>第二部分，我们主要来看输出的值是什么<br> <img src="https://images2.imgbox.com/f6/d2/aT1SdiD7_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/55/6c/JdlmokR5_o.png" alt="在这里插入图片描述"><br> 首先，最大的内存max_pa 为 7fe0000，这实际上包含了e820map的前四段内容。至于为什么要把不可用的也算进来，我也还不清楚，看到后面再补充</p> 
+<p>end 指示数据段的末尾</p> 
+<p>npage 表示把所有的内存分为 32736 个页</p> 
+<p>pages 是第一个Page结构体的起始位置，其算法为将end取整到4kb后的第一个页</p> 
+<p>freemem 为pages 后面的内存减去page数组大小的值</p> 
+<p>这样描述很不清楚，所以我画了一张图来方便理解<br> <img src="https://images2.imgbox.com/29/19/sRGtzyr8_o.png" alt="在这里插入图片描述"><br> 如图，具体的内存地址可能会不太一样。</p> 
+<p>所有的页都会对应pages数组中的一项，pages数组中的每一项都是一个page结构体。</p> 
+<p>再page_init的最后会调用init_memmap函数，我们直接看传进去的参数就行</p> 
+<p><img src="https://images2.imgbox.com/70/64/doW90Y98_o.png" alt="在这里插入图片描述"><br> 第一个参数是需要管理内存的起始位置，第二个是一共有多少个页</p> 
+<p><img src="https://images2.imgbox.com/d8/cf/1DtwUnXD_o.png" alt="在这里插入图片描述"><br> 这里有一个很方便的函数page2ppn()可以显示当前的地址属于哪一个页。</p> 
+<p><img src="https://images2.imgbox.com/a1/20/b9s7cMQO_o.png" alt="在这里插入图片描述"><br> 我们来看输出，显示现在实在第444号页面上，我们可以管理32292个页面，加起来就 前面显示的一共 32736 个页。</p> 
+<p>for循环中，将base后面所有的page的property设置为0，因为这是后，双向链表里因该只有两项（head节点 和 一个显示有32292个空页面的节点）。</p> 
+<p>后面的代码就是把第二个节点加入。<br> <img src="https://images2.imgbox.com/98/5c/Z8f3xZ4s_o.png" alt="在这里插入图片描述"><br> 直观的来看，就是上图所示。第二个节点属于第444页面（可分配的起始位置，记住这个位置）</p> 
+<p>初始化完成之后，就是一个检测算法正确性的check函数了。现在，这个check函数是无法通过的。</p> 
+<h2><a id="5alloc__free_179"></a>5.alloc 和 free</h2> 
+<p>这两个函数是内存管理的关键。<br> <img src="https://images2.imgbox.com/7f/5c/UBcx4qqa_o.png" alt="在这里插入图片描述"><br> alloc的逻辑非常简单，先检测剩余的位置够不够，然后顺序的遍历链表，直到找到第一个符合的位置(property &gt; n) 然后，删除原来的节点，在原来的位置上插入新的节点，注意到这里调用的list_add是直接在头节点插入的，所以这里要改。（要保持整个链表是顺序的）<br> <img src="https://images2.imgbox.com/6a/c1/FjBC3lda_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/d0/46/3w2YnL6G_o.png" alt="在这里插入图片描述"><br> 删除的逻辑如上图，也是比较清晰的。同样，在最后更新的时候，原来的代码也是没有按顺序直接list_add的，这里是改过的。<br> <img src="https://images2.imgbox.com/86/3d/tNHHiIAA_o.png" alt="在这里插入图片描述"><br> 写一个按顺序的插入函数替换掉list_add就可以通过检测了。</p> 
+<p>想要全部看完代码的逻辑还是挺复杂的。可以用我写好的打印函数。</p> 
+<pre><code class="prism language-C">#include &lt;pmm.h&gt;
+void print_freeList(const list_entry_t* freeList){
+    const list_entry_t* t = freeList;
+    _print_freeList_elm_head(t);
+    list_entry_t* next = (t-&gt;next);
+    while(next != t ){
+        _print_freeList_elm(next);
+        next = (next-&gt;next);
+    }
+}
+void inline _print_freeList_elm_head(list_entry_t *elm){
+    cprintf("head:     prev = %08x , next = %08x \n", elm, (*elm).prev, (*elm).next);
+}
+void inline _print_freeList_elm(list_entry_t *elm){
+    struct Page *thisPage = le2page(elm, page_link);
+    cprintf("%08x(%d):free = %d , flag = %08x \n", thisPage, page2ppn(thisPage),\
+             thisPage-&gt;property , thisPage-&gt;flags );
+}
+</code></pre> 
+<h2><a id="6_210"></a>6.总结</h2> 
+<p>没有gdb太难了…</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/6dbbc19874d484cd84df0386e5220aa1/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Nginx负载均衡调度中的状态</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/91f7300c50c435489916ee2c02d378b9/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">数据结构 活期储蓄账目管理（课程设计完整实验报告）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

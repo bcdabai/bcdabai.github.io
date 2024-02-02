@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>bwa-mem中的ksw算法到底是怎么回事儿？ - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="bwa-mem中的ksw算法到底是怎么回事儿？" />
+<meta property="og:description" content="ksw算法小结 研究了这么久bwa-mem算法，也不只一次啃了ksw这块硬骨头，之前没有好好总结，今天来小结一下函数的输入输出。
+主要研究的对象是ksw_extend2函数，它是一个单线程、非完全匹配的sequence alignment算法，该算法基于动态规划的逻辑，进行数据匹配，由于数据间存在大量相关性，所以不方便并行实现，串行实现有十分耗时，我们的工作就是，把这一块从原工程中拎出来，并改写成GPU加速版本。
+下面分析函数的输入输出，把英语的注释翻译成了中文。
+ksw_extend2 @param qlen query length	待匹配段碱基的query长度 * @param query query sequence with 0 &lt;= query[i] &lt; m //query的指针	* @param tlen target length //reference长度 * @param target target sequence with 0 &lt;= target[i] &lt; m //reference数据的指针 * @param m number of residue types // 碱基种类=5 * @param mat m*m scoring mattrix in one-dimension array //每个位置的query和target的匹配得分 * @param gapo gap open penalty; a gap of length l cost &#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/0665661c4a60f4f87d7775053ab56758/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-12-20T22:21:33+08:00" />
+<meta property="article:modified_time" content="2018-12-20T22:21:33+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">bwa-mem中的ksw算法到底是怎么回事儿？</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="ksw_1"></a>ksw算法小结</h2> 
+<p>研究了这么久bwa-mem算法，也不只一次啃了ksw这块硬骨头，之前没有好好总结，今天来小结一下函数的输入输出。<br> 主要研究的对象是ksw_extend2函数，它是一个单线程、非完全匹配的sequence alignment算法，该算法基于动态规划的逻辑，进行数据匹配，由于数据间存在大量相关性，所以不方便并行实现，串行实现有十分耗时，我们的工作就是，把这一块从原工程中拎出来，并改写成GPU加速版本。</p> 
+<p>下面分析函数的输入输出，把英语的注释翻译成了中文。</p> 
+<h2><a id="ksw_extend2_8"></a>ksw_extend2</h2> 
+<pre><code>   @param qlen    query length		待匹配段碱基的query长度
+ * @param query   query sequence with 0 &lt;= query[i] &lt; m    //query的指针		
+ * @param tlen    target length                               //reference长度
+ * @param target  target sequence with 0 &lt;= target[i] &lt; m          //reference数据的指针
+ * @param m       number of residue types                           // 碱基种类=5
+ * @param mat     m*m scoring mattrix in one-dimension array      //每个位置的query和target的匹配得分
+ * @param gapo    gap open penalty; a gap of length l cost "-(gapo+l*gape)"  //错配开始的惩罚系数=6
+ * @param gape    gap extension penalty       						//错配继续的惩罚系数=1
+ * @param w       band width					//提前剪枝系数，w =100   匹配位置和beg的最大距离
+ * @param         end_bonus                                             end_bonus=5
+ * @param         zdrop 							 zdrop=100
+ * @param h0      alignment score of upstream sequences   //该seed的初始得分（完全匹配query的碱基数）
+ * @param _qle    (out) length of the query in the alignment     //匹配得到全局最大得分的碱基在query的位置
+ * @param _tle    (out) length of the target in the alignment   //匹配得到全局最大得分的碱基在reference的位置
+ * @param _gtle   (out) length of the target if query is fully aligned	//query全部匹配上的target的长度
+ * @param _gscore (out) score of the best end-to-end alignment;    //query的端到端匹配得分
+ * @param _gscore (out) max_off  								//取得最大得分时在query和reference上位置差的 最大值
+ 
+ * @return        best semi-local alignment score
+</code></pre> 
+<p>int ksw_extend2(int qlen, const uint8_t *query, int tlen, const uint8_t *target, int m, const int8_t *mat,<font color="green">int o_del, int e_del, int o_ins, int e_ins</font>, int w, int end_bonus, int zdrop, int h0, int *qle, int *tle, int *gtle, int *gscore, int *max_off);</p> 
+<p>其中绿色的四个参数对应上面的gapo和gape两个参数</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/571f1b692a91da645194a2886834f503/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Oracle之CMD导入DMP文件报错提示“IMP-00003: 遇到 ORACLE 错误 1917”</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/9e525ae1aa9442ca38e6eeeb11455301/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">网易雷火 Unity面经</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

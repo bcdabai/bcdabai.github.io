@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>ASAN内存校验器 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="ASAN内存校验器" />
+<meta property="og:description" content="文章目录 1. 简介ASAN原理 2. DemoUAFHeapOutOfBoundsStackOutOfBoundsuseAfterReturnuseAfterScopec&#43;&#43;静态初始化顺序问题内存泄露 3. 其它参考文章 1. 简介 Windows wdk提供了verifier校验器，用于排查内存泄漏等不好发现和定位的问题。
+Linux上的校验器就比较多了，如：
+Dr.Memory， 检测未初始化的内存访问、double free、use after free 等错误；Mudflap， 检测指针的解引用，静态插桩；Insure， 检测内存泄漏；Valgrind, 慢；ASAN，本文主角。 如果只是检测 memcpy/memset/strcpy 危险函数，可以使用 _FORTIFY_SOURCE机制。
+Google的ASAN（AddressSanitizer）应该是最给力的，结合编译器插桩和运行时快速内存检测，包括缓冲区溢出、空指针引用、野指针、Double Free等。
+ASAN 不支持检测【使用未初始化的内存】，MSAN（MemorySanitizer）可以。Google其实是提供了一整套校验程序。
+项目地址：https://github.com/google/sanitizers
+工具原理wiki介绍得很详细。本问主要记录一下ASAN的用法。
+ASAN原理 AddressSanitizer is a part of LLVM starting with version 3.1 and a part of GCC starting with version 4.8。
+ASAN由两部分组成：
+编译时插桩模块；运行时库，替换一些内存操作函数，比如用__asan_malloc替换malloc。 检测原理是在变量的左右内存区域下毒，这些区域又叫雷区/redzone：
+void *__asan_malloc(size_t sz) { void *rz = malloc(RED_SZ); // 上接雷区 Poison(rz, RED_SZ); void *addr = malloc(sz); // 真正分配的内存 UnPoison(addr, sz); rz = malloc(RED_SZ); // 下接雷区 Poison(rz, RED_SZ); return addr; // 返回分配的内存首地址 } 内存空间会被划分为以下两个类别：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/68d661a4be34ed924947f4b690c70506/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-04-14T14:04:47+08:00" />
+<meta property="article:modified_time" content="2022-04-14T14:04:47+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">ASAN内存校验器</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#1__1" rel="nofollow">1. 简介</a></li><li><ul><li><a href="#ASAN_22" rel="nofollow">ASAN原理</a></li></ul> 
+  </li><li><a href="#2_Demo_64" rel="nofollow">2. Demo</a></li><li><ul><li><a href="#UAF_66" rel="nofollow">UAF</a></li><li><a href="#HeapOutOfBounds_160" rel="nofollow">HeapOutOfBounds</a></li><li><a href="#StackOutOfBounds_233" rel="nofollow">StackOutOfBounds</a></li><li><a href="#useAfterReturn_309" rel="nofollow">useAfterReturn</a></li><li><a href="#useAfterScope_395" rel="nofollow">useAfterScope</a></li><li><a href="#c_483" rel="nofollow">c++静态初始化顺序问题</a></li><li><a href="#_527" rel="nofollow">内存泄露</a></li></ul> 
+  </li><li><a href="#3__650" rel="nofollow">3. 其它参考文章</a></li></ul> 
+</div> 
+<p></p> 
+<h2><a id="1__1"></a>1. 简介</h2> 
+<p>Windows wdk提供了verifier校验器，用于排查内存泄漏等不好发现和定位的问题。</p> 
+<p>Linux上的校验器就比较多了，如：</p> 
+<ul><li>Dr.Memory， 检测未初始化的内存访问、double free、use after free 等错误；</li><li>Mudflap， 检测指针的解引用，静态插桩；</li><li>Insure， 检测内存泄漏；</li><li>Valgrind, 慢；</li><li>ASAN，本文主角。</li></ul> 
+<blockquote> 
+ <p>如果只是检测 memcpy/memset/strcpy 危险函数，可以使用 _FORTIFY_SOURCE机制。</p> 
+</blockquote> 
+<p>Google的ASAN（AddressSanitizer）应该是最给力的，结合编译器插桩和运行时快速内存检测，包括缓冲区溢出、空指针引用、野指针、Double Free等。</p> 
+<p>ASAN 不支持检测【使用未初始化的内存】，MSAN（MemorySanitizer）可以。Google其实是提供了一整套校验程序。</p> 
+<p>项目地址：https://github.com/google/sanitizers</p> 
+<p>工具原理wiki介绍得很详细。本问主要记录一下ASAN的用法。</p> 
+<h3><a id="ASAN_22"></a>ASAN原理</h3> 
+<p>AddressSanitizer is a part of LLVM starting with version 3.1 and a part of GCC starting with version 4.8。</p> 
+<p>ASAN由两部分组成：</p> 
+<ol><li>编译时插桩模块；</li><li>运行时库，替换一些内存操作函数，比如用<code>__asan_malloc</code>替换malloc。</li></ol> 
+<p>检测原理是在变量的左右内存区域下毒，这些区域又叫雷区/redzone：</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token operator">*</span><span class="token function">__asan_malloc</span><span class="token punctuation">(</span><span class="token class-name">size_t</span> sz<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">void</span> <span class="token operator">*</span>rz <span class="token operator">=</span> <span class="token function">malloc</span><span class="token punctuation">(</span>RED_SZ<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// 上接雷区</span>
+    <span class="token function">Poison</span><span class="token punctuation">(</span>rz<span class="token punctuation">,</span> RED_SZ<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">void</span> <span class="token operator">*</span>addr <span class="token operator">=</span> <span class="token function">malloc</span><span class="token punctuation">(</span>sz<span class="token punctuation">)</span><span class="token punctuation">;</span>    <span class="token comment">// 真正分配的内存</span>
+    <span class="token function">UnPoison</span><span class="token punctuation">(</span>addr<span class="token punctuation">,</span> sz<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    rz <span class="token operator">=</span> <span class="token function">malloc</span><span class="token punctuation">(</span>RED_SZ<span class="token punctuation">)</span><span class="token punctuation">;</span>        <span class="token comment">// 下接雷区</span>
+    <span class="token function">Poison</span><span class="token punctuation">(</span>rz<span class="token punctuation">,</span> RED_SZ<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">return</span> addr<span class="token punctuation">;</span>                <span class="token comment">// 返回分配的内存首地址</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>内存空间会被划分为以下两个类别：</p> 
+<ul><li>Main application memory ,应用程序代码所使用的内存，后面简称应用内存。</li><li>Shadow memory, 应用内存的元数据，每8字节应用内存对应1字节影子内存。</li></ul> 
+<p>影子内存的这 1 字节应用内存的状态：</p> 
+<ul><li>0，表示整个 8 字节内存都正常；</li><li>0n表示有n个字节被下毒，表示前 n 个字节正常、后 8-n 个字节被投毒了；</li><li>负数，如fa，表示整个 8 字节都被投毒了，不可访问。</li></ul> 
+<p><code>0xfa</code> 表示堆左边的 redzone、<code>0xf1</code> 表示栈左边的 redzone, 还有0xf2, 0xf3等含义，可以在报错信息下面的Shadow byte legend说明部分查看。</p> 
+<p>报错时，引起报错的memory byte会用方括号括起来。</p> 
+<p>gdb里也可以看malloc堆空间的信息：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">(</span>gdb<span class="token punctuation">)</span> p __asan_describe_address
+</code></pre> 
+<h2><a id="2_Demo_64"></a>2. Demo</h2> 
+<h3><a id="UAF_66"></a>UAF</h3> 
+<p>这是<a href="https://github.com/google/sanitizers/wiki/AddressSanitizer">ASAN wiki</a>的第一个例子</p> 
+<p>源码：</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdlib.h&gt;</span></span>
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">char</span> <span class="token operator">*</span>x <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">char</span><span class="token operator">*</span><span class="token punctuation">)</span><span class="token function">malloc</span><span class="token punctuation">(</span><span class="token number">10</span> <span class="token operator">*</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token keyword">char</span><span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"malloc:0x%p\n"</span><span class="token punctuation">,</span> array<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">free</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> x<span class="token punctuation">[</span><span class="token number">5</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>编译一下，需要有<code>-fsanitize=address -O1 -fno-omit-frame-pointer</code>这几个编译参数，带上-g则可以定位到源码行数。</p> 
+<p>可以看到依赖库中有libasan.so。</p> 
+<pre><code class="prism language-shell">$ gcc -fsanitize<span class="token operator">=</span>address -O1 -fno-omit-frame-pointer -g use-after-free.c -o uaf
+$ ldd uaf
+        linux-vdso.so.1 <span class="token punctuation">(</span>0x00007ffe8658f000<span class="token punctuation">)</span>
+        libasan.so.4 <span class="token operator">=</span><span class="token operator">&gt;</span> /usr/lib/x86_64-linux-gnu/libasan.so.4 <span class="token punctuation">(</span>0x00007fb511c27000<span class="token punctuation">)</span>
+        libc.so.6 <span class="token operator">=</span><span class="token operator">&gt;</span> /lib/x86_64-linux-gnu/libc.so.6 <span class="token punctuation">(</span>0x00007fb511836000<span class="token punctuation">)</span>
+        libdl.so.2 <span class="token operator">=</span><span class="token operator">&gt;</span> /lib/x86_64-linux-gnu/libdl.so.2 <span class="token punctuation">(</span>0x00007fb511632000<span class="token punctuation">)</span>
+        librt.so.1 <span class="token operator">=</span><span class="token operator">&gt;</span> /lib/x86_64-linux-gnu/librt.so.1 <span class="token punctuation">(</span>0x00007fb51142a000<span class="token punctuation">)</span>
+        libpthread.so.0 <span class="token operator">=</span><span class="token operator">&gt;</span> /lib/x86_64-linux-gnu/libpthread.so.0 <span class="token punctuation">(</span>0x00007fb51120b000<span class="token punctuation">)</span>
+        libm.so.6 <span class="token operator">=</span><span class="token operator">&gt;</span> /lib/x86_64-linux-gnu/libm.so.6 <span class="token punctuation">(</span>0x00007fb510e6d000<span class="token punctuation">)</span>
+        libgcc_s.so.1 <span class="token operator">=</span><span class="token operator">&gt;</span> /lib/x86_64-linux-gnu/libgcc_s.so.1 <span class="token punctuation">(</span>0x00007fb510c55000<span class="token punctuation">)</span>
+        /lib64/ld-linux-x86-64.so.2 <span class="token punctuation">(</span>0x00007fb512de4000<span class="token punctuation">)</span>
+</code></pre> 
+<p>运行一下，报错信息很详细，一般就是关注爆粗原因、出错的代码行数（需要-g参数编译）：</p> 
+<pre><code class="prism language-shell">$ ./uaf
+malloc:0x0x607000000090
+<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>
+<span class="token operator">==</span><span class="token number">22264</span><span class="token operator">==</span>ERROR: AddressSanitizer: heap-use-after-free on address 0x607000000095 at pc 0x55f9433bfa71 bp 0x7ffe9554f380 sp 0x7ffe9554f370
+READ of size <span class="token number">1</span> at 0x607000000095 thread T0
+    <span class="token comment">#0 0x55f9433bfa70 in main /home/starr/Documents/CProject/use-after-free.c:7</span>
+    <span class="token comment">#1 0x7f3545125c86 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x21c86)</span>
+    <span class="token comment">#2 0x55f9433bf929 in _start (/home/starr/Documents/CProject/uaf+0x929)</span>
+
+0x607000000095 is located <span class="token number">5</span> bytes inside of <span class="token number">80</span>-byte region <span class="token punctuation">[</span>0x607000000090,0x6070000000e0<span class="token punctuation">)</span>
+freed by thread T0 here:
+    <span class="token comment">#0 0x7f35455d37a8 in __interceptor_free (/usr/lib/x86_64-linux-gnu/libasan.so.4+0xde7a8)</span>
+    <span class="token comment">#1 0x55f9433bfa40 in main /home/starr/Documents/CProject/use-after-free.c:6</span>
+    <span class="token comment">#2 0x7f3545125c86 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x21c86)</span>
+
+previously allocated by thread T0 here:
+    <span class="token comment">#0 0x7f35455d3b40 in __interceptor_malloc (/usr/lib/x86_64-linux-gnu/libasan.so.4+0xdeb40)</span>
+    <span class="token comment">#1 0x55f9433bfa1c in main /home/starr/Documents/CProject/use-after-free.c:4</span>
+    <span class="token comment">#2 0x7f3545125c86 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x21c86)</span>
+
+SUMMARY: AddressSanitizer: heap-use-after-free /home/starr/Documents/CProject/use-after-free.c:7 <span class="token keyword">in</span> main
+Shadow bytes around the buggy address:
+  0x0c0e7fff7fc0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0c0e7fff7fd0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0c0e7fff7fe0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0c0e7fff7ff0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0c0e7fff8000: fa fa fa fa 00 00 00 00 00 00 00 00 00 fa fa fa
+<span class="token operator">=</span><span class="token operator">&gt;</span>0x0c0e7fff8010: fa fa<span class="token punctuation">[</span>fd<span class="token punctuation">]</span>fd fd fd fd fd fd fd fd fd fa fa fa fa
+  0x0c0e7fff8020: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c0e7fff8030: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c0e7fff8040: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c0e7fff8050: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c0e7fff8060: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend <span class="token punctuation">(</span>one shadow byte represents <span class="token number">8</span> application bytes<span class="token punctuation">)</span>:
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+<span class="token operator">==</span><span class="token number">22264</span><span class="token operator">==</span>ABORTING
+</code></pre> 
+<p><code>[fa]</code>正好是我们申请的、用0xfd填充的内存偏移为5的字节。</p> 
+<h3><a id="HeapOutOfBounds_160"></a>HeapOutOfBounds</h3> 
+<p>https://github.com/google/sanitizers/wiki/AddressSanitizerExampleHeapOutOfBounds</p> 
+<p>源码：</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">int</span> argc<span class="token punctuation">,</span> <span class="token keyword">char</span> <span class="token operator">*</span><span class="token operator">*</span>argv<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">int</span> <span class="token operator">*</span>array <span class="token operator">=</span> new <span class="token keyword">int</span><span class="token punctuation">[</span><span class="token number">100</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+  <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"new:0x%p\n"</span><span class="token punctuation">,</span> array<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  array<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+  <span class="token keyword">int</span> res <span class="token operator">=</span> array<span class="token punctuation">[</span>argc <span class="token operator">+</span> <span class="token number">100</span><span class="token punctuation">]</span><span class="token punctuation">;</span>  <span class="token comment">// BOOM</span>
+  delete <span class="token punctuation">[</span><span class="token punctuation">]</span> array<span class="token punctuation">;</span>
+  <span class="token keyword">return</span> res<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>编译运行：</p> 
+<pre><code class="prism language-shell">$ g++ -fsanitize<span class="token operator">=</span>address -O1 -fno-omit-frame-pointer -g asan.cpp -o heapOutBound
+$ ./heapOutBound
+new:0x0x614000000040
+<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>
+<span class="token operator">==</span><span class="token number">29504</span><span class="token operator">==</span>ERROR: AddressSanitizer: heap-buffer-overflow on address 0x6140000001d4 at pc 0x5589e84b8afe bp 0x7fffed2e8950 sp 0x7fffed2e8940
+READ of size <span class="token number">4</span> at 0x6140000001d4 thread T0
+    <span class="token comment">#0 0x5589e84b8afd in main /home/starr/Documents/CProject/asan.cpp:7</span>
+    <span class="token comment">#1 0x7f9226ae4c86 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x21c86)</span>
+    <span class="token comment">#2 0x5589e84b8979 in _start (/home/starr/Documents/CProject/heapOutBound+0x979)</span>
+
+0x6140000001d4 is located <span class="token number">4</span> bytes to the right of <span class="token number">400</span>-byte region <span class="token punctuation">[</span>0x614000000040,0x6140000001d0<span class="token punctuation">)</span>
+allocated by thread T0 here:
+    <span class="token comment">#0 0x7f9226f94608 in operator new[](unsigned long) (/usr/lib/x86_64-linux-gnu/libasan.so.4+0xe0608)</span>
+    <span class="token comment">#1 0x5589e84b8a6d in main /home/starr/Documents/CProject/asan.cpp:4</span>
+    <span class="token comment">#2 0x7f9226ae4c86 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x21c86)</span>
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow /home/starr/Documents/CProject/asan.cpp:7 <span class="token keyword">in</span> main
+Shadow bytes around the buggy address:
+  0x0c287fff7fe0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0c287fff7ff0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0c287fff8000: fa fa fa fa fa fa fa fa 00 00 00 00 00 00 00 00
+  0x0c287fff8010: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0c287fff8020: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+<span class="token operator">=</span><span class="token operator">&gt;</span>0x0c287fff8030: 00 00 00 00 00 00 00 00 00 00<span class="token punctuation">[</span>fa<span class="token punctuation">]</span>fa fa fa fa fa
+  0x0c287fff8040: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c287fff8050: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c287fff8060: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c287fff8070: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x0c287fff8080: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend <span class="token punctuation">(</span>one shadow byte represents <span class="token number">8</span> application bytes<span class="token punctuation">)</span>:
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+<span class="token operator">==</span><span class="token number">29504</span><span class="token operator">==</span>ABORTING
+</code></pre> 
+<h3><a id="StackOutOfBounds_233"></a>StackOutOfBounds</h3> 
+<p><a href="https://github.com/google/sanitizers/wiki/AddressSanitizerExampleStackOutOfBounds">AddressSanitizerExampleStackOutOfBounds · google/sanitizers Wiki (github.com)</a></p> 
+<p>源码：</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">int</span> argc<span class="token punctuation">,</span> <span class="token keyword">char</span> <span class="token operator">*</span><span class="token operator">*</span>argv<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">int</span> stack_array<span class="token punctuation">[</span><span class="token number">100</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+  stack_array<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+  <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"new:0x%p\n"</span><span class="token punctuation">,</span> stack_array<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+  <span class="token keyword">return</span> stack_array<span class="token punctuation">[</span>argc <span class="token operator">+</span> <span class="token number">100</span><span class="token punctuation">]</span><span class="token punctuation">;</span>  <span class="token comment">// BOOM</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>编译运行：</p> 
+<pre><code class="prism language-shell">$ g++ -fsanitize<span class="token operator">=</span>address -O1 -fno-omit-frame-pointer -g asan.cpp -o stackOutBound
+$ ./stackOutBound
+new:0x0x7ffc3b934e80
+<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>
+<span class="token operator">==</span><span class="token number">31438</span><span class="token operator">==</span>ERROR: AddressSanitizer: stack-buffer-overflow on address 0x7ffc3b935014 at pc 0x55fd7c7f0caf bp 0x7ffc3b934e40 sp 0x7ffc3b934e30
+READ of size <span class="token number">4</span> at 0x7ffc3b935014 thread T0
+    <span class="token comment">#0 0x55fd7c7f0cae in main /home/starr/Documents/CProject/asan.cpp:8</span>
+    <span class="token comment">#1 0x7ff69b30ec86 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x21c86)</span>
+    <span class="token comment">#2 0x55fd7c7f0a19 in _start (/home/starr/Documents/CProject/heapOutBound+0xa19)</span>
+
+Address 0x7ffc3b935014 is located <span class="token keyword">in</span> stack of thread T0 at offset <span class="token number">436</span> <span class="token keyword">in</span> frame
+    <span class="token comment">#0 0x55fd7c7f0b09 in main /home/starr/Documents/CProject/asan.cpp:3</span>
+
+  This frame has <span class="token number">1</span> object<span class="token punctuation">(</span>s<span class="token punctuation">)</span>:
+    <span class="token punctuation">[</span><span class="token number">32</span>, <span class="token number">432</span><span class="token punctuation">)</span> <span class="token string">'stack_array'</span> <span class="token operator">&lt;=</span><span class="token operator">=</span> Memory access at offset <span class="token number">436</span> overflows this variable
+HINT: this may be a <span class="token boolean">false</span> positive <span class="token keyword">if</span> your program uses some custom stack unwind mechanism or swapcontext
+      <span class="token punctuation">(</span>longjmp and C++ exceptions *are* supported<span class="token punctuation">)</span>
+SUMMARY: AddressSanitizer: stack-buffer-overflow /home/starr/Documents/CProject/asan.cpp:8 <span class="token keyword">in</span> main
+Shadow bytes around the buggy address:
+  0x10000771e9b0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x10000771e9c0: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+  0x10000771e9d0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x10000771e9e0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x10000771e9f0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+<span class="token operator">=</span><span class="token operator">&gt;</span>0x10000771ea00: 00 00<span class="token punctuation">[</span>f2<span class="token punctuation">]</span>f2 00 00 00 00 00 00 00 00 00 00 00 00
+  0x10000771ea10: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x10000771ea20: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x10000771ea30: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x10000771ea40: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x10000771ea50: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Shadow byte legend <span class="token punctuation">(</span>one shadow byte represents <span class="token number">8</span> application bytes<span class="token punctuation">)</span>:
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+<span class="token operator">==</span><span class="token number">31438</span><span class="token operator">==</span>ABORTING
+
+</code></pre> 
+<p>最后一个<code>0xf1</code>距离方括号字节<code>8*(16*3+2) == 400</code>字节，正好是stack_array的大小。</p> 
+<h3><a id="useAfterReturn_309"></a>useAfterReturn</h3> 
+<p>https://github.com/google/sanitizers/wiki/AddressSanitizerExampleUseAfterReturn</p> 
+<p>这种错有时可以检查出来。</p> 
+<p>源码：</p> 
+<pre><code class="prism language-c"><span class="token comment">// By default, AddressSanitizer does not try to detect</span>
+<span class="token comment">// stack-use-after-return bugs.</span>
+<span class="token comment">// It may still find such bugs occasionally</span>
+<span class="token comment">// and report them as a hard-to-explain stack-buffer-overflow.</span>
+
+<span class="token comment">// You need to run the test with ASAN_OPTIONS=detect_stack_use_after_return=1</span>
+
+<span class="token keyword">int</span> <span class="token operator">*</span>ptr<span class="token punctuation">;</span>
+<span class="token keyword">__attribute__</span><span class="token punctuation">(</span><span class="token punctuation">(</span>noinline<span class="token punctuation">)</span><span class="token punctuation">)</span>
+<span class="token keyword">void</span> <span class="token function">FunctionThatEscapesLocalObject</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token keyword">int</span> local<span class="token punctuation">[</span><span class="token number">100</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+  ptr <span class="token operator">=</span> <span class="token operator">&amp;</span>local<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token keyword">int</span> argc<span class="token punctuation">,</span> <span class="token keyword">char</span> <span class="token operator">*</span><span class="token operator">*</span>argv<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token function">FunctionThatEscapesLocalObject</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">return</span> ptr<span class="token punctuation">[</span>argc<span class="token punctuation">]</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>编译运行：</p> 
+<pre><code class="prism language-shell">$ g++ -fsanitize<span class="token operator">=</span>address -O1 -fno-omit-frame-pointer -g asan.cpp -o useAfterRet
+$ <span class="token assign-left variable">ASAN_OPTIONS</span><span class="token operator">=</span>detect_stack_use_after_return<span class="token operator">=</span><span class="token number">1</span> ./useAfterRet
+<span class="token punctuation">\</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>
+<span class="token operator">==</span><span class="token number">584</span><span class="token operator">==</span>ERROR: AddressSanitizer: stack-use-after-return on address 0x7f17e0700024 at pc 0x560a7f92ac12 bp 0x7ffde4dbabc0 sp 0x7ffde4dbabb0
+READ of size <span class="token number">4</span> at 0x7f17e0700024 thread T0
+    <span class="token comment">#0 0x560a7f92ac11 in main /home/starr/Documents/CProject/asan.cpp:17</span>
+    <span class="token comment">#1 0x7f17e4566c86 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x21c86)</span>
+    <span class="token comment">#2 0x560a7f92a999 in _start (/home/starr/Documents/CProject/useAfterRet+0x999)</span>
+
+Address 0x7f17e0700024 is located <span class="token keyword">in</span> stack of thread T0 at offset <span class="token number">36</span> <span class="token keyword">in</span> frame
+    <span class="token comment">#0 0x560a7f92aa89 in FunctionThatEscapesLocalObject() /home/starr/Documents/CProject/asan.cpp:10</span>
+
+  This frame has <span class="token number">1</span> object<span class="token punctuation">(</span>s<span class="token punctuation">)</span>:
+    <span class="token punctuation">[</span><span class="token number">32</span>, <span class="token number">432</span><span class="token punctuation">)</span> <span class="token string">'local'</span> <span class="token operator">&lt;=</span><span class="token operator">=</span> Memory access at offset <span class="token number">36</span> is inside this variable
+HINT: this may be a <span class="token boolean">false</span> positive <span class="token keyword">if</span> your program uses some custom stack unwind mechanism or swapcontext
+      <span class="token punctuation">(</span>longjmp and C++ exceptions *are* supported<span class="token punctuation">)</span>
+SUMMARY: AddressSanitizer: stack-use-after-return /home/starr/Documents/CProject/asan.cpp:17 <span class="token keyword">in</span> main
+Shadow bytes around the buggy address:
+  0x0fe37c0d7fb0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0fe37c0d7fc0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0fe37c0d7fd0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0fe37c0d7fe0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0fe37c0d7ff0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+<span class="token operator">=</span><span class="token operator">&gt;</span>0x0fe37c0d8000: f5 f5 f5 f5<span class="token punctuation">[</span>f5<span class="token punctuation">]</span>f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5
+  0x0fe37c0d8010: f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5
+  0x0fe37c0d8020: f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5 f5
+  0x0fe37c0d8030: f5 f5 f5 f5 f5 f5 f5 f5 00 00 00 00 00 00 00 00
+  0x0fe37c0d8040: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x0fe37c0d8050: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Shadow byte legend <span class="token punctuation">(</span>one shadow byte represents <span class="token number">8</span> application bytes<span class="token punctuation">)</span>:
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5		注意这里的说明<span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span><span class="token operator">!</span>
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+<span class="token operator">==</span><span class="token number">584</span><span class="token operator">==</span>ABORTING
+
+</code></pre> 
+<h3><a id="useAfterScope_395"></a>useAfterScope</h3> 
+<p>先复习一下volatile关键字：</p> 
+<pre><code class="prism language-c"><span class="token keyword">volatile</span> <span class="token keyword">int</span> i<span class="token operator">=</span><span class="token number">10</span><span class="token punctuation">;</span>
+<span class="token keyword">int</span> j <span class="token operator">=</span> i<span class="token punctuation">;</span>
+</code></pre> 
+<p>volatile 告诉编译器i是随时可能发生变化的，每次使用它的时候必须从i的地址中读取，所以看生成的汇编代码的话，j的赋值是从i的地址读取数据的。</p> 
+<p>测试源码：</p> 
+<pre><code class="prism language-c"><span class="token comment">// RUN: clang -O -g -fsanitize=address -fsanitize-address-use-after-scope \
+//    use-after-scope.cpp -o /tmp/use-after-scope</span>
+<span class="token comment">// RUN: /tmp/use-after-scope</span>
+
+<span class="token comment">// Check can be disabled in run-time:</span>
+<span class="token comment">// RUN: ASAN_OPTIONS=detect_stack_use_after_scope=0 /tmp/use-after-scope</span>
+
+<span class="token keyword">volatile</span> <span class="token keyword">int</span> <span class="token operator">*</span>p <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int</span> x <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    p <span class="token operator">=</span> <span class="token operator">&amp;</span>x<span class="token punctuation">;</span>
+  <span class="token punctuation">}</span>
+  <span class="token operator">*</span>p <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">;</span>
+  <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>编译运行：</p> 
+<pre><code class="prism language-shell">$ g++ -fsanitize<span class="token operator">=</span>address -O1 -fno-omit-frame-pointer -fsanitize-address-use-after-scope -g asan.cpp -o useAfterScope
+$ <span class="token assign-left variable">ASAN_OPTIONS</span><span class="token operator">=</span>detect_stack_use_after_scope<span class="token operator">=</span><span class="token number">0</span> ./useAfterScope
+<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>
+<span class="token operator">==</span><span class="token number">1596</span><span class="token operator">==</span>ERROR: AddressSanitizer: stack-use-after-scope on address 0x7ffdbdcf4b20 at pc 0x5581327a9b99 bp 0x7ffdbdcf4af0 sp 0x7ffdbdcf4ae0
+WRITE of size <span class="token number">4</span> at 0x7ffdbdcf4b20 thread T0
+    <span class="token comment">#0 0x5581327a9b98 in main /home/starr/Documents/CProject/asan.cpp:15</span>
+    <span class="token comment">#1 0x7f75550ecc86 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x21c86)</span>
+    <span class="token comment">#2 0x5581327a9999 in _start (/home/starr/Documents/CProject/useAfterScope+0x999)</span>
+
+Address 0x7ffdbdcf4b20 is located <span class="token keyword">in</span> stack of thread T0 at offset <span class="token number">32</span> <span class="token keyword">in</span> frame
+    <span class="token comment">#0 0x5581327a9a89 in main /home/starr/Documents/CProject/asan.cpp:10</span>
+
+  This frame has <span class="token number">1</span> object<span class="token punctuation">(</span>s<span class="token punctuation">)</span>:
+    <span class="token punctuation">[</span><span class="token number">32</span>, <span class="token number">36</span><span class="token punctuation">)</span> <span class="token string">'x'</span> <span class="token operator">&lt;=</span><span class="token operator">=</span> Memory access at offset <span class="token number">32</span> is inside this variable
+HINT: this may be a <span class="token boolean">false</span> positive <span class="token keyword">if</span> your program uses some custom stack unwind mechanism or swapcontext
+      <span class="token punctuation">(</span>longjmp and C++ exceptions *are* supported<span class="token punctuation">)</span>
+SUMMARY: AddressSanitizer: stack-use-after-scope /home/starr/Documents/CProject/asan.cpp:15 <span class="token keyword">in</span> main
+Shadow bytes around the buggy address:
+  0x100037b96910: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x100037b96920: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x100037b96930: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x100037b96940: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x100037b96950: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+<span class="token operator">=</span><span class="token operator">&gt;</span>0x100037b96960: f1 f1 f1 f1<span class="token punctuation">[</span>f8<span class="token punctuation">]</span>f2 f2 f2 00 00 00 00 00 00 00 00
+  0x100037b96970: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x100037b96980: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x100037b96990: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x100037b969a0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x100037b969b0: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Shadow byte legend <span class="token punctuation">(</span>one shadow byte represents <span class="token number">8</span> application bytes<span class="token punctuation">)</span>:
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+<span class="token operator">==</span><span class="token number">1596</span><span class="token operator">==</span>ABORTING
+
+</code></pre> 
+<h3><a id="c_483"></a>c++静态初始化顺序问题</h3> 
+<p>源码：</p> 
+<pre><code class="prism language-c++">// a.cc
+#include &lt;stdio.h&gt;
+extern int extern_global;
+int __attribute__((noinline)) read_extern_global() {
+  return extern_global;
+}
+int x = read_extern_global() + 1;
+int main() {
+  printf("%d\n", x);
+  return 0;
+}
+
+// b.cc
+int foo() { return 42; }
+int extern_global = foo();
+</code></pre> 
+<p>编译顺序问题导致的错误：</p> 
+<pre><code class="prism language-shell">$ clang++ tmp/init-order/example/a.cc tmp/init-order/example/b.cc <span class="token operator">&amp;&amp;</span> ./a.out 
+<span class="token number">1</span>
+$ clang++ tmp/init-order/example/b.cc tmp/init-order/example/a.cc <span class="token operator">&amp;&amp;</span> ./a.out 
+<span class="token number">43</span>
+</code></pre> 
+<p>用ASAN检查：</p> 
+<pre><code class="prism language-shell">$ clang++ -fsanitize<span class="token operator">=</span>address -g tmp/init-order/example/a.cc tmp/init-order/example/b.cc
+$ <span class="token assign-left variable">ASAN_OPTIONS</span><span class="token operator">=</span>check_initialization_order<span class="token operator">=</span>true ./a.out
+<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>
+<span class="token operator">==</span><span class="token number">26772</span><span class="token operator">==</span>ERROR: AddressSanitizer: initialization-order-fiasco on address 0x000001068820 at pc 0x427e74 bp 0x7ffff8295010 sp 0x7ffff8295008
+READ of size <span class="token number">4</span> at 0x000001068820 thread T0
+    <span class="token comment">#0 0x427e73 in read_extern_global() tmp/init-order/example/a.cc:4</span>
+    <span class="token comment">#1 0x42806c in __cxx_global_var_init tmp/init-order/example/a.cc:7</span>
+    <span class="token punctuation">..</span>.
+</code></pre> 
+<h3><a id="_527"></a>内存泄露</h3> 
+<p><a href="https://github.com/google/sanitizers/wiki/AddressSanitizerLeakSanitizer">AddressSanitizerLeakSanitizer · google/sanitizers Wiki (github.com)</a></p> 
+<p>这本来是LeakSanitizer的功能，ASAN也继承了这个功能，不过在x86_64 Linux和OS X上才支持。</p> 
+<p>源码：</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdlib.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token keyword">void</span> <span class="token operator">*</span>p<span class="token punctuation">;</span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  p <span class="token operator">=</span> <span class="token function">malloc</span><span class="token punctuation">(</span><span class="token number">7</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"malloc:0x%p\n"</span><span class="token punctuation">,</span> p<span class="token punctuation">)</span><span class="token punctuation">;</span>
+  p <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> <span class="token comment">// The memory is leaked here.</span>
+  <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>编译参数有所改变，不能-O优化.</p> 
+<pre><code class="prism language-shell">$ g++ -fsanitize<span class="token operator">=</span>address -fno-omit-frame-pointer -g asan.cpp -o memLeak
+$ <span class="token assign-left variable">ASAN_OPTIONS</span><span class="token operator">=</span>detect_leaks<span class="token operator">=</span><span class="token number">1</span> ./memLeak
+malloc:0x0x602000000010
+
+<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>
+<span class="token operator">==</span><span class="token number">3405</span><span class="token operator">==</span>ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of <span class="token number">7</span> byte<span class="token punctuation">(</span>s<span class="token punctuation">)</span> <span class="token keyword">in</span> <span class="token number">1</span> object<span class="token punctuation">(</span>s<span class="token punctuation">)</span> allocated from:
+    <span class="token comment">#0 0x7fec26de3b40 in __interceptor_malloc (/usr/lib/x86_64-linux-gnu/libasan.so.4+0xdeb40)</span>
+    <span class="token comment">#1 0x56255e6149e7 in main /home/starr/Documents/CProject/asan.cpp:6</span>
+    <span class="token comment">#2 0x7fec26935c86 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x21c86)</span>
+
+SUMMARY: AddressSanitizer: <span class="token number">7</span> byte<span class="token punctuation">(</span>s<span class="token punctuation">)</span> leaked <span class="token keyword">in</span> <span class="token number">1</span> allocation<span class="token punctuation">(</span>s<span class="token punctuation">)</span>.
+
+</code></pre> 
+<p>也可以用LeakSanitizer 试试，wiki给出了一个设置已知泄露并忽略的例子。</p> 
+<p>suppr.txt：</p> 
+<pre><code class="prism language-shell"><span class="token comment"># This is a known leak.</span>
+leak:FooBar
+</code></pre> 
+<p>源码：</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdlib.h&gt;</span></span>
+
+<span class="token comment">// ignored</span>
+<span class="token keyword">void</span> <span class="token function">FooBar</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token function">malloc</span><span class="token punctuation">(</span><span class="token number">7</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">void</span> <span class="token function">Baz</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token function">malloc</span><span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token function">FooBar</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token function">Baz</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+  <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>编译后可以看到，依赖的库从libasan.so变成了liblsan.so：</p> 
+<pre><code class="prism language-shell">$ g++ -fsanitize<span class="token operator">=</span>leak -fno-omit-frame-pointer -g asan.cpp -o memLeak
+$ ldd memLeak
+        linux-vdso.so.1 <span class="token punctuation">(</span>0x00007ffca0f6c000<span class="token punctuation">)</span>
+        liblsan.so.0 <span class="token operator">=</span><span class="token operator">&gt;</span> /usr/lib/x86_64-linux-gnu/liblsan.so.0 <span class="token punctuation">(</span>0x00007f0c97480000<span class="token punctuation">)</span>
+        libc.so.6 <span class="token operator">=</span><span class="token operator">&gt;</span> /lib/x86_64-linux-gnu/libc.so.6 <span class="token punctuation">(</span>0x00007f0c9708f000<span class="token punctuation">)</span>
+        libdl.so.2 <span class="token operator">=</span><span class="token operator">&gt;</span> /lib/x86_64-linux-gnu/libdl.so.2 <span class="token punctuation">(</span>0x00007f0c96e8b000<span class="token punctuation">)</span>
+        librt.so.1 <span class="token operator">=</span><span class="token operator">&gt;</span> /lib/x86_64-linux-gnu/librt.so.1 <span class="token punctuation">(</span>0x00007f0c96c83000<span class="token punctuation">)</span>
+        libpthread.so.0 <span class="token operator">=</span><span class="token operator">&gt;</span> /lib/x86_64-linux-gnu/libpthread.so.0 <span class="token punctuation">(</span>0x00007f0c96a64000<span class="token punctuation">)</span>
+        /lib64/ld-linux-x86-64.so.2 <span class="token punctuation">(</span>0x00007f0c9852a000<span class="token punctuation">)</span>
+        libgcc_s.so.1 <span class="token operator">=</span><span class="token operator">&gt;</span> /lib/x86_64-linux-gnu/libgcc_s.so.1 <span class="token punctuation">(</span>0x00007f0c9684c000<span class="token punctuation">)</span>
+
+</code></pre> 
+<p>运行：</p> 
+<pre><code class="prism language-shell">$ <span class="token assign-left variable">ASAN_OPTIONS</span><span class="token operator">=</span>detect_leaks<span class="token operator">=</span><span class="token number">1</span>  <span class="token assign-left variable">LSAN_OPTIONS</span><span class="token operator">=</span>suppressions<span class="token operator">=</span>suppr.txt ./memLeak
+
+<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>
+<span class="token operator">==</span><span class="token number">4583</span><span class="token operator">==</span>ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of <span class="token number">5</span> byte<span class="token punctuation">(</span>s<span class="token punctuation">)</span> <span class="token keyword">in</span> <span class="token number">1</span> object<span class="token punctuation">(</span>s<span class="token punctuation">)</span> allocated from:
+    <span class="token comment">#0 0x7fde99343acb in __interceptor_malloc (/usr/lib/x86_64-linux-gnu/liblsan.so.0+0xeacb)</span>
+    <span class="token comment">#1 0x55b15a195728 in Baz() /home/starr/Documents/CProject/asan.cpp:9</span>
+    <span class="token comment">#2 0x55b15a195739 in main /home/starr/Documents/CProject/asan.cpp:14</span>
+    <span class="token comment">#3 0x7fde98f65c86 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x21c86)</span>
+
+-----------------------------------------------------
+Suppressions used:
+  count      bytes template
+      <span class="token number">1</span>          <span class="token number">7</span> FooBar
+-----------------------------------------------------
+
+SUMMARY: LeakSanitizer: <span class="token number">5</span> byte<span class="token punctuation">(</span>s<span class="token punctuation">)</span> leaked <span class="token keyword">in</span> <span class="token number">1</span> allocation<span class="token punctuation">(</span>s<span class="token punctuation">)</span>.
+
+</code></pre> 
+<p>可以看到FooBar函数的泄露被忽略了。</p> 
+<p>其它用法用到了再说：</p> 
+<table><thead><tr><th>flag</th><th>default</th><th>description</th></tr></thead><tbody><tr><td>exitcode</td><td>23</td><td>If non-zero, LSan will call <code>_exit(exitcode)</code> upon detecting leaks. This can be different from the exit code used to signal ASan errors.</td></tr><tr><td>max_leaks</td><td>0</td><td>If non-zero, report only this many top leaks.</td></tr><tr><td>suppressions</td><td>(none)</td><td>Path to file containing suppression rules (see below)</td></tr><tr><td>print_suppressions</td><td>1</td><td>If 1, print statistics for matched suppressions.</td></tr><tr><td>report_objects</td><td>0</td><td>If 1, LSan will report the addresses of individual leaked objects.</td></tr><tr><td>use_unaligned</td><td>0</td><td>If 0, LSan will only consider properly aligned 8-byte patterns when looking for pointers. Set to 1 to include unaligned patterns. This refers to the pointer itself, not the memory being pointed at.</td></tr></tbody></table> 
+<h2><a id="3__650"></a>3. 其它参考文章</h2> 
+<p>https://zhuanlan.zhihu.com/p/382994002</p> 
+<p>https://zhuanlan.zhihu.com/p/390555316</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f4672e7ee43ed49a10d9fcc6423cb2d9/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">ElementPlus的使用</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/2dbcbae15320613c570dac5212f8fe7b/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">微信小程序开发 编译后 保留在当前页面 的设置</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

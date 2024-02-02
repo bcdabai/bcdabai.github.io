@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>eBPF动手实践系列一：解构内核源码eBPF样例编译过程 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="eBPF动手实践系列一：解构内核源码eBPF样例编译过程" />
+<meta property="og:description" content="作者：闻茂泉
+他山之石 了解和掌握纯c语言的ebpf编译和使用，有助于我们加深对于eBPF技术原理的进一步掌握，也有助于开发符合自己业务需求的高性能的ebpf程序。目前常见和主流的纯c语言的ebpf编译使用方法，主要是两种。一种是内核源码中原生提供的编译方式。另外一种是libbpf-bootstrap项目中提供的skeleton编译方式。libbpf-bootstrap方式和社区5.x以上内核结合的比较好，以后再做介绍，今天我们选择基于4.18内核的基于内核源码的原生编译方式做介绍。
+在国内学习ebpf技术，就不得不提到《Linux内核观测技术BPF》书籍译者狄卫华老师。狄老师还有一个网站《深入浅出 eBPF》。在网站里，他专门用一篇文章介绍了基于内核源码方式编译ebpf的方式，文章内容叫《【BPF入门系列-3】BPF 环境搭建》
+网址：https://www.ebpf.top/post/ebpf_c_env/
+我们今天将参考这篇文章内容，对基于内核源码方式的纯c语言的ebpf编译方式做进一步分析。
+获取内核源码 目前主流的服务器的操作系统环境还是以8u &#43; 4.18内核为主。因此，本文以4.18版本内核为主要分析对象。我们提供如下操作系统环境的获取建议：
+获取操作系统环境 如果你自己有centos8u兼容环境操作系统，则可以使用已有的环境。如果没有，可以通过阿里云官网购买阿里云主机，选择选择centos8或者anolis8操作系统环境。
+$ cat /etc/centos-release CentOS Linux release 8.5.2111 $ uname -r 4.18.0-348.7.1.el8_5.x86_64 获取开源的内核源码 可以使用wget，从aliyun官网镜像，获取开源的4.18内核源码。
+$ cd /tmp/$ wget https://mirrors.aliyun.com/linux-kernel/v4.x/linux-4.18. tar.gz$ tar -zxvf linux-4.18.tar.gz$ cd linux-4.18 下载内核源码一定要确保内核版本与操作系统的一致。原因是ebpf会用到VERSION、PATCHLEVEL和SUBLEVEL这3个宏的值与内核做内核版本校验。如果版本传的不对，ebpf校验会失败。
+$ cat Makefile | grep -P &#39;^VERSION|^PATCHLEVEL|^SUBLEVEL&#39; VERSION = 4 PATCHLEVEL = 18 SUBLEVEL = 0 初始化基础环境 需要安装ebpf编译时依赖的llvm和clang等rpm包。此外内核编译还需要依赖openssl-devel等rpm包。
+$ sudo yum install bison flex openssl-devel $ sudo yum install clang llvm elfutils-libelf-devel 具体每个实验机器的环境可能略有差别，需要根据自己的情况做细节调整。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/76fbe46401898beb543eaecce9e8411d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-04-17T11:51:13+08:00" />
+<meta property="article:modified_time" content="2023-04-17T11:51:13+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">eBPF动手实践系列一：解构内核源码eBPF样例编译过程</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p><strong>作者：闻茂泉</strong></p> 
+<h3><a id="_2"></a>他山之石</h3> 
+<p>了解和掌握纯c语言的ebpf编译和使用，有助于我们加深对于eBPF技术原理的进一步掌握，也有助于开发符合自己业务需求的高性能的ebpf程序。目前常见和主流的纯c语言的ebpf编译使用方法，主要是两种。一种是内核源码中原生提供的编译方式。另外一种是libbpf-bootstrap项目中提供的skeleton编译方式。libbpf-bootstrap方式和社区5.x以上内核结合的比较好，以后再做介绍，今天我们选择基于4.18内核的基于内核源码的原生编译方式做介绍。</p> 
+<p>在国内学习ebpf技术，就不得不提到《Linux内核观测技术BPF》书籍译者狄卫华老师。狄老师还有一个网站《深入浅出 eBPF》。在网站里，他专门用一篇文章介绍了基于内核源码方式编译ebpf的方式，文章内容叫《【BPF入门系列-3】BPF 环境搭建》</p> 
+<p>网址：<strong>https://www.ebpf.top/post/ebpf_c_env/</strong></p> 
+<p>我们今天将参考这篇文章内容，对基于内核源码方式的纯c语言的ebpf编译方式做进一步分析。</p> 
+<h3><a id="_12"></a>获取内核源码</h3> 
+<p>目前主流的服务器的操作系统环境还是以8u + 4.18内核为主。因此，本文以4.18版本内核为主要分析对象。我们提供如下操作系统环境的获取建议：</p> 
+<h5><a id="_16"></a><strong>获取操作系统环境</strong></h5> 
+<p>如果你自己有centos8u兼容环境操作系统，则可以使用已有的环境。如果没有，可以通过阿里云官网购买阿里云主机，选择选择centos8或者anolis8操作系统环境。</p> 
+<pre><code>$  cat /etc/centos-release
+CentOS Linux release 8.5.2111
+$  uname -r
+4.18.0-348.7.1.el8_5.x86_64
+</code></pre> 
+<h5><a id="_27"></a>获取开源的内核源码</h5> 
+<p>可以使用wget，从aliyun官网镜像，获取开源的4.18内核源码。</p> 
+<pre><code>$  cd /tmp/$  
+wget https://mirrors.aliyun.com/linux-kernel/v4.x/linux-4.18.
+tar.gz$  tar -zxvf linux-4.18.tar.gz$  
+cd linux-4.18
+</code></pre> 
+<p>下载内核源码一定要确保内核版本与操作系统的一致。原因是ebpf会用到VERSION、PATCHLEVEL和SUBLEVEL这3个宏的值与内核做内核版本校验。如果版本传的不对，ebpf校验会失败。</p> 
+<pre><code>$  cat Makefile  | grep -P '^VERSION|^PATCHLEVEL|^SUBLEVEL'   
+VERSION = 4
+PATCHLEVEL = 18
+SUBLEVEL = 0
+</code></pre> 
+<h3><a id="_49"></a>初始化基础环境</h3> 
+<p>需要安装ebpf编译时依赖的llvm和clang等rpm包。此外内核编译还需要依赖openssl-devel等rpm包。</p> 
+<pre><code>$  sudo yum install bison flex openssl-devel
+$  sudo yum install clang llvm elfutils-libelf-devel
+</code></pre> 
+<p>具体每个实验机器的环境可能略有差别，需要根据自己的情况做细节调整。</p> 
+<h3><a id="ebpf_60"></a><strong>编译内核源码中ebpf程序样例</strong></h3> 
+<h5><a id="_61"></a>编译环境初始化</h5> 
+<p>狄老师的文章中这里执行的是make scripts，在内核源码编译时此步骤前通常还需要执行make prepare。而make init正好包含这两步make prepare &amp;&amp; make scripts。因此，我们将命令按照如下方式优化，基本能够一遍跑过：</p> 
+<pre><code>$  cd /tmp/linux-4.18
+$  make oldconfig &amp;&amp; make init  # make oldconfig &amp;&amp; make prepare &amp;&amp; make scripts
+$  make headers_install
+</code></pre> 
+<h5><a id="_71"></a><strong>编译内核源码样例</strong></h5> 
+<p>终于执行到了内核源码中提供的ebpf程序样例的编译。</p> 
+<pre><code>$  make M=samples/bpf
+</code></pre> 
+<h5><a id="_78"></a><strong>执行样例程序</strong></h5> 
+<p>我们可以通过对样例程序的执行，对编译效果进行验证。结果显示执行成功，狄老师文章中的步骤验证通过，有点小激动。</p> 
+<pre><code>$  sudo ./samples/bpf/trace_output
+recv 1766352 events per sec
+</code></pre> 
+<h3><a id="ebpf_88"></a><strong>内核源码的ebpf编译关键过程提取</strong></h3> 
+<p>接下去就是本文最重点的部分，对ebpf编译过程的分析。我们主要分分析headers_install和对samples/bpf目录的make这2个步骤。</p> 
+<h5><a id="_make_headers_install_92"></a><strong>头文件安装 make headers_install</strong></h5> 
+<p>重新获取一个干净的内核源码，再次执行上面的编译步骤。这次我们对编译过程增加一些观察步骤。</p> 
+<pre><code>$  cd  /tmp/
+$  rm -fr /tmp/linux-4.18
+$  tar -zxvf linux-4.18.tar.gz 
+$  cd /tmp/linux-4.18
+$  make oldconfig &amp;&amp; make init
+$  ls usr/include/
+ls: cannot access usr/include/: No such file or directory      # 此时include目录不存在
+$  make headers_install
+$  ls usr/include/ -R  | grep -v -P ':$' | grep -v -P '^$' | wc -l931                                                      #  此时include目录下有931个文件
+$  diff -rs usr/include/ /usr/include/|grep -P '^Files .+ and .+ are identical$'|wc -l677
+</code></pre> 
+<p>这说明内核源码目录下，headers_install步骤生成的usr/include/目录下功能900多个文件，其中大多数（677个）文件都能在操作系统环境的/usr/include/下找到完全一摸一样的同名文件，并且内容也完全相同。</p> 
+<pre><code>$  rpm -ql kernel-headers | wc -l
+964  
+$  rpm -ql kernel-headers | head 
+/usr/include/asm
+/usr/include/asm-generic
+/usr/include/asm-generic/bpf_perf_event.h
+</code></pre> 
+<p>而操作系统环境的/usr/include/目录正好是kernel-headers包的安装目录。所以编译过程中headers_install步骤就是在内核源码目录生成了kernel-headers包作用一样的内容。</p> 
+<h5><a id="eBPF_make_Msamplesbpf_123"></a><strong>eBPF样例编译 make M=samples/bpf</strong></h5> 
+<p>ebpf样例的编译过程，我们做一下改进，通过SHELL选项打开shell的调试选项。具体命令如下：</p> 
+<pre><code>$  make M=samples/bpf --debug=v,m SHELL="bash -x" &gt; make.log 2&gt;&amp;1
+</code></pre> 
+<p>通过分析make.log，再结合其他一些黑科技，可以大概找出内核源码样例中trace_output命令的编译脉络。其中用户态编译脉络如下。为了表述上更加突出主题，此处只显示编译命令的关键信息，下一节会给出完整编译命令。</p> 
+<pre><code>$  gcc -g -fPIC -c -o libbpf.o libbpf.c
+$  gcc -g -fPIC -c -o bpf.o bpf.c
+$  gcc -g -fPIC -c -o btf.o btf.c
+$  gcc -g -fPIC -c -o nlattr.o nlattr.c
+$  ld -r -o libbpf-in.o libbpf.o bpf.o nlattr.o btf.o
+$  ar rcs libbpf.a libbpf-in.o
+$  gcc -O2 -std=gnu89 -c -o bpf_load.o bpf_load.c
+$  gcc -O2 -std=gnu89 -c -o trace_output_user.o trace_output_user.c
+$  gcc -O2 -std=gnu89 -c -o trace_helpers.o trace_helpers.c
+$  gcc -o trace_output bpf_load.o trace_output_user.o trace_helpers.o libbpf.a -lelf -lrt
+</code></pre> 
+<p>其中内核态编译脉络如下：</p> 
+<pre><code>$  clang -O2 -emit-llvm -c trace_output_kern.c -o - 
+$  llc -march=bpf -filetype=obj -o trace_output_kern.o
+</code></pre> 
+<p>其中前一行最后的横线 - 表示 这里是输出给shell管道，所以这两行实际是可以通过shell管道拼接成一个命令来执行的。</p> 
+<h3><a id="eBPF_156"></a><strong>手工编译内核源码中的eBPF样例分析</strong></h3> 
+<p>通过上一节对关键步骤make M=samples/bpf的实践，我们已经可以编译出内核源码中提供的ebpf样例。但这还不够我们充分地理解这个编译过程，我们将这编译过程继续拆解一下，拆解成可以一步步执行的那种，为了方便大家理解，我将这个过程分解为 A-H 6大手工步骤，里面还会包含一些细分的小步骤：</p> 
+<pre><code>$  cd  /tmp/
+$  rm -fr /tmp/linux-4.18$  tar -zxvf linux-4.18.tar.gz 
+$  cd /tmp/linux-4.18
+$  make oldconfig &amp;&amp; make init
+$  make headers_install
+$  cd tools/lib/bpf/
+</code></pre> 
+<h5><a id="A_170"></a><strong>手工步骤A过程解析</strong></h5> 
+<p><strong>手工步骤A1：</strong></p> 
+<pre><code>$  # gcc -g -fPIC -c -o libbpf.o libbpf.c
+$  gcc -g -DHAVE_LIBELF_MMAP_SUPPORT -DCOMPAT_NEED_REALLOCARRAY -fPIC -I. -I/tmp/linux-4.18/tools/include -I/tmp/linux-4.18/tools/arch/x86/include/uapi -I/tmp/linux-4.18/tools/include/uapi -I/tmp/linux-4.18/tools/perf -D"BUILD_STR(s)=#s" -c -o libbpf.o libbpf.c
+</code></pre> 
+<p><strong>手工步骤A2：</strong></p> 
+<pre><code>$ # gcc -g -fPIC -c -o bpf.o bpf.c
+$  gcc -g -DHAVE_LIBELF_MMAP_SUPPORT -DCOMPAT_NEED_REALLOCARRAY -fPIC -I. -I/tmp/linux-4.18/tools/include -I/tmp/linux-4.18/tools/arch/x86/include/uapi -I/tmp/linux-4.18/tools/include/uapi -I/tmp/linux-4.18/tools/perf -D"BUILD_STR(s)=#s" -c -o bpf.o bpf.c
+</code></pre> 
+<p><strong>手工步骤A3：</strong></p> 
+<pre><code>$ # gcc -g -fPIC -c -o btf.o btf.c
+$  gcc -g -DHAVE_LIBELF_MMAP_SUPPORT -DCOMPAT_NEED_REALLOCARRAY -fPIC -I. -I/tmp/linux-4.18/tools/include -I/tmp/linux-4.18/tools/arch/x86/include/uapi -I/tmp/linux-4.18/tools/include/uapi -I/tmp/linux-4.18/tools/perf -D"BUILD_STR(s)=#s" -c -o btf.o btf.c
+</code></pre> 
+<p><strong>手工步骤A4：</strong></p> 
+<pre><code>$ # gcc -g -fPIC -c -o nlattr.o nlattr.c
+$  gcc -g -DHAVE_LIBELF_MMAP_SUPPORT -DCOMPAT_NEED_REALLOCARRAY -fPIC -I. -I/tmp/linux-4.18/tools/include -I/tmp/linux-4.18/tools/arch/x86/include/uapi -I/tmp/linux-4.18/tools/include/uapi -I/tmp/linux-4.18/tools/perf -D"BUILD_STR(s)=#s" -c -o nlattr.o nlattr.c
+</code></pre> 
+<p>针对手工步骤A1到A4的关键编译选项做一些介绍。</p> 
+<ul><li> <p>-fPIC，告诉编译器输出位置无关目标，为后面生成共享库埋下伏笔。</p> </li><li> <p>-I. 表示需要包含当前目录下的头文件。</p> </li><li> <p>-I/tmp/linux-4.18/tools/include -I/tmp/linux-4.18/tools/arch/x86/include/uapi -I/tmp/linux-4.18/tools/include/uapi -I/tmp/linux-4.18/tools/perf，这4个头文件，是用户态ebpf程序所依赖tool目录下的头文件位置。</p> </li></ul> 
+<h5><a id="B_211"></a><strong>手工步骤B过程解析</strong></h5> 
+<pre><code>$  ld -r -o libbpf-in.o  libbpf.o bpf.o nlattr.o btf.o
+</code></pre> 
+<p>手工步骤B是将步骤A中产生4个.o文件进行链接。</p> 
+<h5><a id="C_220"></a><strong>手工步骤C过程解析</strong></h5> 
+<pre><code>$  ar rcs libbpf.a libbpf-in.o
+</code></pre> 
+<p>手工步骤C是从链接后的文件中提取静态库文件。</p> 
+<h5><a id="DEF_228"></a><strong>手工步骤D/E/F过程解析</strong></h5> 
+<p><strong>手工步骤D：</strong></p> 
+<pre><code>$  # gcc -O2 -std=gnu89 -c -o bpf_load.o bpf_load.c
+$  gcc -O2 -fomit-frame-pointer -std=gnu89 -I./usr/include -I./tools/lib/ -I./tools/testing/selftests/bpf/ -I./tools/lib/ -I./tools/include -I./tools/perf -I./usr/include -Wno-unused-variable -c -o samples/bpf/bpf_load.o samples/bpf/bpf_load.c
+</code></pre> 
+<p><strong>手工步骤E：</strong></p> 
+<pre><code>$  # gcc -O2 -std=gnu89 -c -o trace_output_user.o trace_output_user.c
+$  gcc -O2 -fomit-frame-pointer -std=gnu89 -I./usr/include -I./tools/lib/ -I./tools/testing/selftests/bpf/ -I./tools/lib/ -I./tools/include -I./tools/perf -I./tools/lib/bpf/ -c -o samples/bpf/trace_output_user.o samples/bpf/trace_output_user.c
+</code></pre> 
+<p><strong>手工步骤F：</strong></p> 
+<pre><code>$  # gcc -O2 -std=gnu89 -c -o trace_helpers.o trace_helpers.c
+$  gcc -O2 -fomit-frame-pointer -std=gnu89 -I./usr/include -I./tools/lib/ -I./tools/testing/selftests/bpf/ -I./tools/lib/ -I./tools/include -I./tools/perf -I./tools/lib/bpf/ -c -o samples/bpf/../../tools/testing/selftests/bpf/trace_helpers.o samples/bpf/../../tools/testing/selftests/bpf/trace_helpers.c
+</code></pre> 
+<p>针对手工步骤E的关键编译选项做一些介绍。手工步骤D和手工步骤F与此类似。</p> 
+<ul><li> <p>O2 和 -std=gnu89 是两个核心选项。</p> </li><li> <p>include选项，一共有6个，我们将其分为3组。第一组是-I./usr/include ，这表示包含等同于kernel-headers的内容。● 第二组是-I./tools/lib/， -I./tools/include，-I./tools/perf，-I./tools/lib/bpf/● 第三组是-I./tools/testing/selftests/bpf/。之所以把这一组单独独立出来，是因为它和样例代码处于同样的路径。</p> </li></ul> 
+<h5><a id="G_260"></a><strong>手工步骤G过程解析</strong></h5> 
+<pre><code>$  # gcc -o trace_output bpf_load.o trace_output_user.o trace_helpers.o libbpf.a -lelf -lrt
+$  gcc -o samples/bpf/trace_output samples/bpf/bpf_load.o samples/bpf/trace_output_user.o samples/bpf/../../tools/testing/selftests/bpf/trace_helpers.o /tmp/linux-4.18/samples/bpf/../../tools/lib/bpf/libbpf.a -lelf -lrt
+</code></pre> 
+<p>针对手工步骤G的关键编译选项做一些介绍。</p> 
+<ul><li> <p>-lelf -lrt链接两个类库</p> </li><li> <p>libbpf.a表示以静态链接库的方式链接libbpf的类库。● 最关键的是，没有添加-static选项，没有添加-static选项，没有添加-static选项，重要的事情说三遍。</p> </li></ul> 
+<p><strong>手工步骤H过程解析</strong></p> 
+<pre><code>$  clang -nostdinc -isystem /usr/lib/gcc/x86_64-redhat-linux/8/include -I./arch/x86/include -I./arch/x86/include/generated -I./include -I./arch/x86/include/uapi -I./arch/x86/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/kconfig.h -Isamples/bpf -I./tools/testing/selftests/bpf/ -D__KERNEL__ -D__BPF_TRACING__ -D__TARGET_ARCH_x86 -O2 -emit-llvm -c samples/bpf/trace_output_kern.c -o - | llc -march=bpf -filetype=obj -o samples/bpf/trace_output_kern.o
+</code></pre> 
+<p>针对手工步骤H的关键编译选项做一些介绍。</p> 
+<ul><li> <p>-nostdinc -isystem /usr/lib/gcc/x86_64-redhat-linux/8/include，这2个选项是一组。nostdinc表示屏蔽掉系统默认的include环境，替换成当前gcc编译器自带的include头文件环境。</p> </li><li> <p>-I./arch/x86/include，-I./arch/x86/include/generated，-I./include，-I./arch/x86/include/uapi，-I./arch/x86/include/generated/uapi，-I./include/uapi，-I./include/generated/uapi。这7个头文件很关键，是内核态ebpf程序所依赖的绝大多数头文件的位置。● -include ./include/linux/kconfig.h，这个头文件也很关键，是让上面7个头文件生效的前提条件。● -I samples/bpf 和 -I ./tools/testing/selftests/bpf/，这2个头文件是和ebpf样例所处位置相同，单独独立出来看。● llc是llvm的连接器。内核是将clang的编译和llc的链接独立成两步完成，在llc步骤才指定-march=bpf。对编译结果进行验证，完美验证通过，第二次有点小激动。</p> </li></ul> 
+<pre><code>$  sudo ./samples/bpf/trace_outputrecv 1760674 events per sec
+</code></pre> 
+<p>关键步骤抽取不是最终目的，根本目的是能让我们实现脱离内核源码进行独立的纯C语言编译。我们将在后续的文章中进一步阐述。</p> 
+<h3><a id="49_293"></a><strong>关于4.9版本内核</strong></h3> 
+<p>按照内核的原生步骤，对4.9内核进行一次编译，我们会发现对应手工步骤E的这一步，编译代码有点不一样，具体代码如下。</p> 
+<blockquote> 
+ <p>$ gcc -o samples/bpf/trace_output samples/bpf/bpf_load.o samples/bpf/libbpf.o samples/bpf/trace_output_user.o -lelf -lrt</p> 
+</blockquote> 
+<p>其中没有了对libbpf.a静态库的链接，但却多了一个libbpf.o文件的链接。</p> 
+<pre><code>$  cd /tmp/linux-4.9/
+$  find . -name libbpf.c
+./samples/bpf/libbpf.c
+./tools/lib/bpf/libbpf.c
+</code></pre> 
+<p>查询内核源码，可以发现，在4.9内核下，有2个libbpf.c文件，分别处于./tools/lib/bpf/目录和./samples/bpf/目录。而内核ebpf样例暂时使用的还是老的./samples/bpf/libbpf.c文件。</p> 
+<h3><a id="_309"></a>进一步探索</h3> 
+<p>本文为eBPF动手实践系列的第一篇，我们实现了基于内核源码框架的一步一步的纯C语言编译，下一篇我们会对这个编译过程继续深入探索，实现脱离内核源码后的纯C语言编译。</p> 
+<p>欢迎有想法或者有问题的同学，加群交流eBPF技术以及工程实践。</p> 
+<p>SREWorks数智运维工程群(<strong>钉钉群号：35853026</strong>)</p> 
+<p><strong>附录: eBPF手工纯C编译完整命令清单</strong></p> 
+<pre><code>cd  /tmp/rm -fr /tmp/linux-4.18tar -zxvf linux-4.18.tar.gz cd /tmp/linux-4.18make oldconfig &amp;&amp; make initmake headers_installcd tools/lib/bpf/
+# 步骤A1# gcc -g -fPIC -c -o libbpf.o libbpf.cgcc -g -DHAVE_LIBELF_MMAP_SUPPORT -DCOMPAT_NEED_REALLOCARRAY -fPIC -I. -I/tmp/linux-4.18/tools/include -I/tmp/linux-4.18/tools/arch/x86/include/uapi -I/tmp/linux-4.18/tools/include/uapi -I/tmp/linux-4.18/tools/perf -D"BUILD_STR(s)=#s" -c -o libbpf.o libbpf.c
+# 步骤A2# gcc -g -fPIC -c -o bpf.o bpf.cgcc -g -DHAVE_LIBELF_MMAP_SUPPORT -DCOMPAT_NEED_REALLOCARRAY -fPIC -I. -I/tmp/linux-4.18/tools/include -I/tmp/linux-4.18/tools/arch/x86/include/uapi -I/tmp/linux-4.18/tools/include/uapi -I/tmp/linux-4.18/tools/perf -D"BUILD_STR(s)=#s" -c -o bpf.o bpf.c
+# 步骤A3# gcc -g -fPIC -c -o btf.o btf.cgcc -g -DHAVE_LIBELF_MMAP_SUPPORT -DCOMPAT_NEED_REALLOCARRAY -fPIC -I. -I/tmp/linux-4.18/tools/include -I/tmp/linux-4.18/tools/arch/x86/include/uapi -I/tmp/linux-4.18/tools/include/uapi -I/tmp/linux-4.18/tools/perf -D"BUILD_STR(s)=#s" -c -o btf.o btf.c
+# 步骤A4# gcc -g -fPIC -c -o nlattr.o nlattr.cgcc -g -DHAVE_LIBELF_MMAP_SUPPORT -DCOMPAT_NEED_REALLOCARRAY -fPIC -I. -I/tmp/linux-4.18/tools/include -I/tmp/linux-4.18/tools/arch/x86/include/uapi -I/tmp/linux-4.18/tools/include/uapi -I/tmp/linux-4.18/tools/perf -D"BUILD_STR(s)=#s" -c -o nlattr.o nlattr.c
+# 步骤Bld -r -o libbpf-in.o  libbpf.o bpf.o nlattr.o btf.o
+# 步骤Car rcs libbpf.a libbpf-in.o 
+cd /tmp/linux-4.18/
+# 步骤D# gcc -O2 -std=gnu89 -c -o bpf_load.o bpf_load.cgcc -O2 -fomit-frame-pointer -std=gnu89 -I./usr/include -I./tools/lib/ -I./tools/testing/selftests/bpf/ -I./tools/lib/ -I./tools/include -I./tools/perf -I./usr/include -Wno-unused-variable -c -o samples/bpf/bpf_load.o samples/bpf/bpf_load.c
+# 步骤E# gcc -O2 -std=gnu89 -c -o trace_output_user.o trace_output_user.cgcc -O2 -fomit-frame-pointer -std=gnu89 -I./usr/include -I./tools/lib/ -I./tools/testing/selftests/bpf/ -I./tools/lib/ -I./tools/include -I./tools/perf -I./tools/lib/bpf/ -c -o samples/bpf/trace_output_user.o samples/bpf/trace_output_user.c
+# 步骤F# gcc -O2 -std=gnu89 -c -o trace_helpers.o trace_helpers.cgcc -O2 -fomit-frame-pointer -std=gnu89 -I./usr/include -I./tools/lib/ -I./tools/testing/selftests/bpf/ -I./tools/lib/ -I./tools/include -I./tools/perf -I./tools/lib/bpf/ -c -o samples/bpf/../../tools/testing/selftests/bpf/trace_helpers.o samples/bpf/../../tools/testing/selftests/bpf/trace_helpers.c
+# 步骤G# gcc -o trace_output bpf_load.o trace_output_user.o trace_helpers.o libbpf.a -lelf -lrtgcc -o samples/bpf/trace_output samples/bpf/bpf_load.o samples/bpf/trace_output_user.o samples/bpf/../../tools/testing/selftests/bpf/trace_helpers.o /tmp/linux-4.18/samples/bpf/../../tools/lib/bpf/libbpf.a -lelf -lrt
+# 步骤Hclang -nostdinc -isystem /usr/lib/gcc/x86_64-redhat-linux/8/include -I./arch/x86/include -I./arch/x86/include/generated -I./include -I./arch/x86/include/uapi -I./arch/x86/include/generated/uapi -I./include/uapi -I./include/generated/uapi -include ./include/linux/kconfig.h -Isamples/bpf -I./tools/testing/selftests/bpf/ -D__KERNEL__ -D__BPF_TRACING__ -D__TARGET_ARCH_x86 -O2 -emit-llvm -c samples/bpf/trace_output_kern.c -o - | llc -march=bpf -filetype=obj -o samples/bpf/trace_output_kern.o
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/77eb1e860ccf7de6220bab9671bfb41d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">网络基础架构</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/d483c7c227058a2caa61c3af8bf8e79f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">GDOUCTF WEB</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

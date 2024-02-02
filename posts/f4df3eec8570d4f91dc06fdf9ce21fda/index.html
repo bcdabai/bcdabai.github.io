@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>深入浅出Disruptor的使用和原理 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="深入浅出Disruptor的使用和原理" />
+<meta property="og:description" content="1. Disruptor简介 Disruptor git地址：https://github.com/LMAX-Exchange/disruptorDisruptor定义：线程间的高性能消息框架Disruptor核心思想：把多线程并发写的线程安全问题转化为线程本地写，即：不需要做同步 2. Disruptor优点 Disruptor非常轻量，整个框架最新版3.4.2也才70多个类，但性能却非常强悍，得益于其优秀的设计和对计算机底层原理的运用单线程每秒能处理超600W的数据（Disruptor能在1秒内将600W数据发送给消费者，其实600W是Disruptor刚发布时硬件的水平了，现在在个人PC上也能轻松突破2000W）基于事件驱动模型，不用消费者主动拉取消息比JDK的ArrayBlockingQueue性能高一个数量级 3. 为什么这么快！ 无锁序号栅栏缓存行填充，消除伪共享内存预分配环形队列RingBuffer 4. Disruptor核心概念 RingBuffer：环形队列，基于数组的内存级别缓存，是创建sequencer(序号)与定义WaitStrategy(拒绝策略)的入口Disruptor：对RingBuffer的封装，持有RingBuffer、消费者线程池Executor、消费之集合ConsumerRepsitory等引用Sequence：对RingBuffer中的元素进行序号标记，通过顺序递增的方式来管理进行交换的数据(事件/Event)，一个Sequence可以跟踪标识某个事件的处理进度，同时还能消除伪共享Sequencer：Sequencer里面包含了Sequence，是Disruptor的核心，Sequencer有两个实现类：SingleProducerSequencer(单生产者实现)、MultiProducerSequencer(多生产者实现)，Sequencer主要作用是实现生产者和消费者之间快速、正确传递数据的并发算法SequenceBarrier：消费者屏障，用于控制RingBuffer的Producer和Consumer之间的平衡关系，并且决定了Consumer是否还有可处理的事件的逻辑WaitStrategy：消费者等待策略，决定了消费者如何等待生产者将Event生产进Disruptor，WaitStrategy有多种实现策略，分别是：
+1. BlockingWaitStrategy：阻塞方式，效率较低，但对cpu消耗小，内部使用的是典型的锁和条件变量机制(java的ReentrantLock)，来处理线程的唤醒，这个策略是disruptor等待策略中最慢的一种，但是是最保守使用消耗cpu的一种用法，并且在不同的部署环境下最能保持性能一致。 但是，随着我们可以根据部署的服务环境优化出额外的性能
+2. BusySpinWaitStrategy：自旋方式，无锁，BusySpinWaitStrategy是性能最高的等待策略，但是受部署环境的制约依赖也越强。 仅当event处理线程数少于物理核心数的时候才应该采用这种等待策略。 例如，超线程不可开启。
+3. LiteBlockingWaitStrategy：BlockingWaitStrategy的变体版本，目前感觉不建议使用
+4. LiteTimeoutBlockingWaitStrategy：LiteBlockingWaitStrategy的超时版本
+5. PhasedBackoffWaitStrategy：自旋 &#43; yield &#43; 自定义策略，当吞吐量和低延迟不如CPU资源重要，CPU资源紧缺，可以使用此策略
+6. SleepingWaitStrategy：自旋休眠方式(无锁)，性能和BlockingWaitStrategy差不多，但是这个对生产者线程影响最小，它使用一个简单的loop繁忙等待循环，但是在循环体中间它调用了LockSupport.parkNanos(1)。 一般情况在linux系统这样会使得线程停顿大约60微秒。不过这样做的好处是，生产者线程不需要额外的累加计数器，也不需要产生条件变量信号量开销。 负面影响是，在生产者线程与消费者线程之间传递event数据的延迟变高。所以SleepingWaitStrategy适合在不需要低延迟， 但需要很低的生产者线程影响的情形。一个典型的案例是异步日志记录功能。
+7. TimeoutBlockingWaitStrategy：BlockingWaitStrategy的超时阻塞方式
+8. YieldingWaitStrategy：自旋线程切换竞争方式(Thread.yield())，最快的方式，适用于低延时的系统，在要求极高性能且事件处理线数小于CPU逻辑核心数的场景中推荐使用此策略，它会充分使用压榨cpu来达到降低延迟的目标。 通过不断的循环等待sequence去递增到合适的值。 在循环体内，调用Thread.yield()来允许其他的排队线程执行。 这是一种在需要极高性能并且event handler线程数少于cpu逻辑内核数的时候推荐使用的策略。 例如，你开启了超线程。（译者注：超线程是intel研发的一种cpu技术，可以使得一个核心提供两个逻辑线程，比如4核心超线程后有8个线程）
+✨✨✨✨✨这里说一下YieldingWaitStrategy使用要小心，不是特别要求性能的情况下，要谨慎使用，否则会引起服务起cpu飙升的情况，因为他的内部实现是在线程做100次递减然后Thread.yield()，可能会压榨cpu性能来换取速度，所以如果要使用要满足上面的描述Evnet：从生产者到消费者过程中所处理的数据单元，Event由使用者自定义EventHandler：由用户自定义实现，就是我们写消费者逻辑的地方，代表了Disruptor中的一个消费者的接口EventProcessor：这是个事件处理器接口，实现了Runnable，处理主要事件循环，处理Event，拥有消费者的Sequence，这个接口有2个重要实现：
+WorkProcessor：多线程处理实现，在多生产者多消费者模式下，确保每个sequence只被一个processor消费，在同一个WorkPool中，确保多个WorkProcessor不会消费同样的sequence
+BatchEventProcessor：单线程批量处理实现，包含了Event loop有效的实现，并回调到了一个EventHandler接口的实现对象，这接口实际上是通过重写run方法，轮询获取数据对象，并把数据经过等待策略交给消费者去处理 5. Disruptor基本使用方式 maven依赖：
+&lt;dependency&gt; &lt;groupId&gt;com.lmax&lt;/groupId&gt; &lt;artifactId&gt;disruptor&lt;/artifactId&gt; &lt;version&gt;3.4.2&lt;/version&gt; &lt;/dependency&gt; ----------------------------------------------------华丽的分割线------------------------------------------------------
+5.1 Disruptor单生产单消费简单模式举例： import lombok.Data; /** * 消息对象 */ @Data public class TestEvent { private Long data; } import com." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/f4df3eec8570d4f91dc06fdf9ce21fda/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-04-28T17:18:58+08:00" />
+<meta property="article:modified_time" content="2020-04-28T17:18:58+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">深入浅出Disruptor的使用和原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="1_Disruptor_0"></a>1. Disruptor简介</h3> 
+<ul><li>Disruptor git地址：<a href="https://github.com/LMAX-Exchange/disruptor">https://github.com/LMAX-Exchange/disruptor</a></li><li>Disruptor定义：线程间的高性能消息框架</li><li>Disruptor核心思想：把多线程并发写的线程安全问题转化为线程本地写，即：不需要做同步</li></ul> 
+<h3><a id="2_Disruptor_5"></a>2. Disruptor优点</h3> 
+<ul><li>Disruptor非常轻量，整个框架最新版3.4.2也才70多个类，但性能却非常强悍，得益于其优秀的设计和对计算机底层原理的运用</li><li>单线程每秒能处理超600W的数据（Disruptor能在1秒内将600W数据发送给消费者，其实600W是Disruptor刚发布时硬件的水平了，现在在个人PC上也能轻松突破2000W）</li><li>基于事件驱动模型，不用消费者主动拉取消息</li><li>比JDK的ArrayBlockingQueue性能高一个数量级</li></ul> 
+<h3><a id="3__10"></a>3. 为什么这么快！</h3> 
+<ul><li>无锁序号栅栏</li><li>缓存行填充，消除伪共享</li><li>内存预分配</li><li>环形队列RingBuffer</li></ul> 
+<h3><a id="4_Disruptor_15"></a>4. Disruptor核心概念</h3> 
+<ul><li><strong>RingBuffer</strong>：环形队列，基于数组的内存级别缓存，是创建sequencer(序号)与定义WaitStrategy(拒绝策略)的入口</li><li><strong>Disruptor</strong>：对RingBuffer的封装，持有RingBuffer、消费者线程池Executor、消费之集合ConsumerRepsitory等引用</li><li><strong>Sequence</strong>：对RingBuffer中的元素进行序号标记，通过顺序递增的方式来管理进行交换的数据(事件/Event)，一个Sequence可以跟踪标识某个事件的处理进度，同时还能消除伪共享</li><li><strong>Sequencer</strong>：Sequencer里面包含了Sequence，是Disruptor的核心，Sequencer有两个实现类：<code>SingleProducerSequencer</code>(单生产者实现)、<code>MultiProducerSequencer</code>(多生产者实现)，Sequencer主要作用是实现生产者和消费者之间快速、正确传递数据的并发算法</li><li><strong>SequenceBarrier</strong>：消费者屏障，用于控制RingBuffer的Producer和Consumer之间的平衡关系，并且决定了Consumer是否还有可处理的事件的逻辑</li><li><strong>WaitStrategy</strong>：消费者等待策略，决定了消费者如何等待生产者将Event生产进Disruptor，WaitStrategy有多种实现策略，分别是：<br> <strong>1. <code>BlockingWaitStrategy</code></strong>：阻塞方式，效率较低，但对cpu消耗小，内部使用的是典型的锁和条件变量机制(java的ReentrantLock)，来处理线程的唤醒，这个策略是disruptor等待策略中最慢的一种，但是是最保守使用消耗cpu的一种用法，并且在不同的部署环境下最能保持性能一致。 但是，随着我们可以根据部署的服务环境优化出额外的性能<br> <strong>2. <code>BusySpinWaitStrategy</code></strong>：自旋方式，无锁，BusySpinWaitStrategy是性能最高的等待策略，但是受部署环境的制约依赖也越强。 仅当event处理线程数少于物理核心数的时候才应该采用这种等待策略。 例如，超线程不可开启。<br> <strong>3. <code>LiteBlockingWaitStrategy</code></strong>：BlockingWaitStrategy的变体版本，目前感觉不建议使用<br> <strong>4. <code>LiteTimeoutBlockingWaitStrategy</code></strong>：LiteBlockingWaitStrategy的超时版本<br> <strong>5. <code>PhasedBackoffWaitStrategy</code></strong>：自旋 + yield + 自定义策略，当吞吐量和低延迟不如CPU资源重要，CPU资源紧缺，可以使用此策略<br> <strong>6. <code>SleepingWaitStrategy</code></strong>：自旋休眠方式(无锁)，性能和BlockingWaitStrategy差不多，但是这个对生产者线程影响最小，它使用一个简单的loop繁忙等待循环，但是在循环体中间它调用了<code>LockSupport.parkNanos(1)</code>。 一般情况在linux系统这样会使得线程停顿大约60微秒。不过这样做的好处是，生产者线程不需要额外的累加计数器，也不需要产生条件变量信号量开销。 负面影响是，在生产者线程与消费者线程之间传递event数据的延迟变高。所以SleepingWaitStrategy适合在不需要低延迟， 但需要很低的生产者线程影响的情形。一个典型的案例是异步日志记录功能。<br> <strong>7. <code>TimeoutBlockingWaitStrategy</code></strong>：BlockingWaitStrategy的超时阻塞方式<br> <strong>8. <code>YieldingWaitStrategy</code></strong>：自旋线程切换竞争方式(<code>Thread.yield()</code>)，最快的方式，适用于低延时的系统，在要求极高性能且事件处理线数小于CPU逻辑核心数的场景中推荐使用此策略，它会充分使用压榨cpu来达到降低延迟的目标。 通过不断的循环等待sequence去递增到合适的值。 在循环体内，调用<code>Thread.yield()</code>来允许其他的排队线程执行。 这是一种在需要极高性能并且event handler线程数少于cpu逻辑内核数的时候推荐使用的策略。 例如，你开启了超线程。（译者注：超线程是intel研发的一种cpu技术，可以使得一个核心提供两个逻辑线程，比如4核心超线程后有8个线程）<br> <strong>✨✨✨✨✨这里说一下YieldingWaitStrategy使用要小心，不是特别要求性能的情况下，要谨慎使用，否则会引起服务起cpu飙升的情况，因为他的内部实现是在线程做100次递减然后<code>Thread.yield()</code>，可能会压榨cpu性能来换取速度，所以如果要使用要满足上面的描述</strong></li><li><strong>Evnet</strong>：从生产者到消费者过程中所处理的数据单元，Event由使用者自定义</li><li><strong>EventHandler</strong>：由用户自定义实现，就是我们写消费者逻辑的地方，代表了Disruptor中的一个消费者的接口</li><li><strong>EventProcessor</strong>：这是个事件处理器接口，实现了<code>Runnable</code>，处理主要事件循环，处理Event，拥有消费者的Sequence，这个接口有2个重要实现：<br> <code>WorkProcessor</code>：多线程处理实现，在多生产者多消费者模式下，确保每个sequence只被一个processor消费，在同一个WorkPool中，确保多个WorkProcessor不会消费同样的sequence<br> <code>BatchEventProcessor</code>：单线程批量处理实现，包含了Event loop有效的实现，并回调到了一个EventHandler接口的实现对象，这接口实际上是通过重写<code>run</code>方法，轮询获取数据对象，并把数据经过等待策略交给消费者去处理</li></ul> 
+<h3><a id="5_Disruptor_37"></a>5. Disruptor基本使用方式</h3> 
+<p>maven依赖：</p> 
+<pre><code class="prism language-java"><span class="token generics function"><span class="token punctuation">&lt;</span>dependency<span class="token punctuation">&gt;</span></span>
+    <span class="token generics function"><span class="token punctuation">&lt;</span>groupId<span class="token punctuation">&gt;</span></span>com<span class="token punctuation">.</span>lmax<span class="token operator">&lt;</span><span class="token operator">/</span>groupId<span class="token operator">&gt;</span>
+    <span class="token generics function"><span class="token punctuation">&lt;</span>artifactId<span class="token punctuation">&gt;</span></span>disruptor<span class="token operator">&lt;</span><span class="token operator">/</span>artifactId<span class="token operator">&gt;</span>
+    <span class="token generics function"><span class="token punctuation">&lt;</span>version<span class="token punctuation">&gt;</span></span><span class="token number">3.4</span><span class="token number">.2</span><span class="token operator">&lt;</span><span class="token operator">/</span>version<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>dependency<span class="token operator">&gt;</span>
+</code></pre> 
+<p>----------------------------------------------------华丽的分割线------------------------------------------------------</p> 
+<h5><a id="51_Disruptor_49"></a>5.1 Disruptor单生产单消费简单模式举例：</h5> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> lombok<span class="token punctuation">.</span>Data<span class="token punctuation">;</span>
+<span class="token comment">/**
+ * 消息对象
+ */</span>
+<span class="token annotation punctuation">@Data</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">TestEvent</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> Long data<span class="token punctuation">;</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>EventFactory<span class="token punctuation">;</span>
+
+<span class="token comment">/**
+ * 消息对象生产工厂
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">TestEventFactory</span> <span class="token keyword">implements</span> <span class="token class-name">EventFactory</span><span class="token generics function"><span class="token punctuation">&lt;</span>TestEvent<span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> TestEvent <span class="token function">newInstance</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//返回空的消息对象数据Event</span>
+        <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">TestEvent</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>EventHandler<span class="token punctuation">;</span>
+
+<span class="token comment">/**
+ * 消息事件处理器
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">TestEventHandler</span> <span class="token keyword">implements</span> <span class="token class-name">EventHandler</span><span class="token generics function"><span class="token punctuation">&lt;</span>TestEvent<span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/**
+     * 事件驱动模式
+     */</span>
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span>TestEvent event<span class="token punctuation">,</span> <span class="token keyword">long</span> sequence<span class="token punctuation">,</span> <span class="token keyword">boolean</span> endOfBatch<span class="token punctuation">)</span> <span class="token keyword">throws</span> Exception <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// do ...</span>
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"消费者消费处理数据："</span> <span class="token operator">+</span> event<span class="token punctuation">.</span><span class="token function">getData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>RingBuffer<span class="token punctuation">;</span>
+<span class="token comment">/**
+ * 消息发送
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">TestEventProducer</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> RingBuffer<span class="token generics function"><span class="token punctuation">&lt;</span>TestEvent<span class="token punctuation">&gt;</span></span> ringBuffer<span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> <span class="token function">TestEventProducer</span><span class="token punctuation">(</span>RingBuffer<span class="token generics function"><span class="token punctuation">&lt;</span>TestEvent<span class="token punctuation">&gt;</span></span> ringBuffer<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>ringBuffer <span class="token operator">=</span> ringBuffer<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/**
+     * 生产的数据发送出去
+     * @param data
+     */</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">sendData</span><span class="token punctuation">(</span><span class="token keyword">long</span> data<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//从ringBuffer获取可用sequence序号</span>
+        <span class="token keyword">long</span> sequence <span class="token operator">=</span> ringBuffer<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//根据sequence获取sequence对应的Event 这个Event是一个没有赋值具体数据的对象</span>
+            TestEvent testEvent <span class="token operator">=</span> ringBuffer<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>sequence<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            testEvent<span class="token punctuation">.</span><span class="token function">setData</span><span class="token punctuation">(</span>data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//提交发布</span>
+            ringBuffer<span class="token punctuation">.</span><span class="token function">publish</span><span class="token punctuation">(</span>sequence<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>BlockingWaitStrategy<span class="token punctuation">;</span>
+<span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>RingBuffer<span class="token punctuation">;</span>
+<span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>dsl<span class="token punctuation">.</span>Disruptor<span class="token punctuation">;</span>
+<span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>dsl<span class="token punctuation">.</span>ProducerType<span class="token punctuation">;</span>
+
+<span class="token keyword">import</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>ExecutorService<span class="token punctuation">;</span>
+<span class="token keyword">import</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>Executors<span class="token punctuation">;</span>
+
+<span class="token comment">/**
+ * 测试类：
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">TestMain</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">main</span><span class="token punctuation">(</span>String<span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+        TestEventFactory eventFactory <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">TestEventFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">int</span> ringBufferSize <span class="token operator">=</span> <span class="token number">1024</span> <span class="token operator">*</span> <span class="token number">1024</span><span class="token punctuation">;</span>
+		
+		<span class="token comment">//这个线程池最好自定义</span>
+        ExecutorService executor <span class="token operator">=</span> Executors<span class="token punctuation">.</span><span class="token function">newCachedThreadPool</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//实例化disruptor</span>
+        Disruptor<span class="token generics function"><span class="token punctuation">&lt;</span>TestEvent<span class="token punctuation">&gt;</span></span> disruptor <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Disruptor</span><span class="token generics function"><span class="token punctuation">&lt;</span>TestEvent<span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>
+                eventFactory<span class="token punctuation">,</span>                   <span class="token comment">//消息工厂</span>
+                ringBufferSize<span class="token punctuation">,</span>                 <span class="token comment">//ringBuffer容器最大容量长度</span>
+                executor<span class="token punctuation">,</span>                       <span class="token comment">//线程池，最好自定义一个</span>
+                ProducerType<span class="token punctuation">.</span>SINGLE<span class="token punctuation">,</span>            <span class="token comment">//单生产者模式</span>
+                <span class="token keyword">new</span> <span class="token class-name">BlockingWaitStrategy</span><span class="token punctuation">(</span><span class="token punctuation">)</span>      <span class="token comment">//等待策略</span>
+        <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//添加消费者监听 把TestEventHandler绑定到disruptor</span>
+        disruptor<span class="token punctuation">.</span><span class="token function">handleEventsWith</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">TestEventHandler</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//启动disruptor</span>
+        disruptor<span class="token punctuation">.</span><span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//获取实际存储数据的容器RingBuffer</span>
+        RingBuffer<span class="token generics function"><span class="token punctuation">&lt;</span>TestEvent<span class="token punctuation">&gt;</span></span> ringBuffer <span class="token operator">=</span> disruptor<span class="token punctuation">.</span><span class="token function">getRingBuffer</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//生产发送数据</span>
+        TestEventProducer producer <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">TestEventProducer</span><span class="token punctuation">(</span>ringBuffer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">long</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">100</span><span class="token punctuation">;</span> i <span class="token operator">++</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+            producer<span class="token punctuation">.</span><span class="token function">sendData</span><span class="token punctuation">(</span>i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        disruptor<span class="token punctuation">.</span><span class="token function">shutdown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        executor<span class="token punctuation">.</span><span class="token function">shutdown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>运行结果：</p> 
+<pre><code class="prism language-java">消费者消费处理数据：<span class="token number">0</span>
+消费者消费处理数据：<span class="token number">1</span>
+消费者消费处理数据：<span class="token number">2</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+消费者消费处理数据：<span class="token number">97</span>
+消费者消费处理数据：<span class="token number">98</span>
+消费者消费处理数据：<span class="token number">99</span>
+</code></pre> 
+<p>上面这写代码展示了单消费者单生产者的简单处理逻辑</p> 
+<p>----------------------------------------------------华丽的分割线------------------------------------------------------</p> 
+<h5><a id="52_Disruptor_195"></a>5.2 Disruptor单生产单消费复杂模型举例：</h5> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> lombok<span class="token punctuation">.</span>Data<span class="token punctuation">;</span>
+
+<span class="token keyword">import</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>atomic<span class="token punctuation">.</span>AtomicInteger<span class="token punctuation">;</span>
+
+<span class="token comment">/**
+ * Event 数据
+ */</span>
+<span class="token annotation punctuation">@Data</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Test1</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> String name<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> Long id<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> Integer num<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> Boolean flag <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>EventHandler<span class="token punctuation">;</span>
+
+<span class="token comment">//event处理类</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Test1HandlerPrint</span> <span class="token keyword">implements</span> <span class="token class-name">EventHandler</span><span class="token generics function"><span class="token punctuation">&lt;</span>Test1<span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span>Test1 event<span class="token punctuation">,</span> <span class="token keyword">long</span> sequence<span class="token punctuation">,</span> <span class="token keyword">boolean</span> endOfBatch<span class="token punctuation">)</span> <span class="token keyword">throws</span> Exception <span class="token punctuation">{<!-- --></span>
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span>event<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>EventHandler<span class="token punctuation">;</span>
+
+<span class="token comment">//event处理类</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Test1HandlerSetFlag</span> <span class="token keyword">implements</span> <span class="token class-name">EventHandler</span><span class="token generics function"><span class="token punctuation">&lt;</span>Test1<span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span>Test1 event<span class="token punctuation">,</span> <span class="token keyword">long</span> sequence<span class="token punctuation">,</span> <span class="token keyword">boolean</span> endOfBatch<span class="token punctuation">)</span> <span class="token keyword">throws</span> Exception <span class="token punctuation">{<!-- --></span>
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"event set Flag false"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        event<span class="token punctuation">.</span><span class="token function">setFlag</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>EventHandler<span class="token punctuation">;</span>
+
+<span class="token comment">//event处理类</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Test1HandlerSetId</span> <span class="token keyword">implements</span> <span class="token class-name">EventHandler</span><span class="token generics function"><span class="token punctuation">&lt;</span>Test1<span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span>Test1 event<span class="token punctuation">,</span> <span class="token keyword">long</span> sequence<span class="token punctuation">,</span> <span class="token keyword">boolean</span> endOfBatch<span class="token punctuation">)</span> <span class="token keyword">throws</span> Exception <span class="token punctuation">{<!-- --></span>
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"event set id 12345"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        event<span class="token punctuation">.</span><span class="token function">setId</span><span class="token punctuation">(</span><span class="token number">12345</span>L<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>EventHandler<span class="token punctuation">;</span>
+
+<span class="token comment">//event处理类</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Test1HandlerSetName</span> <span class="token keyword">implements</span> <span class="token class-name">EventHandler</span><span class="token generics function"><span class="token punctuation">&lt;</span>Test1<span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span>Test1 event<span class="token punctuation">,</span> <span class="token keyword">long</span> sequence<span class="token punctuation">,</span> <span class="token keyword">boolean</span> endOfBatch<span class="token punctuation">)</span> <span class="token keyword">throws</span> Exception <span class="token punctuation">{<!-- --></span>
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"event set name Test1"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        event<span class="token punctuation">.</span><span class="token function">setName</span><span class="token punctuation">(</span><span class="token string">"Test1"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>EventTranslator<span class="token punctuation">;</span>
+<span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>dsl<span class="token punctuation">.</span>Disruptor<span class="token punctuation">;</span>
+
+<span class="token keyword">import</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>Random<span class="token punctuation">;</span>
+<span class="token keyword">import</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>CountDownLatch<span class="token punctuation">;</span>
+
+<span class="token comment">//事件/消息  投递处理类</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Test1Pushlisher</span> <span class="token keyword">implements</span> <span class="token class-name">Runnable</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> Disruptor<span class="token generics function"><span class="token punctuation">&lt;</span>Test1<span class="token punctuation">&gt;</span></span> disruptor<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> CountDownLatch downLatch<span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> <span class="token function">Test1Pushlisher</span><span class="token punctuation">(</span>Disruptor<span class="token generics function"><span class="token punctuation">&lt;</span>Test1<span class="token punctuation">&gt;</span></span> disruptor<span class="token punctuation">,</span> CountDownLatch downLatch<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>disruptor <span class="token operator">=</span> disruptor<span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>downLatch <span class="token operator">=</span> downLatch<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+        Test1EventTranslator test1EventTranslator <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Test1EventTranslator</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//提交要处理的任务</span>
+        disruptor<span class="token punctuation">.</span><span class="token function">publishEvent</span><span class="token punctuation">(</span>test1EventTranslator<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        downLatch<span class="token punctuation">.</span><span class="token function">countDown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">class</span> <span class="token class-name">Test1EventTranslator</span> <span class="token keyword">implements</span> <span class="token class-name">EventTranslator</span><span class="token generics function"><span class="token punctuation">&lt;</span>Test1<span class="token punctuation">&gt;</span></span><span class="token punctuation">{<!-- --></span>
+
+
+    <span class="token comment">//快速/便捷  的提交要处理的任务   不用再获取ringBuffer和可用sequence序号</span>
+    <span class="token comment">//在对象被创建的时候会自动执行此方法 处理Event</span>
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">translateTo</span><span class="token punctuation">(</span>Test1 event<span class="token punctuation">,</span> <span class="token keyword">long</span> sequence<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        event<span class="token punctuation">.</span><span class="token function">setNum</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Random</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">nextInt</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>BusySpinWaitStrategy<span class="token punctuation">;</span>
+<span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>EventFactory<span class="token punctuation">;</span>
+<span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>dsl<span class="token punctuation">.</span>Disruptor<span class="token punctuation">;</span>
+<span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>dsl<span class="token punctuation">.</span>ProducerType<span class="token punctuation">;</span>
+
+<span class="token keyword">import</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>CountDownLatch<span class="token punctuation">;</span>
+<span class="token keyword">import</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>ExecutorService<span class="token punctuation">;</span>
+<span class="token keyword">import</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>Executors<span class="token punctuation">;</span>
+
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Test1Main</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">main</span><span class="token punctuation">(</span>String<span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span> <span class="token keyword">throws</span> InterruptedException <span class="token punctuation">{<!-- --></span>
+
+        <span class="token keyword">int</span> ringBufferSize <span class="token operator">=</span> <span class="token number">1024</span> <span class="token operator">*</span> <span class="token number">1024</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//这个线程池最好自定义</span>
+        ExecutorService executor <span class="token operator">=</span> Executors<span class="token punctuation">.</span><span class="token function">newCachedThreadPool</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        Disruptor<span class="token generics function"><span class="token punctuation">&lt;</span>Test1<span class="token punctuation">&gt;</span></span> disruptor <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Disruptor</span><span class="token punctuation">(</span>
+                <span class="token punctuation">(</span>EventFactory<span class="token generics function"><span class="token punctuation">&lt;</span>Test1<span class="token punctuation">&gt;</span></span><span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span><span class="token operator">&gt;</span> <span class="token keyword">new</span> <span class="token class-name">Test1</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>        <span class="token comment">//简写工厂创建Event</span>
+                ringBufferSize<span class="token punctuation">,</span>
+                <span class="token comment">//disruptor使用的线程池</span>
+                <span class="token comment">// 这个线程池在单消费者模式下</span>
+                <span class="token comment">// 有几个消费者Handler就最少需要初始化几个线程</span>
+                <span class="token comment">// 多消费者就不会有这个问题</span>
+                executor<span class="token punctuation">,</span>
+                ProducerType<span class="token punctuation">.</span>SINGLE<span class="token punctuation">,</span>
+                <span class="token keyword">new</span> <span class="token class-name">BusySpinWaitStrategy</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//绑定Event处理类和disruptor，并设置执行顺序</span>
+        <span class="token comment">// 通过链式编程的方式决定串行，通过多参数的方式决定并行，看下面的例子</span>
+        <span class="token comment">// 下面这个写法有2种执行结果：</span>
+        <span class="token comment">/**
+         * 1：
+         * event set id 12345
+         * Test1(name=null, id=12345, num=1463263591, count=0)
+         * event set name Test1
+         * Test1(name=Test1, id=12345, num=1463263591, count=0)
+         *
+         * 2：
+         * Test1(name=null, id=null, num=-288133781, count=0)
+         * event set id 12345
+         * event set name Test1
+         * Test1(name=Test1, id=12345, num=-288133781, count=0)
+         *
+         * 可以多执行几次下面这个写法，可以看出来，他是Test1HandlerSetId和Test1HandlerPrint并行执行
+         * 然后等Test1HandlerSetId和Test1HandlerPrint并行执行完成之后
+         * 再串行执行Test1HandlerSetName和第二次的Test1HandlerPrint
+         * 这就是disruptor.handleEventsWith的串并行操作
+         **/</span>
+<span class="token comment">//        disruptor.handleEventsWith(new Test1HandlerSetId(), new Test1HandlerPrint())</span>
+<span class="token comment">//                .handleEventsWith(new Test1HandlerSetName())</span>
+<span class="token comment">//                .handleEventsWith(new Test1HandlerPrint());</span>
+
+        <span class="token comment">//下面这个写法就是完全的串行操作</span>
+        <span class="token comment">/**
+         * 执行顺序是：Test1HandlerPrint -&gt; Test1HandlerSetName -&gt; Test1HandlerPrint -&gt; Test1HandlerSetId -&gt; Test1HandlerPrint
+         * 执行结果：
+         * Test1(name=null, id=null, num=1780818646, count=0)
+         * event set name Test1
+         * Test1(name=Test1, id=null, num=1780818646, count=0)
+         * event set id 12345
+         * Test1(name=Test1, id=12345, num=1780818646, count=0)
+         */</span>
+<span class="token comment">//        disruptor.handleEventsWith(new Test1HandlerPrint())</span>
+<span class="token comment">//                .handleEventsWith(new Test1HandlerSetName())</span>
+<span class="token comment">//                .handleEventsWith(new Test1HandlerPrint())</span>
+<span class="token comment">//                .handleEventsWith(new Test1HandlerSetId())</span>
+<span class="token comment">//                .handleEventsWith(new Test1HandlerPrint());</span>
+        <span class="token comment">/**
+         * 通过上面两个例子，应该可以想到，disruptor支持串并行操作，类似多边形操作，多线并线
+         * 还有其他的写法，比如并行可以写：
+         * disruptor.handleEventsWith(new Test1HandlerPrint());
+         * disruptor.handleEventsWith(new Test1HandlerSetName());
+         * 这样就是Test1HandlerPrint和Test1HandlerSetName并行执行
+         * 也可以使用disruptor.handleEventsWith的返回结果：EventHandlerGroup
+         * EventHandlerGroup有then()、and()等方法，也可以实现复杂等串并行操作
+         */</span>
+        <span class="token comment">//下面演示一个更复杂等操作，多边形操作：</span>
+        Test1HandlerPrint print1 <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Test1HandlerPrint</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        Test1HandlerPrint print2 <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Test1HandlerPrint</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        Test1HandlerPrint print3 <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Test1HandlerPrint</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        Test1HandlerPrint print4 <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Test1HandlerPrint</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        Test1HandlerSetName setName <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Test1HandlerSetName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        Test1HandlerSetId setId <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Test1HandlerSetId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        Test1HandlerSetFlag setFlag <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Test1HandlerSetFlag</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        disruptor<span class="token punctuation">.</span><span class="token function">handleEventsWith</span><span class="token punctuation">(</span>print1<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        disruptor<span class="token punctuation">.</span><span class="token function">after</span><span class="token punctuation">(</span>print1<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">handleEventsWith</span><span class="token punctuation">(</span>setId<span class="token punctuation">,</span> setName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        disruptor<span class="token punctuation">.</span><span class="token function">after</span><span class="token punctuation">(</span>setId<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">handleEventsWith</span><span class="token punctuation">(</span>print2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        disruptor<span class="token punctuation">.</span><span class="token function">after</span><span class="token punctuation">(</span>setName<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">handleEventsWith</span><span class="token punctuation">(</span>print3<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        disruptor<span class="token punctuation">.</span><span class="token function">after</span><span class="token punctuation">(</span>print2<span class="token punctuation">,</span> print3<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">handleEventsWith</span><span class="token punctuation">(</span>setFlag<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        disruptor<span class="token punctuation">.</span><span class="token function">after</span><span class="token punctuation">(</span>setFlag<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">handleEventsWith</span><span class="token punctuation">(</span>print4<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">/**
+         * 上面这个操作的顺序是：
+         *         ↗ setId     -&gt;    print1    ↘
+         *  print3                              setFlag -&gt; print4
+         *         ↘ setName   -&gt;    setFlag   ↗
+         */</span>
+
+        <span class="token comment">//启动</span>
+        disruptor<span class="token punctuation">.</span><span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        CountDownLatch downLatch <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">CountDownLatch</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//线程池投递任务</span>
+        executor<span class="token punctuation">.</span><span class="token function">submit</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Test1Pushlisher</span><span class="token punctuation">(</span>disruptor<span class="token punctuation">,</span> downLatch<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        downLatch<span class="token punctuation">.</span><span class="token function">await</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        disruptor<span class="token punctuation">.</span><span class="token function">shutdown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        executor<span class="token punctuation">.</span><span class="token function">shutdown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"over"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>上面这些代码都有注释，大家可以拷下来执行看看，主要是想给大家展示单生产单消费的复杂模型，也就是复杂消费链路的写法</p> 
+<p>------------------------------------------------华丽的分割线--------------------------------------------------------------</p> 
+<h5><a id="53_Disruptor_437"></a>5.3 Disruptor多生产者多消费举例：</h5> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> lombok<span class="token punctuation">.</span>Data<span class="token punctuation">;</span>
+
+<span class="token annotation punctuation">@Data</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Item</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> String name<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> Long id<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> Integer num<span class="token punctuation">;</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>ExceptionHandler<span class="token punctuation">;</span>
+
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">EventExceptionHander</span> <span class="token keyword">implements</span> <span class="token class-name">ExceptionHandler</span><span class="token generics function"><span class="token punctuation">&lt;</span>Item<span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">handleEventException</span><span class="token punctuation">(</span>Throwable ex<span class="token punctuation">,</span> <span class="token keyword">long</span> sequence<span class="token punctuation">,</span> Item event<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"消费时的异常"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">handleOnStartException</span><span class="token punctuation">(</span>Throwable ex<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"消费刚启动时的异常"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">handleOnShutdownException</span><span class="token punctuation">(</span>Throwable ex<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"Shutdown时候的异常"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>RingBuffer<span class="token punctuation">;</span>
+
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Producer</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> RingBuffer<span class="token generics function"><span class="token punctuation">&lt;</span>Item<span class="token punctuation">&gt;</span></span> ringBuffer<span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> <span class="token function">Producer</span><span class="token punctuation">(</span>RingBuffer<span class="token generics function"><span class="token punctuation">&lt;</span>Item<span class="token punctuation">&gt;</span></span> ringBuffer<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>ringBuffer <span class="token operator">=</span> ringBuffer<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">sendData</span><span class="token punctuation">(</span>String data<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//获取下一个可用的sequence</span>
+        <span class="token keyword">long</span> sequence <span class="token operator">=</span> ringBuffer<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//设置并投递event数据</span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            Item item <span class="token operator">=</span> ringBuffer<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>sequence<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            item<span class="token punctuation">.</span><span class="token function">setName</span><span class="token punctuation">(</span>data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            ringBuffer<span class="token punctuation">.</span><span class="token function">publish</span><span class="token punctuation">(</span>sequence<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>WorkHandler<span class="token punctuation">;</span>
+
+<span class="token keyword">import</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>atomic<span class="token punctuation">.</span>AtomicInteger<span class="token punctuation">;</span>
+
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">TestConsumer</span> <span class="token keyword">implements</span> <span class="token class-name">WorkHandler</span><span class="token generics function"><span class="token punctuation">&lt;</span>Item<span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> String consumerId<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> AtomicInteger atomicInteger<span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> <span class="token function">TestConsumer</span><span class="token punctuation">(</span>String consumerId<span class="token punctuation">,</span> AtomicInteger atomicInteger<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>consumerId <span class="token operator">=</span> consumerId<span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>atomicInteger <span class="token operator">=</span> atomicInteger<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span>Item event<span class="token punctuation">)</span> <span class="token keyword">throws</span> Exception <span class="token punctuation">{<!-- --></span>
+        Thread<span class="token punctuation">.</span><span class="token function">sleep</span><span class="token punctuation">(</span><span class="token number">5</span>L<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"消费者："</span> <span class="token operator">+</span> consumerId <span class="token operator">+</span> <span class="token string">"消费Item："</span> <span class="token operator">+</span> event<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        atomicInteger<span class="token punctuation">.</span><span class="token function">incrementAndGet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>*<span class="token punctuation">;</span>
+<span class="token keyword">import</span> com<span class="token punctuation">.</span>lmax<span class="token punctuation">.</span>disruptor<span class="token punctuation">.</span>dsl<span class="token punctuation">.</span>ProducerType<span class="token punctuation">;</span>
+
+<span class="token keyword">import</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>CountDownLatch<span class="token punctuation">;</span>
+<span class="token keyword">import</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>Executors<span class="token punctuation">;</span>
+<span class="token keyword">import</span> java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>atomic<span class="token punctuation">.</span>AtomicInteger<span class="token punctuation">;</span>
+
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">TestMain</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">main</span><span class="token punctuation">(</span>String<span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span> <span class="token keyword">throws</span> InterruptedException <span class="token punctuation">{<!-- --></span>
+
+        <span class="token comment">//构建一个RingBuffer</span>
+        RingBuffer<span class="token generics function"><span class="token punctuation">&lt;</span>Item<span class="token punctuation">&gt;</span></span> ringBuffer <span class="token operator">=</span> RingBuffer<span class="token punctuation">.</span><span class="token function">create</span><span class="token punctuation">(</span>
+                ProducerType<span class="token punctuation">.</span>MULTI<span class="token punctuation">,</span>
+                <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span><span class="token operator">&gt;</span> <span class="token keyword">new</span> <span class="token class-name">Item</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                <span class="token number">1024</span> <span class="token operator">*</span> <span class="token number">1024</span><span class="token punctuation">,</span>
+                <span class="token keyword">new</span> <span class="token class-name">YieldingWaitStrategy</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//通过RingBuffer创建一个屏障</span>
+        SequenceBarrier sequenceBarrier <span class="token operator">=</span> ringBuffer<span class="token punctuation">.</span><span class="token function">newBarrier</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//创建多个消费者的数组 和 消费统计atomicInteger</span>
+        AtomicInteger atomicInteger <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">AtomicInteger</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        TestConsumer<span class="token punctuation">[</span><span class="token punctuation">]</span> testConsumers <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">TestConsumer</span><span class="token punctuation">[</span><span class="token number">10</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> testConsumers<span class="token punctuation">.</span>length<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+            testConsumers<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">TestConsumer</span><span class="token punctuation">(</span><span class="token string">"consumers"</span> <span class="token operator">+</span> i<span class="token punctuation">,</span> atomicInteger<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">//构建多消费者的工作池</span>
+        WorkerPool workerPool <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">WorkerPool</span><span class="token punctuation">(</span>
+                ringBuffer<span class="token punctuation">,</span>
+                sequenceBarrier<span class="token punctuation">,</span>
+                <span class="token keyword">new</span> <span class="token class-name">EventExceptionHander</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                testConsumers
+        <span class="token punctuation">)</span><span class="token punctuation">;</span>
+        
+        <span class="token comment">//设置多消费者的sequence序号，用于单独统计消费进度</span>
+        ringBuffer<span class="token punctuation">.</span><span class="token function">addGatingSequences</span><span class="token punctuation">(</span>workerPool<span class="token punctuation">.</span><span class="token function">getWorkerSequences</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//启动workerPool</span>
+        workerPool<span class="token punctuation">.</span><span class="token function">start</span><span class="token punctuation">(</span>Executors<span class="token punctuation">.</span><span class="token function">newCachedThreadPool</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        CountDownLatch latch <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">CountDownLatch</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//等待所有生产者投递完成所有数据 下面是100个线程每个线程投递100次 所以总数10000</span>
+        CountDownLatch latch1 <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">CountDownLatch</span><span class="token punctuation">(</span><span class="token number">10000</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">//循环模拟多线程生产数据</span>
+        <span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">100</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+            Producer producer <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Producer</span><span class="token punctuation">(</span>ringBuffer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">new</span> <span class="token class-name">Thread</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span><span class="token operator">&gt;</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token comment">//构建100个线程并在这里等待</span>
+                    latch<span class="token punctuation">.</span><span class="token function">await</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">InterruptedException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    e<span class="token punctuation">.</span><span class="token function">printStackTrace</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token keyword">for</span><span class="token punctuation">(</span><span class="token keyword">int</span> j <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> j <span class="token operator">&lt;</span> <span class="token number">100</span><span class="token punctuation">;</span> j<span class="token operator">++</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+                    producer<span class="token punctuation">.</span><span class="token function">sendData</span><span class="token punctuation">(</span><span class="token string">"data:"</span> <span class="token operator">+</span> j<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    latch1<span class="token punctuation">.</span><span class="token function">countDown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token comment">//sleep等待100线程创建完成</span>
+        Thread<span class="token punctuation">.</span><span class="token function">sleep</span><span class="token punctuation">(</span><span class="token number">2000</span>L<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"所有线程都构建完成之后通知他们可以开始生产数据"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        latch<span class="token punctuation">.</span><span class="token function">countDown</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        latch1<span class="token punctuation">.</span><span class="token function">await</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"所有生产者已完成数据发送"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//sleep模拟消费数据</span>
+        Thread<span class="token punctuation">.</span><span class="token function">sleep</span><span class="token punctuation">(</span><span class="token number">10000</span>L<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"当前消费数据总数："</span> <span class="token operator">+</span> atomicInteger<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>运行结果：</p> 
+<pre><code class="prism language-java">所有线程都构建完成之后通知他们可以开始生产数据
+所有生产者已完成数据发送
+消费者：consumers7消费Item：<span class="token function">Item</span><span class="token punctuation">(</span>name<span class="token operator">=</span>data<span class="token operator">:</span><span class="token number">2</span><span class="token punctuation">,</span> id<span class="token operator">=</span>null<span class="token punctuation">,</span> num<span class="token operator">=</span>null<span class="token punctuation">)</span>
+消费者：consumers9消费Item：<span class="token function">Item</span><span class="token punctuation">(</span>name<span class="token operator">=</span>data<span class="token operator">:</span><span class="token number">3</span><span class="token punctuation">,</span> id<span class="token operator">=</span>null<span class="token punctuation">,</span> num<span class="token operator">=</span>null<span class="token punctuation">)</span>
+消费者：consumers0消费Item：<span class="token function">Item</span><span class="token punctuation">(</span>name<span class="token operator">=</span>data<span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">,</span> id<span class="token operator">=</span>null<span class="token punctuation">,</span> num<span class="token operator">=</span>null<span class="token punctuation">)</span>
+消费者：consumers3消费Item：<span class="token function">Item</span><span class="token punctuation">(</span>name<span class="token operator">=</span>data<span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">,</span> id<span class="token operator">=</span>null<span class="token punctuation">,</span> num<span class="token operator">=</span>null<span class="token punctuation">)</span>
+消费者：consumers8消费Item：<span class="token function">Item</span><span class="token punctuation">(</span>name<span class="token operator">=</span>data<span class="token operator">:</span><span class="token number">2</span><span class="token punctuation">,</span> id<span class="token operator">=</span>null<span class="token punctuation">,</span> num<span class="token operator">=</span>null<span class="token punctuation">)</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+消费者：consumers7消费Item：<span class="token function">Item</span><span class="token punctuation">(</span>name<span class="token operator">=</span>data<span class="token operator">:</span><span class="token number">95</span><span class="token punctuation">,</span> id<span class="token operator">=</span>null<span class="token punctuation">,</span> num<span class="token operator">=</span>null<span class="token punctuation">)</span>
+消费者：consumers1消费Item：<span class="token function">Item</span><span class="token punctuation">(</span>name<span class="token operator">=</span>data<span class="token operator">:</span><span class="token number">98</span><span class="token punctuation">,</span> id<span class="token operator">=</span>null<span class="token punctuation">,</span> num<span class="token operator">=</span>null<span class="token punctuation">)</span>
+消费者：consumers2消费Item：<span class="token function">Item</span><span class="token punctuation">(</span>name<span class="token operator">=</span>data<span class="token operator">:</span><span class="token number">99</span><span class="token punctuation">,</span> id<span class="token operator">=</span>null<span class="token punctuation">,</span> num<span class="token operator">=</span>null<span class="token punctuation">)</span>
+消费者：consumers0消费Item：<span class="token function">Item</span><span class="token punctuation">(</span>name<span class="token operator">=</span>data<span class="token operator">:</span><span class="token number">94</span><span class="token punctuation">,</span> id<span class="token operator">=</span>null<span class="token punctuation">,</span> num<span class="token operator">=</span>null<span class="token punctuation">)</span>
+当前消费数据总数：<span class="token number">10000</span>
+</code></pre> 
+<p>上面这个运行结果 输出：<code>当前消费数据总数：10000</code>是在<code>Thread.sleep(10000L);</code>模拟消费完成之后输出，电脑性能不行的话可能并不一定输出在最后面，如果不在最后面建议sleep时间加长一点<br> ------------------------------------------------华丽的分割线--------------------------------------------------------------</p> 
+<p><strong>上面列举了3种Disruptor的使用简单举例，实际项目使用要灵活应用</strong></p> 
+<h3><a id="6_Disruptor_630"></a>6. Disruptor原理分析</h3> 
+<h5><a id="61___631"></a>6.1 缓存行填充 消除伪共享源码解析</h5> 
+<p>这里以RingBuffer中的消除伪共享为例<br> 要了解缓存行填充消除伪共享，首先要了解什么是系统缓存行：</p> 
+<blockquote> 
+ <p>CPU 为了更快的执行代码。于是当从内存中读取数据时，并不是只读自己想要的部分。而是读取足够的字节来填入高速缓存行。根据不同的 CPU ，高速缓存行大小不同。如 X86 是 32BYTES ，而 ALPHA 是 64BYTES 。并且始终在第 32 个字节或第 64 个字节处对齐。这样，当 CPU 访问相邻的数据时，就不必每次都从内存中读取，提高了速度。 因为访问内存要比访问高速缓存用的时间多得多。<br> 这个缓存是CPU内部自己的缓存，内部的缓存单位是行，叫做缓存行。在多核环境下会出现CPU之间的内存同步问题（比如一个核加载了一份缓存，另外一个核也要用到同一份数据），如果每个核每次需要时都往内存中存取（一个在读缓存，一个在写缓存时，造成数据不一致），这会带来比较大的性能损耗。<br> 现在需要注意一件有趣的事情，数据在缓存中不是以独立的项来存储的，如不是一个单独的变量，也不是一个单独的指针。缓存是由缓存行组成的，通常是64字节（译注：这篇文章发表时常用处理器的缓存行是64字节的，比较旧的处理器缓存行是32字节），并且它有效地引用主内存中的一块地址。一个Java的long类型是8字节，因此在一个缓存行中可以存8个long类型的变量。<br> 非常奇妙的是如果你访问一个long数组，当数组中的一个值被加载到缓存中，它会额外加载另外7个。因此你能非常快地遍历这个数组。事实上，你可以非常快速的遍历在连续的内存块中分配的任意数据结构。我在第一篇关于ring buffer的文章中顺便提到过这个，它解释了我们的ring buffer使用数组的原因。<br> 因此如果你数据结构中的项在内存中不是彼此相邻的（链表，我正在关注你呢），你将得不到免费缓存加载所带来的优势。并且在这些数据结构中的每一个项都可能会出现缓存未命中。<br> 不过，所有这种免费加载有一个弊端。设想你的long类型的数据不是数组的一部分。设想它只是一个单独的变量。让我们称它为head，这么称呼它其实没有什么原因。然后再设想在你的类中有另一个变量紧挨着它。让我们直接称它为tail。现在，当你加载head到缓存的时候，你也免费加载了tail<br> 摘自：并发编程网-&gt;神奇的缓存行填充</p> 
+</blockquote> 
+<table><thead><tr><th>从CPU到</th><th>大约需要的 CPU 周期</th><th>大约需要的时间</th></tr></thead><tbody><tr><td>主存</td><td></td><td>约60-80纳秒</td></tr><tr><td>QPI 总线传输(between sockets, not drawn)</td><td></td><td>约20ns</td></tr><tr><td>L3 cache</td><td>约40-45 周期</td><td>约15ns</td></tr><tr><td>L2 cache</td><td>约10 周期</td><td>约3ns</td></tr><tr><td>L1 cache</td><td>约3-4 周期</td><td>约1ns</td></tr><tr><td>寄存器</td><td>1周期</td><td></td></tr></tbody></table> 
+<p><strong>简单理解就是在系统缓存中是以缓存行为单位缓存数据的，这个时候如果你要获取某个缓存数据，你会附带的获取了其他的(和你目标数据在同一个缓存行的数据)，这个感觉是一个好事情，但是在多线程中，你的缓存行中存储的多个数据，有可能你想读取其中一个，但是这个时候被另一个线程修改了这个缓存行中的另一个，导致整个缓存行缓存的数据失效，整个缓存行需要从主内存重新读取，这个时候就会出现缓存未命中，拖慢了速度</strong></p> 
+<p>那么接下来以RingBuffer为例看看他是怎么处理的<br> 在上面第四节里面我们将disruptor核心概念中说了<code>Sequence：对RingBuffer中的元素进行序号标记，通过顺序递增的方式来管理进行交换的数据(事件/Event)，一个Sequence可以跟踪标识某个事件的处理进度，同时还能消除伪共享</code><br> 这个Sequence就是：<code>com.lmax.disruptor.Sequence</code></p> 
+<pre><code class="prism language-java"><span class="token keyword">class</span> <span class="token class-name">LhsPadding</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">protected</span> <span class="token keyword">long</span> p1<span class="token punctuation">,</span> p2<span class="token punctuation">,</span> p3<span class="token punctuation">,</span> p4<span class="token punctuation">,</span> p5<span class="token punctuation">,</span> p6<span class="token punctuation">,</span> p7<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">class</span> <span class="token class-name">Value</span> <span class="token keyword">extends</span> <span class="token class-name">LhsPadding</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">protected</span> <span class="token keyword">volatile</span> <span class="token keyword">long</span> value<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">class</span> <span class="token class-name">RhsPadding</span> <span class="token keyword">extends</span> <span class="token class-name">Value</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">protected</span> <span class="token keyword">long</span> p9<span class="token punctuation">,</span> p10<span class="token punctuation">,</span> p11<span class="token punctuation">,</span> p12<span class="token punctuation">,</span> p13<span class="token punctuation">,</span> p14<span class="token punctuation">,</span> p15<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Sequence</span> <span class="token keyword">extends</span> <span class="token class-name">RhsPadding</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这是Sequence(序号)的源码，这里省略了其他的代码，我们可以看到<br> <img src="https://images2.imgbox.com/e3/bd/vade3xDG_o.png" alt="在这里插入图片描述"><br> Sequence ➡️ RhsPadding ➡️ Value ➡️ LhsPadding<br> 这个里面的<code>Value</code>就是Sequence的实际值，是个<code>volatile long</code>，<code>RhsPadding</code>便是右边的填充，<code>LhsPadding</code>表示左边的填充，左右两边各填充7个long，这样在缓存行中，无论Sequence的value在缓存行什么位置，都可以保证不会有别的缓存影响到它自己(自己独占一个缓存行，空间换时间)，这就是缓存行填充，消除伪共享<br> 这是disruptor中RingBuffer的做法，其实在java中也支持消除伪共享，在java8之后，java提供了一个注解：<code>@Contended</code>，这个注解在<code>ConcurrentHashMap</code>中有使用，但是这个注解要使用执行时，必须加上虚拟机参数<code>-XX:-RestrictContended</code>，@Contended注释才会生效。</p> 
+<h5><a id="62__684"></a>6.2 内存预分配</h5> 
+<p>内存预分配指的是Disruptor在初始化的时候，把ringBuffer中的所有内存都提前加载，省去了在消除投递和处理过程中的创建和分配内存，具体代码可以看下面的流程：<br> <code>com.lmax.disruptor.dsl.Disruptor#Disruptor(com.lmax.disruptor.EventFactory&lt;T&gt;, int, java.util.concurrent.Executor, com.lmax.disruptor.dsl.ProducerType, com.lmax.disruptor.WaitStrategy)</code><br> ⬇️<br> <code>com.lmax.disruptor.RingBuffer#create</code><br> ⬇️<br> <code>com.lmax.disruptor.RingBuffer#createSingleProducer(com.lmax.disruptor.EventFactory&lt;E&gt;, int, com.lmax.disruptor.WaitStrategy)</code> //这里以单消费者为例<br> ⬇️<br> <code>com.lmax.disruptor.RingBuffer#RingBuffer</code><br> ⬇️<br> <code>com.lmax.disruptor.RingBufferFields#RingBufferFields</code><br> ⬇️<br> <code>com.lmax.disruptor.RingBufferFields#fill</code><br> 按照上面这个流程，从创建Disruptor的时候，最终在<code>com.lmax.disruptor.RingBufferFields#fill</code>方法里面可以看到在初始化的时候内存就被预先创建好了：</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">fill</span><span class="token punctuation">(</span>EventFactory<span class="token generics function"><span class="token punctuation">&lt;</span>E<span class="token punctuation">&gt;</span></span> eventFactory<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token comment">//创建bufferSize次循环</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> bufferSize<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+    	<span class="token comment">//给RingBuffer里面按照下表预先分配内存</span>
+        entries<span class="token punctuation">[</span>BUFFER_PAD <span class="token operator">+</span> i<span class="token punctuation">]</span> <span class="token operator">=</span> eventFactory<span class="token punctuation">.</span><span class="token function">newInstance</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h5><a id="63__710"></a>6.3 序号栅栏机制</h5> 
+<p>这里以生产这投递数据到RingBuffer开始切入，在上面单生产者单消费者简单模式举例中，有这样一段代码：</p> 
+<pre><code class="prism language-java">	<span class="token comment">/**
+     * 生产的数据发送出去
+     * @param data
+     */</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">sendData</span><span class="token punctuation">(</span><span class="token keyword">long</span> data<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+        <span class="token comment">//从ringBuffer获取可用sequence序号</span>
+        <span class="token keyword">long</span> sequence <span class="token operator">=</span> ringBuffer<span class="token punctuation">.</span><span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//根据sequence获取sequence对应的Event 这个Event是一个没有赋值具体数据的对象</span>
+            TestEvent testEvent <span class="token operator">=</span> ringBuffer<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>sequence<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            testEvent<span class="token punctuation">.</span><span class="token function">setData</span><span class="token punctuation">(</span>data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//提交发布</span>
+            ringBuffer<span class="token punctuation">.</span><span class="token function">publish</span><span class="token punctuation">(</span>sequence<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>在这段代码中的<code>ringBuffer.next();</code>是获取下一个可用序号，用来给这个序号投递数据，点进源码之后，在单生产者中可以看到具体实现在：<code>com.lmax.disruptor.SingleProducerSequencer#next()</code></p> 
+<pre><code class="prism language-java">	<span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">long</span> <span class="token function">next</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token function">next</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>再看<code>next(1);</code><br> 下面这段代码就是具体的序号栅栏机制实现</p> 
+<pre><code class="prism language-java">	<span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">long</span> <span class="token function">next</span><span class="token punctuation">(</span><span class="token keyword">int</span> n<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+    	<span class="token comment">//校验参数  Sequence初始值为-1 所以 n必须不小于1 （-1 + 1 = 0）保证下标可用</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">&lt;</span> <span class="token number">1</span><span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">IllegalArgumentException</span><span class="token punctuation">(</span><span class="token string">"n must be &gt; 0"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+		<span class="token comment">//在初始化的时候this.nextValue值为：-1 表示下一个可用序号</span>
+        <span class="token keyword">long</span> nextValue <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>nextValue<span class="token punctuation">;</span>
+		<span class="token comment">//当在初始化后第一次调用当前方法时,那么nextValue=-1， n=1 </span>
+		<span class="token comment">//那么nextSequence=0 也就是环形队列的第一个</span>
+		<span class="token comment">//在后续的调用中也表示下一个序号</span>
+        <span class="token keyword">long</span> nextSequence <span class="token operator">=</span> nextValue <span class="token operator">+</span> n<span class="token punctuation">;</span>
+        <span class="token comment">//当nextSequence=0，bufferSize为环形队列长度n，那么wrapPoint=0-n, wrapPoint就是-n  这是一个巧妙的算法逻辑 需要大家仔细想清楚</span>
+        <span class="token comment">//这里先解释出来wrapPoint，它是用来判断生产者的序号减去RingBuffer环的长度，计算的结果用来判断生产者的序号有没有追上消费者最小的消费序号</span>
+        <span class="token keyword">long</span> wrapPoint <span class="token operator">=</span> nextSequence <span class="token operator">-</span> bufferSize<span class="token punctuation">;</span>
+        <span class="token comment">//cachedValue表示缓存的序号值，初始值也是-1</span>
+        <span class="token keyword">long</span> cachedGatingSequence <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>cachedValue<span class="token punctuation">;</span>
+		<span class="token comment">//这个if判断逻辑建议先跳过  看if里面的逻辑，再回过头来看if判断</span>
+		<span class="token comment">//在理解了下面这个if里面的逻辑之后，就可以发现cachedGatingSequence就是最小的消费者序号</span>
+		<span class="token comment">//如果wrapPoint大于了最小的消费者序号或者最小消费者序号大于了naxtValue</span>
+		<span class="token comment">//那说明需要检查是不是需要自旋挂起  这个if判断在一定程度上减少了获取最小消费者序号的步骤，提高了性能</span>
+		<span class="token comment">//至于这个为什么用wrapPoint来判断，大家可以用断点的方式看看，其实是一个算法的逻辑</span>
+		<span class="token comment">//🌟🌟🌟🌟🌟(这里很重要)建议大家用断点的方式，设置4个RingBuffer长度，就是bufferSize=4，然后连续给RingBuffer投递5个数据，在消费者消费第一个数据的时候让Sleep一个很长的时间或者在消费的时候断点卡住，也就是不要让第一个消费完，模拟生产者速度大于消费者速度的情况，当投递第5个数据的时候就可以看到栅栏的作用了，也就是这个里的算法逻辑</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>wrapPoint <span class="token operator">&gt;</span> cachedGatingSequence <span class="token operator">||</span> cachedGatingSequence <span class="token operator">&gt;</span> nextValue<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+        	<span class="token comment">//Volatile方式设置读取或者写入的屏障 隔离之前的调用和下次调用</span>
+            cursor<span class="token punctuation">.</span><span class="token function">setVolatile</span><span class="token punctuation">(</span>nextValue<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// StoreLoad fence</span>
+			<span class="token comment">//定义一个最小的序号</span>
+            <span class="token keyword">long</span> minSequence<span class="token punctuation">;</span>
+            <span class="token comment">//自旋(相当于等待/自旋锁 避免CAS或者加锁)，</span>
+            <span class="token comment">//如果wrapPoint大于当前所有消费者中最小的序号值   那么就一直自旋挂起当前线程1纳秒</span>
+            <span class="token comment">//因为RingBuffer是环形的，生产者生产的时候不能把消费者未消费的数据覆盖掉，也就是生产者生产太快了  需要挂起等待数据被消费</span>
+            <span class="token comment">//Util.getMinimumSequence(gatingSequences, nextValue)就表示获取所有消费者中最小的Sequence值</span>
+            <span class="token comment">//gatingSequences其实是在disruptor.handleEventsWith(...)里面添加的消费者Sequence  可以在com.lmax.disruptor.dsl.Disruptor#updateGatingSequencesForNextInChain方法看到：ringBuffer.addGatingSequences(processorSequences);</span>
+            <span class="token comment">//这个while里面的判断条件实际意义是：生产者序号如果要大于所有消费者中的最小的序号  那么挂起自旋，保证生产的消息不会把为消费的消息覆盖掉</span>
+            <span class="token keyword">while</span> <span class="token punctuation">(</span>wrapPoint <span class="token operator">&gt;</span> <span class="token punctuation">(</span>minSequence <span class="token operator">=</span> Util<span class="token punctuation">.</span><span class="token function">getMinimumSequence</span><span class="token punctuation">(</span>gatingSequences<span class="token punctuation">,</span> nextValue<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+            	<span class="token comment">//线程挂起1纳秒</span>
+                LockSupport<span class="token punctuation">.</span><span class="token function">parkNanos</span><span class="token punctuation">(</span><span class="token number">1</span>L<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// TODO: Use waitStrategy to spin?</span>
+            <span class="token punctuation">}</span>
+			<span class="token comment">//当上面自旋结束之后，把最小的消费者序号赋值给cachedValue做记录 </span>
+			<span class="token comment">//cachedValue会再下次进入方法后赋值给上面的cachedGatingSequence变量 </span>
+			<span class="token comment">//这样再下次进入的时候不用再次在Util.getMinimumSequence(gatingSequences, nextValue)获取消费者最小序号值，直接使用缓存值提高性能</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>cachedValue <span class="token operator">=</span> minSequence<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+		<span class="token comment">//通过上面的判断或者自旋结束，说明有可用的序号了，那么把下一个可用的序号返回</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>nextValue <span class="token operator">=</span> nextSequence<span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> nextSequence<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>上面的代码和注释，详细的解释了序号栅栏的方式阻塞生产者生产速度大于消费者消费速度时的情况，相比传统的加锁和CAS方式，这种处理方式有高效速度快的优点</p> 
+<h5><a id="64_EventProcessor_797"></a>6.4 EventProcessor消费机制</h5> 
+<p>在我们上面的代码举例中，有一段这样的代码：</p> 
+<pre><code class="prism language-java"><span class="token comment">/**
+ * 消息事件处理器
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">TestEventHandler</span> <span class="token keyword">implements</span> <span class="token class-name">EventHandler</span><span class="token generics function"><span class="token punctuation">&lt;</span>TestEvent<span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/**
+     * 事件驱动模式
+     */</span>
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span>TestEvent event<span class="token punctuation">,</span> <span class="token keyword">long</span> sequence<span class="token punctuation">,</span> <span class="token keyword">boolean</span> endOfBatch<span class="token punctuation">)</span> <span class="token keyword">throws</span> Exception <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// do ...</span>
+        System<span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span><span class="token string">"消费者消费处理数据："</span> <span class="token operator">+</span> event<span class="token punctuation">.</span><span class="token function">getData</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>他是个事件驱动类型的，不需要我们手动去拉取消息消费，点进<code>onEvent()</code>方法的上游可以看到他是接口：<code>com.lmax.disruptor.EventHandler#onEvent</code>下的，我们查找一下这个<code>onEvent()</code>在哪里被调用过，就会发现是在：<code>com.lmax.disruptor.BatchEventProcessor#processEvents</code>被调用了，很明显可以看到这是消费的逻辑，那么<code>com.lmax.disruptor.BatchEventProcessor#processEvents</code>被调用是在<code>com.lmax.disruptor.BatchEventProcessor#run</code>，很明显这个是<code>Runnable</code>的<code>run()</code>方法</p> 
+<p>这里我们重点来看<code>com.lmax.disruptor.BatchEventProcessor#processEvents</code>这个方法：</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">processEvents</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token comment">//定义一个消息对象，实际就是我们使用时的Event消息对象</span>
+    T event <span class="token operator">=</span> null<span class="token punctuation">;</span>
+    <span class="token comment">//下一个序号，是给消费者使用，用于获取下一个要消费的消息</span>
+    <span class="token keyword">long</span> nextSequence <span class="token operator">=</span> sequence<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">1</span>L<span class="token punctuation">;</span>
+
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span>
+        <span class="token punctuation">{<!-- --></span>
+        	<span class="token comment">//availableSequence表示真实可用的序号</span>
+        	<span class="token comment">//sequenceBarrier.waitFor 实际是从我们的阻塞策略里获取下一个可用序号 实际要看我们使用的是哪个阻塞策略 </span>
+        	<span class="token comment">//这里真实获取的availableSequence不一定就是nextSequence 因为在多生产者(多线程)情况下，下一个可用的Sequence不一定是nextSequence</span>
+            <span class="token keyword">final</span> <span class="token keyword">long</span> availableSequence <span class="token operator">=</span> sequenceBarrier<span class="token punctuation">.</span><span class="token function">waitFor</span><span class="token punctuation">(</span>nextSequence<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>batchStartAware <span class="token operator">!=</span> null<span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+                batchStartAware<span class="token punctuation">.</span><span class="token function">onBatchStart</span><span class="token punctuation">(</span>availableSequence <span class="token operator">-</span> nextSequence <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+			<span class="token comment">//所以这里进行判断，如果nextSequence&lt;=availableSequence 说明获取的真实可用的序号大于等于了上面sequence.get()获取的下一个序号，那么就要循环</span>
+            <span class="token keyword">while</span> <span class="token punctuation">(</span>nextSequence <span class="token operator">&lt;=</span> availableSequence<span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+            	<span class="token comment">//把sequence.get()的nextSequence到真实可用的序号availableSequence 之间的消息取出来</span>
+                event <span class="token operator">=</span> dataProvider<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>nextSequence<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//然后调用onEvent方法，其实就是我们上面的TestEventHandler消费者实现的onEvent</span>
+                eventHandler<span class="token punctuation">.</span><span class="token function">onEvent</span><span class="token punctuation">(</span>event<span class="token punctuation">,</span> nextSequence<span class="token punctuation">,</span> nextSequence <span class="token operator">==</span> availableSequence<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">//这里消费完一个自增一下用于循环</span>
+                nextSequence<span class="token operator">++</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+			<span class="token comment">// 设置下一个要消费的sequence</span>
+            sequence<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>availableSequence<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">final</span> TimeoutException e<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">//while (true)循环退出的条件，这里判断程序抛出：TimeoutException时退出</span>
+            <span class="token function">notifyTimeout</span><span class="token punctuation">(</span>sequence<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">final</span> AlertException ex<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+        	<span class="token comment">//while (true)循环退出的条件，这里判断程序阻断的时候break</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>running<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">!=</span> RUNNING<span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">final</span> Throwable ex<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+        	<span class="token comment">//其他异常的时候  进入我们的补偿机制，就是上面例子中我们定义的异常处理情况：EventExceptionHander  可以看上面：5.3 Disruptor多生产者多消费举例</span>
+            exceptionHandler<span class="token punctuation">.</span><span class="token function">handleEventException</span><span class="token punctuation">(</span>ex<span class="token punctuation">,</span> nextSequence<span class="token punctuation">,</span> event<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            sequence<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>nextSequence<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            nextSequence<span class="token operator">++</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="7_876"></a>7.总结</h3> 
+<p>Disruptor作为一个以高性能著称的队列，它既实现了例如BlockingQueue等队列的功能，同时也通过缓存行填充、序号栅栏、内存预分配等机制有效等提高了性能，同时还有其他队列所没有的功能，例如：同一个消息可以有多个消费者去消费，消费者消费时既可以并行处理消费，也可以相互依赖形成并行串行同时存在的优先级消费(通过代码编程的方式，形成处理流程)<br> 以上只是对Disruptor的部分代码解析和使用，更多的使用和源码理解，需要大家再仔细看哈，有不对的地方希望大家可以帮我指正。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a6439fcc19a3df0bf4b31290e31f9f85/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">常见用法——js中如何动态生成元素的几种方法总结（简单直观！）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/abfb3316d86122df321f0ec2ae9d0bbb/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">一文带你搞懂Spring MVC和servlet（面试必备）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

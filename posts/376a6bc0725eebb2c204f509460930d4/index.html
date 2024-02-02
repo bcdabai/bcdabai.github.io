@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>STM32使用CubeMx配置定时器输出PWM - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="STM32使用CubeMx配置定时器输出PWM" />
+<meta property="og:description" content="1 概述 项目中经常使用到STM32来输出PWM，每次配置过后过不了多久就会忘记，稍微需要对配置做出修改时都要翻很久的手册，所以决定结合实例把PWM配置的详细步骤记录下来，这样在下次配置时可以很快的捡起来。
+本文档的行文结构如下，首先，说明实际需求，即要输出什么样的PWM信号；然后，根据需求把手册中相关的部分摘抄下来并辅以个人的理解和总结；最后，详细说明在软件中怎么去配置并展示配置后的实验效果。
+2 需求 项目中用到4路PWM信号，硬件条件决定了其只能由定时器1和定时器3产生，每个定时器输出两路PWM信号，要求4个PWM信号相位同步，每个PWM信号如图1所示。
+图1 PWM输出波形要求
+具体要求见表1。
+表1 PWM要求
+序号名称要求备注 1
+周期
+100us
+暂定
+2
+占空比
+0~100%可调
+3
+中断触发时刻
+计数器下溢点
+4
+占空比更新时刻
+计数器下溢点
+3 STM高级定时器原理 图 2高级定时器的原理框图
+图中用红色虚线框出来的部分是输出PWM所需要的部分，包括时钟源、计数器单元、比较寄存器及PWM输出、TRGO输出、外部触发输入，下面依次说明各部分原理。
+3.1 时钟源 计数器时钟可由以下时钟源提供：
+内部时钟(CK_INT)外部时钟模式1：外部输入引脚外部时钟模式2：外部触发输入ETR外部触发输入(ITRx) 输出PWM使用内部时钟(CK_INT)，只需要关心怎么配置为内部时钟以及内部时钟的频率。
+3.2 计数器单元 时钟源输出的时钟经过预分频器分频后作为计数器的时钟。计数器在时钟下可以增计数、减计数、增/减计数。自动重载寄存器控制计数器的计数范围，即定时器的周期。重复计数器控制更新事件UEV产生的频率。
+3.2.1 预分频器 预分频器用于对计数器时钟进行分频，分频系数可配置为1~65536。分频系数可以动态修改，不过其具有缓冲功能，修改后的分频系数只能在下一次更新事件UEV后生效（见3.2.3节）。
+3.2.2 计数器 1）计数器可以增计数、减计数、增\减计数。
+增计数的范围为0~自动重装值（TIMx_ARR寄存器的值），计数值为自动重装值时产生上溢事件，定时器周期=T_CK_CNT*(自动重装值&#43;1)；减计数的范围为自动重装值（TIMx_ARR寄存器的值）~0，计数值为0时产生下溢事件，定时器周期=T_CK_CNT*(自动重装值&#43;1)；增\减计数的范围为0~自动重装值（TIMx_ARR寄存器的值）~1，计数值为自动重装值-1时生成上溢事件，计数值为1时生成下溢事件。计数器周期=T_CK_CNT*自动重装值*2； 2）自动重装值可以配置为预装载或者不预装载。不预装载时，自动重装值实时生效；预装载时，自动重装值在下一次更新事件UEV后生效（见3.2.3节）。
+3）增/减计数有3种，分别为中心对称模式1/2/3，区别在于输出比较中断标志触发的位置不同，具体见手册。
+3.2.3 重复计数器及更新事件（UEV）的产生 1.重复计数器
+重复计数器仅用来控制更新事件的产生。它是一个自动重装的减计数器，在更新事件UEV时自动重装，重装值为RCR寄存器的值。每次上溢或下溢事件时重复计数器减1。
+2.更新事件的产生
+更新事件（UEV）可以被屏蔽或者启用（TIM_CR1的UDIS位）。被屏蔽的情况下不会产生任何更新事件；被启用的情况下，有两种情况可以产生更新事件，分别为外部触发和计数器内部触发。
+外部触发不受重复计数器的影响，只要触发则立即产生更新事件。外部触发有两种，分别为软件向TIM_EGR的UG位写1和外部触发输入（见3.5节）。
+计数器内部触发受重复计数器的影响，只有重复计数器等于0时才可以产生更新事件。在重复计数器等于0时以下三种情况可以产生更新事件：
+增计数时上溢事件时产生更新事件；减计数时下溢事件时产生更新事件；增\减计数时上溢和下溢均产生更新事件； 结合重复寄存器的原理可知，每N（RCR寄存器的值）&#43;1次上溢或者N&#43;1
+次下溢事件产生1次更新事件 。
+3.增\减计数模式下如何控制更新事件（UEV）在上溢还是下溢产生？
+显然，增\减计数模式时如果配置重复寄存器RCR为奇数，更新事件将只能在上溢或下溢产生，那么该如何控制其在上溢还是在下溢产生呢？手册中写到：在启动计数器前写入RCR，则UEV将在上溢时产生，在计数器启动后写入RCR，则UEV将在下溢时产生。
+但经过实测试上述说法并不完全准确。实测结果如下：
+在启动计数器前对RCR写入1，UEV在上溢产生；在启动计数器前先对RCR写入1，再软件强制触发一个UEV，然后启动计数器，UEV将在下溢产生。（HAL库中有此操作，所以在CubeMx直接配置重复计数器为1，UEV仍在下溢产生）；启动计数器后，在增计数过程中对RCR写入1，UEV在上溢产生；启动计数器后，在减计数过程中对RCR写入1，UEV在下溢产生。 可以这么理解，启动计数器后首先触发的是上溢事件，然后是下溢事件。因为重复计数器是一个在更新事件UEV时自动重装载的计数器，在启动计数器前写入的1并没有装载到重复计数器，所以启动计数器后更新事件UEV在上溢产生；如果在启动计数器前软件强制触发一个UEV事件，则在启动计数器时1已经写入重复计数器，所以更新事件UEV在下溢产生。
+至于启动计数器后写入RCR的现象则更好解释。因重复计数器只在UEV时更新，写入RCR后不会立马更新，所以增计数在上溢产生UEV事件然后更新重复计数器，减计数在下溢产生UEV事件然后更新重复计数器。
+图 3不同模式和配置下的更新事件（UEV）的触发时刻
+3.2.3 比较寄存器及PWM输出 比较寄存器（TIM_CCRx）可以配置为预装载和不预装载。预装载时，只有在下一次更新事件UEV时比较寄存器的值才会生效，不预装载时，比较寄存器的值实时生效。配置为PWM模式时必须使能预装载（使用HAL库配置为PWM模式时默认已使能预装载）。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/376a6bc0725eebb2c204f509460930d4/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-13T23:30:55+08:00" />
+<meta property="article:modified_time" content="2023-07-13T23:30:55+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">STM32使用CubeMx配置定时器输出PWM</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2>1 概述</h2> 
+<p style="margin-left:.0001pt;text-align:justify;">        项目中经常使用到STM32来输出PWM，每次配置过后过不了多久就会忘记，稍微需要对配置做出修改时都要翻很久的手册，所以决定结合实例把PWM配置的详细步骤记录下来，这样在下次配置时可以很快的捡起来。</p> 
+<p style="margin-left:.0001pt;text-align:justify;">        本文档的行文结构如下，首先，说明实际需求，即要输出什么样的PWM信号；然后，根据需求把手册中相关的部分摘抄下来并辅以个人的理解和总结；最后，详细说明在软件中怎么去配置并展示配置后的实验效果。</p> 
+<h2>2 需求</h2> 
+<p>        项目中用到4路PWM信号，硬件条件决定了其只能由定时器1和定时器3产生，每个定时器输出两路PWM信号，要求4个PWM信号相位同步，每个PWM信号如图1所示。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/c2/55/mT1x2Oj1_o.png"></p> 
+<p style="text-align:center;">图1 PWM输出波形要求</p> 
+<p>        具体要求见表1。</p> 
+<p style="text-align:center;">        表1 PWM要求</p> 
+<table align="center" border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td>序号</td><td>名称</td><td>要求</td><td>备注</td></tr><tr><td style="width:36.7pt;"> <p style="text-align:center;">1</p> </td><td style="width:141.5pt;"> <p style="text-align:center;">周期</p> </td><td style="width:135.4pt;"> <p style="text-align:center;">100us</p> </td><td style="width:65.25pt;"> <p style="text-align:center;">暂定</p> </td></tr><tr><td style="width:36.7pt;"> <p style="text-align:center;">2</p> </td><td style="width:141.5pt;"> <p style="text-align:center;">占空比</p> </td><td style="width:135.4pt;"> <p style="text-align:center;">0~100%可调</p> </td><td style="width:65.25pt;"> <p style="text-align:center;"></p> </td></tr><tr><td style="width:36.7pt;"> <p style="text-align:center;">3</p> </td><td style="width:141.5pt;"> <p style="text-align:center;">中断触发时刻</p> </td><td style="width:135.4pt;"> <p style="text-align:center;">计数器下溢点</p> </td><td style="width:65.25pt;"> <p style="text-align:center;"></p> </td></tr><tr><td style="width:36.7pt;"> <p style="text-align:center;">4</p> </td><td style="width:141.5pt;"> <p style="text-align:center;">占空比更新时刻</p> </td><td style="width:135.4pt;"> <p style="text-align:center;">计数器下溢点</p> </td><td style="width:65.25pt;"> <p style="text-align:center;"></p> </td></tr></tbody></table> 
+<p></p> 
+<h2>3 STM高级定时器原理</h2> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/e4/4e/fWh5dz0U_o.png"></p> 
+<p style="margin-left:.0001pt;text-align:center;">图 2高级定时器的原理框图</p> 
+<p style="margin-left:.0001pt;text-align:justify;">        图中用红色虚线框出来的部分是输出PWM所需要的部分，包括时钟源、计数器单元、比较寄存器及PWM输出、TRGO输出、外部触发输入，下面依次说明各部分原理。</p> 
+<h3 style="margin-left:.0001pt;text-align:justify;">3.1 时钟源</h3> 
+<p style="margin-left:.0001pt;text-align:justify;">计数器时钟可由以下时钟源提供：</p> 
+<ul><li style="text-align:justify;">内部时钟(CK_INT)</li><li style="text-align:justify;">外部时钟模式1：外部输入引脚</li><li style="text-align:justify;">外部时钟模式2：外部触发输入ETR</li><li style="text-align:justify;">外部触发输入(ITRx)</li></ul> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong><u><span style="color:#000000;"><u>输出PWM使用内部时钟(CK_INT)，只需要关心怎么配置为内部时钟以及内部时钟的频率</u></span></u></strong><span style="color:#000000;">。</span></p> 
+<h3> 3.2 计数器单元</h3> 
+<p>        时钟源输出的时钟经过预分频器分频后作为计数器的时钟。计数器在时钟下可以增计数、减计数、增/减计数。自动重载寄存器控制计数器的计数范围，即定时器的周期。重复计数器控制更新事件UEV产生的频率。</p> 
+<h4>3.2.1 预分频器</h4> 
+<p>        预分频器用于对计数器时钟进行分频，分频系数可配置为1~65536。分频系数可以动态修改，不过其具有缓冲功能，<strong><u><strong><u>修改后的分频系数只能在下一次更新事件UEV后生效（见3.2.3节）</u></strong></u></strong>。</p> 
+<h4>3.2.2 计数器</h4> 
+<p>1）计数器可以增计数、减计数、增\减计数。</p> 
+<ul><li><strong><u><strong><u>增计数</u></strong></u></strong>的范围为0~自动重装值（TIMx_ARR寄存器的值），计数值为自动重装值时产生上溢事件，<strong><u><strong><u>定时器周期=T_CK_CNT*(自动重装值+1)</u></strong></u></strong>；</li><li><strong><u><strong><u>减计数</u></strong></u></strong>的范围为自动重装值（TIMx_ARR寄存器的值）~0，计数值为0时产生下溢事件，<strong><u><strong><u>定时器周期=T_CK_CNT*(自动重装值+1)</u></strong></u></strong>；</li><li><strong><u><strong><u>增\减计数</u></strong></u></strong>的范围为0~自动重装值（TIMx_ARR寄存器的值）~1，计数值为自动重装值-1时生成上溢事件，计数值为1时生成下溢事件。<strong><u><strong><u>计数器周期=T_CK_CNT*自动重装值*2</u></strong></u></strong>；</li></ul> 
+<p>2）自动重装值可以配置为预装载或者不预装载。<strong><u><strong><u>不预装载时，自动重装值实时生效；预装载时，自动重装值在下一次更新事件UEV后生效（见3.2.3节）</u></strong></u></strong><strong><strong>。</strong></strong></p> 
+<p>3）增/减计数有3种，分别为中心对称模式1/2/3，区别在于输出比较中断标志触发的位置不同，具体见手册。</p> 
+<h4>3.2.3 重复计数器及更新事件（UEV）的产生</h4> 
+<p>1.重复计数器</p> 
+<p>        重复计数器仅用来控制更新事件的产生。它是一个自动重装的减计数器，<u><u>在</u></u><strong><u><strong><u>更新事件UEV时自动重装</u></strong></u></strong>，重装值为RCR寄存器的值。每次上溢或下溢事件时重复计数器减1。</p> 
+<p>2.更新事件的产生</p> 
+<p>         更新事件（UEV）可以被屏蔽或者启用（TIM_CR1的UDIS位）。被屏蔽的情况下不会产生任何更新事件；被启用的情况下，有两种情况可以产生更新事件，分别为外部触发和计数器内部触发。</p> 
+<p><strong><u><strong><u>        外部触发不受重复计数器的影响</u></strong></u></strong>，只要触发则立即产生更新事件。外部触发有两种，分别为软件向TIM_EGR的UG位写1和外部触发输入（见3.5节）。</p> 
+<p><strong><u><strong><u>        计数器内部触发受重复计数器的影响</u></strong></u></strong>，只有重复计数器等于0时才可以产生更新事件。在重复计数器等于0时以下三种情况可以产生更新事件：</p> 
+<ul><li>增计数时上溢事件时产生更新事件；</li><li>减计数时下溢事件时产生更新事件；</li><li>增\减计数时上溢和下溢均产生更新事件；</li></ul> 
+<p>        结合重复寄存器的原理可知，<strong><u><strong><u>每N（RCR寄存器的值）+1次上溢或者N+1</u></strong></u></strong></p> 
+<p style="margin-left:0pt;"><strong><u><strong><u>次下溢事件产生1次更新事件</u></strong></u></strong> 。</p> 
+<p>3.增\减计数模式下如何控制更新事件（UEV）在上溢还是下溢产生？</p> 
+<p>        显然，增\减计数模式时如果配置重复寄存器RCR为奇数，更新事件将只能在上溢或下溢产生，那么该如何控制其在上溢还是在下溢产生呢？手册中写到：<u><u>在启动计数器前写入RCR，则UEV将在上溢时产生，在计数器启动后写入RCR，则UEV将在下溢时产生</u></u>。</p> 
+<p><strong><u><span style="background-color:#ffff00;"><strong><u>但经过实测试上述说法并不完全准确</u></strong></span></u></strong>。实测结果如下：</p> 
+<ul><li><strong><u><strong><u>在启动计数器前对RCR写入1，UEV在上溢产生；</u></strong></u></strong></li><li><strong><u><strong><u>在启动计数器前先对RCR写入1，再软件强制触发一个UEV，然后启动计数器，UEV将在下溢产生。（HAL库中有此操作，所以在CubeMx直接配置重复计数器为1，UEV仍在下溢产生）；</u></strong></u></strong></li><li><strong><u><strong><u>启动计数器后，在增计数过程中对RCR写入1，UEV在上溢产生；</u></strong></u></strong></li><li><strong><u><strong><u>启动计数器后，在减计数过程中对RCR写入1，UEV在下溢产生</u></strong></u></strong>。</li></ul> 
+<p>        可以这么理解，启动计数器后首先触发的是上溢事件，然后是下溢事件。因为重复计数器是一个在更新事件UEV时自动重装载的计数器，在启动计数器前写入的1并没有装载到重复计数器，所以启动计数器后更新事件UEV在上溢产生；如果在启动计数器前软件强制触发一个UEV事件，则在启动计数器时1已经写入重复计数器，所以更新事件UEV在下溢产生。</p> 
+<p style="margin-left:.0001pt;text-align:justify;">        至于启动计数器后写入RCR的现象则更好解释。因重复计数器只在UEV时更新，写入RCR后不会立马更新，所以增计数在上溢产生UEV事件然后更新重复计数器，减计数在下溢产生UEV事件然后更新重复计数器。</p> 
+<p style="margin-left:.0001pt;text-align:center;"><img alt="" src="https://images2.imgbox.com/07/0f/jxq0c8zC_o.png"></p> 
+<p style="margin-left:.0001pt;text-align:center;">图 3不同模式和配置下的更新事件（UEV）的触发时刻</p> 
+<h4 style="margin-left:.0001pt;">3.2.3 比较寄存器及PWM输出</h4> 
+<p>        比较寄存器（TIM_CCRx）可以配置为预装载和不预装载。预装载时，只有在下一次更新事件UEV时比较寄存器的值才会生效，不预装载时，比较寄存器的值实时生效。<strong><u><strong><u>配置为PWM模式时必须使能预装载（使用HAL库配置为PWM模式时默认已使能预装载）</u></strong></u></strong>。</p> 
+<p>        比较寄存器可以配置为PWM模式和其他模式。这里仅介绍PWM模式，其他模式见手册比较输出模式章节。PWM模式分为PWM模式1和PWM模式2。</p> 
+<p><strong><u><strong><u>PWM模式1时：</u></strong></u></strong></p> 
+<ul><li><strong><u><strong><u>计数器增计数时，计数器&lt;TIM_CCRx则OCxREF输出高电平，否则输出低电平；</u></strong></u></strong></li></ul> 
+<ul><li><strong><u><strong><u>计数器减计数时，计数器</u></strong></u></strong><strong><u><strong><u>≦</u></strong></u></strong><strong><u><strong><u>TIM_CCRx则OCxREF输出高电平，否则输出低电平</u></strong></u></strong>。</li></ul> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/f0/da/wFRMNCnT_o.png"></p> 
+<p style="margin-left:.0001pt;text-align:center;">图 4 PWM模式1、中心对齐模式的PWM波形</p> 
+<p>PWM模式2时：</p> 
+<ul><li>计数器增计数时，计数器&gt;TIM_CCRx则OCxREF输出高电平，否则输出低电平；</li><li>计数器减计数时，计数器≧TIM_CCRx则OCxREF输出高电平，否则输出低电平。</li></ul> 
+<p><strong><u><strong><u>        注意事项：不建议在运行中心对齐模式（增\减计数）时对计数器执行写操作，使用中心对称模式最为保险的方法为：在启动计数器前通过软件生成更新（对TIM_EGR的UG位写1）来初始化所有寄存器（HAL库中有此操作），并且不要在计数器运行过程中对其执行写操作</u></strong></u></strong>。</p> 
+<h3>3.4 外部触发输出（TRGO）</h3> 
+<p>        TRGO输出受TIM_CR2寄存器MMS位控制，具体如图5。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/f6/7f/ViWG6ujM_o.png"></p> 
+<p style="text-align:center;"> 图 5 TRGO输出配置</p> 
+<p>        MMS为010时，更新事件UEV作为TRGO输出，可用于同步其他定时器。</p> 
+<h3>3.5 外部触发输入</h3> 
+<p>        定时器配置为从模式可与外部触发输入同步，有三种同步模式，分别为复位模式、门控模式和触发模式，这里仅介绍复位模式，其他模式见手册。复位模式：触发事件时，<u><u>计数器和预分频器将重新初始化</u></u>，同时还会生成更新事件UEV，所有的预装载寄存器将会更新。触发输入可选：</p> 
+<ul><li>ITR0：内部触发0</li><li>ITR1：内部触发1</li><li>ITR2：内部触发2</li><li>ITR3：内部触发3</li><li>T1F_ED：TI1的边沿检测器</li><li>TI1FP1：滤波后的定时器输入1</li><li>TI1FP2：滤波后的定时器输入2</li><li>ETRF：外部触发输入</li></ul> 
+<p>        其中ITR0~ITR3是从定时器的内部触发输入，是主定时器的TRGO输出。当定时器3作为从定时器时，它对应的内部触发输入来源如下：</p> 
+<p style="text-align:center;">表 2 定时器3作为从定时器时的触发输入来源</p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="vertical-align:top;width:85.2pt;"> <p style="margin-left:0pt;text-align:center;">从定时器</p> </td><td style="vertical-align:top;width:85.2pt;"> <p style="text-align:justify;">ITR0</p> </td><td style="vertical-align:top;width:85.25pt;"> <p style="text-align:justify;">ITR1</p> </td><td style="vertical-align:top;width:85.25pt;"> <p style="text-align:justify;">ITR2</p> </td><td style="vertical-align:top;width:85.25pt;"> <p style="text-align:justify;">ITR3</p> </td></tr><tr><td style="vertical-align:top;width:85.2pt;"> <p style="margin-left:0pt;text-align:center;">TIM2</p> </td><td style="vertical-align:top;width:85.2pt;"> <p style="text-align:justify;">TIM1</p> </td><td style="vertical-align:top;width:85.25pt;"> <p style="text-align:justify;">TIM15</p> </td><td style="vertical-align:top;width:85.25pt;"> <p style="text-align:justify;">TIM3</p> </td><td style="vertical-align:top;width:85.25pt;"> <p style="text-align:justify;">TIM14</p> </td></tr></tbody></table> 
+<p></p> 
+<h2>4 软件配置</h2> 
+<p>        硬件条件决定了只能使用定时器1和定时器3各输出两路PWM信号。为实现同步，配置定时器3为从模式，使用定时器1的触发输出（TRGO）进行同步复位。</p> 
+<h3>4.1 CubeMx中的配置</h3> 
+<h4>4.1.1 定时器1的配置</h4> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/c3/d3/eSlBZle4_o.png"></p> 
+<p style="text-align:center;"> 图 6 CubeMx中定时器1的配置1</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/a5/8a/IGdYg0vt_o.png"></p> 
+<p style="text-align:center;"> 图 7 CubeMx中定时器1的配置2</p> 
+<h4>4.1.2 定时器3的配置 </h4> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/fe/07/FJ3fEkcA_o.png"></p> 
+<p style="margin-left:.0001pt;text-align:center;">图 8 CubeMx中定时器2的配置</p> 
+<h3 style="margin-left:.0001pt;">4.2 程序中的配置</h3> 
+<p style="text-align:center;"> <img alt="" src="https://images2.imgbox.com/72/16/iIWDZcHk_o.png"></p> 
+<p style="text-align:center;"> 图 9 程序中的配置1</p> 
+<p><img alt="" src="https://images2.imgbox.com/4f/c4/ymqy31ib_o.png"></p> 
+<p style="text-align:center;"> 图 10 程序中的配置2</p> 
+<h2>5 实验效果</h2> 
+<p>        实验结果如图10和图11所示，定时器1和定时器3的PWM输出同步，周期为10kHz，占空比为25%；定时器1的更新事件在下溢点触发，每个增\减计数周期触发1次。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/8c/63/Le7s6Jkt_o.png"></p> 
+<p style="margin-left:.0001pt;text-align:center;">图 11 实验效果1-PWM信号周期、占空比、同步关系</p> 
+<p style="margin-left:.0001pt;"><img alt="" src="https://images2.imgbox.com/63/8c/l0G590Gg_o.jpg"></p> 
+<p style="text-align:center;"> 图 12 定时器1更新事件UEV触发时刻</p> 
+<p> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/83ba40acf30a58eb55302f64b7f683a6/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">电脑查看以往连接WIFI信息（含密码）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a2dd8faeb24eefeb976e9e9b10533a30/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">深入解析Python文件操作：打开文件处理的大门</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

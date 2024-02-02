@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>iptables和ipvs - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="iptables和ipvs" />
+<meta property="og:description" content="一、service和iptables的关系 service 的代理是 kube-proxy
+kube-proxy 运行在所有节点上，它监听 apiserver 中 service 和 endpoint 的变化情况，创建路由规则以提供服务 IP 和负载均衡功能。简单理解此进程是Service的透明代理兼负载均衡器，其核心功能是将到某个Service的访问请求转发到后端的多个Pod实例上，而kube-proxy底层又是通过iptables和ipvs实现的。
+iptables原理 Kubernetes从1.2版本开始，将iptables作为kube-proxy的默认模式。iptables模式下的kube-proxy不再起到Proxy的作用，其核心功能：通过API Server的Watch接口实时跟踪Service与Endpoint的变更信息，并更新对应的iptables规则，Client的请求流量则通过iptables的NAT机制“直接路由”到目标Pod。
+ipvs原理 IPVS在Kubernetes1.11中升级为GA稳定版。IPVS则专门用于高性能负载均衡，并使用更高效的数据结构(Hash表)，允许几乎无限的规模扩张，因此被kube-proxy采纳为最新模式。
+在IPVS模式下，使用iptables的扩展ipset，而不是直接调用iptables来生成规则链。iptables规则链是一个线性的数据结构，ipset则引入了带索引的数据结构，因此当规则很多时，也可以很高效地查找和匹配。
+可以将ipset简单理解为一个IP(段)的集合，这个集合的内容可以是IP地址、IP网段、端口等，iptables可以直接添加规则对这个“可变的集合”进行操作，这样做的好处在于可以大大减少iptables规则的数量，从而减少性能损耗。
+kube-proxy ipvs和iptables的异同 iptables与IPVS都是基于Netfilter实现的，但因为定位不同，二者有着本质的差别：iptables是为防火墙而设计的；IPVS则专门用于高性能负载均衡，并使用更高效的数据结构(Hash表)，允许几乎无限的规模扩张。
+与iptables相比，IPVS拥有以下明显优势：
+为大型集群提供了更好的可扩展性和性能；
+支持比iptables更复杂的复制均衡算法(最小负载、最少连接、加权等)；
+支持服务器健康检查和连接重试等功能；
+可以动态修改ipset的集合，即使iptables的规则正在使用这个集合。
+二、k8s集群中分析service和kube-proxy 访问Service的请求，不论是Cluster IP&#43;TargetPort的方式；还是用Node节点IP&#43;NodePort的方式，都被Node节点的Iptables规则重定向到Kube-proxy监听Service服务代理端口。kube-proxy接收到Service的访问请求后，根据负载策略，转发到后端的Pod。
+# kubectl logs kube-proxy-5clwf -n kube-system (查看某一个节点的kube-proxy日志)
+W1014 13:25:02.120810 1 server_others.go:559] Unknown proxy mode &#34;&#34;, assuming iptables proxy I1014 13:25:02.137813 1 node.go:136] Successfully retrieved node IP: 192.168.40.133 I1014 13:25:02.137952 1 server_others.go:186] Using iptables Proxier. I1014 13:25:02.138750 1 server." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/968a7ba3236eedd7eff1c5846ed7516e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-10-14T22:44:00+08:00" />
+<meta property="article:modified_time" content="2020-10-14T22:44:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">iptables和ipvs</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="cnblogs_post_body" class="blogpost-body blogpost-body-html" style="font-size: 16px;"> 
+ <h4>一、service和iptables的关系</h4> 
+ <p>service 的代理是 kube-proxy</p> 
+ <p>kube-proxy 运行在所有节点上，它监听 apiserver 中 service 和 endpoint 的变化情况，创建路由规则以提供服务 IP 和负载均衡功能。简单理解此进程是Service的透明代理兼负载均衡器，其核心功能是将到某个Service的访问请求转发到后端的多个Pod实例上，而kube-proxy底层又是通过iptables和ipvs实现的。</p> 
+ <h4>iptables原理</h4> 
+ <p>Kubernetes从1.2版本开始，将iptables作为kube-proxy的默认模式。iptables模式下的kube-proxy不再起到Proxy的作用，其核心功能：通过API Server的Watch接口实时跟踪Service与Endpoint的变更信息，并更新对应的iptables规则，Client的请求流量则通过iptables的NAT机制“直接路由”到目标Pod。</p> 
+ <h4>ipvs原理</h4> 
+ <p>IPVS在Kubernetes1.11中升级为GA稳定版。IPVS则专门用于高性能负载均衡，并使用更高效的数据结构(Hash表)，允许几乎无限的规模扩张，因此被kube-proxy采纳为最新模式。</p> 
+ <p>在IPVS模式下，使用iptables的扩展ipset，而不是直接调用iptables来生成规则链。iptables规则链是一个线性的数据结构，ipset则引入了带索引的数据结构，因此当规则很多时，也可以很高效地查找和匹配。</p> 
+ <p>可以将ipset简单理解为一个IP(段)的集合，这个集合的内容可以是IP地址、IP网段、端口等，iptables可以直接添加规则对这个“可变的集合”进行操作，这样做的好处在于可以大大减少iptables规则的数量，从而减少性能损耗。</p> 
+ <h4>kube-proxy ipvs和iptables的异同</h4> 
+ <p>iptables与IPVS都是基于Netfilter实现的，但因为定位不同，二者有着本质的差别：iptables是为防火墙而设计的；IPVS则专门用于高性能负载均衡，并使用更高效的数据结构(Hash表)，允许几乎无限的规模扩张。</p> 
+ <p>与iptables相比，IPVS拥有以下明显优势：</p> 
+ <ul class="list-paddingleft-2"><li> <p>为大型集群提供了更好的可扩展性和性能；</p> </li><li> <p>支持比iptables更复杂的复制均衡算法(最小负载、最少连接、加权等)；</p> </li><li> <p>支持服务器健康检查和连接重试等功能；</p> </li><li> <p>可以动态修改ipset的集合，即使iptables的规则正在使用这个集合。</p> </li></ul> 
+ <p></p> 
+ <div style="text-align: center;"> 
+  <img src="https://images2.imgbox.com/77/78/QSOeF7li_o.png" alt="" style="outline: none;"> 
+ </div> 
+ <h4>二、k8s集群中分析service和kube-proxy</h4> 
+ <p></p> 
+ <div style="text-align: center;"> 
+  <img src="https://images2.imgbox.com/8e/8c/tE4PJjTV_o.png" width="600" style="outline: none;"> 
+ </div> 
+ <p><strong>访问Service的请求，不论是Cluster IP+TargetPort的方式；还是用Node节点IP+NodePort的方式，都被Node节点的Iptables规则重定向到Kube-proxy监听Service服务代理端口。kube-proxy接收到Service的访问请求后，根据负载策略，转发到后端的Pod。</strong></p> 
+ <p># kubectl logs  kube-proxy-5clwf  -n kube-system  (查看某一个节点的kube-proxy日志)</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has">W1014 13:25:02.120810       1 server_others.go:559] Unknown proxy mode "", assuming iptables proxy
+I1014 13:25:02.137813       1 node.go:136] Successfully retrieved node IP: 192.168.40.133
+I1014 13:25:02.137952       1 server_others.go:186] Using iptables Proxier.
+I1014 13:25:02.138750       1 server.go:583] Version: v1.18.0
+I1014 13:25:02.139344       1 conntrack.go:100] Set sysctl 'net/netfilter/nf_conntrack_max' to 131072
+</code>
+</pre> 
+ </div> 
+ <p># iptables -vnL     查看所有的规则</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has">Chain INPUT (policy ACCEPT 19577 packets, 3755K bytes)
+ pkts bytes target     prot opt in     out     source               destination         
+ 622K  121M cali-INPUT  all  --  *      *       0.0.0.0/0            0.0.0.0/0            /* cali:Cz_u1IQiXIMmKD4c */
+ 3017  162K KUBE-SERVICES  all  --  *      *       0.0.0.0/0            0.0.0.0/0            ctstate NEW /* kubernetes service portals */
+ 3017  162K KUBE-EXTERNAL-SERVICES  all  --  *      *       0.0.0.0/0            0.0.0.0/0            ctstate NEW /* kubernetes externally-visible service portals */
+ 652K  140M KUBE-FIREWALL  all  --  *      *       0.0.0.0/0            0.0.0.0/0   
+</code>
+</pre> 
+ </div> 
+ <p># iptables-save  &gt; iptables 保存规则，并输出到屏幕</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has">:cali-OUTPUT - [0:0]
+:cali-PREROUTING - [0:0]
+:cali-from-host-endpoint - [0:0]
+:cali-to-host-endpoint - [0:0]
+-A PREROUTING -m comment --comment "cali:6gwbT8clXdHdC1b1" -j cali-PREROUTING
+-A OUTPUT -m comment --comment "cali:tVnHkvAo15HuiPy0" -j cali-OUTPUT
+</code>
+</pre> 
+ </div> 
+ <p>第一步：接收流量</p> 
+ <p>NodePort访问入口规则：</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has"># kubectl get svc
+NAME          TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)        AGE
+kubernetes    ClusterIP   10.96.0.1        &lt;none&gt;        443/TCP        78d
+mydb          ClusterIP   10.108.118.149   &lt;none&gt;        80/TCP         50d
+nginx-dns     NodePort    10.103.206.148   &lt;none&gt;        80:30296/TCP   49d
+web-service   NodePort    10.111.113.171   &lt;none&gt;        80:32681/TCP   49d
+web1          NodePort    10.110.180.143   &lt;none&gt;        80:30746/TCP   12h
+
+# iptables -S -t nat  | grep 30746
+-A KUBE-NODEPORTS -p tcp -m comment --comment "default/web1:" -m tcp --dport 30746 -j KUBE-MARK-MASQ
+-A KUBE-NODEPORTS -p tcp -m comment --comment "default/web1:" -m tcp --dport 30746 -j KUBE-SVC-7YBM6NGNJ6RVLVXL</code>
+</pre> 
+ </div> 
+ <p>CLUSTER-IP 访问入口规则：</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has"># iptables -S -t nat  | grep 10.110.180.143 (cluster IP)
+-A KUBE-SERVICES ! -s 10.244.0.0/16 -d 10.110.180.143/32 -p tcp -m comment --comment "default/web1: cluster IP" -m tcp --dport 80 -j KUBE-MARK-MASQ
+-A KUBE-SERVICES -d 10.110.180.143/32 -p tcp -m comment --comment "default/web1: cluster IP" -m tcp --dport 80 -j KUBE-SVC-7YBM6NGNJ6RVLVXL</code>
+</pre> 
+ </div> 
+ <p>第二步：按概率(probability)分配</p> 
+ <p>(web1有3个pod副本，负载规则如下)</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has"># iptables -S -t nat  | grep KUBE-SVC-7YBM6NGNJ6RVLVXL
+-N KUBE-SVC-7YBM6NGNJ6RVLVXL
+-A KUBE-NODEPORTS -p tcp -m comment --comment "default/web1:" -m tcp --dport 30746 -j KUBE-SVC-7YBM6NGNJ6RVLVXL
+-A KUBE-SERVICES -d 10.110.180.143/32 -p tcp -m comment --comment "default/web1: cluster IP" -m tcp --dport 80 -j KUBE-SVC-7YBM6NGNJ6RVLVXL
+-A KUBE-SVC-7YBM6NGNJ6RVLVXL -m comment --comment "default/web1:" -m statistic --mode random --probability 0.33333333349 -j KUBE-SEP-IXSCGLPBJ6ROUJNA
+-A KUBE-SVC-7YBM6NGNJ6RVLVXL -m comment --comment "default/web1:" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-5MMDFR2YQS26JCDP  (概论大，因为有两个pod在同一节点)
+-A KUBE-SVC-7YBM6NGNJ6RVLVXL -m comment --comment "default/web1:" -j KUBE-SEP-DHYUVI6YLCFCEZBW
+</code>
+</pre> 
+ </div> 
+ <p>第三步：根据分配转发到实际pod中</p> 
+ <div> 
+  <div class="cnblogs_Highlighter"> 
+   <pre><code class="has"># kubectl get ep
+NAME          ENDPOINTS                                             AGE
+kubernetes    192.168.40.132:6443                                   78d
+nginx-dns     10.244.166.145:80                                     49d
+web-service   10.244.166.139:80                                     49d
+web1          10.244.104.9:80,10.244.166.140:80,10.244.166.146:80   12h
+
+# iptables -S -t nat  | grep KUBE-SEP-5MMDFR2YQS26JCDP
+-N KUBE-SEP-5MMDFR2YQS26JCDP
+-A KUBE-SEP-5MMDFR2YQS26JCDP -s 10.244.166.140/32 -m comment --comment "default/web1:" -j KUBE-MARK-MASQ
+-A KUBE-SEP-5MMDFR2YQS26JCDP -p tcp -m comment --comment "default/web1:" -m tcp -j DNAT --to-destination 10.244.166.140:80(ep，到达某一节点的具体pod中)
+-A KUBE-SVC-7YBM6NGNJ6RVLVXL -m comment --comment "default/web1:" -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-5MMDFR2YQS26JCDP
+</code>
+</pre> 
+  </div> 
+ </div> 
+ <h4>三、kube-proxy 工作原理</h4> 
+ <p>kube-proxy当前实现了三种代理模式：userspace, iptables, ipvs</p> 
+ <p>(1)userspace mode:  userspace是在用户空间，通过kube-proxy来实现service的代理服务</p> 
+ <p>(2)iptables mode, 该模式完全利用内核iptables来实现service的代理和LB, 这是K8s在v1.2及之后版本默认模式</p> 
+ <p></p> 
+ <div style="text-align: center;"> 
+  <img src="https://images2.imgbox.com/ff/28/7dgzb7IB_o.png" width="500" style="outline: none;"> 
+ </div> 
+ <p class="blockParagraph-544a408c--noMargin-acdf7afa"><span class="text-4505230f--TextH400-3033861f--textContentFamily-49a318e1">API Server 对内(集群中的其他组件)和对外(用户)提供统一的 REST API，其他组件均通过 API Server 进行通信</span></p> 
+ <p class="blockParagraph-544a408c--noMargin-acdf7afa"><span class="text-4505230f--TextH400-3033861f--textContentFamily-49a318e1">Controller Manager、Scheduler、Kube-proxy 和 Kubelet 等均通过 API Server watch API 监测资源变化情况，并对资源作相应的操作</span></p> 
+ <p>(3)ipvs mode.  在kubernetes 1.8以上的版本中，对于kube-proxy组件增加了除iptables模式和用户模式之外还支持ipvs模式。</p> 
+ <p>kube-proxy ipvs 是基于 NAT 实现的，通过ipvs的NAT模式，对访问k8s service的请求进行虚IP到POD IP的转发。当创建一个 service 后，kubernetes 会在每个节点上创建一个网卡，同时帮你将 Service IP(VIP) 绑定上，此时相当于每个 Node 都是一个 ds，而其他任何 Node 上的 Pod，甚至是宿主机服务(比如 kube-apiserver 的 6443)都可能成为 rs；</p> 
+ <p>与iptables、userspace 模式一样，kube-proxy 依然监听Service以及Endpoints对象的变化, 不过它并不创建反向代理, 也不创建大量的 iptables 规则, 而是通过netlink 创建ipvs规则，并使用k8s Service与Endpoints信息，对所在节点的ipvs规则进行定期同步; netlink 与 iptables 底层都是基于 netfilter 钩子，但是 netlink 由于采用了 hash table 而且直接工作在内核态，在性能上比 iptables 更优。其工作流程大体如下:</p> 
+ <p></p> 
+ <div style="text-align: center;"> 
+  <img src="https://images2.imgbox.com/8d/6a/B647oqaS_o.png" width="500" style="outline: none;"> 
+ </div> 
+ <p><strong>k8s的service和endpoine是如何关联和相互影响的？</strong>1、 api-server创建service对象，与service绑定的pod地址：称之为endpoints(kubectl get ep可以查看)<br>2、服务发现方面：kube-proxy监控service后端endpoint的动态变化，并且维护service和endpoint的映射关系</p> 
+ <h5>kubernetes服务注册(dns)，服务发现是service</h5> 
+ <p>http://www.dockone.io/article/9936   有详细讲解</p> 
+ <p>Kubernetes提供了两种方式进行服务发现, 即环境变量和DNS</p> 
+ <p>(1)<strong>环境变量</strong>： 当你创建一个Pod的时候，kubelet会在该Pod中注入集群内所有Service的相关环境变量。<strong>需要注意: </strong>要想一个Pod中注入某个Service的环境变量，则必须Service要先比该Pod创建。这一点，几乎使得这种方式进行服务发现不可用。比如，一个ServiceName为redis-master的Service，对应的ClusterIP:Port为172.16.50.11:6379，则其对应的环境变量为:</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has">REDIS_MASTER_SERVICE_HOST=172.16.50.11
+REDIS_MASTER_SERVICE_PORT=6379
+REDIS_MASTER_PORT=tcp://172.16.50.11:6379
+REDIS_MASTER_PORT_6379_TCP=tcp://172.16.50.11:6379
+REDIS_MASTER_PORT_6379_TCP_PROTO=tcp
+REDIS_MASTER_PORT_6379_TCP_PORT=6379
+REDIS_MASTER_PORT_6379_TCP_ADDR=172.16.50.11
+</code>
+</pre> 
+ </div> 
+ <p>(2)<strong>DNS</strong>：这是k8s官方强烈推荐的方式!!!  可以通过cluster add-on方式轻松的创建KubeDNS来对集群内的Service进行服务发现。</p> 
+ <h4>四、修改kube-proxy模式为ipvs(默认为iptables)</h4> 
+ <p>1、加载内核模块</p> 
+ <p># lsmod | grep  ip_vs</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has">ip_vs_sh               12688  0
+ip_vs_wrr              12697  0
+ip_vs_rr               12600  0
+ip_vs                 145497  6 ip_vs_rr,ip_vs_sh,ip_vs_wrr
+nf_conntrack          139264  7 ip_vs,nf_nat,nf_nat_ipv4,xt_conntrack,nf_nat_masquerade_ipv4,nf_conntrack_netlink,nf_conntrack_ipv4
+libcrc32c              12644  4 xfs,ip_vs,nf_nat,nf_conntrack
+</code>
+</pre> 
+ </div> 
+ <p>2、升级内核模块，ipvs对内核版本有要求</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has"> yum update -y 
+</code>
+</pre> 
+ </div> 
+ <p>3、查看kube-proxy组件</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has"># kubectl get pod -n kube-system  
+NAME                                       READY   STATUS    RESTARTS   AGE
+kube-proxy-5clwf                           1/1     Running   29         78d
+kube-proxy-ht25x                           1/1     Running   30         78d
+kube-proxy-x9ml8                           1/1     Running   30         78d
+kube-scheduler-master                      1/1     Running   49         78d
+metrics-server-584b5f4754-7vlhm            1/1     Running   56         78d
+</code>
+</pre> 
+ </div> 
+ <p>4、产看kube-proxy的配置文件configmaps</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has"># kubectl get configmaps  -n kube-system  
+NAME                                 DATA   AGE
+calico-config                        4      78d
+coredns                              1      78d
+extension-apiserver-authentication   6      78d
+kube-proxy                           2      78d
+kubeadm-config                       2      78d
+kubelet-config-1.18                  1      78d
+</code>
+</pre> 
+ </div> 
+ <p>5、编辑kube-proxy的configmaps</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has"># kubectl edit  configmaps  kube-proxy -n kube-system 
+mode "ipvs"
+
+删除旧的kube-proxy,kubelet自动重新拉起，应用ipvs
+# kubectl delete pod   kube-proxy-x9ml8   -n kube-system  
+pod "kube-proxy-x9ml8" deleted
+[root@master ~]# kubectl delete pod   kube-proxy-ht25x   -n kube-system  
+pod "kube-proxy-ht25x" deleted
+
+# kubectl logs kube-proxy-4cnbn  -n kube-system 
+I1015 14:03:08.402147       1 node.go:136] Successfully retrieved node IP: 192.168.40.132
+I1015 14:03:08.402259       1 server_others.go:259] Using ipvs Proxier.
+W1015 14:03:08.402618       1 proxier.go:429] IPVS scheduler not specified, use rr by default
+</code>
+</pre> 
+ </div> 
+ <p>6、安装ipvsadm </p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has"># yum install -y ipvsadm.x86_64 
+
+# ipvsadm -L -n 
+IP Virtual Server version 1.2.1 (size=4096)
+Prot LocalAddress:Port Scheduler Flags
+  -&gt; RemoteAddress:Port           Forward Weight ActiveConn InActConn
+TCP  127.0.0.1:30564 rr  (轮询规则)
+  -&gt; 10.244.104.36:8080           Masq    1      0          0         
+  -&gt; 10.244.166.147:8080          Masq    1      0          0         
+TCP  127.0.0.1:32618 rr
+  -&gt; 10.244.104.20:80             Masq    1      0          0         
+TCP  172.17.0.1:30564 rr
+  -&gt; 10.244.104.36:8080           Masq    1      0          0    
+</code>
+</pre> 
+ </div> 
+ <p>7、系统生成虚拟网卡kube-ipvs0</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has">#  ip a
+6: kube-ipvs0: &lt;BROADCAST,NOARP&gt; mtu 1500 qdisc noop state DOWN group default 
+    link/ether a2:09:a4:9d:fb:f8 brd ff:ff:ff:ff:ff:ff
+    inet 10.110.180.143/32 brd 10.110.180.143 scope global kube-ipvs0
+       valid_lft forever preferred_lft forever
+inet 10.110.180.143/32专门用于接收svc web1的请求
+</code>
+</pre> 
+ </div> 
+ <p>8、svc的流量被ipvs分发</p> 
+ <div class="cnblogs_Highlighter"> 
+  <pre><code class="has"># kubectl get svc 
+NAME          TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)        AGE
+web1          NodePort    10.110.180.143   &lt;none&gt;        80:30746/TCP   23h
+
+# curl  10.110.180.143
+...
+&lt;title&gt;Welcome to nginx!&lt;/title&gt;
+...
+
+# kubectl get ep
+NAME          ENDPOINTS                                              AGE
+kubernetes    192.168.40.132:6443                                    78d
+web1          10.244.104.15:80,10.244.166.143:80,10.244.166.148:80   23h
+
+ipvs捕捉到svc的流量
+# ipvsadm -L -n 
+TCP  10.110.180.143:80 rr
+  -&gt; 10.244.104.15:80             Masq    1      0          0         
+  -&gt; 10.244.166.143:80            Masq    1      0          0         
+  -&gt; 10.244.166.148:80            Masq    1      0          1   
+</code>
+</pre> 
+ </div> 
+ <p>参考   https://www.cnblogs.com/fuyuteng/p/11598768.html</p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a43eecd1810b22a610db28b122dbe489/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">java Thread.yield()用法详解</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e2ad5c95aafaccbe874d6a289ef6577f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">基于SPSS的正态性检验方法汇总——以个股收益率为例（超详细）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

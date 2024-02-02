@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>STM32F103操作DS1302时钟芯片串口显示（标准库和HAL库） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="STM32F103操作DS1302时钟芯片串口显示（标准库和HAL库）" />
+<meta property="og:description" content="目录
+DS1302的性能指标
+DS1302的寄存器及片内RAM
+标准库实现
+HAL库实现
+源码链接
+单片机型号：STM32F103C8T6 在日常生活中，很多情况下会需要使用时间，单片机中虽然也是有定时器但并不能较为准备的实现计时功能，而且定时计时纯属浪费资源，因此，为了解决此问题，就引入了时钟芯片，时钟芯片能够实现较为精确计时，可实现电子钟/闹钟等功能。
+市面上时钟芯片种类很多，本文选用使用较为广泛的DS1302芯片。 DS1302是DALLAS公司推出的涓流充电时钟芯片，内含一个实时时钟/日历和31字节静态RAM，通过简单的串行接口与单片机进行通信。实时时钟/日历电路提供秒、分、时、日、周、月、年的信息，每月的天数和闰年的天数可自动调整。时钟操作可通过AM/PM指示决定采用24或12小时格式。DS1302与单片机之间能简单地采用同步串行的方式进行通信，仅需用到三个口线: (1) RST复位(2) I/O数据线(3)SCLK串行时钟。
+时钟/RAM的读/写数据以一个字节或多达31个字节的字符组方式通信。DS1302工作时功耗很低保持数据和时钟信息时功率小于1mW。
+下面是其电路图，通过自己设计也是可以实现的，电路图如下：
+如果自己不想设计电路，也可以在网上购买时钟模块，其实就是按照上述电路图设计制成，效果图如下：
+接下来简单介绍一下DS1302，网上关于其知识点很多，大家也可以自行学习：
+DS1302的性能指标 1）可以计算2100年之前的秒、分、时、日、星期、月、年，并且可以调整闰年。
+2）内部有31个字节静态RAM,供用户访问
+3）串行数据传送方式（SPI3线接口）
+4）工作电压：2.0~5.5v
+5) 工作电流：2v时，小于300nA(功耗低)
+6）时钟或RAM数据的读写，有两种传送方式：单字节传送、多字节传送
+7）主电源和负电源双电源供电（备份电源可以用电池或大电容实现）
+DS1302的寄存器及片内RAM DS1302内部包括1个控制寄存器，12个寄存器（7个与日历、时钟相关，存放的数据是BCD码形式）和31个RAM
+1)控制寄存器
+用于存放ds1302的控制命令字，DS1302的复位引脚回到高电平后写入的第一个字就是控制命令，控制着ds1302的读写过程。
+D7D6D5D4D3D2D1D01RAM/CKA4A3A2A1A0RD/W 其中：D7：固定为1D6：RAM/CK位，=1片内RAM，=0日历、时钟寄存器选择位。D5-D1：地址位，用于选择进行读写的日历、时钟寄存器或片内RAM。对日历、时钟寄存器或片内RAM的选择。D0：读写选择，=0写，=1读 寄存器0：最高位 CH 是一个时钟停止标志位。如果时钟电路有备用电源，上电后，我们要先检测一下这一位，如果这一位是0，那说明时钟芯片在系统掉电后，由于备用电源的供给，时钟是持续正常运行的；如果这一位是1，那么说明时钟芯片在系统掉电后，时钟部分不工作了。如果 Vcc1 悬空或者是电池没电了，当我们下次重新上电时，读取这一位，那这一位就是1，我们可以通过这一位判断时钟在单片机系统掉电后是否还正常运行。剩下的7位高3位是秒的十位，低4位是秒的个位，这里再提请注意一次，DS1302 内部是 BCD 码，而秒的十位最大是5，所以3个二进制位就够了。
+寄存器1：最高位未使用，剩下的7位中高3位是分钟的十位，低4位是分钟的个位。
+寄存器2：bit7 是1的话代表是12小时制，0代表是24小时制；bit6 固定是0，bit5 在12小时制下 0代表的是上午，1代表的是下午，在24小时制下和 bit4 一起代表了小时的十位，低4位代表的是小时的个位。
+寄存器3：高2位固定是0，bit5 和 bit4 是日期的十位，低4位是日期的个位。
+寄存器4：高3位固定是0，bit4 是月的十位，低4位是月的个位。
+寄存器5：高5位固定是0，低3位代表了星期。
+寄存器6：高4位代表了年的十位，低4位代表了年的个位。请特别注意，这里的00～99指的是2000年～2099年。
+寄存器7：最高位一个写保护位，如果这一位是1，那么是禁止给任何其它寄存器或者那31个字节的 RAM 写数据的。因此在写数据之前，这一位必须先写成0。
+接下来是代码实现：
+接线表设计：
+时钟模块STM32F103VCC5V/3.3VGNDGNDCLKPA0DATAPA1RSTPA2-PA9（串口1）-PA10（串口1） 标准库实现： DS1302.c
+#include &#34;ds1302.h&#34; #include &#34;delay.h&#34; u8 read_time[7]; struct TIMEData TimeData; char DS1302_data_1[10]; char DS1302_data_2[8]; /* * SCLK 和 CE初始化 */ void ds1302_gpio_init() { GPIO_InitTypeDef GPIO_InitStructure; RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA,ENABLE); GPIO_InitStructure." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/2ec868bf06b61c82501d61489994d77f/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-18T17:04:29+08:00" />
+<meta property="article:modified_time" content="2023-07-18T17:04:29+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">STM32F103操作DS1302时钟芯片串口显示（标准库和HAL库）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p style="margin-left:.0001pt;text-align:left;"></p> 
+<p id="main-toc"><strong>目录</strong></p> 
+<p id="%C2%A0ds1302%E7%9A%84%E6%80%A7%E8%83%BD%E6%8C%87%E6%A0%87-toc" style="margin-left:80px;"><a href="#%C2%A0ds1302%E7%9A%84%E6%80%A7%E8%83%BD%E6%8C%87%E6%A0%87" rel="nofollow">DS1302的性能指标</a></p> 
+<p id="ds1302%E7%9A%84%E5%AF%84%E5%AD%98%E5%99%A8%E5%8F%8A%E7%89%87%E5%86%85RAM-toc" style="margin-left:80px;"><a href="#ds1302%E7%9A%84%E5%AF%84%E5%AD%98%E5%99%A8%E5%8F%8A%E7%89%87%E5%86%85RAM" rel="nofollow">DS1302的寄存器及片内RAM</a></p> 
+<p id="%E6%A0%87%E5%87%86%E5%BA%93%E5%AE%9E%E7%8E%B0%EF%BC%9A-toc" style="margin-left:80px;"><a href="#%E6%A0%87%E5%87%86%E5%BA%93%E5%AE%9E%E7%8E%B0%EF%BC%9A" rel="nofollow">标准库实现</a></p> 
+<p id="HAL%E5%BA%93%E5%AE%9E%E7%8E%B0%EF%BC%9A-toc" style="margin-left:80px;"><a href="#HAL%E5%BA%93%E5%AE%9E%E7%8E%B0%EF%BC%9A" rel="nofollow">HAL库实现</a></p> 
+<p id="%E6%BA%90%E7%A0%81%E9%93%BE%E6%8E%A5%EF%BC%9A-toc" style="margin-left:80px;"><a href="#%E6%BA%90%E7%A0%81%E9%93%BE%E6%8E%A5%EF%BC%9A" rel="nofollow">源码链接</a></p> 
+<hr id="hr-toc"> 
+<p></p> 
+<p><strong>单片机型号：</strong>STM32F103C8T6  </p> 
+<p style="margin-left:.0001pt;text-align:left;"><img alt="" height="288" src="https://images2.imgbox.com/fa/6e/Jn49lgYn_o.png" width="456"></p> 
+<p></p> 
+<p style="margin-left:.0001pt;text-align:left;">        在日常生活中，很多情况下会需要使用时间，单片机中虽然也是有定时器但并不能较为准备的实现计时功能，而且定时计时纯属浪费资源，因此，为了解决此问题，就引入了时钟芯片，时钟芯片能够实现较为精确计时，可实现电子钟/闹钟等功能。</p> 
+<p style="margin-left:.0001pt;text-align:left;">        市面上时钟芯片种类很多，本文选用使用较为广泛的<span style="color:#fe2c24;"><strong>DS1302芯片</strong></span>。        </p> 
+<p style="margin-left:.0001pt;text-align:left;">        DS1302是DALLAS公司推出的涓流充电时钟芯片，内含一个实时时钟/日历和31字节静态RAM，通过简单的串行接口与单片机进行通信。实时时钟/日历电路提供秒、分、时、日、周、月、年的信息，每月的天数和闰年的天数可自动调整。时钟操作可通过AM/PM指示决定采用24或12小时格式。DS1302与单片机之间能简单地采用同步串行的方式进行通信，仅需用到三个口线: (1) RST复位(2) I/O数据线(3)SCLK串行时钟。</p> 
+<p>        时钟/RAM的读/写数据以一个字节或多达31个字节的字符组方式通信。DS1302工作时功耗很低保持数据和时钟信息时功率小于1mW。</p> 
+<p>下面是其电路图，通过自己设计也是可以实现的，电路图如下：</p> 
+<p><img alt="" height="244" src="https://images2.imgbox.com/68/65/s8vCVHpY_o.png" width="395"></p> 
+<p>如果自己不想设计电路，也可以在网上购买时钟模块，其实就是按照上述电路图设计制成，效果图如下：</p> 
+<p><img alt="" height="319" src="https://images2.imgbox.com/29/07/AYZU20bk_o.png" width="489"></p> 
+<p>接下来简单介绍一下DS1302，网上关于其知识点很多，大家也可以自行学习：</p> 
+<ul><li> <h4 id="%C2%A0ds1302%E7%9A%84%E6%80%A7%E8%83%BD%E6%8C%87%E6%A0%87"><strong> DS1302的性能指标</strong></h4> </li></ul> 
+<p>1）可以计算2100年之前的秒、分、时、日、星期、月、年，并且可以调整闰年。<br> 2）内部有31个字节静态RAM,供用户访问<br> 3）串行数据传送方式（SPI3线接口）<br> 4）工作电压：2.0~5.5v<br> 5) 工作电流：2v时，小于300nA(功耗低)<br> 6）时钟或RAM数据的读写，有两种传送方式：单字节传送、多字节传送<br> 7）主电源和负电源双电源供电（备份电源可以用电池或大电容实现）</p> 
+<ul><li> <h4 id="ds1302%E7%9A%84%E5%AF%84%E5%AD%98%E5%99%A8%E5%8F%8A%E7%89%87%E5%86%85RAM">DS1302的寄存器及片内RAM</h4> </li></ul> 
+<p>DS1302内部包括1个控制寄存器，12个寄存器（7个与日历、时钟相关，存放的数据是BCD码形式）和31个RAM<br> 1)控制寄存器<br> 用于存放ds1302的控制命令字，<strong>DS1302的复位引脚回到高电平后写入的第一个字就是控制命令，控制着ds1302的读写过程</strong>。</p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="text-align:center;">D7</td><td style="text-align:center;">D6</td><td style="text-align:center;">D5</td><td style="text-align:center;">D4</td><td style="text-align:center;">D3</td><td style="text-align:center;">D2</td><td style="text-align:center;">D1</td><td style="text-align:center;">D0</td></tr><tr><td style="text-align:center;">1</td><td style="text-align:center;">RAM/CK</td><td style="text-align:center;">A4</td><td style="text-align:center;">A3</td><td style="text-align:center;">A2</td><td style="text-align:center;">A1</td><td style="text-align:center;">A0</td><td style="text-align:center;">RD/W</td></tr></tbody></table> 
+<ul><li>其中：</li><li>D7：固定为1</li><li>D6：RAM/CK位，=1片内RAM，=0日历、时钟寄存器选择位。</li><li>D5-D1：地址位，用于选择进行读写的日历、时钟寄存器或片内RAM。对日历、时钟寄存器或片内RAM的选择。</li><li>D0：读写选择，=0写，=1读</li></ul> 
+<p><img alt="" src="https://images2.imgbox.com/36/8d/HjYlrnaP_o.png"></p> 
+<p> 寄存器0：最高位 CH 是一个时钟停止标志位。如果时钟电路有备用电源，上电后，我们要先检测一下这一位，如果这一位是0，那说明时钟芯片在系统掉电后，由于备用电源的供给，时钟是持续正常运行的；如果这一位是1，那么说明时钟芯片在系统掉电后，时钟部分不工作了。如果 Vcc1 悬空或者是电池没电了，当我们下次重新上电时，读取这一位，那这一位就是1，我们可以通过这一位判断时钟在单片机系统掉电后是否还正常运行。剩下的7位高3位是秒的十位，低4位是秒的个位，这里再提请注意一次，DS1302 内部是 BCD 码，而秒的十位最大是5，所以3个二进制位就够了。</p> 
+<p>寄存器1：最高位未使用，剩下的7位中高3位是分钟的十位，低4位是分钟的个位。</p> 
+<p>寄存器2：bit7 是1的话代表是12小时制，0代表是24小时制；bit6 固定是0，bit5 在12小时制下 0代表的是上午，1代表的是下午，在24小时制下和 bit4 一起代表了小时的十位，低4位代表的是小时的个位。</p> 
+<p>寄存器3：高2位固定是0，bit5 和 bit4 是日期的十位，低4位是日期的个位。</p> 
+<p>寄存器4：高3位固定是0，bit4 是月的十位，低4位是月的个位。</p> 
+<p>寄存器5：高5位固定是0，低3位代表了星期。</p> 
+<p>寄存器6：高4位代表了年的十位，低4位代表了年的个位。请特别注意，这里的00～99指的是2000年～2099年。</p> 
+<p>寄存器7：最高位一个写保护位，如果这一位是1，那么是禁止给任何其它寄存器或者那31个字节的 RAM 写数据的。因此在写数据之前，这一位必须先写成0。<br>  </p> 
+<p>接下来是代码实现：</p> 
+<p>接线表设计：</p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td><strong>时钟模块</strong></td><td><strong>STM32F103</strong></td></tr><tr><td>VCC</td><td>5V/3.3V</td></tr><tr><td>GND</td><td>GND</td></tr><tr><td>CLK</td><td>PA0</td></tr><tr><td>DATA</td><td>PA1</td></tr><tr><td>RST</td><td>PA2</td></tr><tr><td>-</td><td>PA9（串口1）</td></tr><tr><td>-</td><td>PA10（串口1）</td></tr></tbody></table> 
+<h4 id="%E6%A0%87%E5%87%86%E5%BA%93%E5%AE%9E%E7%8E%B0%EF%BC%9A"><strong>标准库实现：</strong></h4> 
+<p>DS1302.c</p> 
+<pre><code>#include "ds1302.h"
+#include "delay.h"
+
+u8 read_time[7];
+
+struct TIMEData TimeData;
+char DS1302_data_1[10];
+char DS1302_data_2[8];
+
+
+ /*
+  * SCLK 和 CE初始化
+  */
+void ds1302_gpio_init()
+{
+	GPIO_InitTypeDef GPIO_InitStructure;
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA,ENABLE);
+
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_2; 
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;//推挽输出
+	GPIO_Init(GPIOA, &amp;GPIO_InitStructure);	//
+	GPIO_ResetBits(GPIOA,GPIO_Pin_2); 
+
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0; 
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;//推挽输出
+	GPIO_Init(GPIOA, &amp;GPIO_InitStructure);	//
+	GPIO_ResetBits(GPIOA,GPIO_Pin_0); 
+}
+
+ /*
+  * 数据端口输出配置
+  */
+void ds1302_DATAOUT_init()//配置双向I/O端口为输出态
+{
+	GPIO_InitTypeDef GPIO_InitStructure;
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA,ENABLE);
+
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_1; // DATA
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
+	GPIO_Init(GPIOA,&amp;GPIO_InitStructure);			// 初始化
+	GPIO_ResetBits(GPIOA,GPIO_Pin_1);
+}
+ 
+ /*
+  * 数据端口输入配置
+  */
+void ds1302_DATAINPUT_init()//配置双向I/O端口为输入态
+{
+	GPIO_InitTypeDef GPIO_InitStructure;
+	
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_1; //PA.1 DATA
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;
+	GPIO_Init(GPIOA, &amp;GPIO_InitStructure);//初始化GPIOA.1
+}
+ 
+/*
+ * /向DS1302发送一字节数据
+ */
+void ds1302_write_onebyte(uint8_t data)//向DS1302发送一字节数据
+{
+	uint8_t count=0;
+	ds1302_DATAOUT_init(); // I/O配置为输出 
+	SCLK_L; // 拉低时钟
+	for(count=0;count&lt;8;count++)
+	{	
+		SCLK_L; // 拉低时钟
+		if(data&amp;0x01)
+		{
+			DATA_H;
+		}
+		else
+		{
+			DATA_L;
+		}//先准备好数据再发送
+		SCLK_H; //拉高时钟线，发送数据
+		data&gt;&gt;=1; 
+	}
+}
+
+/*
+ * 向DS1302发送指定数据
+ */
+void ds1302_wirte_rig(uint8_t address,uint8_t data)//向指定寄存器地址发送数据
+{
+	uint8_t temp1=address;
+	uint8_t temp2=data;
+	
+	CE_L; // 拉低CE
+	SCLK_L; // 拉低SCLK
+	delay_us(1);
+	CE_H; // 拉高CE
+	delay_us(2);
+	ds1302_write_onebyte(temp1); // 写命令
+	ds1302_write_onebyte(temp2); // 写数据
+	
+	CE_L; // 拉低CE
+	SCLK_L; // 拉低时钟
+	delay_us(2);
+}
+
+/*
+ * 从DS1302读取数据
+ */
+uint8_t ds1302_read_rig(uint8_t address)//从指定地址读取一字节数据
+{
+	uint8_t temp3=address;
+	uint8_t count=0;
+	uint8_t return_data=0x00;
+	
+	CE_L; // 拉低CE
+	SCLK_L; // 拉低SCLK
+	delay_us(3);
+	CE_H; // 拉高CE
+	delay_us(3);
+	
+	ds1302_write_onebyte(temp3); // 写地址
+	
+	ds1302_DATAINPUT_init();//配置I/O口为输入
+
+	for(count=0;count&lt;8;count++)
+	{
+		delay_us(2);//使电平持续一段时间
+		return_data&gt;&gt;=1;
+		SCLK_H;
+		delay_us(4);//使高电平持续一段时间
+		SCLK_L;
+		delay_us(14);//延时14us后再去读取电压，更加准确
+		if(GPIO_ReadInputDataBit(GPIOA,GPIO_Pin_1))
+		{return_data=return_data|0x80;}
+	}
+	delay_us(2);
+	CE_L; // 拉低CE
+	DATA_L; // 拉低SCLK
+	
+	return return_data; // 返回数据
+}
+
+/*
+ * 初始化DS1302
+ */
+void ds1302_init()
+{
+	ds1302_wirte_rig(0x8e,0x00);//关闭写保护
+	ds1302_wirte_rig(0x80,0x37);//seconds37秒
+	ds1302_wirte_rig(0x82,0x58);//minutes58分
+	ds1302_wirte_rig(0x84,0x23);//hours23时
+	ds1302_wirte_rig(0x86,0x30);//date30日
+	ds1302_wirte_rig(0x88,0x09);//months9月
+	ds1302_wirte_rig(0x8a,0x07);//days星期日
+	ds1302_wirte_rig(0x8c,0x20);//year2020年
+	
+	//ds1302_wirte_rig(0x80,0x19);
+	
+	ds1302_wirte_rig(0x8e,0x80);//关闭写保护
+	
+}
+
+/*
+ * 读取DS1302数据
+ */
+void ds1302_read_time(void)
+{
+	read_time[0]=ds1302_read_rig(0x81);//读秒
+	read_time[1]=ds1302_read_rig(0x83);//读分
+	read_time[2]=ds1302_read_rig(0x85);//读时
+	read_time[3]=ds1302_read_rig(0x87);//读日
+	read_time[4]=ds1302_read_rig(0x89);//读月
+	read_time[5]=ds1302_read_rig(0x8B);//读星期
+	read_time[6]=ds1302_read_rig(0x8D);//读年
+}
+
+void ds1302_read_realTime(void)
+{
+	ds1302_read_time();  //BCD码转换为10进制
+	TimeData.second=(read_time[0]&gt;&gt;4)*10+(read_time[0]&amp;0x0f);
+	TimeData.minute=((read_time[1]&gt;&gt;4)&amp;(0x07))*10+(read_time[1]&amp;0x0f);
+	TimeData.hour=(read_time[2]&gt;&gt;4)*10+(read_time[2]&amp;0x0f);
+	TimeData.day=(read_time[3]&gt;&gt;4)*10+(read_time[3]&amp;0x0f);
+	TimeData.month=(read_time[4]&gt;&gt;4)*10+(read_time[4]&amp;0x0f);
+	TimeData.week=read_time[5];
+	TimeData.year=(read_time[6]&gt;&gt;4)*10+(read_time[6]&amp;0x0f)+2000;
+	DS1302_data_1[0]='2';
+	DS1302_data_1[1]='0';
+	DS1302_data_1[2]='0'+(TimeData.year-2000)/10;
+	DS1302_data_1[3]='0'+(TimeData.year-2000)%10;
+	DS1302_data_1[4]='-';
+	DS1302_data_1[5]='0'+TimeData.month/10;
+	DS1302_data_1[6]='0'+TimeData.month%10;
+	DS1302_data_1[7]='-';
+	DS1302_data_1[8]='0'+TimeData.day/10;
+	DS1302_data_1[9]='0'+TimeData.day%10;
+	
+	DS1302_data_2[0]='0'+TimeData.hour/10;
+	DS1302_data_2[1]='0'+TimeData.hour%10;
+	DS1302_data_2[2]=':';
+	DS1302_data_2[3]='0'+TimeData.minute/10;
+	DS1302_data_2[4]='0'+TimeData.minute%10;
+	DS1302_data_2[5]=':';
+	DS1302_data_2[6]='0'+TimeData.second/10;
+	DS1302_data_2[7]='0'+TimeData.second%10;
+}</code></pre> 
+<p>main.c</p> 
+<pre><code>/**
+  ******************************************************************************
+  * @file    Project/STM32F10x_StdPeriph_Template/main.c 
+  * @author  MCD Application Team
+  * @version V3.5.0
+  * @date    08-April-2011
+  * @brief   Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * THE PRESENT FIRMWARE WHICH IS FOR GUIDANCE ONLY AIMS AT PROVIDING CUSTOMERS
+  * WITH CODING INFORMATION REGARDING THEIR PRODUCTS IN ORDER FOR THEM TO SAVE
+  * TIME. AS A RESULT, STMICROELECTRONICS SHALL NOT BE HELD LIABLE FOR ANY
+  * DIRECT, INDIRECT OR CONSEQUENTIAL DAMAGES WITH RESPECT TO ANY CLAIMS ARISING
+  * FROM THE CONTENT OF SUCH FIRMWARE AND/OR THE USE MADE BY CUSTOMERS OF THE
+  * CODING INFORMATION CONTAINED HEREIN IN CONNECTION WITH THEIR PRODUCTS.
+  *
+  * &lt;h2&gt;&lt;center&gt;&amp;copy; COPYRIGHT 2011 STMicroelectronics&lt;/center&gt;&lt;/h2&gt;
+  ******************************************************************************
+  */  
+
+/* Includes ------------------------------------------------------------------*/
+#include "stm32f10x.h"
+#include "delay.h"
+#include "usart.h"
+#include "stdio.h"
+#include "string.h"
+#include "ds1302.h"
+/**
+  * @brief  Main program.
+  * @param  None
+  * @retval None
+  */
+int main(void)
+{
+	int i = 0;							//	循环变量
+	char str[10] ="";				//	字符数组 
+	char str2[100] ="";				//	字符数组 
+	char str3[10] ="";				//	字符数组 
+	char str4[100] ="";				//	字符数组 
+	delay_init();						//	延时函数初始化
+	uart_init(9600);				//	串口1函数初始化
+	
+	ds1302_gpio_init();//CE,SCLK端口初始化
+	ds1302_init();
+	
+	
+  /* Infinite loop 	*/
+  while (1)
+  {
+		
+		ds1302_read_realTime();
+		delay_ms(10);
+		for(i = 0;i &lt; 10;i++)
+		{
+			sprintf(str3,"%c",DS1302_data_1[i]); 
+			strcat(str4,str3); 
+		}
+		strcat(str4,"\r\n"); 
+		
+		for(i=0;i&lt;strlen(str4);i++)
+		{
+			USART_SendData(USART1,str4[i]);
+			delay_ms(20);
+		}
+
+		ds1302_read_realTime();
+		delay_ms(10);
+		for(i = 0;i &lt; 8;i++)
+		{
+			sprintf(str,"%c",DS1302_data_2[i]); 
+			strcat(str2,str); 
+		}
+		strcat(str2,"\r\n"); 
+		
+		for(i=0;i&lt;strlen(str2);i++)
+		{
+			USART_SendData(USART1,str2[i]);
+			delay_ms(20);
+		}
+		
+		delay_ms(200); 
+		
+		memset(str2,0,sizeof(str2)); 
+		memset(str4,0,sizeof(str4)); 
+		
+  }
+}
+
+
+/******************* (C) COPYRIGHT 2011 STMicroelectronics *****END OF FILE****/</code></pre> 
+<p><strong>实现效果：</strong></p> 
+<p><img alt="" height="513" src="https://images2.imgbox.com/93/5a/nXHgvwVT_o.png" width="620"></p> 
+<h4 id="HAL%E5%BA%93%E5%AE%9E%E7%8E%B0%EF%BC%9A"><strong>HAL库实现：</strong></h4> 
+<p><img alt="" height="490" src="https://images2.imgbox.com/ad/47/89JAmQWG_o.png" width="614"></p> 
+<p>ds1302.c</p> 
+<pre><code>#include "main.h"
+#include "ds1302.h"
+
+
+uint8_t read_time[7];
+
+struct TIMEData TimeData;
+char DS1302_data_1[10];
+char DS1302_data_2[8];
+
+
+void ds1302_DATAOUT_init(void)
+{
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA,DATA_Pin, GPIO_PIN_RESET);
+	
+	/*Configure GPIO pin : DATA_Pin */
+  GPIO_InitStruct.Pin = DATA_Pin;   
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(DATA_GPIO_Port, &amp;GPIO_InitStruct);
+}
+
+void ds1302_DATAINPUT_init(void)
+{
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+
+	 /*Configure GPIO pin : PA2 */
+  GPIO_InitStruct.Pin = DATA_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(DATA_GPIO_Port, &amp;GPIO_InitStruct);
+}
+
+
+/*
+ * /向DS1302发送一字节数据
+ */
+void ds1302_write_onebyte(uint8_t data)//向DS1302发送一字节数据
+{
+	uint8_t count=0;
+	ds1302_DATAOUT_init(); // I/O配置为输出 
+	
+	HAL_GPIO_WritePin(GPIOA,CLK_Pin, GPIO_PIN_RESET);// 拉低时钟
+	
+	for(count=0;count&lt;8;count++)
+	{	
+		HAL_GPIO_WritePin(GPIOA,CLK_Pin, GPIO_PIN_RESET);// 拉低时钟
+		if(data&amp;0x01)
+		{
+			HAL_GPIO_WritePin(GPIOA,DATA_Pin, GPIO_PIN_SET);
+		}
+		else
+		{
+			HAL_GPIO_WritePin(GPIOA,DATA_Pin, GPIO_PIN_RESET);
+		}//先准备好数据再发送
+		HAL_GPIO_WritePin(GPIOA,CLK_Pin, GPIO_PIN_SET); //拉高时钟线，发送数据
+		data&gt;&gt;=1; 
+	}
+}
+
+/*
+ * 向DS1302发送指定数据
+ */
+void ds1302_wirte_rig(uint8_t address,uint8_t data)//向指定寄存器地址发送数据
+{
+	uint8_t temp1=address;
+	uint8_t temp2=data;
+	
+	
+	HAL_GPIO_WritePin(GPIOA,RST_Pin, GPIO_PIN_RESET); // 拉低RST
+	
+	HAL_GPIO_WritePin(GPIOA,CLK_Pin, GPIO_PIN_RESET);// 拉低时钟
+	delay_us(1);
+	HAL_GPIO_WritePin(GPIOA,RST_Pin, GPIO_PIN_SET); // 拉高RST
+	delay_us(2);
+	ds1302_write_onebyte(temp1); // 写命令
+	ds1302_write_onebyte(temp2); // 写数据
+	
+	HAL_GPIO_WritePin(GPIOA,RST_Pin, GPIO_PIN_RESET); // 拉低RST
+	HAL_GPIO_WritePin(GPIOA,CLK_Pin, GPIO_PIN_RESET);// 拉低时钟
+	delay_us(2);
+}
+
+/*
+ * 从DS1302读取数据
+ */
+uint8_t ds1302_read_rig(uint8_t address)//从指定地址读取一字节数据
+{
+	uint8_t temp3=address;
+	uint8_t count=0;
+	uint8_t return_data=0x00;
+	
+	HAL_GPIO_WritePin(GPIOA,RST_Pin, GPIO_PIN_RESET); // 拉低RST
+	HAL_GPIO_WritePin(GPIOA,CLK_Pin, GPIO_PIN_RESET);// 拉低时钟
+	delay_us(3);
+	HAL_GPIO_WritePin(GPIOA,RST_Pin, GPIO_PIN_SET); // 拉高RST
+	delay_us(3);
+	
+	ds1302_write_onebyte(temp3); // 写地址
+	
+	ds1302_DATAINPUT_init();//配置I/O口为输入
+
+	for(count=0;count&lt;8;count++)
+	{
+		delay_us(2);//使电平持续一段时间
+		return_data&gt;&gt;=1;
+		HAL_GPIO_WritePin(GPIOA,CLK_Pin, GPIO_PIN_SET);// 拉高时钟
+		delay_us(4);//使高电平持续一段时间
+		HAL_GPIO_WritePin(GPIOA,CLK_Pin, GPIO_PIN_RESET);// 拉低时钟
+		delay_us(14);//延时14us后再去读取电压，更加准确
+		if(HAL_GPIO_ReadPin(GPIOA,DATA_Pin)) 
+		{return_data=return_data|0x80;}
+	}
+	delay_us(2);
+	HAL_GPIO_WritePin(GPIOA,RST_Pin, GPIO_PIN_RESET); // 拉低RST
+	HAL_GPIO_WritePin(GPIOA,DATA_Pin, GPIO_PIN_RESET);	//	DATA拉低
+	
+	return return_data; // 返回数据
+}
+
+/*
+ * 初始化DS1302
+注意，写的时候D0配置为0
+写入时
+秒：1000 0000即0x80
+分：1000 0010即0x82
+时：1000 0100即0x84
+日：1000 0110即0x86
+月：1000 1000即0x88
+周：1000 1010即0x8a
+年：1000 1100即0x8c
+ */
+void ds1302_init()
+{
+	ds1302_wirte_rig(0x8e,0x00);//关闭写保护
+	ds1302_wirte_rig(0x80,0x37);//seconds37秒
+	ds1302_wirte_rig(0x82,0x58);//minutes58分
+	ds1302_wirte_rig(0x84,0x23);//hours23时
+	ds1302_wirte_rig(0x86,0x30);//date30日
+	ds1302_wirte_rig(0x88,0x09);//months9月
+	ds1302_wirte_rig(0x8a,0x07);//days星期日
+	ds1302_wirte_rig(0x8c,0x20);//year2020年
+	
+	//ds1302_wirte_rig(0x80,0x19);
+	
+	ds1302_wirte_rig(0x8e,0x80);//关闭写保护
+	
+}
+
+/*
+ * 读取DS1302数据
+注意，读的时候D0配置为1
+读取时
+秒：1000 0001即0x81
+分：1000 0011即0x83
+时：1000 0101即0x85
+日：1000 0111即0x87
+月：1000 1001即0x89
+周：1000 1011即0x8b
+年：1000 1101即0x8d
+ */
+void ds1302_read_time(void)
+{
+	read_time[0]=ds1302_read_rig(0x81);//读秒
+	read_time[1]=ds1302_read_rig(0x83);//读分
+	read_time[2]=ds1302_read_rig(0x85);//读时
+	read_time[3]=ds1302_read_rig(0x87);//读日
+	read_time[4]=ds1302_read_rig(0x89);//读月
+	read_time[5]=ds1302_read_rig(0x8B);//读星期
+	read_time[6]=ds1302_read_rig(0x8D);//读年
+}
+
+void ds1302_read_realTime(void)
+{
+	ds1302_read_time();  //BCD码转换为10进制
+	TimeData.second=(read_time[0]&gt;&gt;4)*10+(read_time[0]&amp;0x0f);
+	TimeData.minute=((read_time[1]&gt;&gt;4)&amp;(0x07))*10+(read_time[1]&amp;0x0f);
+	TimeData.hour=(read_time[2]&gt;&gt;4)*10+(read_time[2]&amp;0x0f);
+	TimeData.day=(read_time[3]&gt;&gt;4)*10+(read_time[3]&amp;0x0f);
+	TimeData.month=(read_time[4]&gt;&gt;4)*10+(read_time[4]&amp;0x0f);
+	TimeData.week=read_time[5];
+	TimeData.year=(read_time[6]&gt;&gt;4)*10+(read_time[6]&amp;0x0f)+2000;
+	DS1302_data_1[0]='2';
+	DS1302_data_1[1]='0';
+	DS1302_data_1[2]='0'+(TimeData.year-2000)/10;
+	DS1302_data_1[3]='0'+(TimeData.year-2000)%10;
+	DS1302_data_1[4]='-';
+	DS1302_data_1[5]='0'+TimeData.month/10;
+	DS1302_data_1[6]='0'+TimeData.month%10;
+	DS1302_data_1[7]='-';
+	DS1302_data_1[8]='0'+TimeData.day/10;
+	DS1302_data_1[9]='0'+TimeData.day%10;
+	
+	DS1302_data_2[0]='0'+TimeData.hour/10;
+	DS1302_data_2[1]='0'+TimeData.hour%10;
+	DS1302_data_2[2]=':';
+	DS1302_data_2[3]='0'+TimeData.minute/10;
+	DS1302_data_2[4]='0'+TimeData.minute%10;
+	DS1302_data_2[5]=':';
+	DS1302_data_2[6]='0'+TimeData.second/10;
+	DS1302_data_2[7]='0'+TimeData.second%10;
+}
+</code></pre> 
+<p>main.c中mian函数</p> 
+<pre><code>int main(void)
+{
+  /* USER CODE BEGIN 1 */
+	char str[100] ="";				//	字符数组 
+	char str2[100] ="";				//	字符数组 
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+	
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_USART1_UART_Init();
+  /* USER CODE BEGIN 2 */
+	ds1302_init();		//	
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+	
+		ds1302_read_realTime();
+		HAL_Delay(10);
+		strcat(str,DS1302_data_2); 
+		strcat(str,"\r\n");
+		strcat(str2,DS1302_data_1); 
+		strcat(str2,"\r\n");
+		while(HAL_OK != HAL_UART_Transmit(&amp;huart1,(unsigned char *)str2,strlen(str2), 500));
+		while(HAL_OK != HAL_UART_Transmit(&amp;huart1,(unsigned char *)str,strlen(str), 500));
+
+		
+		HAL_Delay(500); 
+		memset(str,0,sizeof(str));
+		memset(str2,0,sizeof(str2));
+	
+  }
+  /* USER CODE END 3 */
+}</code></pre> 
+<p> 效果如下：</p> 
+<p><img alt="" height="513" src="https://images2.imgbox.com/58/3b/1wSfn4tz_o.png" width="620"></p> 
+<p>以上是将数据读取出来，然后通过串口发送出来，这样便于大家移植，祝大家学习愉快，还要沟通交流！！！</p> 
+<h4 id="%E6%BA%90%E7%A0%81%E9%93%BE%E6%8E%A5%EF%BC%9A"><strong>源码链接：</strong></h4> 
+<p><a href="https://download.csdn.net/download/XiaoCaiDaYong/86819853" title="STM32F103操作DS1302时钟芯片串口显示（标准库和HAL库）-C文档类资源-CSDN文库">STM32F103操作DS1302时钟芯片串口显示（标准库和HAL库）-C文档类资源-CSDN文库</a></p> 
+<p><a class="link-info" href="https://item.taobao.com/item.htm?spm=a1z10.3-c.w4002-22043756845.15.57a113aaPLA3RI&amp;id=689930787767" rel="nofollow" title="吾芯电子工作室">吾芯电子工作室</a></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/7bf9f57b997749007b8ebedfb0526a00/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Java LocalDate的详细方法总结</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c91e003399421f3bdfb639638f32540b/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">ZYNQ学习笔记——5.AXI_GPIO实验</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

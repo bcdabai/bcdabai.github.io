@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Kafka学习笔记 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Kafka学习笔记" />
+<meta property="og:description" content="目录 常见术语如何解决数据重复和数据乱序幂等性幂等性的缺陷事务事务原子性事务原理流程图 如何解决数据积压解决方法 Kafka的高水位（HW）和Leader Epoch副本同步机制解析Leader Epoch是如何解决消息丢失和消息不一致的问题的 常见术语 Kafka的三层消息架构：
+第一层是主题层，每个主题可以配置M个分区，而每个分区又可以配置N个副本。
+第二层是分区层，每个分区的N个副本中只能有一个充当领导者角色，对外提供服务；其他N-1个副本是追随者副本，只是提供数据冗余之用。（客户端程序只与分区的领导者副本进行交互）
+第三层是消息层，分区中包含若干条消息，每条消息的位移从0开始，依次递增。
+在Kafka中，发布订阅的对象是主题（Topic），每个业务、每类数据都能创建对应的主题。
+向主题发布消息的客户端应用程序称为生产者（Producer）
+订阅这些主题消息的客户端应用程序就被称为消费者（Consumer）
+生产者和消费者统称为客户端（Clients）。
+Kafka的服务器端由被称为Broker的服务进程构成，即一个Kafka集群由多个Broker组成，Broker负责接收和处理客户端发送过来的请求，以及对消息进行持久化。
+为了保证高可用，可以采取多副本进行数据同步。Kafka定义了两类副本：领导者副本（Leader Replica）和追随者副本（Follower Replica）。
+生产者总是向领导者副本写消息；而消费者总是从领导者副本读消息。至于追随者副本，它只做一件事：向领导者副本发送请求，请求领导者把最新生产的消息发给它，这样它能保持与领导者的同步。
+为了保证系统的伸缩性，Kafka中的分区机制指的是将每个主题划分成多个分区（Partition），每个分区是一组有序的消息日志。生产者生产的每条消息只会被发送到一个分区中，也就是说如果向一个双分区的主题发送一条消息，这条消息要么在分区0中，要么在分区1中。
+副本是在分区这个层级定义的。生产者向分区写入消息，每条消息在分区中的位置信息由一个叫位移（Offset）的数据来表征。
+每个消费者在消费消息的过程中必然需要有个字段记录它当前消费到了分区的哪个位置上，这个字段就是消费者位移（Consumer Offset）。
+如何解决数据重复和数据乱序 Kafka默认提供的交付可靠性保障是“至少一次”，即消息不会丢失，但有可能被重复发送。
+只有Broker成功“提交”消息且Producer接到Broker的应答才会认为该消息成功发送。不过倘若消息成功“提交”，但Broker的应答没有成功发送回Producer端（比如网络出现瞬时抖动），那么Producer就无法确定消息是否真的提交成功了。因此，它只能选择重试，也就是再次发送相同的消息。这就是Kafka默认提供至少一次可靠性保障的原因，不过这会导致消息重复发送。
+对于涉及金钱交易的系统，我们更希望交付方式是“精确一次”，即消息既不会丢失，也不会被重复处理。Kafka通过两种机制：幂等性（Idempotence）和事务（Transaction）保证了“精确一次”的交付。
+幂等性 Producer 的幂等性指的是当发送同一条消息时，数据在 Server 端只会被持久化一次，数据不丟不重，Kafka为了实现幂等性，在0.11.0.0之后加入的该新功能，它在底层设计架构中引入了ProducerID和SequenceNumber。
+ProducerID：每个生产者启动时，Kafka 都会给它分配一个 ID，ProducerID 是生产者的唯一标识，需要注意的是，Kafka 重启也会重新分配 PIDSequenceNumber ：对于每个ProducerID，Producer发送数据的每个Topic和Partition都对应一个从0开始单调递增的SequenceNumber值。 如果Broker在发送Ack信号给Producer时出现网络异常，导致发送失败。异常情况如下图所示：
+每个新的Producer在初始化的时候会被分配一个唯一的PID（凡是开启幂等性都是需要生成PID，只不过未开启事务的PID可以在任意broker生成，而开启事务只能在TransactionCoordinator节点生成），该PID对用户完全透明而不会暴露给用户。Broker端也会为每个&lt;PID, Topic, Partition&gt;维护一个序号，并且每次Commit一条消息时将其对应序号递增。对于接收的每条消息，如果其消息序号比Broker维护的序号（即最后一次Commit的消息的序号）大一，则Broker会接受它，否则将其丢弃：
+如果消息序号比Broker维护的序号大于1以上，说明中间有数据尚未写入，也即乱序，此时Broker拒绝该消息，Producer抛出InvalidSequenceNumber如果消息序号小于等于Broker维护的序号，说明该消息已被保存，即为重复消息，Broker直接丢弃该消息，Producer抛出DuplicateSequenceNumber 上述设计解决了数据重复和数据乱序的问题。
+幂等性的缺陷 只能保证 Producer 在单个会话内不丟不重 ，如果 Producer 出现意外挂掉再重启是无法保证的（幂等性情况下，是无法获取之前的状态信息，因此是无法做到跨会话级别的不丢不重）;另外幂等性不能跨多个 Topic-Partition，只能保证单个 partition 内的幂等性 ，当涉及多个 Topic-Partition 时，这中间的状态并没有同步。
+如果需要跨会话、跨多个 topic-partition 的情况，需要使用 Kafka 的事务性来实现。
+事务 为了实现有状态的应用也可以保证重启后从断点处继续处理，也即事务恢复。应用程序必须提供一个稳定的（重启后不变）唯一的 ID，也即Transaction ID。Transactin ID与PID可能一一对应。区别在于Transaction ID由用户提供，而PID是内部的实现对用户透明。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/e5939af41d5f842a1956265748522bc1/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-08-28T02:05:09+08:00" />
+<meta property="article:modified_time" content="2023-08-28T02:05:09+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Kafka学习笔记</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>目录</h4> 
+ <ul><li><ul><li><a href="#_1" rel="nofollow">常见术语</a></li><li><a href="#_27" rel="nofollow">如何解决数据重复和数据乱序</a></li><li><ul><li><a href="#_34" rel="nofollow">幂等性</a></li><li><a href="#_48" rel="nofollow">幂等性的缺陷</a></li><li><a href="#_53" rel="nofollow">事务</a></li><li><a href="#_63" rel="nofollow">事务原子性</a></li><li><a href="#_79" rel="nofollow">事务原理流程图</a></li></ul> 
+   </li><li><a href="#_81" rel="nofollow">如何解决数据积压</a></li><li><ul><li><a href="#_84" rel="nofollow">解决方法</a></li></ul> 
+   </li><li><a href="#KafkaHWLeader_Epoch_121" rel="nofollow">Kafka的高水位（HW）和Leader Epoch</a></li><li><ul><li><a href="#_143" rel="nofollow">副本同步机制解析</a></li><li><a href="#Leader_Epoch_157" rel="nofollow">Leader Epoch是如何解决消息丢失和消息不一致的问题的</a></li></ul> 
+  </li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h3><a id="_1"></a>常见术语</h3> 
+<p>Kafka的三层消息架构：<br> 第一层是<strong>主题层</strong>，每个主题可以配置M个分区，而每个分区又可以配置N个副本。<br> 第二层是<strong>分区层</strong>，每个分区的N个副本中只能有一个充当领导者角色，对外提供服务；其他N-1个副本是追随者副本，只是提供数据冗余之用。（<em>客户端程序只与分区的领导者副本进行交互</em>）<br> 第三层是<strong>消息层</strong>，分区中包含若干条消息，每条消息的位移从0开始，依次递增。</p> 
+<p>在Kafka中，发布订阅的对象是<strong>主题</strong>（Topic），每个业务、每类数据都能创建对应的主题。</p> 
+<p>向主题发布消息的客户端应用程序称为<strong>生产者</strong>（Producer）</p> 
+<p>订阅这些主题消息的客户端应用程序就被称为<strong>消费者</strong>（Consumer）</p> 
+<p>生产者和消费者统称为客户端（Clients）。</p> 
+<p>Kafka的服务器端由被称为Broker的服务进程构成，即一个Kafka集群由多个Broker组成，Broker负责接收和处理客户端发送过来的请求，以及对消息进行持久化。</p> 
+<p>为了保证高可用，可以采取多副本进行数据同步。Kafka定义了两类副本：领导者副本（Leader Replica）和追随者副本（Follower Replica）。</p> 
+<p>生产者总是向领导者副本写消息；而消费者总是从领导者副本读消息。至于追随者副本，它只做一件事：向领导者副本发送请求，请求领导者把最新生产的消息发给它，这样它能保持与领导者的同步。</p> 
+<p>为了保证系统的伸缩性，Kafka中的分区机制指的是将每个主题划分成多个分区（Partition），每个分区是一组有序的消息日志。生产者生产的每条消息只会被发送到一个分区中，也就是说如果向一个双分区的主题发送一条消息，这条消息要么在分区0中，要么在分区1中。</p> 
+<p>副本是在分区这个层级定义的。生产者向分区写入消息，每条消息在分区中的位置信息由一个叫位移（Offset）的数据来表征。</p> 
+<p>每个消费者在消费消息的过程中必然需要有个字段记录它当前消费到了分区的哪个位置上，这个字段就是消费者位移（Consumer Offset）。</p> 
+<h3><a id="_27"></a>如何解决数据重复和数据乱序</h3> 
+<p>Kafka默认提供的交付可靠性保障是“至少一次”，即消息不会丢失，但有可能被重复发送。</p> 
+<p>只有Broker成功“提交”消息且Producer接到Broker的应答才会认为该消息成功发送。不过倘若消息成功“提交”，但Broker的应答没有成功发送回Producer端（比如网络出现瞬时抖动），那么Producer就无法确定消息是否真的提交成功了。因此，它只能选择重试，也就是再次发送相同的消息。这就是Kafka默认提供至少一次可靠性保障的原因，不过这会导致消息重复发送。</p> 
+<p>对于涉及金钱交易的系统，我们更希望交付方式是“精确一次”，即消息既不会丢失，也不会被重复处理。Kafka通过两种机制：幂等性（Idempotence）和事务（Transaction）保证了“精确一次”的交付。</p> 
+<h4><a id="_34"></a>幂等性</h4> 
+<p>Producer 的幂等性指的是当发送同一条消息时，数据在 Server 端只会被持久化一次，数据不丟不重，Kafka为了实现幂等性，在0.11.0.0之后加入的该新功能，它在底层设计架构中引入了ProducerID和SequenceNumber。</p> 
+<ul><li>ProducerID：每个生产者启动时，Kafka 都会给它分配一个 ID，ProducerID 是生产者的唯一标识，需要注意的是，Kafka 重启也会重新分配 PID</li><li>SequenceNumber ：对于每个ProducerID，Producer发送数据的每个Topic和Partition都对应一个从0开始单调递增的SequenceNumber值。</li></ul> 
+<p>如果Broker在发送Ack信号给Producer时出现网络异常，导致发送失败。异常情况如下图所示：<br> <img src="https://images2.imgbox.com/86/e4/zCdFIHvH_o.png" alt="在这里插入图片描述"><br> 每个新的Producer在初始化的时候会被分配一个唯一的PID（凡是开启幂等性都是需要生成PID，只不过未开启事务的PID可以在任意broker生成，而开启事务只能在TransactionCoordinator节点生成），该PID对用户完全透明而不会暴露给用户。Broker端也会为每个&lt;PID, Topic, Partition&gt;维护一个序号，并且每次Commit一条消息时将其对应序号递增。对于接收的每条消息，如果其消息序号比Broker维护的序号（即最后一次Commit的消息的序号）大一，则Broker会接受它，否则将其丢弃：</p> 
+<ul><li>如果消息序号比Broker维护的序号大于1以上，说明中间有数据尚未写入，也即乱序，此时Broker拒绝该消息，Producer抛出InvalidSequenceNumber</li><li>如果消息序号小于等于Broker维护的序号，说明该消息已被保存，即为重复消息，Broker直接丢弃该消息，Producer抛出DuplicateSequenceNumber</li></ul> 
+<p>上述设计解决了数据重复和数据乱序的问题。</p> 
+<h4><a id="_48"></a>幂等性的缺陷</h4> 
+<p>只能保证 Producer 在单个会话内不丟不重 ，如果 Producer 出现意外挂掉再重启是无法保证的（幂等性情况下，是无法获取之前的状态信息，因此是无法做到跨会话级别的不丢不重）;另外幂等性不能跨多个 Topic-Partition，只能保证单个 partition 内的幂等性 ，当涉及多个 Topic-Partition 时，这中间的状态并没有同步。</p> 
+<p>如果需要跨会话、跨多个 topic-partition 的情况，需要使用 Kafka 的事务性来实现。</p> 
+<h4><a id="_53"></a>事务</h4> 
+<p>为了实现有状态的应用也可以保证重启后从断点处继续处理，也即事务恢复。应用程序必须提供一个稳定的（重启后不变）唯一的 ID，也即Transaction ID。Transactin ID与PID可能一一对应。区别在于Transaction ID由用户提供，而PID是内部的实现对用户透明。</p> 
+<p>另外，为了保证新的 Producer 启动后，旧的具有相同Transaction ID的 Producer 即失效，每次 Producer 通过Transaction ID拿到 PID 的同时，还会获取一个单调递增的 epoch。由于旧的 Producer 的 epoch 比新 Producer 的 epoch 小，Kafka 可以很容易识别出该 Producer 是老的 Producer 并拒绝其请求。</p> 
+<p>有了Transaction ID和epoch后，Kafka 可保证：</p> 
+<ul><li>跨 Session 的数据幂等发送。当具有相同Transaction ID的新的 Producer 实例被创建且工作时，旧的且拥有相同Transaction ID的 Producer 将不再工作。</li><li>跨 Session 的事务恢复。如果某个应用实例宕机，新的实例可以保证任何未完成的旧的事务要么 Commit 要么 Abort，使得新实例从一个正常状态开始工作。</li></ul> 
+<h4><a id="_63"></a>事务原子性</h4> 
+<p>事务原子性是指 Producer 将多条消息作为一个事务批量发送，要么全部成功要么全部失败。 引入了一个服务器端的模块，名为Transaction Coordinator，用于管理 Producer 发送的消息的事务性。</p> 
+<p>该Transaction Coordinator维护Transaction Log，该 log 存于一个内部的 Topic 内。由于 Topic 数据具有持久性，因此事务的状态也具有持久性。</p> 
+<p>Producer 并不直接读写Transaction Log，它与Transaction Coordinator通信，然后由Transaction Coordinator将该事务的状态插入相应的Transaction Log。</p> 
+<p>Transaction Log的设计与Offset Log用于保存 Consumer 的 Offset 类似。</p> 
+<p>在Kafka Stream 应用中同时包含 Consumer 和 Producer（即Consumer-Transform-Producer），前者负责从 Kafka 中获取消息，后者负责将处理完的数据写回 Kafka 的其它 Topic 中。</p> 
+<p>为了实现该场景下的事务的原子性，Kafka 需要保证对 Consumer Offset 的 Commit 与 Producer 对发送消息的 Commit 包含在同一个事务中。否则，如果在二者 Commit 中间发生异常，根据二者 Commit 的顺序可能会造成数据丢失和数据重复：</p> 
+<ul><li>如果先 Commit Producer 发送数据的事务再 Commit Consumer 的 Offset，即At Least Once语义，可能造成数据重复。</li><li>如果先 Commit Consumer 的 Offset，再 Commit Producer 数据发送事务，即At Most Once语义，可能造成数据丢失。</li></ul> 
+<h4><a id="_79"></a>事务原理流程图</h4> 
+<p><img src="https://images2.imgbox.com/29/f2/1SkjjEfw_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="_81"></a>如何解决数据积压</h3> 
+<p>导致突然积压的原因肯定是多种多样的，不同的系统、不同的情况有不同的原因，不能一概而论。但能导致积压突然增加，最粗粒度的原因，只有两种：1、要么是发送变快了，2、要么是消费变慢了。</p> 
+<h4><a id="_84"></a>解决方法</h4> 
+<p>1、生产者producer：</p> 
+<ul><li> <p>batch.memory修改缓冲区大小</p> <p>设置发送消息的缓冲区，默认值是33554432，就是32MB</p> <p>如果发送消息出去的速度小于写入消息进去的速度，就会导致缓冲区写满，此时生产消息就会阻塞住，所以说这里就应该多做一些压测，尽可能保证说这块缓冲区不会被写满导致生产行为被阻塞住。</p> </li><li> <p>compression.type压缩格式</p> <p>默认是none，不压缩，但是也可以使用lz4压缩，效率还是不错的，压缩之后可以减小数据量，提升吞吐量，但是会加大producer端的cpu开销。</p> </li><li> <p>batch.size批次大小</p> <p>设置merge batch合并批次消息的大小</p> <p>如果 batch 批次太小，会导致频繁网络请求，吞吐量下降；</p> <p>如果batch批次太大，会导致一条消息需要等待很久才能被发送出去，而且会让内存缓冲区有很大压力，过多数据缓冲在内存里。</p> <p>默认值是：16384，就是16kb，也就是一个batch批次满了16kb就发送出去，一般在实际生产环境，这个batch批次的值可以增大一些来提升吞吐量，可以自己压测一下。</p> </li><li> <p>linger.ms等待时长</p> <p>这个值默认是0，意思就是消息必须立即被发送，但是这是不对的。</p> <p>一般设置一个100毫秒之类的，这样的话就是说，这个消息被发送出去后进入一个batch批次，如果100毫秒内，这个batch批次满了16kb，自然就会发送出去。</p> <p>但是如果100毫秒内，batch没满，那么也必须把消息发送出去了，不能让消息的发送延迟时间太长，也避免给内存造成过大的一个压力。</p> </li></ul> 
+<p>2、消费者consum ：</p> 
+<ul><li> <p>提升消费者组中的消费者数以及Topic中的分区数，让二者相等，假设设置为3个分区 = 3CPU。</p> </li><li> <p>提高消费者拉取数据的能力，比如Flume每次拉取的数据可以由1000条改为3000条、Spark中将限流的参数增大、Flink中保证数据的处理效率等。</p> </li></ul> 
+<h3><a id="KafkaHWLeader_Epoch_121"></a>Kafka的高水位（HW）和Leader Epoch</h3> 
+<p>Kafka在保证数据的可靠性上使用的是‘数据冗余’的方式，即将一个分区下的数据保存到多个副本中，起到备份数据的作用。这样如果leader挂了，会重新选举follower作为leader继续工作，那么Kafka中leader副本是如何将数据同步到follower副本中的呢。</p> 
+<p><img src="https://images2.imgbox.com/01/ca/OD3NgJsP_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>什么是高水位？<br> 在Kafka中，高水位是一个位置信息标记，它是用消息位移来表征的，比如某个副本中HW=4，就是这个副本的高水位在offset=4那个位置上。</li></ul> 
+<p>HW的作用<br> 在Kafka中，高水位的作用主要有2个</p> 
+<p>1.定义消息的可见性，即用来标识分区下的哪些消息是可以被消费的，比如某个分区的HW（leader的HW）是8，那么这个分区只有 &lt; 8 这些位置上消息可以被消费。即高水位之前的消息才被认为是已提交的消息，才可以被消费。</p> 
+<p>2.帮助Kafka完成副本同步。</p> 
+<p>需要注意的是，位移值等于高水位的消息也属于未提交消息。也就是说，高水位上的消息是不能被消费者消费的</p> 
+<p>还有一个日志末端位移的概念，Log End Offset，缩写是LEO。它表示副本写入下一条消息的位移值。上图中LEO是15，即下一条新消息的位移是15，8-14这些位置上的消息就是未提交消息。同一个副本对象，其高水位值不会大于LEO值。</p> 
+<p>分区的高水位就是其leader副本的高水位。</p> 
+<h4><a id="_143"></a>副本同步机制解析</h4> 
+<p>follower向leader副本发送fetch同步数据请求，此时他们的HW和LEO都是0。<br> <img src="https://images2.imgbox.com/36/dc/VKV7GAr8_o.png" alt="在这里插入图片描述"><br> 当生产者向leader发送一条消息，且提交成功后，leader的LEO更新为1，这个时候follower发现有消息可以拉取了，于是follower的LEO也更新为1，但是此时leader和follower的HW都为0，它们需要在下一轮的拉取中被更新。<br> <img src="https://images2.imgbox.com/17/25/US2STxZD_o.png" alt="在这里插入图片描述"><br> 在新一轮的拉取请求中，因为之前位移值是0的消息已经拉取成功了，所以follower这次请求拉取的是位移值=1的消息。leader接收到这个请求后，将远程副本LEO更新为1，然后更新leader的HW=1，最后将HW=1发送给follower副本，follower收到后将自己的高水位值更新成1。至此，一次完整的消息同步周期就结束了。Kafka就是利用这样的机制，实现了leader和follower之前的同步。<br> <img src="https://images2.imgbox.com/a0/29/uoUw89ks_o.png" alt="在这里插入图片描述"><br> 依托于高水位，Kafka既界定了消息的对外可见性，又实现了异步的副本同步机制。但是这里面还存在一些问题。刚才我们了解到的Kafka副本同步的过程中，follower副本的高水位更新需要一轮额外的拉取请求才能实现。如果有多个follower副本，情况可能更糟，就需要多轮拉取请求。也就是说，leader副本的高水位更新和follower副本高水位更新在时间上是存在一定延迟的，这样会导致数据丢失或者数据不一致。数据丢失主要是由于副本重启后，LEO和HW不一致导致<strong>日志截断</strong>造成的。</p> 
+<p>另外上图中副本A和B，其中副本A中有两条消息，LEO是2、HW是2，B的LEO和HW都是1，假设在同一时刻，A和B都宕机了，然后B先醒过来，那么B成了新的leader，然后他收到生产者发来的m3消息，然后B的LEO和HW都更新成了2。<br> 当A醒过来后，会先根据HW判断是否需要进行日记截断，这里HW和LEO相等，发现不需要进行日志截断，然后跟B进行同步，这个时候A和B的LEO都是2，这样A中的消息是&lt;m1,m2&gt;,B中的消息是&lt;m1,m3&gt;,出现了消息不一致的情况。</p> 
+<p>Kafka中采用了Leader Epoch来解决这个问题。</p> 
+<h4><a id="Leader_Epoch_157"></a>Leader Epoch是如何解决消息丢失和消息不一致的问题的</h4> 
+<p>Leader Epoch 可以认为是leader的版本，它由两部分数据组成。</p> 
+<ul><li>Epoch，一个单调增加的版本号。每当副本领导权发生变更后，都会增加该版本号。小版本号的leader被认定是过期leader。</li><li>起始位移，leader副本在该Epoch值上写入的首条消息的位移。</li></ul> 
+<p><img src="https://images2.imgbox.com/46/c1/YZDTHItN_o.png" alt="在这里插入图片描述"><br> 还是刚才那个场景，现在有了Leader Epoch机制的介入，当副本B重启回来后，会向A发送一个请求去获取leader中的LEO，发现A的LEO=2，不比它自己的LEO值小，而且缓存中没有保存任何起始位移值 &gt; 2的Epoch条目，这样B就不需要执行日志截断操作了。<br> 然后副本A宕机了，B成为了leader，B的Leader Epoch由原来的&lt;0, 0&gt; 更新成了 &lt;1, 2&gt;，意思说是B成为了新的leader，版本号+1，这个leader的起始消息位移值为2。<br> A重启回来后会向B发送请求获取B的LEO，发现等于2，和自己相同，并且缓存中的Leader Epoch的起始位移值是2，也不需要进行日志截断。这样就不会出现消息丢失的问题了。</p> 
+<p>有了Leader Epoch机制的加入，当B变为leader后，producer发送m3消息到B中，数据保存到磁盘上，Leader Epoch会更新为&lt;1，1&gt;,然后A醒过来后，会先发送请求知道B的LEO值为2和自己一样，然后通过缓存的Leader Epoch值，得知下一条要写入的消息是1的位置，然后就会进行日志截断，将原先的m2删除，再将m3写入。由此解决了消息不一致的问题。</p> 
+<p>有了Leader Epoch机制的加入，当B变为leader后，producer发送m3消息到B中，数据保存到磁盘上，Leader Epoch会更新为&lt;1，1&gt;,然后A醒过来后，会先发送请求知道B的LEO值为2和自己一样，然后通过缓存的Leader Epoch值，得知下一条要写入的消息是1的位置，然后就会进行日志截断，将原先的m2删除，再将m3写入。由此解决了消息不一致的问题。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d6469e1ffb977fcb6267e5cf6de1ab52/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">RT-2(robotics-transformer2)论文翻译——1</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/9a45f062e09a225779d649d2d3bc75a4/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">web浏览器使用FileSystem的API进行本地文件的存储</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>PostgreSQL 目录结构及修改数据目录及配置文件分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="PostgreSQL 目录结构及修改数据目录及配置文件分析" />
+<meta property="og:description" content="启动脚本 #!/usr/bin/env bash set -Eeo pipefail # TODO swap to -Eeuo pipefail above (after handling all potentially-unset variables) # usage: file_env VAR [DEFAULT] # ie: file_env &#39;XYZ_DB_PASSWORD&#39; &#39;example&#39; # (will allow for &#34;$XYZ_DB_PASSWORD_FILE&#34; to fill in the value of # &#34;$XYZ_DB_PASSWORD&#34; from a file, especially for Docker&#39;s secrets feature) file_env() { local var=&#34;$1&#34; local fileVar=&#34;${var}_FILE&#34; local def=&#34;${2:-}&#34; if [ &#34;${!var:-}&#34; ] &amp;&amp; [ &#34;${!fileVar:-}&#34; ]; then echo &gt;&amp;2 &#34;error: both $var and $fileVar are set (but are exclusive)&#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/0276b1fb5f62e10683e37e776b95dd4e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-08-04T20:31:31+08:00" />
+<meta property="article:modified_time" content="2020-08-04T20:31:31+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">PostgreSQL 目录结构及修改数据目录及配置文件分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="_2"></a>启动脚本</h3> 
+<pre><code class="prism language-sh">#!/usr/bin/env bash
+set -Eeo pipefail
+# TODO swap to -Eeuo pipefail above (after handling all potentially-unset variables)
+
+# usage: file_env VAR [DEFAULT]
+#    ie: file_env 'XYZ_DB_PASSWORD' 'example'
+# (will allow for "$XYZ_DB_PASSWORD_FILE" to fill in the value of
+#  "$XYZ_DB_PASSWORD" from a file, especially for Docker's secrets feature)
+file_env() {
+	local var="$1"
+	local fileVar="${var}_FILE"
+	local def="${2:-}"
+	if [ "${!var:-}" ] &amp;&amp; [ "${!fileVar:-}" ]; then
+		echo &gt;&amp;2 "error: both $var and $fileVar are set (but are exclusive)"
+		exit 1
+	fi
+	local val="$def"
+	if [ "${!var:-}" ]; then
+		val="${!var}"
+	elif [ "${!fileVar:-}" ]; then
+		val="$(&lt; "${!fileVar}")"
+	fi
+	export "$var"="$val"
+	unset "$fileVar"
+}
+
+# check to see if this file is being run or sourced from another script
+_is_sourced() {
+	# https://unix.stackexchange.com/a/215279
+	[ "${#FUNCNAME[@]}" -ge 2 ] \
+		&amp;&amp; [ "${FUNCNAME[0]}" = '_is_sourced' ] \
+		&amp;&amp; [ "${FUNCNAME[1]}" = 'source' ]
+}
+
+# used to create initial postgres directories and if run as root, ensure ownership to the "postgres" user
+docker_create_db_directories() {
+	local user; user="$(id -u)"
+
+	mkdir -p "$PGDATA"
+	chmod 700 "$PGDATA"
+
+	# ignore failure since it will be fine when using the image provided directory; see also https://github.com/docker-library/postgres/pull/289
+	mkdir -p /var/run/postgresql || :
+	chmod 775 /var/run/postgresql || :
+
+	# Create the transaction log directory before initdb is run so the directory is owned by the correct user
+	if [ -n "$POSTGRES_INITDB_XLOGDIR" ]; then
+		mkdir -p "$POSTGRES_INITDB_XLOGDIR"
+		if [ "$user" = '0' ]; then
+			find "$POSTGRES_INITDB_XLOGDIR" \! -user postgres -exec chown postgres '{}' +
+		fi
+		chmod 700 "$POSTGRES_INITDB_XLOGDIR"
+	fi
+
+	# allow the container to be started with `--user`
+	if [ "$user" = '0' ]; then
+		find "$PGDATA" \! -user postgres -exec chown postgres '{}' +
+		find /var/run/postgresql \! -user postgres -exec chown postgres '{}' +
+	fi
+}
+
+# initialize empty PGDATA directory with new database via 'initdb'
+# arguments to `initdb` can be passed via POSTGRES_INITDB_ARGS or as arguments to this function
+# `initdb` automatically creates the "postgres", "template0", and "template1" dbnames
+# this is also where the database user is created, specified by `POSTGRES_USER` env
+docker_init_database_dir() {
+	# "initdb" is particular about the current user existing in "/etc/passwd", so we use "nss_wrapper" to fake that if necessary
+	# see https://github.com/docker-library/postgres/pull/253, https://github.com/docker-library/postgres/issues/359, https://cwrap.org/nss_wrapper.html
+	if ! getent passwd "$(id -u)" &amp;&gt; /dev/null &amp;&amp; [ -e /usr/lib/libnss_wrapper.so ]; then
+		export LD_PRELOAD='/usr/lib/libnss_wrapper.so'
+		export NSS_WRAPPER_PASSWD="$(mktemp)"
+		export NSS_WRAPPER_GROUP="$(mktemp)"
+		echo "postgres:x:$(id -u):$(id -g):PostgreSQL:$PGDATA:/bin/false" &gt; "$NSS_WRAPPER_PASSWD"
+		echo "postgres:x:$(id -g):" &gt; "$NSS_WRAPPER_GROUP"
+	fi
+
+	if [ -n "$POSTGRES_INITDB_XLOGDIR" ]; then
+		set -- --xlogdir "$POSTGRES_INITDB_XLOGDIR" "$@"
+	fi
+
+	eval 'initdb --username="$POSTGRES_USER" --pwfile=&lt;(echo "$POSTGRES_PASSWORD") '"$POSTGRES_INITDB_ARGS"' "$@"'
+
+	# unset/cleanup "nss_wrapper" bits
+	if [ "${LD_PRELOAD:-}" = '/usr/lib/libnss_wrapper.so' ]; then
+		rm -f "$NSS_WRAPPER_PASSWD" "$NSS_WRAPPER_GROUP"
+		unset LD_PRELOAD NSS_WRAPPER_PASSWD NSS_WRAPPER_GROUP
+	fi
+}
+
+# print large warning if POSTGRES_PASSWORD is long
+# error if both POSTGRES_PASSWORD is empty and POSTGRES_HOST_AUTH_METHOD is not 'trust'
+# print large warning if POSTGRES_HOST_AUTH_METHOD is set to 'trust'
+# assumes database is not set up, ie: [ -z "$DATABASE_ALREADY_EXISTS" ]
+docker_verify_minimum_env() {
+	# check password first so we can output the warning before postgres
+	# messes it up
+	if [ "${#POSTGRES_PASSWORD}" -ge 100 ]; then
+		cat &gt;&amp;2 &lt;&lt;-'EOWARN'
+			WARNING: The supplied POSTGRES_PASSWORD is 100+ characters.
+			  This will not work if used via PGPASSWORD with "psql".
+			  https://www.postgresql.org/message-id/flat/E1Rqxp2-0004Qt-PL%40wrigleys.postgresql.org (BUG #6412)
+			  https://github.com/docker-library/postgres/issues/507
+		EOWARN
+	fi
+	if [ -z "$POSTGRES_PASSWORD" ] &amp;&amp; [ 'trust' != "$POSTGRES_HOST_AUTH_METHOD" ]; then
+		# The - option suppresses leading tabs but *not* spaces. :)
+		cat &gt;&amp;2 &lt;&lt;-'EOE'
+			Error: Database is uninitialized and superuser password is not specified.
+			       You must specify POSTGRES_PASSWORD to a non-empty value for the
+			       superuser. For example, "-e POSTGRES_PASSWORD=password" on "docker run".
+			       You may also use "POSTGRES_HOST_AUTH_METHOD=trust" to allow all
+			       connections without a password. This is *not* recommended.
+			       See PostgreSQL documentation about "trust":
+			       https://www.postgresql.org/docs/current/auth-trust.html
+		EOE
+		exit 1
+	fi
+	if [ 'trust' = "$POSTGRES_HOST_AUTH_METHOD" ]; then
+		cat &gt;&amp;2 &lt;&lt;-'EOWARN'
+			********************************************************************************
+			WARNING: POSTGRES_HOST_AUTH_METHOD has been set to "trust". This will allow
+			         anyone with access to the Postgres port to access your database without
+			         a password, even if POSTGRES_PASSWORD is set. See PostgreSQL
+			         documentation about "trust":
+			         https://www.postgresql.org/docs/current/auth-trust.html
+			         In Docker's default configuration, this is effectively any other
+			         container on the same system.
+			         It is not recommended to use POSTGRES_HOST_AUTH_METHOD=trust. Replace
+			         it with "-e POSTGRES_PASSWORD=password" instead to set a password in
+			         "docker run".
+			********************************************************************************
+		EOWARN
+	fi
+}
+
+# usage: docker_process_init_files [file [file [...]]]
+#    ie: docker_process_init_files /always-initdb.d/*
+# process initializer files, based on file extensions and permissions
+docker_process_init_files() {
+	# psql here for backwards compatiblilty "${psql[@]}"
+	psql=( docker_process_sql )
+
+	echo
+	local f
+	for f; do
+		case "$f" in
+			*.sh)
+				# https://github.com/docker-library/postgres/issues/450#issuecomment-393167936
+				# https://github.com/docker-library/postgres/pull/452
+				if [ -x "$f" ]; then
+					echo "$0: running $f"
+					"$f"
+				else
+					echo "$0: sourcing $f"
+					. "$f"
+				fi
+				;;
+			*.sql)    echo "$0: running $f"; docker_process_sql -f "$f"; echo ;;
+			*.sql.gz) echo "$0: running $f"; gunzip -c "$f" | docker_process_sql; echo ;;
+			*.sql.xz) echo "$0: running $f"; xzcat "$f" | docker_process_sql; echo ;;
+			*)        echo "$0: ignoring $f" ;;
+		esac
+		echo
+	done
+}
+
+# Execute sql script, passed via stdin (or -f flag of pqsl)
+# usage: docker_process_sql [psql-cli-args]
+#    ie: docker_process_sql --dbname=mydb &lt;&lt;&lt;'INSERT ...'
+#    ie: docker_process_sql -f my-file.sql
+#    ie: docker_process_sql &lt;my-file.sql
+docker_process_sql() {
+	local query_runner=( psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --no-password )
+	if [ -n "$POSTGRES_DB" ]; then
+		query_runner+=( --dbname "$POSTGRES_DB" )
+	fi
+
+	"${query_runner[@]}" "$@"
+}
+
+# create initial database
+# uses environment variables for input: POSTGRES_DB
+docker_setup_db() {
+	if [ "$POSTGRES_DB" != 'postgres' ]; then
+		POSTGRES_DB= docker_process_sql --dbname postgres --set db="$POSTGRES_DB" &lt;&lt;-'EOSQL'
+			CREATE DATABASE :"db" ;
+		EOSQL
+		echo
+	fi
+}
+
+# Loads various settings that are used elsewhere in the script
+# This should be called before any other functions
+docker_setup_env() {
+	file_env 'POSTGRES_PASSWORD'
+
+	file_env 'POSTGRES_USER' 'postgres'
+	file_env 'POSTGRES_DB' "$POSTGRES_USER"
+	file_env 'POSTGRES_INITDB_ARGS'
+	# default authentication method is md5
+	: "${POSTGRES_HOST_AUTH_METHOD:=md5}"
+
+	declare -g DATABASE_ALREADY_EXISTS
+	# look specifically for PG_VERSION, as it is expected in the DB dir
+	if [ -s "$PGDATA/PG_VERSION" ]; then
+		DATABASE_ALREADY_EXISTS='true'
+	fi
+}
+
+# append POSTGRES_HOST_AUTH_METHOD to pg_hba.conf for "host" connections
+pg_setup_hba_conf() {
+	{
+		echo
+		if [ 'trust' = "$POSTGRES_HOST_AUTH_METHOD" ]; then
+			echo '# warning trust is enabled for all connections'
+			echo '# see https://www.postgresql.org/docs/12/auth-trust.html'
+		fi
+		echo "host all all all $POSTGRES_HOST_AUTH_METHOD"
+	} &gt;&gt; "$PGDATA/pg_hba.conf"
+}
+
+# start socket-only postgresql server for setting up or running scripts
+# all arguments will be passed along as arguments to `postgres` (via pg_ctl)
+docker_temp_server_start() {
+	if [ "$1" = 'postgres' ]; then
+		shift
+	fi
+
+	# internal start of server in order to allow setup using psql client
+	# does not listen on external TCP/IP and waits until start finishes
+	set -- "$@" -c listen_addresses='' -p "${PGPORT:-5432}"
+
+	PGUSER="${PGUSER:-$POSTGRES_USER}" \
+	pg_ctl -D "$PGDATA" \
+		-o "$(printf '%q ' "$@")" \
+		-w start
+}
+
+# stop postgresql server after done setting up user and running scripts
+docker_temp_server_stop() {
+	PGUSER="${PGUSER:-postgres}" \
+	pg_ctl -D "$PGDATA" -m fast -w stop
+}
+
+# check arguments for an option that would cause postgres to stop
+# return true if there is one
+_pg_want_help() {
+	local arg
+	for arg; do
+		case "$arg" in
+			# postgres --help | grep 'then exit'
+			# leaving out -C on purpose since it always fails and is unhelpful:
+			# postgres: could not access the server configuration file "/var/lib/postgresql/data/postgresql.conf": No such file or directory
+			-'?'|--help|--describe-config|-V|--version)
+				return 0
+				;;
+		esac
+	done
+	return 1
+}
+
+_main() {
+	# if first arg looks like a flag, assume we want to run postgres server
+	if [ "${1:0:1}" = '-' ]; then
+		set -- postgres "$@"
+	fi
+
+	if [ "$1" = 'postgres' ] &amp;&amp; ! _pg_want_help "$@"; then
+		docker_setup_env
+		# setup data directories and permissions (when run as root)
+		docker_create_db_directories
+		if [ "$(id -u)" = '0' ]; then
+			# then restart script as postgres user
+			exec gosu postgres "$BASH_SOURCE" "$@"
+		fi
+
+		# only run initialization on an empty data directory
+		if [ -z "$DATABASE_ALREADY_EXISTS" ]; then
+			docker_verify_minimum_env
+
+			# check dir permissions to reduce likelihood of half-initialized database
+			ls /docker-entrypoint-initdb.d/ &gt; /dev/null
+
+			docker_init_database_dir
+			pg_setup_hba_conf
+
+			# PGPASSWORD is required for psql when authentication is required for 'local' connections via pg_hba.conf and is otherwise harmless
+			# e.g. when '--auth=md5' or '--auth-local=md5' is used in POSTGRES_INITDB_ARGS
+			export PGPASSWORD="${PGPASSWORD:-$POSTGRES_PASSWORD}"
+			docker_temp_server_start "$@"
+
+			docker_setup_db
+			docker_process_init_files /docker-entrypoint-initdb.d/*
+
+			docker_temp_server_stop
+			unset PGPASSWORD
+
+			echo
+			echo 'PostgreSQL init process complete; ready for start up.'
+			echo
+		else
+			echo
+			echo 'PostgreSQL Database directory appears to contain a database; Skipping initialization'
+			echo
+		fi
+	fi
+
+	exec "$@"
+}
+
+if ! _is_sourced; then
+	_main "$@"
+fi
+
+# 参考：https://github.com/docker-library/postgres/blob/master/9.6/docker-entrypoint.sh
+</code></pre> 
+<p>可以看到，initdb 的时候会指定一个 PGDATA 目录，这就是 PostgresQL 存储数据的地方</p> 
+<pre><code>drwx------ 6 postgres postgres  4096 Aug  4 18:49 base
+drwx------ 2 postgres postgres  4096 Aug  4 19:30 global
+drwx------ 2 postgres postgres  4096 Aug  4 18:49 pg_clog
+drwx------ 2 postgres postgres  4096 Aug  4 18:48 pg_commit_ts
+drwx------ 2 postgres postgres  4096 Aug  4 18:48 pg_dynshmem
+-rw------- 1 postgres postgres  4490 Aug  4 18:49 pg_hba.conf
+-rw------- 1 postgres postgres  1636 Aug  4 18:49 pg_ident.conf
+drwx------ 4 postgres postgres  4096 Aug  4 18:48 pg_logical
+drwx------ 4 postgres postgres  4096 Aug  4 18:48 pg_multixact
+drwx------ 2 postgres postgres  4096 Aug  4 19:30 pg_notify
+drwx------ 2 postgres postgres  4096 Aug  4 18:48 pg_replslot
+drwx------ 2 postgres postgres  4096 Aug  4 18:48 pg_serial
+drwx------ 2 postgres postgres  4096 Aug  4 18:48 pg_snapshots
+drwx------ 2 postgres postgres  4096 Aug  4 19:19 pg_stat
+drwx------ 2 postgres postgres  4096 Aug  4 20:24 pg_stat_tmp
+drwx------ 2 postgres postgres  4096 Aug  4 18:49 pg_subtrans
+drwx------ 2 postgres postgres  4096 Aug  4 18:48 pg_tblspc
+drwx------ 2 postgres postgres  4096 Aug  4 18:48 pg_twophase
+-rw------- 1 postgres postgres     4 Aug  4 18:48 PG_VERSION
+drwx------ 3 postgres postgres  4096 Aug  4 18:49 pg_xlog
+-rw------- 1 postgres postgres    88 Aug  4 18:49 postgresql.auto.conf
+-rw------- 1 postgres postgres 22266 Aug  4 18:49 postgresql.conf
+-rw------- 1 postgres postgres    37 Aug  4 19:30 postmaster.opts
+-rw------- 1 postgres postgres    73 Aug  4 19:30 postmaster.pid
+</code></pre> 
+<h3><a id="_351"></a>文件目录作用</h3> 
+<pre><code>文件 存储内容
+PG_VERSION     实例的 版本号
+postgresql.conf   主配置文件
+postgresql.auto.conf (新功能,优先级更高)
+pg_hba.conf        认证配置文件
+pg_ident.conf       映射配置文件
+postmaster.opts    /usr/pgsql-10/bin/postgres "-D" "/var/lib/pgsql/10/data/"
+postmaster.pid
+...
+
+目录名: 存储内容
+base： 默认表空间目录,建立的表格储存在此目录中.每个 database 会在 base 目录下有一个子目录
+global: 一些共享系统表的目录.Postgres 自己的 meta 数据库存放的地方（全局 DB）
+pg_stat_tmp: 统计信息的存储目录
+pg_tblsp: 存储了指向各个用户自建表空间实际目录的链接方式
+pg_twophase: 使用两阶段提交功能时分布式事务的存储目录
+==以下目录功能待补充...
+log
+pg_commit_ts
+pg_dynshmem
+pg_logical
+pg_multixact
+pg_notify
+pg_replslot
+pg_serial
+pg_snapshots
+pg_stat
+pg_subtrans
+pg_wal
+pg_xact
+
+以下目录应该是10.0以前版本的
+pg_clog: commit log的目录
+pg_log：系统日志目录，在查询一些系统错误时就可查看此目录下的日志文件
+pg_xlog:wal(Write Ahead Log 预写式日志)日志的目录
+
+base 目录是最重要的一个目录，放的是每一个 database 的数据。
+base 目录里的每一个数字目录对于一个 database 的 oid，可以通过 查看 pg_database 这张表查看每一个 数据库的 oid 
+
+参考：https://www.cnblogs.com/sztom/p/9541272.html
+</code></pre> 
+<h3><a id="_396"></a>配置文件</h3> 
+<p>其中 postgresql.conf 是 postgresql 的配置文件：</p> 
+<pre><code># -----------------------------
+# PostgreSQL configuration file
+# -----------------------------
+#
+# This file consists of lines of the form:
+#
+#   name = value
+#
+# (The "=" is optional.)  Whitespace may be used.  Comments are introduced with
+# "#" anywhere on a line.  The complete list of parameter names and allowed
+# values can be found in the PostgreSQL documentation.
+#
+# The commented-out settings shown in this file represent the default values.
+# Re-commenting a setting is NOT sufficient to revert it to the default value;
+# you need to reload the server.
+#
+# This file is read on server startup and when the server receives a SIGHUP
+# signal.  If you edit the file on a running system, you have to SIGHUP the
+# server for the changes to take effect, run "pg_ctl reload", or execute
+# "SELECT pg_reload_conf()".  Some parameters, which are marked below,
+# require a server shutdown and restart to take effect.
+#
+# Any parameter can also be given as a command-line option to the server, e.g.,
+# "postgres -c log_connections=on".  Some parameters can be changed at run time
+# with the "SET" SQL command.
+#
+# 空间大小、时间计量单位
+# Memory units:  kB = kilobytes        Time units:  ms  = milliseconds
+#                MB = megabytes                     	s   = seconds
+#                GB = gigabytes                     	min = minutes	
+#                TB = terabytes                     	h   = hours
+#                                                   			d   = days
+
+
+
+#------------------------------------------------------------------------------
+# FILE LOCATIONS
+#------------------------------------------------------------------------------
+# 文件位置参数，一般采取默认，不需要修改。
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented here as ConfigDir.
+
+#data_directory = 'ConfigDir'		# use data in another directory
+								# (change requires restart)
+#hba_file = 'ConfigDir/pg_hba.conf'	# host-based authentication file
+								# (change requires restart)
+#ident_file = 'ConfigDir/pg_ident.conf'	# ident configuration file
+									# (change requires restart)
+
+# If external_pid_file is not explicitly set, no extra PID file is written.
+#external_pid_file = ''			# write an extra PID file
+							# (change requires restart)
+
+
+#------------------------------------------------------------------------------
+# CONNECTIONS AND AUTHENTICATION
+#------------------------------------------------------------------------------
+# 连接和信任参数设置
+# - Connection Settings -
+# 监听地址设置，一般修改成 '*'
+#listen_addresses = 'localhost'		# what IP address(es) to listen on;
+					# comma-separated list of addresses;
+					# defaults to 'localhost'; use '*' for all
+					# (change requires restart)
+# 如果一个服务器中只有一个pg实例，无需修改，如果有多个，需要修改，确保每一个pg实例的端口不一样。
+#port = 5432				# (change requires restart)
+# 最大连接数，客户端连接要减去为superuser保留的数量，比如最大连接数100，superuser连接数为10，那普通用户只能连接90个
+# 系统默认占5个，每个备库占一个，不计算在这个里面。
+max_connections = 100			# (change requires restart)
+# 为superuser保留的连接，是普通用户无法连接的数量。
+#superuser_reserved_connections = 3	# (change requires restart)
+#unix_socket_directories = '/var/run/postgresql, /tmp'	# comma-separated list of directories
+												# (change requires restart)
+#unix_socket_group = ''				# (change requires restart)
+#unix_socket_permissions = 0777		# begin with 0 to use octal notation
+									# (change requires restart)
+#bonjour = off						# advertise server via Bonjour
+									# (change requires restart)
+#bonjour_name = ''					# defaults to the computer name
+									# (change requires restart)
+
+# - Security and Authentication -
+
+#authentication_timeout = 1min		# 1s-600s
+#ssl = off
+#ssl_ciphers = 'HIGH:MEDIUM:+3DES:!aNULL' # allowed SSL ciphers
+#ssl_prefer_server_ciphers = on
+#ssl_ecdh_curve = 'prime256v1'
+#ssl_dh_params_file = ''
+#ssl_cert_file = 'server.crt'
+#ssl_key_file = 'server.key'
+#ssl_ca_file = ''
+#ssl_crl_file = ''
+#password_encryption = md5		# md5 or scram-sha-256
+#db_user_namespace = off
+# 控制是否代替应用行安全策略而引发错误。当设置为ON时，策略通常适用。
+#row_security = on
+
+# GSSAPI using Kerberos
+#krb_server_keyfile = ''
+#krb_caseins_users = off
+
+# - TCP Keepalives -
+# see "man 7 tcp" for details
+
+#tcp_keepalives_idle = 0		# TCP_KEEPIDLE, in seconds;
+					# 0 selects the system default
+#tcp_keepalives_interval = 0		# TCP_KEEPINTVL, in seconds;
+					# 0 selects the system default
+#tcp_keepalives_count = 0		# TCP_KEEPCNT;
+					# 0 selects the system default
+# - Memory -
+# 内存设置，可以设置为系统的1/4-1/3
+shared_buffers = 128MB			# min 128kB
+								# (change requires restart)
+# 大页
+#huge_pages = try			# on, off, or try
+							# (change requires restart)
+# 临时内存
+#temp_buffers = 8MB			# min 800kB
+# 如果设置为不为0的正整数，可以在事务中做保存，并且不提交，之后再提交该事务
+# begin --&gt; 操作 --&gt; prepared transaction 'XXX' ，退出事务 --&gt; 执行其他操作 --&gt; 提交或回滚之前事务'XXX' ：commit prepared 'XXX' ，rollback prepared 'XXX' 
+# 信息可在pg_prepared_xacts中查询
+#max_prepared_transactions = 0		# zero disables the feature
+									# (change requires restart)
+# Caution: it is not advisable to set max_prepared_transactions nonzero unless
+# you actively intend to use prepared transactions.
+# 在写入临时磁盘文件之前，内部排序操作和哈希表使用的内存数量。
+# 对于复杂的查询，可能会同时运行多个排序或散列操作;在开始将数据写入临时文件之前，每个操作都可以使用这个值指定的内存。
+# 此外，几个正在运行的会话可以同时执行这些操作。因此，所使用的总内存可以是work_mem值的许多倍;在选择值时，有必要记住这个事实。
+# 每一个会话排序操作用于ORDER BY、DISTINCT和merge join。散列表用于散列连接、基于散列的聚合和基于散列的子查询处理。
+#work_mem = 4MB				# min 64kB
+# 每一个会话维护操作(如真空度、创建索引和修改表添加外键)使用的最大内存量。
+#maintenance_work_mem = 64MB		# min 1MB
+# 当要排序的元组的数目小于这个数目时，排序将使用替换选择而不是快速排序生成它的第一个输出运行。
+# 这在内存受限的环境中可能很有用，在这种环境中，输入到较大排序操作的元组具有很强的物理-逻辑相关性。
+# 注意，这并不包括具有反向相关性的输入元组。替换选择算法可以生成一个不需要合并的长期运行，
+# 在这种情况下，使用默认策略将导致许多必须合并的运行，从而产生最终排序的输出。这可能允许排序操作更快完成。
+# 默认是150,000元组。注意，更高的值通常不会更有效，而且可能会适得其反，因为优先级队列对可用CPU缓存的大小很敏感，而默认策略则使用缓参无关算法来运行。
+# 此属性允许默认的排序策略自动地、透明地有效地使用可用的CPU缓存。
+#replacement_sort_tuples = 150000	# limits use of replacement selection sort
+# 指定每个autovauum 工作进程使用的最大内存数量。它默认为-1，表示应该使用maintenance_work_mem值。
+#autovacuum_work_mem = -1		# min 1MB, or -1 to use maintenance_work_mem
+# 指定服务器执行堆栈的最大安全深度。此参数的理想设置是由内核强制执行的实际堆栈大小限制(由ulimit -s或本地等效值设置)，小于兆字节的安全范围。
+# 之所以需要安全裕度，是因为在服务器中的每个例程中都不检查堆栈深度，而只检查关键的潜在递归例程，如表达式求值。
+# 默认设置是2MB，这是保守的小设置，不太可能出现崩溃。但是，它可能太小而不能执行复杂的函数。只有超级用户可以更改此设置。
+# 将max_stack_depth设置为高于实际内核限制的值，将意味着失控的递归函数可能导致单个后端进程崩溃。
+# 在PostgreSQL可以确定内核限制的平台上，服务器将不允许将此变量设置为不安全的值。然而，并不是所有的平台都提供这些信息，所以在选择值时要谨慎。
+# 在linux系统/etc/security/limits.conf 中设置，* soft stack 102400 即100M
+#max_stack_depth = 2MB			# min 100kB
+# 服务器是否使用的动态共享内存实现
+# posix(用于使用shm_open分配的posix共享内存)
+# sysv(用于通过shmget分配的System V共享内存)
+# windows(用于windows共享内存)、
+# mmap(用于使用存储在数据目录中的内存映射文件模拟共享内存)
+# none(用于禁用此特性)
+dynamic_shared_memory_type = posix	# the default is the first option
+					# supported by the operating system:
+					#   posix
+					#   sysv
+					#   windows
+					#   mmap
+					# use none to disable dynamic shared memory
+					# (change requires restart)
+
+# - Disk -
+# 进程可用于临时文件(如排序和散列临时文件)的最大磁盘空间，或用于保存游标的存储文件。该值以千字节为单位指定，而-1(默认值)表示没有限制。
+#temp_file_limit = -1			# limits per-process temp file space
+					# in kB, or -1 for no limit
+
+# - Kernel Resource Usage -
+# 允许每个服务器子进程同时打开的文件的最大数量
+#max_files_per_process = 1000		# min 25
+								# (change requires restart)
+#shared_preload_libraries = ''		# (change requires restart)
+
+# - Cost-Based Vacuum Delay -
+# 当超过成本限制时，进程将休眠的时间(
+#vacuum_cost_delay = 0			# 0-100 milliseconds
+# 在共享缓冲区缓存中清除缓冲区的估计成本。它表示锁定缓冲池、查找共享散列表和扫描页面内容的成本。默认值是1。
+#vacuum_cost_page_hit = 1		# 0-10000 credits
+# 从磁盘读取缓冲区的估计成本。这表示要锁定缓冲池、查找共享散列表、从磁盘读取所需的块并扫描其内容。
+#vacuum_cost_page_miss = 10		# 0-10000 credits
+# 当vacuum对先前清洗过的块进行修改时，估计的成本。它表示再次将脏块刷新到磁盘所需的额外I/O。
+#vacuum_cost_page_dirty = 20		# 0-10000 credits
+# 导致vacuum过程休眠的累计成本。
+#vacuum_cost_limit = 200		# 1-10000 credits
+
+# - Background Writer -
+# 后台写程序的活动轮之间的延迟。在每一轮中，writer发布为一些脏缓冲区写代码(由以下参数控制)。然后它会在bgwriter_delay毫秒间休眠，然后重复。
+#bgwriter_delay = 200ms			# 10-10000ms between rounds
+# 在每一轮中，不超过这么多的缓冲区将由后台写。将其设置为0将禁用background writer。
+#bgwriter_lru_maxpages = 100		# 0-1000 max buffers written/round
+# 在每一轮中写入的脏缓冲区的数量取决于服务器进程在最近几轮中需要的新缓冲区的数量。
+# 最近的平均需要乘以bgwriter_lru_乘数，以得到下一轮所需的缓冲区数量的估计。
+# 脏缓冲区被写入，直到有许多干净的、可重用的缓冲区可用为止。(但是，每轮写入的缓冲区不超过bgwriter_lru_maxpages。)
+# 因此，1.0的设置代表了一种“刚好及时”的策略，即准确地编写预计需要的缓冲区数目。
+# 较大的值提供了一些缓冲，以应对需求的激增，而较小的值则故意让写操作由服务器进程完成。
+#bgwriter_lru_multiplier = 2.0		# 0-10.0 multiplier on buffers scanned/round
+# 当后台写入器写入超过bgwriter_flush_after字节时，尝试强制操作系统向底层存储发出这些写入。
+# 这样做将限制内核页面缓存中的脏数据量，从而减少在检查点结束时出现fsync的情况，或者当操作系统在后台以更大的批次写入数据时。
+# 这通常会大大降低事务延迟，但也有一些情况，特别是工作负载大于shared_buffers，但小于OS的页面缓存，性能可能会降低。这种设置可能对某些平台没有影响。
+#bgwriter_flush_after = 512kB		# measured in pages, 0 disables
+
+# - Asynchronous Behavior -
+# 希望同时执行的并发磁盘I/O操作的数量。增加这个值将增加任何PostgreSQL会话试图并行发起的I/O操作的数量。
+# 允许的范围是1到1000，或者零，以禁用异步I/O请求的发布。目前，该设置只影响位图堆扫描。
+#effective_io_concurrency = 1		# 1-1000; 0 disables prefetching
+# 设置系统可以支持的后台进程的最大数量。此参数只能在服务器启动时设置。默认是8。
+# 在运行备用服务器时，必须将此参数设置为与主服务器相同或更高的值。否则，在备用服务器中将不允许查询。
+#max_worker_processes = 8		# (change requires restart)
+# 最大数量的worker,可以开始由一个收集或收集合并节点。
+#max_parallel_workers_per_gather = 2	# taken from max_parallel_workers
+# 设置worker的最大数量,系统可以支持并行查询。
+#max_parallel_workers = 8		# maximum number of max_worker_processes that
+							# can be used in parallel queries
+# 避免当使用快照的时候，发生快照过久的错误。
+# 超出阈值,旧的数据可能被vacuum away。可以帮助防止膨胀的快照依然使用了很长一段时间。
+#old_snapshot_threshold = -1		# 1min-60d; -1 disables; 0 is immediate
+					# (change requires restart)
+# 每当backend_flush_after字节多写了一个后端,试图迫使这些写入底层存储操作系统问题。
+# 这样做会限制在内核中脏数据的页面缓存,尽可能的减少 同步checkpoint
+# 或者当操作系统在后台写大量的数据的时候，坏了的可能性。
+#backend_flush_after = 0		# measured in pages, 0 disables
+
+参考：https://blog.csdn.net/chuckchen1222/article/details/80729734
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/9f0a3c0913f0e66ba72b6f34e0ab6814/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Go基础学习-defer</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/f928226052b850b6a069fce91efb6b17/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">LM(列文伯格-马夸尔特)方法的个人理解，以及实现问题</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

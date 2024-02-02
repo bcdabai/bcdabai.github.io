@@ -1,0 +1,1287 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>从OVF矢量场文件中获取磁斯格明子的位置和半径的粗略方法（trace skyrmion） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="从OVF矢量场文件中获取磁斯格明子的位置和半径的粗略方法（trace skyrmion）" />
+<meta property="og:description" content="文章目录 前言一、使用oommf的avf2odt命令行程序获取斯格明子中心位置的示例二、当磁体系的单个xy平面层仅有一个斯格明子的情况1.读取所有磁化文件中的指定磁化分量2.筛选出每一个xy平面层中位于磁化分量阈值范围内的单元格3.计算组成磁结构的所有单元格的平均坐标和平均距离 三、当磁体系的单个xy平面层存在多个斯格明子和磁畴壁共存的情况1.递归查找处于磁化分量阈值范围内的紧邻的单元格并分离成不重叠的磁结构2.根据每一个磁结构的单元格排布规律来区分出斯格明子和磁畴壁 四、使用OpenCV库函数来识别“圆”特征五、测试验证总结 泥上偶然留指爪，鸿飞那复计东西。——苏轼 《和子由渑池怀旧》 前言 近来想做一个与磁斯格明子相关的内容，但苦于没有找到有关获取磁化文件中斯格明子的中心位置和半径的参考代码，所以只能自己动手丰衣足食了。主要思路是参考oommf官网上识别磁化文件中斯格明子的方法，即遍历单个磁化文件中所有xy平面层中的单元格，再从每一个xy平面层中筛选处于磁化分量阈值范围内即磁畴壁区域中的单元格，最后把位于斯格明子环状畴壁中所有单元格的平均坐标作为斯格明子的中心位置，取中心位置到这些单元格的平均距离作为半径。本文还通过递归查找紧邻单元格的方式来分离出磁体系中存在的多个斯格明子和多个磁畴壁等磁结构，然后根据每一个磁结构的单元格排布规律来判断是否为斯格明子。另外还提供了一种利用OpenCV库函数的方法，将每一个xy平面层的单元格映射为灰度图中的一个像素点，然后用OpenCV库函数去识别“圆”特征，并得到“圆”的中心位置和半径。最后，则是通过复现一篇文章中的部分内容来测试该程序。该程序的源码见文末的下载链接。 ######
+本文链接：https://blog.csdn.net/qq_43572058/article/details/131617080
+CSDN@搬砖工人_0803号
+######
+一、使用oommf的avf2odt命令行程序获取斯格明子中心位置的示例 参考oommf网页链接，该作者通过使用命令行tclsh oommf.tcl avf2odt -average space -index t ns &#39;$i*0.05&#39; -valfunc xpos nm &#39;$vz&gt;0.5 ? $x*1e9 : 0&#39; -valfunc ypos nm &#39;$vz&gt;0.5 ? $y*1e9 : 0&#39; -valfunc wgt &#39;&#39; &#39;$vz&gt;0.5 ? 1 : 0&#39; -defaultvals 0 -headers collapse -truncate 1 -onefile foo-a.odt skyrmion_example-alpha0.100-Oxs_TimeDriver-Spin-*omf来利用avf2odt程序遍历所有矢量场文件，对每一个矢量场文件遍历其所有单元格，若某一个单元格的z分量的值满足-valfunc参数定义的阈值范围，则将该单元格的坐标放入统计列表，最后根据-average参数来计算输出每一列的值。显然该方法只适用于磁体系的单个平面层中仅有一个斯格明子的情况，一旦有着两个及以上的斯格明子，或者斯格明子和磁畴壁等其他磁结构同时存在的情况下，该方法就不可用了。此外，虽然感觉也可以通过该命令行程序获取斯格明子的半径，但相比于苦思冥想构造命令行，还不如直接写一个程序来计算半径来的简单。
+通过该示例，我们可以大致理解如何从一个磁化文件中（一般我们使用微磁模拟软件只输出磁化分布M(r,t)的文件，所以后文简称为磁化文件）找到斯格明子的中心位置的过程了。对于每一个磁化文件来说，首先要定义一个磁畴壁所处的磁化分量阈值范围（无磁性的单元格的三个磁化分量都为零，所以需要首先排除掉无磁性的单元格，再进行后续的筛选操作），接着遍历该磁化文件中所有的单元格，筛选出处于磁化分量阈值范围内的所有单元格，即找到位于斯格明子的环状畴壁中的单元格，最后对这些单元格的坐标取平均值并作为斯格明子的中心位置。此外，在本文中直接取该中心位置到这些环状畴壁中单元格的平均距离作为斯格明子的半径。
+二、当磁体系的单个xy平面层仅有一个斯格明子的情况 1.读取所有磁化文件中的指定磁化分量 关于OVF矢量场文件的格式请查阅笔记01，由于它的标题行是文本格式，而数据行可以是文本格式（text）或者4/8字节的二进制格式（b4/b8），所以这种混合格式的文件并不容易读取。囿于个人coding水平有限导致不知道如何读取这种混合格式的文件，所以只能使用avf2ovf命令行程序非常麻烦耗时的将磁化文件的数据行转化为文本格式，从而让整个磁化文件的格式统一，方便使用numpy库的loadtxt函数读取磁化文件中指定的数据列。当然，在模拟开始前，我们可以在mumax的代码中添加一行语句 OutputFormat = OVF2_TEXT，在oommf的driver类中添加一行语句 vector_field_output_format {text %#.17g}，从而让模拟软件输出的磁化文件的默认格式从二进制格式变成text文本格式。
+这里扩展了笔记05中MFA读取磁化文件中指定磁化分量的代码，根据该程序是否第一次读取磁化文件分为单进程读取和多进程读取的方法，将所有磁化文件的所有单元格的指定磁化分量按读取顺序放入一个结果列表m_allFiles返回：
+from functools import partial import numpy as np import os from multiprocessing import Pool ##读取一个磁化文件中的某一磁化分量，name：文件名称；colum：读取的矢量分量 def fileload(name,colum): colum = int(colum) #磁化文件中&#39;#&#39;是注释 m_oneFile = np." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/22703799291365b05059e1309afeb0ff/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-08T22:05:12+08:00" />
+<meta property="article:modified_time" content="2023-07-08T22:05:12+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">从OVF矢量场文件中获取磁斯格明子的位置和半径的粗略方法（trace skyrmion）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-kimbie-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#_7" rel="nofollow">前言</a></li><li><a href="#oommfavf2odt_21" rel="nofollow">一、使用oommf的avf2odt命令行程序获取斯格明子中心位置的示例</a></li><li><a href="#xy_28" rel="nofollow">二、当磁体系的单个xy平面层仅有一个斯格明子的情况</a></li><li><ul><li><a href="#1_29" rel="nofollow">1.读取所有磁化文件中的指定磁化分量</a></li><li><a href="#2xy_147" rel="nofollow">2.筛选出每一个xy平面层中位于磁化分量阈值范围内的单元格</a></li><li><a href="#3_286" rel="nofollow">3.计算组成磁结构的所有单元格的平均坐标和平均距离</a></li></ul> 
+  </li><li><a href="#xy_333" rel="nofollow">三、当磁体系的单个xy平面层存在多个斯格明子和磁畴壁共存的情况</a></li><li><ul><li><a href="#1_334" rel="nofollow">1.递归查找处于磁化分量阈值范围内的紧邻的单元格并分离成不重叠的磁结构</a></li><li><a href="#2_500" rel="nofollow">2.根据每一个磁结构的单元格排布规律来区分出斯格明子和磁畴壁</a></li></ul> 
+  </li><li><a href="#OpenCV_530" rel="nofollow">四、使用OpenCV库函数来识别“圆”特征</a></li><li><a href="#_604" rel="nofollow">五、测试验证</a></li><li><a href="#_1125" rel="nofollow">总结</a></li></ul> 
+</div> 
+<p></p> 
+<font color="#ff0000"> 泥上偶然留指爪，鸿飞那复计东西。——苏轼 《和子由渑池怀旧》 </font> 
+<hr color="#000000" size='1"'> 
+<h2><a id="_7"></a>前言</h2> 
+<font color="#999AAA"> 近来想做一个与磁斯格明子相关的内容，但苦于没有找到有关获取磁化文件中斯格明子的中心位置和半径的参考代码，所以只能自己动手丰衣足食了。主要思路是参考oommf官网上识别磁化文件中斯格明子的方法，即遍历单个磁化文件中所有xy平面层中的单元格，再从每一个xy平面层中筛选处于磁化分量阈值范围内即磁畴壁区域中的单元格，最后把位于斯格明子环状畴壁中所有单元格的平均坐标作为斯格明子的中心位置，取中心位置到这些单元格的平均距离作为半径。本文还通过递归查找紧邻单元格的方式来分离出磁体系中存在的多个斯格明子和多个磁畴壁等磁结构，然后根据每一个磁结构的单元格排布规律来判断是否为斯格明子。另外还提供了一种利用OpenCV库函数的方法，将每一个xy平面层的单元格映射为灰度图中的一个像素点，然后用OpenCV库函数去识别“圆”特征，并得到“圆”的中心位置和半径。最后，则是通过复现一篇文章中的部分内容来测试该程序。该程序的源码见文末的下载链接。 </font> 
+<hr color="#000000" size='1"'> 
+<p><em>######</em><br> 本文链接：https://blog.csdn.net/qq_43572058/article/details/131617080<br> CSDN@搬砖工人_0803号<br> <em>######</em></p> 
+<h2><a id="oommfavf2odt_21"></a>一、使用oommf的avf2odt命令行程序获取斯格明子中心位置的示例</h2> 
+<p>参考<a href="https://math.nist.gov/oommf/oommf_tutorial/skyrmion_tracking/skyrmion_tracking.html" rel="nofollow">oommf网页链接</a>，该作者通过使用命令行<code>tclsh oommf.tcl avf2odt -average space -index t ns '$i*0.05' -valfunc xpos nm '$vz&gt;0.5 ? $x*1e9 : 0' -valfunc ypos nm '$vz&gt;0.5 ? $y*1e9 : 0' -valfunc wgt '' '$vz&gt;0.5 ? 1 : 0' -defaultvals 0 -headers collapse -truncate 1 -onefile foo-a.odt skyrmion_example-alpha0.100-Oxs_TimeDriver-Spin-*omf</code>来利用avf2odt程序遍历所有矢量场文件，对每一个矢量场文件遍历其所有单元格，若某一个单元格的z分量的值满足-valfunc参数定义的阈值范围，则将该单元格的坐标放入统计列表，最后根据-average参数来计算输出每一列的值。显然该方法只适用于磁体系的单个平面层中仅有一个斯格明子的情况，一旦有着两个及以上的斯格明子，或者斯格明子和磁畴壁等其他磁结构同时存在的情况下，该方法就不可用了。此外，虽然感觉也可以通过该命令行程序获取斯格明子的半径，但相比于苦思冥想构造命令行，还不如直接写一个程序来计算半径来的简单。</p> 
+<p><img src="https://images2.imgbox.com/ad/0c/9HVM5Yrn_o.gif" alt="在这里插入图片描述"></p> 
+<p><mark>通过该示例，我们可以大致理解如何从一个磁化文件中（<strong>一般我们使用微磁模拟软件只输出磁化分布M(r,t)的文件，所以后文简称为磁化文件</strong>）找到斯格明子的中心位置的过程了。对于每一个磁化文件来说，首先要定义一个磁畴壁所处的磁化分量阈值范围（无磁性的单元格的三个磁化分量都为零，所以需要首先排除掉无磁性的单元格，再进行后续的筛选操作），接着遍历该磁化文件中所有的单元格，筛选出处于磁化分量阈值范围内的所有单元格，即找到位于斯格明子的环状畴壁中的单元格，最后对这些单元格的坐标取平均值并作为斯格明子的中心位置。此外，在本文中直接取该中心位置到这些环状畴壁中单元格的平均距离作为斯格明子的半径。</mark></p> 
+<h2><a id="xy_28"></a>二、当磁体系的单个xy平面层仅有一个斯格明子的情况</h2> 
+<h3><a id="1_29"></a>1.读取所有磁化文件中的指定磁化分量</h3> 
+<p>关于OVF矢量场文件的格式请查阅<a href="https://blog.csdn.net/qq_43572058/article/details/123299386">笔记01</a>，由于它的标题行是文本格式，而数据行可以是文本格式（text）或者4/8字节的二进制格式（b4/b8），所以这种混合格式的文件并不容易读取。囿于个人coding水平有限导致不知道如何读取这种混合格式的文件，所以只能使用avf2ovf命令行程序非常麻烦耗时的将磁化文件的数据行转化为文本格式，从而让整个磁化文件的格式统一，方便使用numpy库的loadtxt函数读取磁化文件中指定的数据列。当然，在模拟开始前，我们可以在mumax的代码中添加一行语句 <code>OutputFormat = OVF2_TEXT</code>，在oommf的driver类中添加一行语句 <code>vector_field_output_format {text %#.17g}</code>，从而让模拟软件输出的磁化文件的默认格式从二进制格式变成text文本格式。<br> 这里扩展了<a href="https://blog.csdn.net/qq_43572058/article/details/125518572#t11">笔记05</a>中MFA读取磁化文件中指定磁化分量的代码，根据该程序是否第一次读取磁化文件分为单进程读取和多进程读取的方法，将所有磁化文件的所有单元格的指定磁化分量按读取顺序放入一个结果列表m_allFiles返回：</p> 
+<pre><code class="prism language-python"><span class="token keyword">from</span> functools <span class="token keyword">import</span> partial
+<span class="token keyword">import</span> numpy <span class="token keyword">as</span> np
+<span class="token keyword">import</span> os
+<span class="token keyword">from</span> multiprocessing <span class="token keyword">import</span> Pool
+
+<span class="token comment">##读取一个磁化文件中的某一磁化分量，name：文件名称；colum：读取的矢量分量</span>
+<span class="token keyword">def</span> <span class="token function">fileload</span><span class="token punctuation">(</span>name<span class="token punctuation">,</span>colum<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    colum <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>colum<span class="token punctuation">)</span>
+    <span class="token comment">#磁化文件中'#'是注释</span>
+    m_oneFile <span class="token operator">=</span> np<span class="token punctuation">.</span>loadtxt<span class="token punctuation">(</span>name<span class="token punctuation">,</span> dtype <span class="token operator">=</span> <span class="token builtin">float</span><span class="token punctuation">,</span> encoding<span class="token operator">=</span><span class="token string">'utf-8'</span><span class="token punctuation">,</span> comments <span class="token operator">=</span> <span class="token string">'#'</span><span class="token punctuation">,</span> usecols <span class="token operator">=</span> <span class="token punctuation">(</span>colum<span class="token punctuation">,</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">"已读取:"</span><span class="token punctuation">,</span>name<span class="token punctuation">,</span>flush<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+    <span class="token keyword">return</span> m_oneFile
+
+<span class="token comment">#该函数的返回值为[array([...]), array([...])...]，列表的一个元素表示保存一个磁化文件的某个分量的浮点型数组</span>
+<span class="token comment">#列表长度为当前文件夹中所有子文件数量</span>
+<span class="token comment">#dirc：存放磁化文件的目录</span>
+<span class="token comment">#start_stage，end_stage：需要的磁化文件的范围</span>
+<span class="token comment">#exportX,exportY,exportZ：选择磁化矢量的那个分量表征斯格明子信息</span>
+<span class="token keyword">def</span> <span class="token function">readUseOneCore</span><span class="token punctuation">(</span>dirc<span class="token punctuation">,</span>start_stage<span class="token punctuation">,</span>end_stage<span class="token punctuation">,</span>exportX<span class="token punctuation">,</span>exportY<span class="token punctuation">,</span>exportZ<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment">#磁化文件中的第三列表示Z分量</span>
+    <span class="token keyword">if</span> exportZ <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">:</span>
+        column <span class="token operator">=</span> <span class="token string">'2'</span>
+    <span class="token comment">#磁化文件中的第二列表示Y分量</span>
+    <span class="token keyword">elif</span> exportY <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">:</span>
+        column <span class="token operator">=</span> <span class="token string">'1'</span>
+    <span class="token comment">#磁化文件中的第一列表示X分量</span>
+    <span class="token keyword">else</span><span class="token punctuation">:</span>
+        column <span class="token operator">=</span> <span class="token string">'0'</span>
+
+    <span class="token comment">#定义一个保存磁化文件名称的空列表</span>
+    files <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token comment">#walk函数会以文件夹为单位自顶而下遍历指定文件目录，</span>
+    <span class="token comment">#返回的三个参数分别表示当前文件夹, 当前文件夹中的子文件夹, 当前文件夹中的子文件</span>
+    <span class="token keyword">for</span> i<span class="token punctuation">,</span>j<span class="token punctuation">,</span>k <span class="token keyword">in</span> os<span class="token punctuation">.</span>walk<span class="token punctuation">(</span>dirc<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment">#获取当前文件夹中所有磁化文件，并保存到列表中</span>
+        <span class="token comment">#因此，这里的files是二维列表：files[k[...]]</span>
+        files<span class="token punctuation">.</span>append<span class="token punctuation">(</span>k<span class="token punctuation">)</span>
+    <span class="token comment">#将files转化为一维列表</span>
+    files <span class="token operator">=</span> files<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+    <span class="token comment">#对列表中的磁化文件进行按名称升序排序</span>
+    files<span class="token punctuation">.</span>sort<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    files_sort <span class="token operator">=</span> files<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">]</span>
+    <span class="token comment">#创建一个保存磁化文件全路径名称的列表</span>
+    files_new <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>start_stage<span class="token punctuation">,</span>end_stage<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        files_new<span class="token punctuation">.</span>append<span class="token punctuation">(</span>dirc<span class="token operator">+</span> <span class="token string">'/'</span> <span class="token operator">+</span> files_sort<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span>
+        <span class="token comment">#查看输入文件是否升序排列</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span>files_sort<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span>flush<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+    
+    <span class="token comment">#定义一个保存所有文件中某一磁化分量的空列表</span>
+    m_allFiles <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token keyword">for</span> oneFileName <span class="token keyword">in</span> files_new<span class="token punctuation">:</span>
+        <span class="token comment">#按照文件顺序填充列表</span>
+        m_allFiles<span class="token punctuation">.</span>append<span class="token punctuation">(</span>fileload<span class="token punctuation">(</span>oneFileName<span class="token punctuation">,</span>column<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    
+    <span class="token keyword">return</span> m_allFiles
+
+<span class="token comment">#该函数的返回值为[array([...]), array([...])...]，列表的一个元素表示保存一个磁化文件的某个分量的浮点型数组</span>
+<span class="token comment">#列表长度为当前文件夹中所有子文件数量</span>
+<span class="token comment">#dirc：存放磁化文件的目录</span>
+<span class="token comment">#start_stage，end_stage：需要的磁化文件的范围</span>
+<span class="token comment">#exportX,exportY,exportZ：选择磁化矢量的那个分量表征斯格明子信息</span>
+<span class="token comment">#num：占用计算机核心的数量</span>
+<span class="token keyword">def</span> <span class="token function">readUseMultiCore</span><span class="token punctuation">(</span>dirc<span class="token punctuation">,</span>start_stage<span class="token punctuation">,</span>end_stage<span class="token punctuation">,</span>exportX<span class="token punctuation">,</span>exportY<span class="token punctuation">,</span>exportZ<span class="token punctuation">,</span>num<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment">#磁化文件中的第三列表示Z分量</span>
+    <span class="token keyword">if</span> exportZ <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">:</span>
+        column <span class="token operator">=</span> <span class="token string">'2'</span>
+    <span class="token comment">#磁化文件中的第二列表示Y分量</span>
+    <span class="token keyword">elif</span> exportY <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">:</span>
+        column <span class="token operator">=</span> <span class="token string">'1'</span>
+    <span class="token comment">#磁化文件中的第一列表示X分量</span>
+    <span class="token keyword">else</span><span class="token punctuation">:</span>
+        column <span class="token operator">=</span> <span class="token string">'0'</span>
+
+    <span class="token comment">#定义一个保存磁化文件名称的空列表</span>
+    files <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token comment">#walk函数会以文件夹为单位自顶而下遍历指定文件目录，</span>
+    <span class="token comment">#返回的三个参数分别表示当前文件夹, 当前文件夹中的子文件夹, 当前文件夹中的子文件</span>
+    <span class="token keyword">for</span> i<span class="token punctuation">,</span>j<span class="token punctuation">,</span>k <span class="token keyword">in</span> os<span class="token punctuation">.</span>walk<span class="token punctuation">(</span>dirc<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment">#获取当前文件夹中所有磁化文件，并保存到列表中</span>
+        <span class="token comment">#因此，这里的files是二维列表：files[k[...]]</span>
+        files<span class="token punctuation">.</span>append<span class="token punctuation">(</span>k<span class="token punctuation">)</span>
+    <span class="token comment">#将files转化为一维列表</span>
+    files <span class="token operator">=</span> files<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+    <span class="token comment">#对列表中的磁化文件进行按名称升序排序</span>
+    files<span class="token punctuation">.</span>sort<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    files_sort <span class="token operator">=</span> files<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">]</span>
+    <span class="token comment">#创建一个保存磁化文件全路径名称的列表</span>
+    files_new <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span>start_stage<span class="token punctuation">,</span>end_stage<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        files_new<span class="token punctuation">.</span>append<span class="token punctuation">(</span>dirc<span class="token operator">+</span> <span class="token string">'/'</span> <span class="token operator">+</span> files_sort<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span>
+        <span class="token comment">#查看输入文件是否升序排列</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span>files_sort<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span>flush<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+    <span class="token keyword">if</span> num <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span>
+        <span class="token comment">#没有指定核心数量时，表示使用所有cpu核心</span>
+        pool <span class="token operator">=</span> Pool<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token comment">#将需要扩展的的原始函数作为partial函数的第一个参数，原始函数的一系列参数作为partial的后续参数，最后生成一个带默认参数的新函数</span>
+        <span class="token comment">#接着pool.map会把新函数（第一个参数）和新函数的一系列参数（第二个参数即列表）映射到多进程池中运行</span>
+        <span class="token comment">#此处表示，返回读取所有磁化文件中的指定磁化分量的值</span>
+        m_allFiles <span class="token operator">=</span> pool<span class="token punctuation">.</span><span class="token builtin">map</span><span class="token punctuation">(</span>partial<span class="token punctuation">(</span>fileload<span class="token punctuation">,</span>colum<span class="token operator">=</span>column<span class="token punctuation">)</span><span class="token punctuation">,</span>files_new<span class="token punctuation">)</span>
+        <span class="token comment">#关闭进程池</span>
+        pool<span class="token punctuation">.</span>close<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token comment">#主进程阻塞等待子进程的退出，join方法要在close或terminate之后使用</span>
+        pool<span class="token punctuation">.</span>join<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    <span class="token keyword">else</span><span class="token punctuation">:</span>
+        pool <span class="token operator">=</span> Pool<span class="token punctuation">(</span>processes <span class="token operator">=</span> num<span class="token punctuation">)</span>
+        m_allFiles <span class="token operator">=</span> pool<span class="token punctuation">.</span><span class="token builtin">map</span><span class="token punctuation">(</span>partial<span class="token punctuation">(</span>fileload<span class="token punctuation">,</span>colum<span class="token operator">=</span>column<span class="token punctuation">)</span><span class="token punctuation">,</span>files_new<span class="token punctuation">)</span>
+        pool<span class="token punctuation">.</span>close<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        pool<span class="token punctuation">.</span>join<span class="token punctuation">(</span><span class="token punctuation">)</span>
+    
+    <span class="token keyword">return</span> m_allFiles
+</code></pre> 
+<h3><a id="2xy_147"></a>2.筛选出每一个xy平面层中位于磁化分量阈值范围内的单元格</h3> 
+<p>对于上文的返回结果列表m_allFiles而言，它的每一元素的数据类型为array([…])数组，存放着一个磁化文件中指定的数据列，即该磁化文件中所有单元格的指定磁化分量值，该数组中每一个元素的索引对应着OVF矢量场文件中单元格的分布顺序（先x，后y，最后z），通过这个对应关系可以根据数组中元素的索引来计算单元格的坐标：</p> 
+<pre><code class="prism language-python"><span class="token triple-quoted-string string">"""
+参考oommf命令行程序avf2odt的-defaultpos参数查看单元格坐标分布规律，根据x,y,z方向的单元格信息生成三个位置坐标列表，方便根据单元格的索引查表获取位置坐标
+参数:
+- x_start...z_cellSize: 磁化文件中单元格尺寸的信息
+
+返回值: x_num,y_num,z_num: 磁体系在三个方向上的单元格总数
+        cellPosition_x/y/z_list: 所有单元格的x/y/z坐标的索引列表
+"""</span>
+<span class="token keyword">def</span> <span class="token function">getCellPositionList</span><span class="token punctuation">(</span>x_start<span class="token punctuation">,</span>x_end<span class="token punctuation">,</span>x_cellSize<span class="token punctuation">,</span>y_start<span class="token punctuation">,</span>y_end<span class="token punctuation">,</span>y_cellSize<span class="token punctuation">,</span>z_start<span class="token punctuation">,</span>z_end<span class="token punctuation">,</span>z_cellSize<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment">#OVF矢量场格式保存单元格的顺序为：先x，后y，最后z，需要根据磁化文件中的行索引计算对应微磁模型中的3个空间坐标，并放入对应列表中</span>
+    x_cell_list <span class="token operator">=</span> <span class="token punctuation">(</span>np<span class="token punctuation">.</span>arange<span class="token punctuation">(</span>x_start<span class="token punctuation">,</span>x_end<span class="token punctuation">,</span>x_cellSize<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">(</span>x_cellSize <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    y_cell_list <span class="token operator">=</span> <span class="token punctuation">(</span>np<span class="token punctuation">.</span>arange<span class="token punctuation">(</span>y_start<span class="token punctuation">,</span>y_end<span class="token punctuation">,</span>y_cellSize<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">(</span>y_cellSize <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    z_cell_list <span class="token operator">=</span> <span class="token punctuation">(</span>np<span class="token punctuation">.</span>arange<span class="token punctuation">(</span>z_start<span class="token punctuation">,</span>z_end<span class="token punctuation">,</span>z_cellSize<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">(</span>z_cellSize <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    x_num <span class="token operator">=</span> <span class="token builtin">len</span><span class="token punctuation">(</span>x_cell_list<span class="token punctuation">)</span>
+    y_num <span class="token operator">=</span> <span class="token builtin">len</span><span class="token punctuation">(</span>y_cell_list<span class="token punctuation">)</span>
+    z_num <span class="token operator">=</span> <span class="token builtin">len</span><span class="token punctuation">(</span>z_cell_list<span class="token punctuation">)</span>
+    cellPosition_x_list<span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">,</span>cellPosition_z_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span><span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span><span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token comment">#3个列表的长度为微磁模型中单元格总数，遍历行索引，依次填充坐标列表</span>
+    <span class="token keyword">for</span> cell_index <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token builtin">int</span><span class="token punctuation">(</span>x_num<span class="token operator">*</span>y_num<span class="token operator">*</span>z_num<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment">#根据索引计算单元格的x坐标索引</span>
+        x_index <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>cell_index <span class="token operator">%</span> x_num<span class="token punctuation">)</span>
+        <span class="token comment">#根据索引计算单元格的y坐标索引</span>
+        y_index <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span><span class="token punctuation">(</span>cell_index <span class="token operator">/</span> x_num<span class="token punctuation">)</span> <span class="token operator">%</span> y_num<span class="token punctuation">)</span>
+        <span class="token comment">#根据索引计算单元格的z坐标索引</span>
+        z_index <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span><span class="token punctuation">(</span>cell_index <span class="token operator">/</span> <span class="token punctuation">(</span>x_num <span class="token operator">*</span> y_num<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">%</span> z_num<span class="token punctuation">)</span>
+        <span class="token comment">#根据坐标索引获取当前行（即单元格）的三个坐标，并放入对应列表</span>
+        cellPosition_x_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>x_cell_list<span class="token punctuation">[</span>x_index<span class="token punctuation">]</span><span class="token punctuation">)</span>
+        cellPosition_y_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>y_cell_list<span class="token punctuation">[</span>y_index<span class="token punctuation">]</span><span class="token punctuation">)</span>
+        cellPosition_z_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>z_cell_list<span class="token punctuation">[</span>z_index<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    
+    <span class="token keyword">return</span> x_num<span class="token punctuation">,</span>y_num<span class="token punctuation">,</span>z_num<span class="token punctuation">,</span>cellPosition_x_list<span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">,</span>cellPosition_z_list<span class="token punctuation">;</span>
+
+</code></pre> 
+<p>该函数会返回磁体系在三个方向上的单元格总数：x_num、y_num、z_num，以及单元格索引对应的三个坐标列表：cellPosition_x_list、cellPosition_y_list、cellPosition_z_list，比如OVF矢量场文件中磁体系大小为10X10X2 nm，单元格尺寸为1X1X1 nm，若我们想获取第101个单元格（从0开始）的位置坐标，只需使用上述的三个坐标列表及索引“101”，即可获取第101个单元格的位置坐标为(1.5nm,0.5nm,1.5nm)。<br> 接着需要依次处理每一个磁化文件（即遍历列表m_allFiles），必须要考虑磁体系在z方向上有多层单元格的情况，这需要我们从下到上依次提取出每一个xy平面层中所有单元格，然后遍历每一个xy平面层中所有单元格，在排除掉无磁性的单元格之后，若剩余的某一单元格的磁化分量处于所我们设置的磁化分量阈值范围内(m_threshold_1 &lt;= m &lt;= m_threshold_2)，则认为该单元格位于当前xy平面层的畴壁中，否则位于磁畴中。我们需要排除位于磁畴区域的单元格，并将位于磁畴壁中的单元格放入一个列表mThrOneLayer_indexList，以供后面的识别斯格明子磁结构的三个方法使用。</p> 
+<pre><code class="prism language-python"><span class="token triple-quoted-string string">"""
+1.遍历每个磁化文件中的磁化分量数据，首先排除掉无磁性的单元格，接着在预设的磁化分量阈值内，按每一xy平面层依次识别出该层的所有磁结构
+2.接着，从该xy平面层的所有磁结构中分类出斯格明子和其他畴壁类型
+3.接着对该文件中的所有斯格明子进行处理：计算每个斯格明子的环状畴壁上的所有单元格的平均坐标作为中心，计算中心到环状畴壁的平均距离作为半径
+参数:
+- m_allFiles: 保存着所有磁化文件的某一磁化分量数据的列表
+- m_threshold_1/2: 磁化强度分量的阈值(若单元格的磁化分量的值满足：m_threshold_1 &lt;= m &lt;= m_threshold_2，则认为该单元格位于畴壁中)，
+通常单元格的磁化分量直接等于“0”表示是无磁性的，这是因为模拟结果中有磁性的单元格的磁化分量即便非常小，也不会直接等于“0”
+- identifySkyMethod: 选择使用哪一种自定义方法识别斯格明子：1，自定义平均磁化方法，适用于磁体系中仅存在1个斯格明子磁结构；
+2，自定义递归方法，适用于磁体系中存在多个斯格明子和（多个畴壁）；3，利用OpenCV库函数的方法，适用于磁体系中存在多个斯格明子和（多个畴壁）
+- x_start...z_cellSize: 3个方向上的单元格尺寸信息
+
+返回值: fileIndex_list: 读取并处理的磁化文件顺序
+        allFilesSky_list: 按照文件读取顺序将每一个磁化文件中找到的斯格明子信息依次放入该结果列表，
+其中每一个磁化文件中找到的斯格明子信息是一个用于存放多个矩阵（1行4列）的列表oneFilesSky_list，其中每个矩阵就表示一个斯格明子的信息，矩阵的4列分别表示斯格明子中心位置的x/y/z坐标和半径
+"""</span>
+<span class="token keyword">def</span> <span class="token function">getSkyInfo</span><span class="token punctuation">(</span>m_allFiles<span class="token punctuation">,</span>m_threshold_1<span class="token punctuation">,</span>m_threshold_2<span class="token punctuation">,</span>identifySkyMethod<span class="token punctuation">,</span>
+    x_start<span class="token punctuation">,</span>x_end<span class="token punctuation">,</span>x_cellSize<span class="token punctuation">,</span>y_start<span class="token punctuation">,</span>y_end<span class="token punctuation">,</span>y_cellSize<span class="token punctuation">,</span>z_start<span class="token punctuation">,</span>z_end<span class="token punctuation">,</span>z_cellSize<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    
+    <span class="token comment">#根据x,y,z方向的单元格信息生成三个方向上的单元格数量，和三个位置坐标列表，方便根据单元格的索引查表获取位置坐标</span>
+    x_num<span class="token punctuation">,</span>y_num<span class="token punctuation">,</span>z_num<span class="token punctuation">,</span>cellPosition_x_list<span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">,</span>cellPosition_z_list <span class="token operator">=</span> getCellPositionList<span class="token punctuation">(</span>x_start<span class="token punctuation">,</span>x_end<span class="token punctuation">,</span>x_cellSize<span class="token punctuation">,</span>y_start<span class="token punctuation">,</span>y_end<span class="token punctuation">,</span>y_cellSize<span class="token punctuation">,</span>z_start<span class="token punctuation">,</span>z_end<span class="token punctuation">,</span>z_cellSize<span class="token punctuation">)</span>
+
+    <span class="token comment">#读取并处理的磁化文件顺序</span>
+    fileIndex_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token comment">#该函数返回的结果列表</span>
+    allFilesSky_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    
+    <span class="token comment">#遍历每一个磁化文件，找到每一个文件中处于阈值范围内的所有单元格</span>
+    <span class="token keyword">for</span> file_index <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token builtin">len</span><span class="token punctuation">(</span>m_allFiles<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        fileIndex_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>file_index<span class="token punctuation">)</span>
+        oneFile <span class="token operator">=</span> m_allFiles<span class="token punctuation">[</span>file_index<span class="token punctuation">]</span>
+        <span class="token comment">#定义1个保存单元格位置索引的列表，记录处于磁化分量阈值范围内的所有xy平面中的单元格</span>
+        mThrAllLayer_indexList <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+        <span class="token keyword">for</span> cell_index <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token builtin">len</span><span class="token punctuation">(</span>oneFile<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            <span class="token keyword">if</span><span class="token punctuation">(</span>oneFile<span class="token punctuation">[</span>cell_index<span class="token punctuation">]</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            <span class="token comment">#通常认为单元格的磁化分量直接等于“0”表示是无磁性的，这是因为模拟结果中有磁性的单元格的磁化分量即便非常小，也不会直接等于“0”</span>
+               <span class="token keyword">continue</span><span class="token punctuation">;</span>
+            <span class="token keyword">elif</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>oneFile<span class="token punctuation">[</span>cell_index<span class="token punctuation">]</span> <span class="token operator">&gt;=</span> m_threshold_1<span class="token punctuation">)</span> <span class="token keyword">and</span> <span class="token punctuation">(</span>oneFile<span class="token punctuation">[</span>cell_index<span class="token punctuation">]</span> <span class="token operator">&lt;=</span> m_threshold_2<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+               mThrAllLayer_indexList<span class="token punctuation">.</span>append<span class="token punctuation">(</span>cell_index<span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'在第 %d 个磁化文件中，磁化分量处于磁化分量阈值 m_threshold_1 ~ m_threshold_2 的单元格总数为：%d'</span> <span class="token operator">%</span> <span class="token punctuation">(</span>file_index<span class="token punctuation">,</span><span class="token builtin">len</span><span class="token punctuation">(</span>mThrAllLayer_indexList<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+        <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'开始使用自定义方法寻找当前磁化文件中的斯格明子信息'</span><span class="token punctuation">)</span>
+        <span class="token comment">#定义一个保存当前磁化文件中所有斯格明子信息的列表</span>
+        oneFilesSky_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+        <span class="token comment">#首先计算磁体系在z方向的层数，即从下到上依次查找每一层xy平面中斯格明子信息</span>
+        allLayerNum <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span><span class="token punctuation">(</span>z_end <span class="token operator">-</span> z_start<span class="token punctuation">)</span> <span class="token operator">/</span> z_cellSize<span class="token punctuation">)</span>
+        <span class="token keyword">for</span> layer_index <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span>allLayerNum<span class="token punctuation">)</span><span class="token punctuation">:</span>
+            <span class="token comment">#当前xy平面层的z坐标</span>
+            layerPosition_z <span class="token operator">=</span> layer_index <span class="token operator">*</span> z_cellSize <span class="token operator">+</span> <span class="token punctuation">(</span>z_cellSize <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">)</span>
+            <span class="token comment">#当前xy平面层中处于磁化分量阈值范围内的单元格</span>
+            mThrOneLayer_indexList <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+            <span class="token keyword">for</span> cell_index <span class="token keyword">in</span> mThrAllLayer_indexList<span class="token punctuation">:</span>
+                <span class="token keyword">if</span> cell_index <span class="token operator">&gt;=</span> <span class="token punctuation">(</span>layer_index <span class="token operator">*</span> x_num<span class="token operator">*</span>y_num<span class="token punctuation">)</span> <span class="token keyword">and</span> cell_index <span class="token operator">&lt;=</span> <span class="token punctuation">(</span>layer_index<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">*</span> x_num<span class="token operator">*</span>y_num<span class="token punctuation">:</span>
+                   mThrOneLayer_indexList<span class="token punctuation">.</span>append<span class="token punctuation">(</span>cell_index<span class="token punctuation">)</span>
+                   <span class="token comment">#print(cellPosition_x_list[cell_index],cellPosition_y_list[cell_index],cellPosition_z_list[cell_index])</span>
+                <span class="token keyword">else</span><span class="token punctuation">:</span>
+                   <span class="token keyword">continue</span><span class="token punctuation">;</span>
+        
+            <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>mThrOneLayer_indexList<span class="token punctuation">)</span> <span class="token operator">&lt;</span> <span class="token number">1</span><span class="token punctuation">:</span>
+               <span class="token comment">#若当前xy平面层中没有处于磁化分量阈值范围内的单元格，则意味着当前层没有斯格明子</span>
+               <span class="token comment">#可以调节右边的数字，将由非常少的单元格组成的磁结构过滤掉</span>
+               <span class="token keyword">continue</span><span class="token punctuation">;</span>
+            <span class="token keyword">else</span><span class="token punctuation">:</span>
+               <span class="token comment">#定义一个保存当前xy平面层中所有斯格明子信息的列表</span>
+               oneLayerSky_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+               <span class="token comment">#使用自定义方法识别出当前磁化文件中的单个xy平面层中所有磁结构，这里提供三种方法：</span>
+               <span class="token keyword">if</span> identifySkyMethod <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">:</span>
+                  <span class="token keyword">from</span> identifySkyByCustomMethod <span class="token keyword">import</span> identifySkyBySimpleMethod
+                  <span class="token comment">#第一种方法：适用于磁体系每一层的xy平面中仅存在一个斯格明子磁结构的情况</span>
+                  <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'使用方法 1 查找第 %d 个文件，第 %d 层xy平面，仅存在一个斯格明子磁结构的情况'</span><span class="token operator">%</span><span class="token punctuation">(</span>file_index<span class="token punctuation">,</span>layer_index<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                  oneLayerSky_list <span class="token operator">=</span> identifySkyBySimpleMethod<span class="token punctuation">(</span>mThrOneLayer_indexList<span class="token punctuation">,</span>cellPosition_x_list<span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">,</span>layerPosition_z<span class="token punctuation">)</span>
+               <span class="token keyword">elif</span> identifySkyMethod <span class="token operator">==</span> <span class="token number">2</span><span class="token punctuation">:</span>
+                  <span class="token keyword">from</span> identifySkyByCustomMethod <span class="token keyword">import</span> identifySkyByRecursiveMethod
+                  <span class="token comment">#第二种方法：磁体系中每一层xy平面中存在多个斯格明子和（多个畴壁）</span>
+                  <span class="token comment">#考虑位于畴壁的一个单元格，它至少与畴壁上另一个单元格紧邻，即满足阈值距离，否则视为非畴壁中的单元格</span>
+                  <span class="token comment">#可以把阈值距离设置为np.sqrt(x_cellSize^2 + y_cellSize^2)，此处稍微增大一点为x_cellSize + y_cellSize</span>
+                  distance_thr <span class="token operator">=</span> x_cellSize <span class="token operator">+</span> y_cellSize
+                  <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'使用方法 2 查找第 %d 个文件，第 %d 层xy平面，存在多个斯格明子和（多个畴壁）的情况'</span><span class="token operator">%</span><span class="token punctuation">(</span>file_index<span class="token punctuation">,</span>layer_index<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                  oneLayerSky_list <span class="token operator">=</span> identifySkyByRecursiveMethod<span class="token punctuation">(</span>mThrOneLayer_indexList<span class="token punctuation">,</span>cellPosition_x_list<span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">,</span>layerPosition_z<span class="token punctuation">,</span>distance_thr<span class="token punctuation">)</span>
+
+               <span class="token keyword">else</span><span class="token punctuation">:</span>
+                  <span class="token keyword">from</span> identifySkyByOpenCVMethod <span class="token keyword">import</span> identifySkyByOpenCVMethod
+                  <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'使用方法 3 查找第 %d 个文件，第 %d 层xy平面，存在多个斯格明子和（多个畴壁）的情况'</span><span class="token operator">%</span><span class="token punctuation">(</span>file_index<span class="token punctuation">,</span>layer_index<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                  oneLayerSky_list <span class="token operator">=</span> identifySkyByOpenCVMethod<span class="token punctuation">(</span>mThrOneLayer_indexList<span class="token punctuation">,</span>x_start<span class="token punctuation">,</span>x_end<span class="token punctuation">,</span>x_cellSize<span class="token punctuation">,</span>y_start<span class="token punctuation">,</span>y_end<span class="token punctuation">,</span>y_cellSize<span class="token punctuation">,</span>layerPosition_z<span class="token punctuation">)</span>
+               <span class="token comment">#将每一个xy平面层中所有斯格明子信息填充进当前磁化文件的斯格明子结果列表</span>
+               <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>oneLayerSky_list<span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">:</span>
+                  <span class="token comment">#注意此处使用extend而不是append函数来填充一个磁化文件的数据</span>
+                  oneFilesSky_list<span class="token punctuation">.</span>extend<span class="token punctuation">(</span>oneLayerSky_list<span class="token punctuation">)</span>  
+        <span class="token comment">#将每一个磁化文件中找到的斯格明子信息按照文件读取顺序填充进该函数返回的结果列表</span>
+        allFilesSky_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>oneFilesSky_list<span class="token punctuation">)</span>
+
+    <span class="token keyword">return</span> fileIndex_list<span class="token punctuation">,</span>allFilesSky_list<span class="token punctuation">;</span>
+</code></pre> 
+<p>例如，在下图左面板所示的圆盘中仅存在一个斯格明子，采用磁化强度z分量的阈值范围为-200e-3~200e3，通过上述操作提取出了单个xy平面层中位于磁畴壁中的单元格，如右面板所示：</p> 
+<p><img src="https://images2.imgbox.com/a4/49/xo4VlBOn_o.jpg" alt="在这里插入图片描述"></p> 
+<h3><a id="3_286"></a>3.计算组成磁结构的所有单元格的平均坐标和平均距离</h3> 
+<p>当单个xy平面层中仅存在一个斯格明子磁结构时，上文得到的结果列表mThrOneLayer_indexList中的单元格就是组成斯格明子的环状畴壁的单元格，所以无需进行额外操作，直接按照（一）中的思路，对这些处于磁化分量阈值范围内的所有单元格的坐标取平均值作为斯格明子的中心，并取该中心到这些单元格的平均距离为半径：</p> 
+<pre><code class="prism language-python"><span class="token triple-quoted-string string">"""
+适用于适用于磁体系每一xy平面层中仅存在一个斯格明子磁结构的情况：
+计算斯格明子中心的方法：通常取位于环状畴壁的所有单元格的平均坐标作为中心，计算中心到环状畴壁的平均距离作为半径
+参数:
+- mThrOneLayer_indexList: 当前xy平面层中处于磁化分量阈值范围内的单元格位置索引列表
+- cellPosition_x_list: 所有单元格的x坐标的索引列表
+- cellPosition_y_list: 所有单元格的y坐标的索引列表
+- layerPosition_z: 当前xy平面层的z坐标
+
+返回值: skyrmion_list: 一个用于存放多个矩阵（1行4列）的列表，其中每个矩阵就表示一个斯格明子的信息，矩阵的4列分别表示斯格明子中心位置的x/y/z坐标和半径
+"""</span>
+<span class="token keyword">def</span> <span class="token function">identifySkyBySimpleMethod</span><span class="token punctuation">(</span>mThrOneLayer_indexList<span class="token punctuation">,</span>cellPosition_x_list<span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">,</span>layerPosition_z<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment">#定义该函数的结果列表</span>
+    skyrmion_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token comment">#定义当前xy平面层，位于磁化分量阈值范围内（斯格明子的环状畴壁）的所有单元格的2个位置坐标列表</span>
+    mThrPosition_x_list<span class="token punctuation">,</span>mThrPosition_y_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span><span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token keyword">for</span> index <span class="token keyword">in</span> mThrOneLayer_indexList<span class="token punctuation">:</span>
+        mThrPosition_x_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>cellPosition_x_list<span class="token punctuation">[</span>index<span class="token punctuation">]</span><span class="token punctuation">)</span> 
+        mThrPosition_y_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>cellPosition_y_list<span class="token punctuation">[</span>index<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    
+    <span class="token comment">#取位于环状畴壁的所有单元格的平均坐标作为中心</span>
+    skyPosition_x <span class="token operator">=</span> np<span class="token punctuation">.</span>average<span class="token punctuation">(</span>mThrPosition_x_list<span class="token punctuation">)</span>
+    skyPosition_y <span class="token operator">=</span> np<span class="token punctuation">.</span>average<span class="token punctuation">(</span>mThrPosition_y_list<span class="token punctuation">)</span>
+    skyPosition_z <span class="token operator">=</span> layerPosition_z
+    <span class="token comment">#计算斯格明子中心到（环状）畴壁中所有单元格的平均距离作为半径</span>
+    skyPosition <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span>skyPosition_x<span class="token punctuation">,</span>skyPosition_y<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    <span class="token comment">#斯格明子中心到环状畴壁的所有单元格的总距离</span>
+    totalDistance <span class="token operator">=</span> <span class="token number">0</span>
+    <span class="token keyword">for</span> circleDWCell_i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token builtin">len</span><span class="token punctuation">(</span>mThrOneLayer_indexList<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+        circleDWCell <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span>mThrPosition_x_list<span class="token punctuation">[</span>circleDWCell_i<span class="token punctuation">]</span><span class="token punctuation">,</span>mThrPosition_y_list<span class="token punctuation">[</span>circleDWCell_i<span class="token punctuation">]</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+        <span class="token comment">#计算两单元格的空间距离，并计入总距离</span>
+        totalDistance <span class="token operator">+=</span> np<span class="token punctuation">.</span>linalg<span class="token punctuation">.</span>norm<span class="token punctuation">(</span>circleDWCell <span class="token operator">-</span> skyPosition<span class="token punctuation">)</span>
+    skyRadius <span class="token operator">=</span> totalDistance <span class="token operator">/</span> <span class="token builtin">len</span><span class="token punctuation">(</span>mThrOneLayer_indexList<span class="token punctuation">)</span>
+    
+    <span class="token comment">#填充矩阵，并将之放入要返回的结果列表</span>
+    skyrmion <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span>skyPosition_x<span class="token punctuation">,</span>skyPosition_y<span class="token punctuation">,</span>skyPosition_z<span class="token punctuation">,</span>skyRadius<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    skyrmion_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>skyrmion<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> skyrmion_list<span class="token punctuation">;</span>
+
+</code></pre> 
+<p>在上述程序中使用斯格明子的位置坐标(x,y,z)和半径填充了一个1行4列的矩阵skyrmion，最后之所以不直接返回该矩阵而是将之填充到结果列表skyrmion_list中，是为了和后文两种方法的返回结果格式相同，方便进行后续统一处理。</p> 
+<h2><a id="xy_333"></a>三、当磁体系的单个xy平面层存在多个斯格明子和磁畴壁共存的情况</h2> 
+<h3><a id="1_334"></a>1.递归查找处于磁化分量阈值范围内的紧邻的单元格并分离成不重叠的磁结构</h3> 
+<p>考虑下图左面板磁化文件中单个xy平面层包含一个斯格明子和一条形磁畴壁的情况，通过提取处于磁化分量阈值范围内的单元格如右面板所示：</p> 
+<p><img src="https://images2.imgbox.com/04/40/auFb1tET_o.jpg" alt="在这里插入图片描述"></p> 
+<p>首先我们需要对单个xy平面层中处于磁化分量阈值范围内的单元格进行处理：根据递归的方式查找紧邻的所有单元格，将找到的一系列紧邻单元格作为一个磁结构，并使用一个列表magTextureIndex_list记录每一个磁结构包含的所有单元格，如此处理磁化文件中每一个xy平面层，于是我们便分离出了所有不重叠的磁结构。此方法中单元格的“紧邻”距离阈值可以设置为两相邻单元格的最大距离，也可以稍微扩大为 distance_thr = x_cellSize + y_cellSize，只需注意不要让其超过两个磁结构的最小间隔距离即可：</p> 
+<pre><code class="prism language-python"><span class="token triple-quoted-string string">"""
+用于处理当前xy平面层中位于预设磁化分量阈值内的单元格的位置坐标，递归寻找组成磁结构的紧邻单元格
+1.使用上述的递归函数，以指定的任一单元格为起始点，从满足磁化分量阈值的所有单元格中找到它的紧邻单元格，
+如此，分离出了紧邻单元格构成的磁结构，适用于多个斯格明子，斯格明子和畴壁共存等情况
+2.对于识别到的每一个磁结构，根据它们自身的单元格坐标排布规律来区分出斯格明子和畴壁
+参数:
+- mThrOneLayer_indexList: 当前xy平面层中处于磁化分量阈值范围内的单元格位置索引列表
+- cellPosition_x_list: 所有单元格的x坐标的索引列表
+- cellPosition_y_list: 所有单元格的y坐标的索引列表
+- layerPosition_z: 当前xy平面层的z坐标
+
+返回值: skyrmion_list: 一个用于存放多个矩阵（1行4列）的列表，其中每个矩阵就表示一个斯格明子的信息，矩阵的4列分别表示斯格明子中心位置的x/y/z坐标和半径
+"""</span>
+<span class="token keyword">def</span> <span class="token function">identifySkyByRecursiveMethod</span><span class="token punctuation">(</span>mThrOneLayer_indexList<span class="token punctuation">,</span>cellPosition_x_list<span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">,</span>layerPosition_z<span class="token punctuation">,</span>distance_thr<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment">#定义该函数的结果列表</span>
+    skyrmion_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token comment">#定义一个计数列表保存每个磁结构包含的单元格数量</span>
+    magTextureIndex_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    <span class="token comment">#定义已处理和未处理的单元格位置索引列表，每当识别到一个磁结构，就将其所有单元格索引放入haveFoundIndex_list</span>
+    haveFoundIndex_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    noFoundIndex_list <span class="token operator">=</span> mThrOneLayer_indexList<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">]</span>
+    currentPoint_index <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span>
+    
+    <span class="token comment">##开始遍历处于磁化分量阈值中的所有单元格，分类单元格到各自的磁结构##</span>
+    <span class="token comment">#注意不要在遍历列表过程中修改列表内容！</span>
+    <span class="token keyword">for</span> currentPoint_index <span class="token keyword">in</span> mThrOneLayer_indexList<span class="token punctuation">:</span>
+        <span class="token keyword">if</span> currentPoint_index <span class="token keyword">in</span> haveFoundIndex_list<span class="token punctuation">:</span>
+           noFoundIndex_list<span class="token punctuation">.</span>remove<span class="token punctuation">(</span>currentPoint_index<span class="token punctuation">)</span>
+           <span class="token keyword">continue</span><span class="token punctuation">;</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            <span class="token comment">#调用递归函数，以currentPoint_index单元格为起始点，从满足磁化分量阈值的所有单元格中找到它的紧邻单元格</span>
+            neighborIndex_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+            recursiveNeighborCellByIndex<span class="token punctuation">(</span>currentPoint_index<span class="token punctuation">,</span>neighborIndex_list<span class="token punctuation">,</span>mThrOneLayer_indexList<span class="token punctuation">,</span>cellPosition_x_list<span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">,</span>distance_thr<span class="token punctuation">)</span>
+            <span class="token comment">#记录已找到的单元格索引，即每个磁结构在haveFoundIndex_list中的起始索引和单元格数量</span>
+            magTextureIndex_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span><span class="token builtin">len</span><span class="token punctuation">(</span>neighborIndex_list<span class="token punctuation">)</span><span class="token punctuation">)</span>
+            haveFoundIndex_list<span class="token punctuation">.</span>extend<span class="token punctuation">(</span>neighborIndex_list<span class="token punctuation">)</span>
+    <span class="token comment">##结束遍历##</span>
+    
+    <span class="token comment">#对每一个磁结构进行识别，判断该磁结构是斯格明子还是畴壁</span>
+    <span class="token comment">#记录已识别的所有磁结构中的所有单元格数量</span>
+    foundCellCount <span class="token operator">=</span> <span class="token number">0</span>
+    <span class="token keyword">for</span> currentMagTexture_cellNum <span class="token keyword">in</span> magTextureIndex_list<span class="token punctuation">:</span>
+        <span class="token comment">#从顺序保存的所有磁结构的所有单元格列表中，根据每个磁结构包含的单元格数量来截取出各自的单元格索引列表</span>
+        magTexture_cell <span class="token operator">=</span> haveFoundIndex_list<span class="token punctuation">[</span>foundCellCount<span class="token punctuation">:</span><span class="token punctuation">(</span>foundCellCount<span class="token operator">+</span>currentMagTexture_cellNum<span class="token punctuation">)</span><span class="token punctuation">]</span>
+        foundCellCount <span class="token operator">+=</span> currentMagTexture_cellNum
+        <span class="token comment">#定义每个磁结构中所有单元格的3个位置坐标列表</span>
+        texturePosition_x_list<span class="token punctuation">,</span>texturePosition_y_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span><span class="token punctuation">[</span><span class="token punctuation">]</span>
+        <span class="token keyword">for</span> i <span class="token keyword">in</span> magTexture_cell<span class="token punctuation">:</span>
+            texturePosition_x_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>cellPosition_x_list<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span>
+            texturePosition_y_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>cellPosition_y_list<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span>
+        
+        <span class="token comment">#####区分畴壁还是斯格明子？#####</span>
+        <span class="token keyword">if</span> isDWOrSkyrmion<span class="token punctuation">(</span>texturePosition_x_list<span class="token punctuation">,</span>texturePosition_y_list<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">:</span>
+           <span class="token comment">#该磁结构是畴壁</span>
+           <span class="token keyword">continue</span><span class="token punctuation">;</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+           <span class="token comment">#该磁结构是斯格明子</span>
+           <span class="token comment">#取位于环状畴壁的所有单元格的平均坐标作为中心</span>
+           skyPosition_x <span class="token operator">=</span> np<span class="token punctuation">.</span>average<span class="token punctuation">(</span>texturePosition_x_list<span class="token punctuation">)</span>
+           skyPosition_y <span class="token operator">=</span> np<span class="token punctuation">.</span>average<span class="token punctuation">(</span>texturePosition_y_list<span class="token punctuation">)</span>
+           skyPosition_z <span class="token operator">=</span> layerPosition_z
+           <span class="token comment">#计算斯格明子中心到（环状）畴壁中所有单元格的平均距离作为半径</span>
+           skyPosition <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span>skyPosition_x<span class="token punctuation">,</span>skyPosition_y<span class="token punctuation">]</span><span class="token punctuation">)</span>
+           <span class="token comment">#计算斯格明子中心到环状畴壁的所有单元格的总距离</span>
+           totalDistance <span class="token operator">=</span> <span class="token number">0</span>
+           <span class="token keyword">for</span> circleDWCell_i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span>currentMagTexture_cellNum<span class="token punctuation">)</span><span class="token punctuation">:</span>
+               circleDWCell <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span>texturePosition_x_list<span class="token punctuation">[</span>circleDWCell_i<span class="token punctuation">]</span><span class="token punctuation">,</span>texturePosition_y_list<span class="token punctuation">[</span>circleDWCell_i<span class="token punctuation">]</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+               <span class="token comment">#计算两单元格的空间距离，并计入总距离</span>
+               totalDistance <span class="token operator">+=</span> np<span class="token punctuation">.</span>linalg<span class="token punctuation">.</span>norm<span class="token punctuation">(</span>circleDWCell <span class="token operator">-</span> skyPosition<span class="token punctuation">)</span>
+           skyRadius <span class="token operator">=</span> totalDistance <span class="token operator">/</span> currentMagTexture_cellNum
+           <span class="token comment">#填充矩阵，并将之放入要返回的结果列表</span>
+           skyrmion <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span>skyPosition_x<span class="token punctuation">,</span>skyPosition_y<span class="token punctuation">,</span>skyPosition_z<span class="token punctuation">,</span>skyRadius<span class="token punctuation">]</span><span class="token punctuation">)</span>
+           skyrmion_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>skyrmion<span class="token punctuation">)</span>
+    <span class="token keyword">return</span> skyrmion_list<span class="token punctuation">;</span>
+</code></pre> 
+<p>其中，关于如何递归查找一个磁结构中所有紧邻单元格的思路如下：假设存在一个初始列表为[1,2,5,7,3,4,11,9,8,12]，我们给定起点如8，这将从初始列表中找到下一个紧邻点（阈值为1）：7和9，接着从初始列表中去除已找到的紧邻点作为剩余列表[1,2,5,3,4,11,12]，然后将7作为起点，从剩余列表中没有找到紧邻点；然后将9作为起点，从剩余列表中没有找到紧邻点；如此递归查找，每找到一个紧邻点就将其放入结果列表中，最终，当再也没有紧邻点时，退出递归函数：</p> 
+<pre><code class="prism language-python"><span class="token triple-quoted-string string">"""
+计算xy平面内，指定单元格与列表中其余单元格的最小距离，当列表中只有一个单元格索引时，即计算两单元格的空间距离
+参数:
+- position_index: 起点单元格的索引
+- position_index_list: 待比较的单元格索引列表
+- excludeIndex_list: 从position_index_list中排除的单元格索引，即不与position_index比较距离的单元格列表
+- cellPosition_x/y_list: 所有单元格的x/y坐标的索引列表
+
+返回值: min_index,min_dist: 起点单元格与列表中最小距离的单元格索引及其距离
+"""</span>
+<span class="token keyword">def</span> <span class="token function">getMinDistanceByIndex</span><span class="token punctuation">(</span>position_index<span class="token punctuation">,</span>position_index_list<span class="token punctuation">,</span>excludeIndex_list<span class="token punctuation">,</span>cellPosition_x_list<span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment">#初始化最小距离为无穷大，索引为-1表示找不到距离最小值</span>
+    min_dist <span class="token operator">=</span> <span class="token builtin">float</span><span class="token punctuation">(</span><span class="token string">'inf'</span><span class="token punctuation">)</span>
+    min_index <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span>
+    <span class="token keyword">if</span> position_index <span class="token keyword">in</span> position_index_list<span class="token punctuation">:</span>
+       <span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'getMinDistanceByIndex函数position_index索引与列表重复'</span><span class="token punctuation">)</span>
+       min_dist <span class="token operator">=</span> <span class="token number">0</span>
+    <span class="token keyword">else</span><span class="token punctuation">:</span>
+        <span class="token comment">#获取指定单元格索引的位置坐标</span>
+        current_point <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span>cellPosition_x_list<span class="token punctuation">[</span>position_index<span class="token punctuation">]</span><span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">[</span>position_index<span class="token punctuation">]</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+        <span class="token keyword">for</span> index <span class="token keyword">in</span> position_index_list<span class="token punctuation">:</span>
+            <span class="token keyword">if</span> index <span class="token keyword">not</span> <span class="token keyword">in</span> excludeIndex_list<span class="token punctuation">:</span>
+               next_point <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span>cellPosition_x_list<span class="token punctuation">[</span>index<span class="token punctuation">]</span><span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">[</span>index<span class="token punctuation">]</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+               <span class="token comment">#计算两单元格的空间距离</span>
+               dist <span class="token operator">=</span> np<span class="token punctuation">.</span>linalg<span class="token punctuation">.</span>norm<span class="token punctuation">(</span>current_point <span class="token operator">-</span> next_point<span class="token punctuation">)</span>
+               <span class="token keyword">if</span> dist <span class="token operator">&lt;</span> min_dist<span class="token punctuation">:</span>
+                   min_dist <span class="token operator">=</span> dist
+                   min_index <span class="token operator">=</span> index
+    <span class="token keyword">return</span> min_index<span class="token punctuation">,</span>min_dist<span class="token punctuation">;</span>
+
+<span class="token triple-quoted-string string">"""
+定义一个递归函数，用于迭代寻找和起始单元格位置索引紧邻的其他单元格位置索引，它的迭代思路如下：
+假设存在input_list=[1,2,5,7,3,4,11,9,8,12]：给定起点如8，寻找列表中下一个紧邻点（阈值为1），7和9，并分别将之作为起点，如此递归，
+最后，output_list=[8, 7, 9]，即所需要的紧邻点列表
+参数:
+- start_index: 递归的起点单元格索引
+- neighborIndex_list: 已找到的所有紧邻单元格的索引列表
+- mThrOneLayer_indexList: 当前xy平面层中处于磁化分量阈值范围内的单元格位置索引列表
+- cellPosition_x/y_list: 所有单元格的x/y/z坐标的索引列表
+- distance_thr: 两格单元格满足紧邻关系的距离阈值
+
+返回值: 无返回值，注意：从起点start_index开始的所有紧邻单元格存放在neighborIndex_list列表中
+"""</span>
+<span class="token keyword">def</span> <span class="token function">recursiveNeighborCellByIndex</span><span class="token punctuation">(</span>start_index<span class="token punctuation">,</span>neighborIndex_list<span class="token punctuation">,</span>mThrOneLayer_indexList<span class="token punctuation">,</span>cellPosition_x_list<span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">,</span>distance_thr<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment">#print('进入递归函数----start_index',start_index)</span>
+    <span class="token comment">#print('进入递归函数----neighborIndex_list',neighborIndex_list)</span>
+    <span class="token comment">#首先从所有单元格索引列表中排除已找到的紧邻单元格索引</span>
+    rem_mThrPosition_index_list <span class="token operator">=</span> mThrOneLayer_indexList<span class="token punctuation">[</span><span class="token punctuation">:</span><span class="token punctuation">]</span>
+    <span class="token comment">#注意不要在遍历列表过程中修改列表内容！</span>
+    <span class="token keyword">for</span> index <span class="token keyword">in</span> mThrOneLayer_indexList<span class="token punctuation">:</span>
+        <span class="token keyword">if</span> index <span class="token operator">==</span> start_index <span class="token keyword">or</span> index <span class="token keyword">in</span> neighborIndex_list<span class="token punctuation">:</span>
+           rem_mThrPosition_index_list<span class="token punctuation">.</span>remove<span class="token punctuation">(</span>index<span class="token punctuation">)</span>
+    <span class="token comment">#print('rem_mThrPosition_index_list',rem_mThrPosition_index_list)       </span>
+    <span class="token comment">#计算与当前单元格位置具有最小距离的单元格</span>
+    <span class="token comment">#把起点单元格作为第0个元素，视为紧邻单元格</span>
+    minNeighbor_list <span class="token operator">=</span> <span class="token punctuation">[</span>start_index<span class="token punctuation">]</span>
+    minNeighborCount <span class="token operator">=</span> <span class="token number">1</span>
+    <span class="token keyword">if</span> start_index <span class="token keyword">not</span> <span class="token keyword">in</span> neighborIndex_list<span class="token punctuation">:</span>
+       neighborIndex_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>start_index<span class="token punctuation">)</span>
+    <span class="token comment">#以单元格start_index为起点，只寻找它的下一次递归时需要的所有紧邻单元格（不计算已找到的紧邻点）</span>
+    <span class="token keyword">for</span> index <span class="token keyword">in</span> mThrOneLayer_indexList<span class="token punctuation">:</span>
+        <span class="token keyword">if</span> index <span class="token keyword">in</span> neighborIndex_list<span class="token punctuation">:</span>
+           <span class="token keyword">continue</span><span class="token punctuation">;</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            min_index<span class="token punctuation">,</span>min_dist <span class="token operator">=</span> getMinDistanceByIndex<span class="token punctuation">(</span>start_index<span class="token punctuation">,</span>rem_mThrPosition_index_list<span class="token punctuation">,</span>neighborIndex_list<span class="token punctuation">,</span>cellPosition_x_list<span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">)</span>
+            <span class="token keyword">if</span> min_dist <span class="token operator">!=</span> <span class="token number">0</span> <span class="token keyword">and</span> min_dist <span class="token operator">&lt;=</span> distance_thr<span class="token punctuation">:</span>
+               minNeighborCount <span class="token operator">+=</span> <span class="token number">1</span>
+               neighborIndex_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>min_index<span class="token punctuation">)</span>
+               minNeighbor_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>min_index<span class="token punctuation">)</span>
+    <span class="token comment">#print('当前单元格的紧邻单元格列表：minNeighbor_list',minNeighbor_list)</span>
+    <span class="token comment">#print('初始起点单元格开始，所有递归的紧邻单元格列表neighborIndex_list',neighborIndex_list)</span>
+    <span class="token comment">#遍历以一个紧邻的单元格为起点，递归寻找它的紧邻单元格，minNeighborCount第0个元素是当前单元格，首先跳过它</span>
+    <span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span>minNeighborCount<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment">#print('进入递归函数----')</span>
+        recursiveNeighborCellByIndex<span class="token punctuation">(</span>minNeighbor_list<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span>neighborIndex_list<span class="token punctuation">,</span>mThrOneLayer_indexList<span class="token punctuation">,</span>cellPosition_x_list<span class="token punctuation">,</span>cellPosition_y_list<span class="token punctuation">,</span>distance_thr<span class="token punctuation">)</span>
+        <span class="token comment">#print('退出递归函数----')</span>
+    <span class="token keyword">return</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="2_500"></a>2.根据每一个磁结构的单元格排布规律来区分出斯格明子和磁畴壁</h3> 
+<p>在每一个xy平面层中通过递归查找组成每一个磁结构的所有单元格之后，之后我们需要根据每一个磁结构的单元格排布规律来区分出斯格明子和磁畴壁。<strong>根据经验来看，一种大致可行的方法是</strong>：对比每一个磁结构在横纵方向的最大单元格差值，若差值过大，即该磁结构太“扁平”，则认为该磁结构是磁畴壁，否则将之识别为一个磁斯格明子：</p> 
+<pre><code class="prism language-python"><span class="token triple-quoted-string string">"""
+在xy平面层中，根据组成每一个磁结构的所有紧邻单元格的坐标信息，判断该磁结构是斯格明子还是畴壁
+判断过程：分别计算水平和垂直方向上坐标的最大值与最小值之差：horizontal_Maxdiff和vertical_Maxdiff
+若两者之间的差距超过距离阈值((horizontal_Maxdiff + vertical_Maxdiff) / 2 / 2)，即该磁结构非常“扁平”，则判定为畴壁，否则是斯格明子
+参数:
+- texturePosition_x/y_list: 组成一个磁结构的所有紧邻单元格的位置列表
+
+返回值: 0: 该磁结构是畴壁
+        1: 该磁结构是斯格明子
+"""</span>
+<span class="token keyword">def</span> <span class="token function">isDWOrSkyrmion</span><span class="token punctuation">(</span>texturePosition_x_list<span class="token punctuation">,</span>texturePosition_y_list<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment">#分别计算水平和垂直方向上，坐标的最大值与最小值之差，作为评判依据</span>
+    horizontal_Maxdiff <span class="token operator">=</span> np<span class="token punctuation">.</span><span class="token builtin">max</span><span class="token punctuation">(</span>texturePosition_x_list<span class="token punctuation">)</span> <span class="token operator">-</span> np<span class="token punctuation">.</span><span class="token builtin">min</span><span class="token punctuation">(</span>texturePosition_x_list<span class="token punctuation">)</span>
+    vertical_Maxdiff <span class="token operator">=</span> np<span class="token punctuation">.</span><span class="token builtin">max</span><span class="token punctuation">(</span>texturePosition_y_list<span class="token punctuation">)</span> <span class="token operator">-</span> np<span class="token punctuation">.</span><span class="token builtin">min</span><span class="token punctuation">(</span>texturePosition_y_list<span class="token punctuation">)</span>
+    <span class="token keyword">if</span> <span class="token builtin">abs</span><span class="token punctuation">(</span>horizontal_Maxdiff <span class="token operator">-</span> vertical_Maxdiff<span class="token punctuation">)</span> <span class="token operator">&gt;=</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>horizontal_Maxdiff <span class="token operator">+</span> vertical_Maxdiff<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">2</span> <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+       <span class="token keyword">return</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">else</span><span class="token punctuation">:</span>
+       <span class="token keyword">return</span> <span class="token number">1</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>当然，该方法可能并不靠谱，实际上一种较为准确的方法是判断每一个磁结构的单元格排布是否形成闭合，若闭合，则是斯格明子，否则是磁畴壁。当然，我并不知道该如何实现这个方法。。。</p> 
+<p><img src="https://images2.imgbox.com/a7/cc/SXqlZyhq_o.gif" alt="在这里插入图片描述"></p> 
+<p>综上：处理多个斯格明子和磁畴壁共存的情况是稍微有点麻烦的，本小节的方法对处于磁化分量阈值范围内的所有单元格进行了递归，所以当这些单元格的数量达到上百个时，就会相当耗时，所以使用该方法时，我们需要综合考虑之后再设置一个最合适的最小磁化分量阈值范围，来筛选出位于畴壁区域的单元格，以此减少运行时间和提高识别准确性。</p> 
+<h2><a id="OpenCV_530"></a>四、使用OpenCV库函数来识别“圆”特征</h2> 
+<p>对于磁体系的每一个xy平面层，我们可以将每一个单元格映射到灰度图中的一个像素点，让处于磁化分量阈值范围内的单元格的像素值为白色，并让其余位于磁畴的单元格的像素值为黑色，然后就可以使用OpenCV的库函数cv2.HoughCircles来处理这个灰度图，最后提取出“圆”特征的中心位置和半径信息：</p> 
+<pre><code class="prism language-python"><span class="token triple-quoted-string string">"""
+使用OpenCV库中相关函数，识别每一xy平面层中任意数量的斯格明子，适用于任意磁体系：
+1.对于磁体系的每一xy平面层，区分处于和不处于磁化分量阈值范围内的所有单元格，即畴壁区域和磁畴区域/非磁性区域的单元格，一个单元格对应一个像素，
+注意磁体系的原点位于左下角，而图像矩阵的原点位于左上角，所以单元格映射为像素时需要转换y坐标，以此转化为灰度图
+2.使用cv2.HoughCircles(image, method, dp, minDist, param1, param2, minRadius=0, maxRadius=0)函数检测灰度图中的类似圆的形状
+参数:
+- mThrOneLayer_indexList: 当前xy平面层中处于磁化分量阈值范围内的单元格位置索引列表
+- x_start...y_cellSize: 磁化文件中单元格尺寸信息
+- layerPosition_z: 当前xy平面层的z坐标
+返回值: skyrmion_list: 一个用于存放多个矩阵（1行4列）的列表，其中每个矩阵就表示一个斯格明子的信息，矩阵的4列分别表示斯格明子中心位置的x/y坐标和半径
+"""</span>
+<span class="token keyword">def</span> <span class="token function">identifySkyByOpenCVMethod</span><span class="token punctuation">(</span>mThrOneLayer_indexList<span class="token punctuation">,</span>x_start<span class="token punctuation">,</span>x_end<span class="token punctuation">,</span>x_cellSize<span class="token punctuation">,</span>y_start<span class="token punctuation">,</span>y_end<span class="token punctuation">,</span>y_cellSize<span class="token punctuation">,</span>layerPosition_z<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    
+    <span class="token comment">#定义该函数的结果列表</span>
+    skyrmion_list <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+    
+    x_cell_list <span class="token operator">=</span> <span class="token punctuation">(</span>np<span class="token punctuation">.</span>arange<span class="token punctuation">(</span>x_start<span class="token punctuation">,</span>x_end<span class="token punctuation">,</span>x_cellSize<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">(</span>x_cellSize <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    y_cell_list <span class="token operator">=</span> <span class="token punctuation">(</span>np<span class="token punctuation">.</span>arange<span class="token punctuation">(</span>y_start<span class="token punctuation">,</span>y_end<span class="token punctuation">,</span>y_cellSize<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">(</span>y_cellSize <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+    x_num <span class="token operator">=</span> <span class="token builtin">len</span><span class="token punctuation">(</span>x_cell_list<span class="token punctuation">)</span>
+    y_num <span class="token operator">=</span> <span class="token builtin">len</span><span class="token punctuation">(</span>y_cell_list<span class="token punctuation">)</span>
+    <span class="token comment">#一个单元格对应一个像素，以此将一层的单元格转化为一张灰度图</span>
+    height<span class="token punctuation">,</span>width <span class="token operator">=</span> y_num<span class="token punctuation">,</span>x_num
+    <span class="token comment">#创建一个灰度图映射矩阵：行(y)，列(x)</span>
+    grayImage_matrix <span class="token operator">=</span> np<span class="token punctuation">.</span>zeros<span class="token punctuation">(</span><span class="token punctuation">(</span>height<span class="token punctuation">,</span> width<span class="token punctuation">)</span><span class="token punctuation">,</span> dtype<span class="token operator">=</span>np<span class="token punctuation">.</span>uint8<span class="token punctuation">)</span>
+    <span class="token comment">#根据已有的阈值内单元格索引mThrOneLayer_indexList映射到矩阵中的值设为白色像素值（255）</span>
+    <span class="token comment">#注意磁体系的原点位于左下角，而图像矩阵的原点位于左上角，所以单元格映射为像素时需要变换y坐标</span>
+    <span class="token keyword">for</span> cell_index <span class="token keyword">in</span> mThrOneLayer_indexList<span class="token punctuation">:</span>
+        <span class="token comment">#根据单元格索引解析出单元格的x坐标索引</span>
+        x_index <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>cell_index <span class="token operator">%</span> x_num<span class="token punctuation">)</span>
+        <span class="token comment">#根据单元格索引解析出单元格的y坐标索引</span>
+        y_index <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span><span class="token punctuation">(</span>cell_index <span class="token operator">/</span> x_num<span class="token punctuation">)</span> <span class="token operator">%</span> y_num<span class="token punctuation">)</span>
+        <span class="token comment">#转换y坐标</span>
+        y_index <span class="token operator">=</span> y_num <span class="token operator">-</span> y_index
+        grayImage_matrix<span class="token punctuation">[</span>y_index<span class="token punctuation">,</span>x_index<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">255</span>
+    <span class="token comment">#进行图像预处理，高斯模糊，使用的是 5x5 大小的核，实现如降噪、平滑等效果，以便更好地检测圆环</span>
+    blurred <span class="token operator">=</span> cv2<span class="token punctuation">.</span>GaussianBlur<span class="token punctuation">(</span>grayImage_matrix<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">,</span> <span class="token number">5</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span>
+    <span class="token comment">#绘制灰度图</span>
+    <span class="token comment">#cv2.imshow("blurred", blurred)</span>
+    <span class="token comment">#cv2.waitKey(0)</span>
+    <span class="token comment">#cv2.destroyAllWindows()</span>
+    <span class="token comment">#进行圆环检测</span>
+    circles <span class="token operator">=</span> cv2<span class="token punctuation">.</span>HoughCircles<span class="token punctuation">(</span>blurred<span class="token punctuation">,</span> cv2<span class="token punctuation">.</span>HOUGH_GRADIENT<span class="token punctuation">,</span> dp<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">,</span> minDist<span class="token operator">=</span><span class="token number">10</span><span class="token punctuation">,</span>
+                        param1<span class="token operator">=</span><span class="token number">50</span><span class="token punctuation">,</span> param2<span class="token operator">=</span><span class="token number">30</span><span class="token punctuation">,</span> minRadius<span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">,</span> maxRadius<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">)</span>
+
+    <span class="token keyword">if</span> circles <span class="token keyword">is</span> <span class="token keyword">not</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+       <span class="token comment">#将从图像中提取到的所有圆的浮点数进行四舍五入，将其转换为整数</span>
+       circles <span class="token operator">=</span> np<span class="token punctuation">.</span><span class="token builtin">round</span><span class="token punctuation">(</span>circles<span class="token punctuation">)</span><span class="token punctuation">.</span>astype<span class="token punctuation">(</span><span class="token string">"int"</span><span class="token punctuation">)</span>
+       <span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">,</span><span class="token builtin">len</span><span class="token punctuation">(</span>circles<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+           <span class="token keyword">for</span> <span class="token punctuation">(</span>Fig_x<span class="token punctuation">,</span>Fig_y<span class="token punctuation">,</span>Fig_r<span class="token punctuation">)</span> <span class="token keyword">in</span> circles<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">:</span>
+               <span class="token comment">#将图像中检测到的像素坐标转换到磁体系中对应的单元格</span>
+               skyPosition_x <span class="token operator">=</span> x_cell_list<span class="token punctuation">[</span>Fig_x<span class="token punctuation">]</span>
+               <span class="token comment">#注意变换y坐标</span>
+               skyPosition_y <span class="token operator">=</span> y_cell_list<span class="token punctuation">[</span>height <span class="token operator">-</span> Fig_y<span class="token punctuation">]</span>
+               skyPosition_z <span class="token operator">=</span> layerPosition_z
+               skyRadius <span class="token operator">=</span> Fig_r <span class="token operator">*</span> <span class="token punctuation">(</span>x_cellSize<span class="token operator">+</span>y_cellSize<span class="token punctuation">)</span><span class="token operator">/</span><span class="token number">2</span>
+               <span class="token comment">#填充矩阵，并将之放入要返回的结果列表</span>
+               skyrmion <span class="token operator">=</span> np<span class="token punctuation">.</span>array<span class="token punctuation">(</span><span class="token punctuation">[</span>skyPosition_x<span class="token punctuation">,</span>skyPosition_y<span class="token punctuation">,</span>skyPosition_z<span class="token punctuation">,</span>skyRadius<span class="token punctuation">]</span><span class="token punctuation">)</span>
+               skyrmion_list<span class="token punctuation">.</span>append<span class="token punctuation">(</span>skyrmion<span class="token punctuation">)</span>
+               <span class="token comment">#print("中心: ({},{},{}), 半径: {}".format(skyPosition_x,skyPosition_y,skyPosition_z,skyRadius))</span>
+    <span class="token keyword">return</span> skyrmion_list<span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>注意</strong>：磁体系的坐标系通常和图像的坐标系不一样，磁体系的坐标系通常位于左下角，而图像的坐标系位于左上角，所以当单元格和像素点相互映射时需要变换y坐标，这个问题在<a href="https://blog.csdn.net/qq_43572058/article/details/125140341#t9">笔记04</a>将一张图片映射为一个标量场时详细介绍过。该方法得到的灰度图如下所示：</p> 
+<p><img src="https://images2.imgbox.com/cf/91/EyYKk0S1_o.jpg" alt="在这里插入图片描述"></p> 
+<p>综上：该方法需要识别灰度图中“圆”特征，所以需要位于斯格明子环状畴壁中的单元格越多越好，如此才能呈现出一个较好的“圆”，才能更准确的识别出灰度图中一个闭合的几何结构。</p> 
+<p><mark><strong>限于篇幅，关于后续如何保存每个磁化文件的斯格明子信息的代码非常简单，这里不再赘述，所以请直接查阅源程序了解。</strong></mark></p> 
+<h2><a id="_604"></a>五、测试验证</h2> 
+<p>参考文献《Magnonic Frequency Comb through Nonlinear Magnon-Skyrmion Scattering》（DOI:10.1103/PhysRevLett.127.037202），我们尝试复现一下其补充材料的FIG.6，如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/18/f2/ARmLq1n3_o.png" alt="在这里插入图片描述"></p> 
+<p>首先，将该磁体系弛豫后，一个斯格明子会位于xy平面中心位置(500nm,500nm)，半径约为11nm左右，使用如下代码进行弛豫：</p> 
+<pre><code class="prism language-puppet"><span class="token comment"># MIF 2.1</span>
+
+<span class="token comment">#################</span>
+<span class="token comment">#author:YQYUN</span>
+<span class="token comment">#date:23/7/3</span>
+<span class="token comment">#desc:探究斯格明子位于xy平面中心，作为频率梳</span>
+<span class="token comment">#desc:1000*1000nm的平面，厚度1nm</span>
+<span class="token comment">#desc:初始磁化设置:在平面中心设置一个类斯格明子磁化分布</span>
+<span class="token comment">#################</span>
+
+set pi <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token number">4</span><span class="token operator">*</span><span class="token function">atan</span><span class="token punctuation">(</span><span class="token number">1.0</span><span class="token punctuation">)</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+set mu0 <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token number">4</span><span class="token operator">*</span><span class="token variable">$pi</span><span class="token operator">*</span><span class="token number">1e-7</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">##########################划分模型的物理尺寸和单元格尺寸##########################</span>
+
+<span class="token comment">#xy平面尺寸：1000*1000*1nm</span>
+Parameter plane_length <span class="token number">1000</span>
+Parameter plane_width <span class="token number">1000</span>
+Parameter plane_height <span class="token number">1</span>
+set plane_length <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$plane_length</span> <span class="token operator">*</span> <span class="token number">1e-9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+set plane_width <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$plane_width</span> <span class="token operator">*</span> <span class="token number">1e-9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+set plane_height <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$plane_height</span> <span class="token operator">*</span> <span class="token number">1e-9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#容器的尺寸</span>
+set atlas_x <span class="token variable">$plane_length</span>
+set atlas_y <span class="token variable">$plane_width</span>
+set atlas_z <span class="token variable">$plane_height</span>
+
+<span class="token comment">#分配xy平面的区域</span>
+proc setRegions <span class="token punctuation">{<!-- --></span> x y z <span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	return <span class="token number">1</span>
+<span class="token punctuation">}</span>
+
+
+<span class="token comment">#定义容器</span>
+Specify Oxs_MultiAtlas<span class="token punctuation">:</span>atlas <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	comment <span class="token string"><span class="token double-quoted">"使用脚本函数定义模型"</span></span>
+	atlas <span class="token punctuation">{<!-- --></span> Oxs_ScriptAtlas <span class="token punctuation">{<!-- --></span>
+		xrange <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token variable">$atlas_x</span> <span class="token punctuation">}</span>
+		yrange <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token variable">$atlas_y</span> <span class="token punctuation">}</span>
+		zrange <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token variable">$atlas_z</span> <span class="token punctuation">}</span>
+		regions <span class="token punctuation">{<!-- --></span>planeRegion<span class="token punctuation">}</span>
+		script_args rawpt
+		script setRegions
+	<span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#单元格尺寸：2*2*1nm</span>
+Parameter cellsize_x <span class="token number">2</span>
+Parameter cellsize_y <span class="token number">2</span>
+Parameter cellsize_z <span class="token number">1</span>
+set cellsize_x <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$cellsize_x</span> <span class="token operator">*</span> <span class="token number">1e-9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+set cellsize_y <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$cellsize_y</span> <span class="token operator">*</span> <span class="token number">1e-9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+set cellsize_z <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$cellsize_z</span> <span class="token operator">*</span> <span class="token number">1e-9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#定义网格尺寸</span>
+Specify Oxs_RectangularMesh<span class="token punctuation">:</span>mesh <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	cellsize <span class="token punctuation">{<!-- --></span><span class="token variable">$cellsize_x</span> <span class="token variable">$cellsize_y</span> <span class="token variable">$cellsize_z</span><span class="token punctuation">}</span>
+	atlas <span class="token punctuation">:</span>atlas
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">##########################划分模型的物理尺寸和单元格尺寸##########################</span>
+
+<span class="token comment">##########################指定材料的磁性参数和磁性能量##########################</span>
+
+<span class="token comment">#定义交换能（15pJ/m）</span>
+Parameter A <span class="token number">1.5e-11</span>
+
+Specify Oxs_UniformExchange <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	A <span class="token variable">$A</span>
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#定义单轴各向异性能（0.6MJ/m3）</span>
+Parameter K1 <span class="token number">6e5</span>
+
+Specify Oxs_UniaxialAnisotropy <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	K1 <span class="token variable">$K1</span>
+	axis <span class="token punctuation">{<!-- --></span><span class="token number">0</span> <span class="token number">0</span> <span class="token number">1</span><span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#定义退磁能</span>
+Specify Oxs_Demag <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+
+<span class="token comment">#定义界面DMI能（2.5mJ/m2，畴壁中面内磁矩由负指向正）</span>
+<span class="token comment">#若DMI符号相反（-2.5mJ/m2，畴壁中面内磁矩由正指向负）</span>
+
+Parameter plane_interDMI <span class="token number">2.5e-3</span>
+
+Specify Oxs_DMExchange6Ngbr<span class="token punctuation">:</span>DMEx <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	default_D <span class="token number">0</span>
+	atlas <span class="token punctuation">:</span>atlas
+	D <span class="token punctuation">{<!-- --></span>
+	planeRegion planeRegion <span class="token variable">$plane_interDMI</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#定义饱和磁化强度Ms（5.8e5A/m）</span>
+Parameter Ms <span class="token number">5.8e5</span>
+
+<span class="token comment">#定义一个标量场对象来设置不同区域的饱和磁化强度</span>
+Specify Oxs_AtlasScalarField<span class="token punctuation">:</span>regions_Ms <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	atlas <span class="token punctuation">:</span>atlas
+	comment <span class="token string"><span class="token double-quoted">"只有xy平面区域内有磁性，其他区域无磁性"</span></span>
+	default_value <span class="token number">0</span>
+	values <span class="token punctuation">{<!-- --></span>
+	planeRegion <span class="token variable">$Ms</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">##########################指定材料的磁性参数和磁性能量##########################</span>
+
+<span class="token comment">##########################设置磁体系的初始磁化状态##########################</span>
+
+<span class="token comment">#分配xy平面内，中心区域的初始磁化分布为类似斯格明子的磁化分布，其他区域为+z分布</span>
+<span class="token comment">#斯格明子的中心和初始大小，即中心到畴壁外侧的外半径为：30nm，中心到畴壁内侧的内半径：15nm</span>
+set sky_core_x <span class="token number">500e-9</span>
+set sky_core_y <span class="token number">500e-9</span>
+set sky_outRadius <span class="token number">30e-9</span>
+set sky_inRadius <span class="token number">15e-9</span>
+<span class="token comment">#类斯格明子的内半径之内的区域的磁矩指向-z，内半径到外半径之间的面内磁矩指向圆外（需计算），外半径之外的磁矩指向+z</span>
+set sky_inRadiusMag <span class="token string"><span class="token double-quoted">"0 -0.1 -0.9"</span></span>
+set sky_outRadiusMag <span class="token string"><span class="token double-quoted">"0 0.1 0.9"</span></span>
+<span class="token comment">#其他磁性区域的磁矩指向+z</span>
+set otherMag <span class="token string"><span class="token double-quoted">"0 0 1"</span></span>
+
+proc setMagnetization <span class="token punctuation">{<!-- --></span> x y z <span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	global sky_core_x sky_core_y sky_outRadius sky_inRadius sky_inRadiusMag sky_outRadiusMag
+	global otherMag
+	
+	<span class="token comment">#首先找到包围斯格明子的外接方形区域</span>
+	<span class="token keyword">if</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">(</span><span class="token variable">$x</span> <span class="token operator">&gt;=</span> <span class="token number">470e-9</span> &amp;&amp; <span class="token variable">$x</span> <span class="token operator">&lt;=</span> <span class="token number">530e-9</span><span class="token punctuation">)</span> &amp;&amp; <span class="token punctuation">(</span><span class="token variable">$y</span> <span class="token operator">&gt;=</span> <span class="token number">470e-9</span> &amp;&amp; <span class="token variable">$y</span> <span class="token operator">&lt;=</span> <span class="token number">530e-9</span><span class="token punctuation">)</span><span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	set tempRadius <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token punctuation">(</span><span class="token variable">$x</span> <span class="token operator">-</span> <span class="token variable">$sky_core_x</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token punctuation">(</span><span class="token variable">$x</span> <span class="token operator">-</span> <span class="token variable">$sky_core_x</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">(</span><span class="token variable">$y</span> <span class="token operator">-</span> <span class="token variable">$sky_core_y</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token punctuation">(</span><span class="token variable">$y</span> <span class="token operator">-</span> <span class="token variable">$sky_core_y</span><span class="token punctuation">)</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+	<span class="token comment">#接着在这个方形区域内找到内半径之内的区域</span>
+	<span class="token keyword">if</span> <span class="token punctuation">{<!-- --></span><span class="token variable">$tempRadius</span> <span class="token operator">&lt;=</span> <span class="token variable">$sky_inRadius</span> <span class="token operator">*</span> <span class="token variable">$sky_inRadius</span><span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	return <span class="token variable">$sky_inRadiusMag</span>
+	<span class="token punctuation">}</span> elseif <span class="token punctuation">{<!-- --></span><span class="token variable">$tempRadius</span> <span class="token operator">&lt;=</span> <span class="token variable">$sky_outRadius</span> <span class="token operator">*</span> <span class="token variable">$sky_outRadius</span><span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">#接着是内半径和外半径之间的区域：磁化矢量方向为该点坐标减去中点坐标，即矢量背离中心</span>
+	set sky_planeMag_x <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$x</span> <span class="token operator">-</span> <span class="token variable">$sky_core_x</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+	set sky_planeMag_y <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$y</span> <span class="token operator">-</span> <span class="token variable">$sky_core_y</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+	set sky_planeMag_z <span class="token number">0</span>
+	return <span class="token punctuation">[</span>list <span class="token variable">$sky_planeMag_x</span> <span class="token variable">$sky_planeMag_y</span> <span class="token variable">$sky_planeMag_z</span><span class="token punctuation">]</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">#最后找到外半径之外的区域</span>
+	return <span class="token variable">$sky_outRadiusMag</span>
+	<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">#其余位置点的磁矩指向+z</span>
+	return <span class="token variable">$otherMag</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">#定义一个文件矢量场对象来设置不同区域的初始磁化</span>
+Specify Oxs_ScriptVectorField<span class="token punctuation">:</span>regions_m0 <span class="token punctuation">{<!-- --></span>
+	script setMagnetization
+	script_args rawpt
+	atlas <span class="token punctuation">:</span>atlas
+<span class="token punctuation">}</span>
+
+<span class="token comment">##########################设置磁体系的初始磁化状态##########################</span>
+
+<span class="token comment">##########################设置求解器和演化器##########################</span>
+
+<span class="token comment">#使用能量最小化演化器弛豫，保存磁化状态并作为后续模拟的基态</span>
+Specify Oxs_CGEvolve<span class="token punctuation">:</span>evolver <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+
+<span class="token comment">#使用最小化驱动器快速推进到稳态</span>
+Specify Oxs_MinDriver <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	evolver <span class="token punctuation">:</span>evolver
+	mesh <span class="token punctuation">:</span>mesh
+	stopping_mxHxm <span class="token number">0.01</span>
+	comment <span class="token string"><span class="token double-quoted">"设置饱和磁化强度"</span></span>
+	Ms <span class="token punctuation">:</span>regions_Ms
+	comment <span class="token string"><span class="token double-quoted">"设置初始磁化状态"</span></span>
+	m0 <span class="token punctuation">:</span>regions_m0
+	comment <span class="token string"><span class="token double-quoted">"将矢量场输出的数据格式设置为ASCII文本格式（默认为b8格式）"</span></span>
+	comment <span class="token string"><span class="token double-quoted">"vector_field_output_format {text %#.17g}"</span></span>
+	comment <span class="token string"><span class="token double-quoted">"将checkpoint_interval设为10，每10分钟保存一次求解状态"</span></span>
+    checkpoint_interval <span class="token number">10</span>
+	checkpoint_disposal never
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">##########################设置求解器和演化器##########################</span>
+
+<span class="token comment">##########################设置保存磁化文件相关##########################</span>
+
+Destination Record mmArchive
+Schedule Oxs_MinDriver<span class="token punctuation">::</span>Magnetization Record Done <span class="token number">1</span>
+
+<span class="token comment">##########################设置保存磁化文件相关##########################</span>
+</code></pre> 
+<p>弛豫结束后将保存的磁化文件重命令为“sky@center_relaxed.omf”，并将之作为后续动态模拟的基态，结果如下：</p> 
+<p><img src="https://images2.imgbox.com/45/20/i4vnUK1M_o.jpg" alt="在这里插入图片描述"></p> 
+<p>接着需要在xy平面的左端天线区域使用 <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          h 
+         
+        
+          0 
+         
+        
+       
+         s 
+        
+       
+         i 
+        
+       
+         n 
+        
+       
+         ( 
+        
+       
+         w 
+        
+       
+         t 
+        
+       
+         ) 
+        
+        
+        
+          x 
+         
+        
+          ^ 
+         
+        
+       
+      
+        h_0sin(wt)\hat{x} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord"><span class="mord mathnormal">h</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">0</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mord mathnormal">s</span><span class="mord mathnormal">in</span><span class="mopen">(</span><span class="mord mathnormal">wt</span><span class="mclose">)</span><span class="mord accent"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.6944em;"><span class="" style="top: -3em;"><span class="pstrut" style="height: 3em;"></span><span class="mord mathnormal">x</span></span><span class="" style="top: -3em;"><span class="pstrut" style="height: 3em;"></span><span class="accent-body" style="left: -0.2222em;"><span class="mord">^</span></span></span></span></span></span></span></span></span></span></span> 形式的微波外加磁场，其中<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          h 
+         
+        
+          0 
+         
+        
+       
+         = 
+        
+       
+         150 
+        
+       
+         m 
+        
+       
+         T 
+        
+       
+      
+        h_0=150 mT 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8444em; vertical-align: -0.15em;"></span><span class="mord"><span class="mord mathnormal">h</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3011em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">0</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord">150</span><span class="mord mathnormal">m</span><span class="mord mathnormal" style="margin-right: 0.1389em;">T</span></span></span></span></span>，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          w 
+         
+         
+         
+           2 
+          
+         
+           π 
+          
+         
+        
+       
+         = 
+        
+       
+         80 
+        
+       
+         G 
+        
+       
+         H 
+        
+       
+         z 
+        
+       
+      
+        \frac{w}{2\pi}=80GHz 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.0404em; vertical-align: -0.345em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.6954em;"><span class="" style="top: -2.655em;"><span class="pstrut" style="height: 3em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">2</span><span class="mord mathnormal mtight" style="margin-right: 0.0359em;">π</span></span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.394em;"><span class="pstrut" style="height: 3em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0269em;">w</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.345em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord">80</span><span class="mord mathnormal">G</span><span class="mord mathnormal" style="margin-right: 0.044em;">Hz</span></span></span></span></span>，由于文中并没有说明施加外加场的详细区域，这里暂且假设为x@50-60nm；文中也没有说明阻尼系数的详细设置，这里暂且设置为该薄膜四周0-10nm范围内为0.5、10-30nm范围内为0.1、其余范围内为0.001；模拟运行10ns，每间隔1.6ps保存一次磁化文件，，，综上，最终生成的代码如下：</p> 
+<pre><code class="prism language-puppet"><span class="token comment"># MIF 2.1</span>
+
+<span class="token comment">#################</span>
+<span class="token comment">#author:YQYUN</span>
+<span class="token comment">#date:23/7/3</span>
+<span class="token comment">#desc:探究斯格明子位于xy平面中心，在平面左端x:50-60nm范围内使用单频率激发场，查看斯格明子的响应</span>
+<span class="token comment">#desc:1000*1000nm的平面，厚度1nm</span>
+<span class="token comment">#desc:初始磁化设置:以弛豫后的基态磁化文件作为初始磁化，在平面中心存在一个斯格明子</span>
+<span class="token comment">#desc:在平面左端x:50-60nm范围内使用单频率激发场80GHz，119250A/m（150mT）的sin形式</span>
+<span class="token comment">#desc:直接将磁化文件保存为文本格式，方便用程序查看斯格明子信息</span>
+<span class="token comment">#################</span>
+
+set pi <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token number">4</span><span class="token operator">*</span><span class="token function">atan</span><span class="token punctuation">(</span><span class="token number">1.0</span><span class="token punctuation">)</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+set mu0 <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token number">4</span><span class="token operator">*</span><span class="token variable">$pi</span><span class="token operator">*</span><span class="token number">1e-7</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#使用时间驱动器的总共运行时间为10ns</span>
+Parameter run_time <span class="token number">10e-9</span>
+<span class="token comment">#每个阶段1.6ps</span>
+Parameter stage_time <span class="token number">1.6e-12</span>
+set number_of_stages <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token function">int</span><span class="token punctuation">(</span><span class="token function">ceil</span><span class="token punctuation">(</span><span class="token variable">$run_time</span><span class="token operator">/</span><span class="token function">double</span><span class="token punctuation">(</span><span class="token variable">$stage_time</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+
+<span class="token comment">##########################划分模型的物理尺寸和单元格尺寸##########################</span>
+
+<span class="token comment">#xy平面尺寸：1000*1000*1nm</span>
+Parameter plane_length <span class="token number">1000</span>
+Parameter plane_width <span class="token number">1000</span>
+Parameter plane_height <span class="token number">1</span>
+set plane_length <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$plane_length</span> <span class="token operator">*</span> <span class="token number">1e-9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+set plane_width <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$plane_width</span> <span class="token operator">*</span> <span class="token number">1e-9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+set plane_height <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$plane_height</span> <span class="token operator">*</span> <span class="token number">1e-9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#容器的尺寸</span>
+set atlas_x <span class="token variable">$plane_length</span>
+set atlas_y <span class="token variable">$plane_width</span>
+set atlas_z <span class="token variable">$plane_height</span>
+
+<span class="token comment">#分配xy平面的区域</span>
+proc setRegions <span class="token punctuation">{<!-- --></span> x y z <span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	return <span class="token number">1</span>
+<span class="token punctuation">}</span>
+
+
+<span class="token comment">#定义容器</span>
+Specify Oxs_MultiAtlas<span class="token punctuation">:</span>atlas <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	comment <span class="token string"><span class="token double-quoted">"使用脚本函数定义模型"</span></span>
+	atlas <span class="token punctuation">{<!-- --></span> Oxs_ScriptAtlas <span class="token punctuation">{<!-- --></span>
+		xrange <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token variable">$atlas_x</span> <span class="token punctuation">}</span>
+		yrange <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token variable">$atlas_y</span> <span class="token punctuation">}</span>
+		zrange <span class="token punctuation">{<!-- --></span> <span class="token number">0</span> <span class="token variable">$atlas_z</span> <span class="token punctuation">}</span>
+		regions <span class="token punctuation">{<!-- --></span>planeRegion<span class="token punctuation">}</span>
+		script_args rawpt
+		script setRegions
+	<span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#单元格尺寸：2*2*1nm</span>
+Parameter cellsize_x <span class="token number">2</span>
+Parameter cellsize_y <span class="token number">2</span>
+Parameter cellsize_z <span class="token number">1</span>
+set cellsize_x <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$cellsize_x</span> <span class="token operator">*</span> <span class="token number">1e-9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+set cellsize_y <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$cellsize_y</span> <span class="token operator">*</span> <span class="token number">1e-9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+set cellsize_z <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$cellsize_z</span> <span class="token operator">*</span> <span class="token number">1e-9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#定义网格尺寸</span>
+Specify Oxs_RectangularMesh<span class="token punctuation">:</span>mesh <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	cellsize <span class="token punctuation">{<!-- --></span><span class="token variable">$cellsize_x</span> <span class="token variable">$cellsize_y</span> <span class="token variable">$cellsize_z</span><span class="token punctuation">}</span>
+	atlas <span class="token punctuation">:</span>atlas
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">##########################划分模型的物理尺寸和单元格尺寸##########################</span>
+
+<span class="token comment">##########################指定材料的磁性参数和磁性能量##########################</span>
+
+<span class="token comment">#定义交换能（15pJ/m）</span>
+Parameter A <span class="token number">1.5e-11</span>
+
+Specify Oxs_UniformExchange <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	A <span class="token variable">$A</span>
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#定义单轴各向异性能（0.6MJ/m3）</span>
+Parameter K1 <span class="token number">6e5</span>
+
+Specify Oxs_UniaxialAnisotropy <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	K1 <span class="token variable">$K1</span>
+	axis <span class="token punctuation">{<!-- --></span><span class="token number">0</span> <span class="token number">0</span> <span class="token number">1</span><span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#定义退磁能</span>
+Specify Oxs_Demag <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+
+<span class="token comment">#定义界面DMI能（2.5mJ/m2，畴壁中面内磁矩由负指向正）</span>
+<span class="token comment">#若DMI符号相反（-2.5mJ/m2，畴壁中面内磁矩由正指向负）</span>
+
+Parameter plane_interDMI <span class="token number">2.5e-3</span>
+
+Specify Oxs_DMExchange6Ngbr<span class="token punctuation">:</span>DMEx <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	default_D <span class="token number">0</span>
+	atlas <span class="token punctuation">:</span>atlas
+	D <span class="token punctuation">{<!-- --></span>
+	planeRegion planeRegion <span class="token variable">$plane_interDMI</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#定义饱和磁化强度Ms（5.8e5A/m）</span>
+Parameter Ms <span class="token number">5.8e5</span>
+
+<span class="token comment">#定义一个标量场对象来设置不同区域的饱和磁化强度</span>
+Specify Oxs_AtlasScalarField<span class="token punctuation">:</span>regions_Ms <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	atlas <span class="token punctuation">:</span>atlas
+	comment <span class="token string"><span class="token double-quoted">"只有xy平面区域内有磁性，其他区域无磁性"</span></span>
+	default_value <span class="token number">0</span>
+	values <span class="token punctuation">{<!-- --></span>
+	planeRegion <span class="token variable">$Ms</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#定义阻尼系数</span>
+<span class="token comment">#xy平面四周 10nm 范围内为0.5</span>
+Parameter maxAlpha <span class="token number">0.5</span>
+Parameter maxAlphaRegion <span class="token number">10e-9</span>
+<span class="token comment">#xy平面四周 10-30nm范围内为0.1</span>
+Parameter middleAlpha <span class="token number">0.1</span>
+Parameter middleAlphaRegion <span class="token number">30e-9</span>
+<span class="token comment">#其余区域都为0.001</span>
+Parameter minAlpha <span class="token number">0.001</span>
+
+proc setAlpha <span class="token punctuation">{<!-- --></span> x y z <span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	global plane_length plane_width maxAlphaRegion middleAlphaRegion
+	global maxAlpha middleAlpha minAlpha
+	<span class="token comment">#分配左端的阻尼系数</span>
+	<span class="token keyword">if</span> <span class="token punctuation">{<!-- --></span><span class="token variable">$x</span> <span class="token operator">&lt;=</span> <span class="token variable">$middleAlphaRegion</span><span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">if</span> <span class="token punctuation">{<!-- --></span><span class="token variable">$x</span> <span class="token operator">&lt;=</span> <span class="token variable">$maxAlphaRegion</span><span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">#xy平面左端10nm范围内</span>
+	return <span class="token variable">$maxAlpha</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">#左端10-30nm范围内</span>
+	return <span class="token variable">$middleAlpha</span>
+	<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">#分配右端的阻尼系数</span>
+	<span class="token keyword">if</span> <span class="token punctuation">{<!-- --></span><span class="token variable">$x</span> <span class="token operator">&gt;=</span> <span class="token variable">$plane_length</span> <span class="token operator">-</span> <span class="token variable">$middleAlphaRegion</span><span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">if</span> <span class="token punctuation">{<!-- --></span><span class="token variable">$x</span> <span class="token operator">&gt;=</span> <span class="token variable">$plane_length</span> <span class="token operator">-</span> <span class="token variable">$maxAlphaRegion</span><span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">#右端10nm范围内</span>
+	return <span class="token variable">$maxAlpha</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">#右端10-30nm范围内</span>
+	return <span class="token variable">$middleAlpha</span>
+	<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">#分配xy平面下端的阻尼系数</span>
+	<span class="token keyword">if</span> <span class="token punctuation">{<!-- --></span><span class="token variable">$y</span> <span class="token operator">&lt;=</span> <span class="token variable">$middleAlphaRegion</span><span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">if</span> <span class="token punctuation">{<!-- --></span><span class="token variable">$y</span> <span class="token operator">&lt;=</span> <span class="token variable">$maxAlphaRegion</span><span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">#xy平面下端10nm范围内</span>
+	return <span class="token variable">$maxAlpha</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">#下端10-30nm范围内</span>
+	return <span class="token variable">$middleAlpha</span>
+	<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">#分配xy平面上端的阻尼系数</span>
+	<span class="token keyword">if</span> <span class="token punctuation">{<!-- --></span><span class="token variable">$y</span> <span class="token operator">&gt;=</span> <span class="token variable">$plane_width</span> <span class="token operator">-</span> <span class="token variable">$middleAlphaRegion</span><span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">if</span> <span class="token punctuation">{<!-- --></span><span class="token variable">$y</span> <span class="token operator">&gt;=</span> <span class="token variable">$plane_width</span> <span class="token operator">-</span> <span class="token variable">$maxAlphaRegion</span><span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">#上端10nm范围内</span>
+	return <span class="token variable">$maxAlpha</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">#上端10-30nm范围内</span>
+	return <span class="token variable">$middleAlpha</span>
+	<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	
+	<span class="token comment">#分配中间区域的阻尼系数	</span>
+	return <span class="token variable">$minAlpha</span>
+<span class="token punctuation">}</span>
+<span class="token comment">#定义一个标量场对象来设置不同范围的阻尼系数</span>
+Specify Oxs_ScriptScalarField<span class="token punctuation">:</span>regions_alpha <span class="token punctuation">{<!-- --></span> 
+	script setAlpha
+	script_args rawpt 
+	atlas <span class="token punctuation">:</span>atlas
+<span class="token punctuation">}</span>
+
+<span class="token comment">##########################指定材料的磁性参数和磁性能量##########################</span>
+
+<span class="token comment">##########################设置磁体系的初始磁化状态##########################</span>
+
+<span class="token comment">#指定已经弛豫结束的基态磁化.omf文件名称</span>
+Parameter relaxedFileName <span class="token string"><span class="token double-quoted">"sky@center_relaxed.omf"</span></span>
+<span class="token comment">#定义一个文件矢量场对象来设置不同区域的初始磁化</span>
+Specify Oxs_FileVectorField<span class="token punctuation">:</span>regions_m0 <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+    file <span class="token variable">$relaxedFileName</span>
+	atlas <span class="token punctuation">:</span>atlas
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">##########################设置磁体系的初始磁化状态##########################</span>
+
+<span class="token comment">##########################设置求解器和演化器##########################</span>
+
+<span class="token comment">#定义演化器（龙格-库塔时间演化器）</span>
+Specify Oxs_RungeKuttaEvolve<span class="token punctuation">:</span>evolver <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	comment <span class="token string"><span class="token double-quoted">"按照不同范围定义阻尼系数"</span></span>
+	alpha <span class="token punctuation">:</span>regions_alpha
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">#定义驱动器</span>
+Specify Oxs_TimeDriver <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+	evolver <span class="token punctuation">:</span>evolver
+	mesh <span class="token punctuation">:</span>mesh
+	comment <span class="token string"><span class="token double-quoted">"设置一个阶段的停止时间"</span></span>
+	stopping_time <span class="token variable">$stage_time</span>
+	comment <span class="token string"><span class="token double-quoted">"设置模拟包含的阶段数量"</span></span>
+	stage_count <span class="token variable">$number_of_stages</span>
+	comment <span class="token string"><span class="token double-quoted">"设置波导和调制器的饱和磁化强度"</span></span>
+	Ms <span class="token punctuation">:</span>regions_Ms
+	comment <span class="token string"><span class="token double-quoted">"设置初始磁化状态"</span></span>
+	m0 <span class="token punctuation">:</span>regions_m0
+	
+	comment <span class="token string"><span class="token double-quoted">"将矢量场输出的数据格式设置为ASCII文本格式（默认为b8格式）"</span></span>
+	vector_field_output_format <span class="token punctuation">{<!-- --></span>text <span class="token operator">%</span><span class="token comment">#.17g}</span>
+	
+	comment <span class="token string"><span class="token double-quoted">"将checkpoint_interval设为10，每10分钟保存一次求解状态"</span></span>
+    checkpoint_interval <span class="token number">10</span>
+	checkpoint_disposal never
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">##########################设置求解器和演化器##########################</span>
+
+<span class="token comment">##########################外加磁场相关设置##########################</span>
+
+<span class="token comment">#微波磁场的振幅，这里的单位为A/m</span>
+Parameter Happ <span class="token number">119250</span>
+
+<span class="token comment">#微波磁场的频率，这里的单位为GHz</span>
+Parameter frequency <span class="token number">80</span>
+
+<span class="token comment">#条带天线距离平面左端的距离</span>
+Parameter antennaOffset <span class="token number">50e-9</span>
+<span class="token comment">#条带天线的长度：整个平面长度范围</span>
+Parameter antennaLength <span class="token number">10e-9</span>
+
+<span class="token comment">#对初始的矢量场initialAntennaFiled进行变化，</span>
+<span class="token comment">#使其成为激发自旋波的外加磁场：Hx= Happ*sin(2*pi*frequency*t)</span>
+proc transformExcitationField <span class="token punctuation">{<!-- --></span> total_time <span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	global frequency pi
+	set t <span class="token variable">$total_time</span>
+	<span class="token comment">#计算w=2*pi*f，并把单位顺便转化为GHz</span>
+	set w <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token number">2</span> <span class="token operator">*</span> <span class="token variable">$pi</span> <span class="token operator">*</span> <span class="token variable">$frequency</span> <span class="token operator">*</span> <span class="token number">1e9</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+	set sinwt <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token function">sin</span><span class="token punctuation">(</span><span class="token variable">$w</span> <span class="token operator">*</span> <span class="token variable">$t</span><span class="token punctuation">)</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+    set coswt <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token function">cos</span><span class="token punctuation">(</span><span class="token variable">$w</span> <span class="token operator">*</span> <span class="token variable">$t</span><span class="token punctuation">)</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+	<span class="token comment">#计算x方向的磁场分量及其对时间的导数</span>
+	<span class="token comment">#即x方向Hx*sinwt</span>
+	set Hx <span class="token variable">$sinwt</span>
+	set dHx <span class="token punctuation">[</span>expr <span class="token punctuation">{<!-- --></span><span class="token variable">$w</span> <span class="token operator">*</span> <span class="token variable">$coswt</span><span class="token punctuation">}</span><span class="token punctuation">]</span>
+	<span class="token comment">#其余两个方向都为0</span>
+	<span class="token comment">#返回6个元素的列表，即变换矩阵的3个主对角元素及其3个导数</span>
+	return <span class="token punctuation">[</span>list <span class="token variable">$Hx</span> <span class="token number">0</span> <span class="token number">0</span> <span class="token variable">$dHx</span> <span class="token number">0</span> <span class="token number">0</span><span class="token punctuation">]</span>
+<span class="token punctuation">}</span>
+
+<span class="token comment">#指定天线区域的矢量场（后面转化为磁场）：H=($Happ 0 0)，其他区域H=(0 0 0)</span>
+proc initialAntennaField <span class="token punctuation">{<!-- --></span> x y z <span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+    global Happ
+	global antennaOffset antennaLength
+	<span class="token comment">#天线距离波导左端 0nm,天线长度为 1000nm</span>
+	<span class="token keyword">if</span> <span class="token punctuation">{<!-- --></span><span class="token variable">$x</span> <span class="token operator">&gt;=</span> <span class="token variable">$antennaOffset</span> &amp;&amp; <span class="token variable">$x</span> <span class="token operator">&lt;=</span> <span class="token variable">$antennaOffset</span> <span class="token operator">+</span> <span class="token variable">$antennaLength</span><span class="token punctuation">}</span> <span class="token punctuation">{<!-- --></span>
+	return <span class="token string"><span class="token double-quoted">"<span class="token interpolation variable">$Happ</span> 0 0"</span></span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">#其他区域无外加磁场</span>
+	return  <span class="token string"><span class="token double-quoted">"0 0 0"</span></span>
+<span class="token punctuation">}</span>
+<span class="token comment">#指定天线区域的矢量场</span>
+Specify Oxs_ScriptVectorField<span class="token punctuation">:</span>antennaField <span class="token punctuation">{<!-- --></span>
+	script initialAntennaField
+	script_args rawpt
+	atlas <span class="token punctuation">:</span>atlas
+<span class="token punctuation">}</span>
+
+<span class="token comment">#使用此类可生成任意（局域，时变）的外加磁场</span>
+Specify Oxs_TransformZeeman <span class="token punctuation">[</span>subst <span class="token punctuation">{<!-- --></span>
+    field <span class="token punctuation">:</span>antennaField
+	comment <span class="token string"><span class="token double-quoted">"函数返回6个元素，是3个主对角元素及其3个导数"</span></span>
+	<span class="token keyword">type</span> diagonal
+	script transformExcitationField
+	script_args total_time
+	comment <span class="token string"><span class="token double-quoted">"默认单位A/m"</span></span>
+	comment <span class="token string"><span class="token double-quoted">"将stage_count设为0（默认值），让模拟的所有阶段都存在该塞曼能"</span></span>
+	stage_count <span class="token number">0</span>
+<span class="token punctuation">}</span><span class="token punctuation">]</span>
+
+<span class="token comment">##########################外加磁场相关设置##########################</span>
+
+<span class="token comment">##########################设置保存磁化文件相关##########################</span>
+
+Destination Record mmArchive
+Schedule Oxs_TimeDriver<span class="token punctuation">::</span>Magnetization Record stage <span class="token number">1</span>
+
+<span class="token comment">##########################设置保存磁化文件相关##########################</span>
+</code></pre> 
+<p>模拟结束后，一共生成了6250个磁化文件，我们可以将这些磁化文件输出为图片然后拼接成一个视频，查看一下斯格明子的运动情况如下：</p> 
+<p></p> 
+<div class="csdn-video-box"> 
+ <iframe id="YaGqOIsq-1688803930757" frameborder="0" src="https://live.csdn.net/v/embed/309856" allowfullscreen="true" data-mediaembed="csdn"></iframe> 
+ <p>在平面左端使用h0@150mT，f@80GHz的sin场激发</p> 
+</div> 
+<p></p> 
+<p>这里使用<strong>方法一</strong>获取所有磁化文件中斯格明子的信息，该程序输出的图像如下所示：</p> 
+<p><img src="https://images2.imgbox.com/b3/ee/XHxlLlj6_o.png" alt="在这里插入图片描述"></p> 
+<p>此外，<mark>该程序还会把从所有磁化文件中获取的所有斯格明子的信息按照文件读取顺序保存在一个文本文件“sky的位置和半径.txt”，该文件的第一列是文件顺序索引1,2,3，，，从第二列开始，每四列就是一个斯格明子的位置坐标(x,y,z)和半径，默认值-1表示无斯格明子信息。</mark> 比如一个磁化文件中有两个斯格明子，在该行就有9列数据。接着还顺带利用笔记05中介绍过的<a href="https://download.csdn.net/download/qq_43572058/87346736">MFA程序</a>分析了包含斯格明子的区域内的频谱图，最终FIG.6的复现结果如下：</p> 
+<p><img src="https://images2.imgbox.com/76/a0/zRCtEs79_o.jpg" alt="在这里插入图片描述"></p> 
+<p>虽然与原图有着亿点差异，但基本的结论是相同的，可看到斯格明子确实往左上角运动，运动速度大约是0.85m/s，而且还伴随着呼吸模式，其半径在9-12nm范围内周期性变化。</p> 
+<hr color="#000000" size='1"'> 
+<h2><a id="_1125"></a>总结</h2> 
+<p>本文提供的获取每个磁化文件中斯格明子位置和半径的粗略方法仅供参考，最准确的方法毫无疑问是用肉眼直接观测，所以当用该程序得到结果之后，需要再用肉眼观测一些磁化文件进行检查验证。<br> 该程序的源代码见<a href="https://download.csdn.net/download/qq_43572058/88019897"><strong>下载链接</strong></a>，若大家觉得有错误或者需要优化改进的地方请在本文评论区留言。<br> 最后，若觉得本文对大家有帮助的话麻烦来个一键三连吧。</p> 
+<p><img src="https://images2.imgbox.com/91/78/qJq1TKRX_o.png" alt="在这里插入图片描述"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/415e71f2e19f99e090fc9296d18f5f38/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Elasticsearch 搜索推荐</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/7965ffc3aebf4dc8c42c64ff9bb4fe29/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">《深入浅出Dart》搭建环境</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

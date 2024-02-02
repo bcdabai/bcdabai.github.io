@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Springcloud和shiro的一种权限实现方案 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Springcloud和shiro的一种权限实现方案" />
+<meta property="og:description" content="探讨下几种SpringCloud权限实现方案，以zuul和shiro的思路做了实现，简写了搭建过程.
+github地址GitHub - MeloFocus/FocusCloudWork
+一.目标 1.外部请求统一从网关zuul进入，并且服务内部互相调用接口要校验权限
+2.cloud和shiro结合，达到单点登录，和集中一个服务完成权限管理，其他业务服务不需要关注权限如何实现
+3.其他服务依然可以控制权限细粒度到接口，如在接口上使用@RequirePermisson等注解，方便开发
+二.思路 SpirngCloud zuul网关有两个作用，一个是分配路由，一个是过滤。zuul的过滤器作用有限，只能简单的做一些某个url是否能够访问之类的，无法像shiro一样细粒度到某个用户是否有某种权限；
+shiro单体应用大家都会做，那变成微服务后，难道每个服务都要写一套shiro框架？这显然也太麻烦。这么几个思路：
+1.在zuul服务里用shiro，做成动态url权限控制，就是把访问哪个url需要用什么权限，写入数据库，在过滤器读取与用户有的权限作对比；但是服务互相调用校验就行不通了，因为服务间调用不通过zuul
+2.写一个服务专用于shiro认证和授权，包含用户、权限的curd，暴露出查询一个用户拥有什么权限的接口；在其他服务中，都写一个拦截器拿访问者token去授权服务拿此用户的权限，再跟请求的url对比；或者可以自定义注解用aop，注解标注的是访问此url需要什么权限，远程调用授权服务接口查询当前用户所有权限，与请求的url对比。
+但是这个要自己实现拦截器。
+3.第二种思路的简单版本。
+server服务:专用于shiro认证和授权，包含用户、权限的curd，暴露出查询一个用户拥有什么权限的接口；
+client项目：打成jar包供其他服务依赖，用shiro，client不同于server服务的是:
+1.在realm中只有授权方法，没有认证方法，因为不需要client认证、需要server认证。将登陆地址配置为server服务的地址。这样未登录的用户都会跳转到server服务登录,想办法保存下原路径，登录成功后再返回原服务.并且client的realm授权方法是调用server服务接口查询权限，再返回给client项目的安全管理器。同时做成session共享 其他业务服务:只需要依赖于client。
+这种思路来自于《跟我学shiro》的多项目集中权限，其实想想这种思路是可以的，shiro本质也是靠拦截器进行权限校验，虽然相当于每个服务都开启了一套shiro，但也就是容器中多了一些shiro拦截器和实例，而且可以用shiro的各种功能，开发方便。可以完成我们的三个目标。
+三.具体实现 因为shiro和cloud的细节太多，这里就不赘述，以下内容默认读者掌握shiro和springcloud基本组件。
+我使用的是Finchley.BUILD-SNAPSHOT版本。
+我们建两个服务Base和Notice，Base负责权限认证，用户访问Notice服务时先跳转到Base服务校验。
+1.建立基本eureka,zuul,服务Base，服务Notice 将服务Base、Notice、zuul注册到eureka，能够通过zuul访问两个服务，不再赘述。
+贴一下zuul的配置：
+server: port: 18900 spring: application: name: focus-zuul datasource: driverClassName: com.mysql.jdbc.Driver url: jdbc:mysql://localhost:3306/focus_cloud?useUnicode=true&amp;characterEncoding=utf-8 username: root password: pangtiemin eureka: instance: prefer-ip-address: true #metadata-map: #zone: zone1 #此实例所处的zone client: #availability-zones: #可获得的region和其zone有哪些 #xian: zone1 #region: xian #此实例所处的 region serviceUrl: defaultZone: http://localhost:18800/eureka/ #zone1: http://localhost:18800/erueka zuul: #设置请求超时时间 connect-timeout-millis: 15000 #HTTP连接超时要比Hystrix的大 socket-timeout-millis: 60000 #socket超时 #SendErrorFilter: # error: # disable: true #禁用zuul默认的异常过滤器 errorControllerUrl: /error #自定义配置，异常处理接口 routes: focus-base: # 通过服务名serviceId路由，不通过具体的url path: /base/** serviceId: focus-base #默认敏感头是&#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/4ce9933fb6b57646a2c75d3507754b54/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-10T17:33:37+08:00" />
+<meta property="article:modified_time" content="2024-01-10T17:33:37+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Springcloud和shiro的一种权限实现方案</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>探讨下几种SpringCloud权限实现方案，以zuul和shiro的思路做了实现，简写了搭建过程.</p> 
+<p>github地址<a href="https://github.com/MeloFocus/FocusCloudWork" title="GitHub - MeloFocus/FocusCloudWork">GitHub - MeloFocus/FocusCloudWork</a></p> 
+<p><img alt="" class="has" height="245" src="https://images2.imgbox.com/a7/27/qogJukzw_o.png" width="339"></p> 
+<h3>一.目标</h3> 
+<p>1.外部请求统一从网关zuul进入，并且服务内部互相调用接口要校验权限</p> 
+<p>2.cloud和shiro结合，达到单点登录，和集中一个服务完成权限管理，其他业务服务不需要关注权限如何实现</p> 
+<p>3.其他服务依然可以控制权限细粒度到接口，如在接口上使用@RequirePermisson等注解，方便开发</p> 
+<h3>二.思路</h3> 
+<p>SpirngCloud zuul网关有两个作用，一个是分配路由，一个是过滤。zuul的过滤器作用有限，只能简单的做一些某个url是否能够访问之类的，无法像shiro一样细粒度到某个用户是否有某种权限；</p> 
+<p>shiro单体应用大家都会做，那变成微服务后，难道每个服务都要写一套shiro框架？这显然也太麻烦。这么几个思路：</p> 
+<p>1.在zuul服务里用shiro，做成动态url权限控制，就是把访问哪个url需要用什么权限，写入数据库，在过滤器读取与用户有的权限作对比；但是服务互相调用校验就行不通了，因为服务间调用不通过zuul</p> 
+<p>2.写一个服务专用于shiro认证和授权，包含用户、权限的curd，暴露出查询一个用户拥有什么权限的接口；在其他服务中，都写一个拦截器拿访问者token去授权服务拿此用户的权限，再跟请求的url对比；或者可以自定义注解用aop，注解标注的是访问此url需要什么权限，远程调用授权服务接口查询当前用户所有权限，与请求的url对比。</p> 
+<p>但是这个要自己实现拦截器。</p> 
+<p>3.第二种思路的简单版本。</p> 
+<p><strong>server服务:专用于shiro认证和授权，包含用户、权限的curd，暴露出查询一个用户拥有什么权限的接口；</strong></p> 
+<p><strong>client项目：打成jar包供其他服务依赖，用shiro，client不同于server服务的是:</strong></p> 
+<ul><li><strong>1.在realm中只有授权方法，没有认证方法，因为不需要client认证、需要server认证。将登陆地址配置为server服务的地址。这样未登录的用户都会跳转到server服务登录,想办法保存下原路径，登录成功后再返回原服务.</strong></li><li><strong>并且client的realm授权方法是调用server服务接口查询权限，再返回给client项目的安全管理器。同时做成session共享</strong></li></ul> 
+<p><strong>其他业务服务:只需要依赖于client。</strong></p> 
+<p>这种思路来自于《跟我学shiro》的多项目集中权限，其实想想这种思路是可以的，shiro本质也是靠拦截器进行权限校验，虽然相当于每个服务都开启了一套shiro，但也就是容器中多了一些shiro拦截器和实例，而且可以用shiro的各种功能，开发方便。可以完成我们的三个目标。</p> 
+<h3>三.具体实现</h3> 
+<p>因为shiro和cloud的细节太多，这里就不赘述，以下内容默认读者掌握shiro和springcloud基本组件。</p> 
+<p>我使用的是Finchley.BUILD-SNAPSHOT版本。</p> 
+<p><strong>我们建两个服务Base和Notice，Base负责权限认证，用户访问Notice服务时先跳转到Base服务校验。</strong></p> 
+<h4>1.建立基本eureka,zuul,服务Base，服务Notice</h4> 
+<p>将服务Base、Notice、zuul注册到eureka，能够通过zuul访问两个服务，不再赘述。</p> 
+<p>贴一下zuul的配置：</p> 
+<pre class="has"><code>server:
+  port: 18900
+
+spring:
+  application:
+    name: focus-zuul
+  datasource:
+    driverClassName: com.mysql.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/focus_cloud?useUnicode=true&amp;characterEncoding=utf-8
+    username: root
+    password: pangtiemin
+
+eureka:
+  instance:
+    prefer-ip-address: true
+      #metadata-map:
+    #zone: zone1 #此实例所处的zone
+  client:
+    #availability-zones: #可获得的region和其zone有哪些
+    #xian: zone1
+    #region: xian #此实例所处的 region
+    serviceUrl:
+      defaultZone: http://localhost:18800/eureka/
+      #zone1: http://localhost:18800/erueka
+
+zuul:
+  #设置请求超时时间
+  connect-timeout-millis: 15000 #HTTP连接超时要比Hystrix的大
+  socket-timeout-millis: 60000   #socket超时
+  #SendErrorFilter:
+   # error:
+   #   disable: true #禁用zuul默认的异常过滤器
+  errorControllerUrl: /error #自定义配置，异常处理接口
+  routes:
+    focus-base: # 通过服务名serviceId路由，不通过具体的url
+      path: /base/**
+      serviceId: focus-base
+      #默认敏感头是"Cookie", "Set-Cookie", "Authorization"这三项,取消这三项，向下游服务请求带上这些headers
+      #Access-Control-Allow-Origin,Access-Control-Allow-Methods 解决其他服务的js向zuul发起请求的跨域问题
+      sensitiveHeaders: Access-Control-Allow-Origin,Access-Control-Allow-Methods
+    focus-notice: # 通过服务名serviceId路由，不通过具体的url
+      path: /notice/**
+      serviceId: focus-notice
+      sensitiveHeaders: Access-Control-Allow-Origin,Access-Control-Allow-Methods
+
+ribbon:
+  ReadTimeout: 120000
+  ConnectTimeout: 30000</code></pre> 
+<h4>2.在base服务搭建shiro</h4> 
+<ul><li>关于登陆、用户、角色、权限的接口都写在base服务中。要求能在base中单独认证成功。</li><li>使用redis做权限缓存，其他服务认证每次都访问base服务压力比较大，可以优先从缓存拿数据。如果你的shiro安全管理器和seesiondao同时实现了cache接口，直接将redis管理器注入安全管理器即可；或者可以用网上重写的redissessiondao，具体可看我这篇<a href="https://blog.csdn.net/u014203449/article/details/80888637" title="六。shiro集群，将session保存到数据库和redis，使用户保持登录状态_u014203449的博客-CSDN博客">六。shiro集群，将session保存到数据库和redis，使用户保持登录状态_u014203449的博客-CSDN博客</a></li><li>用feign推荐的项目格式。maven父模块包含两个子模块。api模块写暴露出的接口，impl模块写具体的实现。</li></ul> 
+<p><img alt="" class="has" height="144" src="https://images2.imgbox.com/c5/81/iYfX5dVE_o.png" width="324"></p> 
+<ul><li>在base的接口中写一个通过用户id查询权限码的接口，用feign供其他服务调用。</li></ul> 
+<pre class="has"><code>@FeignClient(name = FocusMicroBaseConstants.SERVICE_APP_ID)
+public interface BaseAuthorityRestService {
+
+    @GetMapping
+    public Message&lt;List&lt;BaseAuthorityVM&gt;&gt; getAuthorityByUser(String userId);
+
+}</code></pre> 
+<h4>3.建立一个名为uaa项目</h4> 
+<p>uaa项目依赖于base-api（要用base的接口）、open-feign(通过feign调用) 。此项目以后要打包，给notice之类的业务服务使用。</p> 
+<p>在uaa项目中也搭建shiro。与base服务的区别是，uaa的shiro配置中将登陆接口定位到base服务登陆接口。并且要从zuul入口访问，<a href="http://localhost:18900/base/loginpage" rel="nofollow" title="http://localhost:18900/base/loginpage">http://localhost:18900/base/loginpage</a>，18900是zuul的端口，统一通过zuul访问登陆页面，因为base有可能是多实例的，而且如果直接访问base浏览器会暴露出base服务的地址，我们只应该暴露出zuul的地址。</p> 
+<p>页面里的js css也要从zuul/服务名访问，否则会访问失败。</p> 
+<pre class="has"><code>@Bean
+    public ShiroFilterFactoryBean shirFilter(SecurityManager securityManager) {
+        ShiroFilterFactoryBean shiroFilterFactoryBean = new ShiroFilterFactoryBean();
+        // 必须设置 SecurityManager
+        shiroFilterFactoryBean.setSecurityManager(securityManager);
+
+        // 如果不设置默认会自动寻找Web工程根目录下的"/login.jsp"页面
+        //访问的是后端url的地址，这里要写base 服务的公用登录接口。
+        shiroFilterFactoryBean.setLoginUrl("http://localhost:18900/base/loginpage");
+
+        // 登录成功后要跳转的链接；现在应该没用
+        //shiroFilterFactoryBean.setSuccessUrl("/index");
+
+        // 未授权界面;可以写个公用的403页面
+        shiroFilterFactoryBean.setUnauthorizedUrl("/403");
+
+ 
+        filterChainDefinitionMap.put("/static/**", "anon");
+        filterChainDefinitionMap.put("/login", "anon");
+        filterChainDefinitionMap.put("/loginpage", "anon");
+        filterChainDefinitionMap.put("/swagger-ui.html#", "anon");
+
+        filterChainDefinitionMap.put("/base/test", "authc");
+
+
+        shiroFilterFactoryBean.setFilterChainDefinitionMap(filterChainDefinitionMap);
+        System.out.println("Shiro拦截器工厂类注入成功");
+        return shiroFilterFactoryBean;
+    }</code></pre> 
+<p>uaa的realm不写doGetAuthenticationInfo认证逻辑，只写校验权限逻辑。并且校验逻辑获取此用户的权限码，是通过步骤2中base的接口获取的。</p> 
+<p>因为我的realm不是通过spring注入到 ShiroFilterFactoryBean 的，所以无法在realm中用@Autowired直接调用feign。但当spring启动成功后，注解FeignClient的base接口实例已经注入到了spring中，我这里从spring中手动获取BaseAuthorityRestService 实例再使用。</p> 
+<pre class="has"><code>public class ShiroClientRealm extends AuthorizingRealm {
+
+    //这里没有直接注入实例，ShiroClientRealm被用在配置类中，直接注入报servercontext not set 的错。只能使用时从spring容器中拿
+    private BaseAuthorityRestService baseAuthorityRestService;
+
+    Boolean cachingEnabled=true;
+
+   
+    @Override
+    protected AuthorizationInfo doGetAuthorizationInfo(PrincipalCollection principals) {
+        SimpleAuthorizationInfo simpleAuthorInfo = new SimpleAuthorizationInfo();
+        BaseUserVM user = (BaseUserVM)principals.getPrimaryPrincipal();
+
+        if(user.getSuperman()){//超管
+            simpleAuthorInfo.addStringPermission("administrator");
+
+        }else{
+
+            //这里没有直接注入实例，ShiroClientRealm被用在配置类中new出的，直接注入报servercontext not set 的错。只能使用时从spring容器中拿
+            baseAuthorityRestService = SpringUtil.getBean(BaseAuthorityRestService.class);
+
+            Message&lt;List&lt;BaseAuthorityVM&gt;&gt; message = baseAuthorityRestService.getAuthorityByUser(user.getId());
+            if(message!=null&amp;&amp;message.getData()!=null){
+                List&lt;BaseAuthorityVM&gt; authorityVMList = message.getData();
+                for (BaseAuthorityVM authority:authorityVMList) {
+                    simpleAuthorInfo.addStringPermission(authority.getAuthorityCode());
+                }
+            }
+        }
+        return simpleAuthorInfo;
+    }
+
+    /**
+     * 这个方法不会被调用，会到base服务校验是否登录
+     * @Author:Melo
+     * @Date: 2019/6/10 0010
+    **/
+    @Override
+    protected AuthenticationInfo doGetAuthenticationInfo(
+            AuthenticationToken authcToken) throws AuthenticationException {
+        return null;
+    }
+}</code></pre> 
+<h4> 4.改造uaa为springboot自动配置，notice依赖uaa</h4> 
+<p>notice加uaa依赖，但这时启动notice服务，uaa中shiro拦截器并没有注入到spring中，很明显springboot只能扫描到启动类路径下的配置注解，jar包中的注解无法直接扫描到。这里我们通过加spring.factories的方式</p> 
+<p><img alt="" class="has" height="290" src="https://images2.imgbox.com/35/b6/SvyLopVW_o.png" width="1200"></p> 
+<p>自动配置具体可看我这篇<a href="https://blog.csdn.net/u014203449/article/details/91890531" title="springboot自定义自动配置_u014203449的博客-CSDN博客_springboot自定义自动配置">springboot自定义自动配置_u014203449的博客-CSDN博客_springboot自定义自动配置</a></p> 
+<p>将notice依赖uaa、base-api。</p> 
+<h4>5.notice写需要权限接口</h4> 
+<pre class="has"><code> @GetMapping("/notice1")
+    @RequiresPermissions("dd")
+    public String test1(){
+        return "noticetest";
+    }</code></pre> 
+<h4>6.zuul的cooike丢失问题 </h4> 
+<p>这时有权限的用户直接访问notice需要认证接口也是失败的，在base拦截器中debug发现cookie是空的，因为zuul把cookie过滤了。</p> 
+<p>需要设置zuul的敏感头。#默认敏感头是"Cookie", "Set-Cookie", "Authorization"这三项,取消这三项，向下游服务请求带上这些headers。sensitiveHeaders设置为空即可解决这个问题，我设置了其他值是一会要解决其他问题的。</p> 
+<pre class="has"><code>zuul:
+  #设置请求超时时间
+  connect-timeout-millis: 15000 #HTTP连接超时要比Hystrix的大
+  socket-timeout-millis: 60000   #socket超时
+  #SendErrorFilter:
+   # error:
+   #   disable: true #禁用zuul默认的异常过滤器
+  errorControllerUrl: /error #自定义配置，异常处理接口
+  routes:
+    focus-base: # 通过服务名serviceId路由，不通过具体的url
+      path: /base/**
+      serviceId: focus-base
+      #默认敏感头是"Cookie", "Set-Cookie", "Authorization"这三项,取消这三项，向下游服务请求带上这些headers
+      #Access-Control-Allow-Origin,Access-Control-Allow-Methods 解决其他服务的js向zuul发起请求的跨域问题
+      sensitiveHeaders: Access-Control-Allow-Origin,Access-Control-Allow-Methods
+    focus-notice: # 通过服务名serviceId路由，不通过具体的url
+      path: /notice/**
+      serviceId: focus-notice
+      sensitiveHeaders: Access-Control-Allow-Origin,Access-Control-Allow-Methods</code></pre> 
+<h4>7.zuul的跨域问题</h4> 
+<p>我的js因为放在了base服务中，直接访问zuul接口，出现跨域问题：<img alt="" class="has" height="95" src="https://images2.imgbox.com/68/0b/S5y1ZuhF_o.png" width="1200"></p> 
+<p>这个跟springboot直接注入cors实例还不一样，参考<a href="https://segmentfault.com/a/1190000010722941" rel="nofollow" title="https://segmentfault.com/a/1190000010722941">https://segmentfault.com/a/1190000010722941</a>解决。</p> 
+<p>多次请求的时候，会把这些header再带过来，然后请求zuul转发的接口又在写入一次，造成重复了，方案就是zuul转发的时候，过滤掉这些header，比如：</p> 
+<pre class="has"><code>sensitiveHeaders: Access-Control-Allow-Origin,Access-Control-Allow-Methods</code></pre> 
+<p> 同时zuul添加配置</p> 
+<pre class="has"><code>@Configuration
+public class WebMvcConfig extends WebMvcConfigurerAdapter {
+
+    @Override
+    public void addCorsMappings(CorsRegistry registry) {
+        registry.addMapping("/**")
+                .allowedOrigins("*")
+                .allowedMethods("POST", "GET", "PUT", "OPTIONS", "DELETE")
+                .maxAge(3600)
+                .allowCredentials(true);
+    }
+}</code></pre> 
+<h4>8.feign调用cooike丢失问题</h4> 
+<p>直接调用base服务或notice服务的需认证接口时可以访问成功，但通过notice服务利用feign调用base的认证接口失败了。因为cookie在feign调用没有传递过去。</p> 
+<p>我们知道shiro调用需要认证的接口时，authc，会执行form拦截器，debug isAccessAllowed（是否允许访问）方法，我们先看看直接调用base服务的接口，很明显有cookie JSESSIONID.</p> 
+<p><img alt="" class="has" height="332" src="https://images2.imgbox.com/c8/17/CDenS0qV_o.png" width="654">.</p> 
+<p>再通过notice feign调用base接口时，看到cookie时null。</p> 
+<p><img alt="" class="has" height="354" src="https://images2.imgbox.com/bc/7b/3MQpJSbd_o.png" width="661"></p> 
+<p>解决问题很简单，只需要实现Feign的 FeignCookieInterceptor 接口，取当前请求头中的cookie，放到feign请求头上即可。</p> 
+<pre class="has"><code>package com.focus.framework.feign;
+
+import feign.RequestInterceptor;
+import feign.RequestTemplate;
+import org.springframework.stereotype.Component;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
+
+import javax.servlet.http.HttpServletRequest;
+
+/**
+ * 用Feign发新请求，原请求的header cookie都默认没有，需要自己设置
+ */
+@Component
+public class FeignCookieInterceptor implements RequestInterceptor {
+    @Override
+    public void apply(RequestTemplate requestTemplate) {
+        if (null == getHttpServletRequest()){
+            return;
+        }
+        //requestTemplate 好像没有直接设置cookie对象的地方，但cookie其实是header中的
+        //Cookie[] cookies = getHttpServletRequest().getCookies();
+
+        requestTemplate.header("Cookie",getHttpServletRequest().getHeader("Cookie"));
+    }
+
+    /**
+     * RequestContextHolder从当前线程中获取请求，又用了线程副本
+     * @return
+     */
+    private HttpServletRequest getHttpServletRequest(){
+        try{
+            return ((ServletRequestAttributes)RequestContextHolder.getRequestAttributes()).getRequest();
+        }catch (Exception e){
+            return null;
+        }
+    }
+}
+</code></pre> 
+<p> FeignCookieInterceptor这个配置类也是notice等业务服务都需要用的。因为有一些公用的配置，我就写了一个common项目，里面配置了一些公用的配置类和可能用到的工具类。同时也用springboot的自动配置方式配置好。</p> 
+<p>到这里为止，已经实现了最初的三个目标。</p> 
+<h3>四.其他思路</h3> 
+<p>另一篇文字，其他常见微服务鉴权方案 <a href="https://blog.csdn.net/u014203449/article/details/120487310" title="微服务常见认证、鉴权方案_u014203449的博客-CSDN博客">微服务常见认证、鉴权方案_u014203449的博客-CSDN博客</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/619fe6978795a8d42e03da14a20b85c1/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">RabbitMq</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/4f42f14236ef096af7c4a532072292c4/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Python基础教程——用Python处理Excel！</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

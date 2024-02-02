@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>分布式事务处理方式总结 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="分布式事务处理方式总结" />
+<meta property="og:description" content="在项目开发中，经常会需要处理分布式事务。例如数据库分库分表之后，原来在一个单库上的操作可能会跨越多个数据库。系统服务化拆分之后，原来的在一个系统上的操作可能会跨越多个系统。就连我们平时经常使用到的缓存(如redis、memcache等)也可能涉及分布式事务，因为缓存和数据库是两个不同的实体，如何保证数据在缓存和数据库间的一致性也是要重点考虑的。分布式事务就是指事务要处理的资源分别位于分布式系统中的不同节点之上的事务。
+对于单机系统，通常我们借助数据库实现本地事务，例如下面JDBC代码实现了一个事务：
+由于在分布式系统中，多个系统无法共用同一个数据库链接，所以无法简单借用上面的处理方式实现分布式事务。
+下面将介绍几种本人在实际开发中使用过的处理分布式事务的方式，最后再引出分布式事务的相关理论并进行总结。
+避免出现分布式事务 由于分布式事务比较难于处理，所以应该尽量避免分布式事务的发生。例如对于一个客户信息系统，由于注册用户数太多导致存储的数据量过大，所以对其进行分库分表存储。而客户信息模型又分为多个子模型，对应数据库中的多个表，例如客户基本信息表、客户登录账号表、客户登录密码表、客户联系方式表等等。假设登录账号表和客户基本信息表的关联关系如下所示：
+user_id和login_id分别是两个表的主键，user_id还作为login_info表的外键使两个表关联。在用户注册时会自动生成user_id和login_id的值。user_info和login_info两个表分别采用user_id和login_id计算分库分表规则。假设我们对每个模型分十库一百表存储，即存在user_info_00 ~ user_info_99一百个表，其中user_info_00 ~ user_info_09属于第一个库，user_info_10 ~ user_info_19属于第二个库，依次类推。
+在分库分表之后，如果我们不仔细考虑user_id和login_id的生成规则(例如随意生成一个数字字符串或简单使用递增sequence)，就可能导致同一个用户的user_info信息和login_info信息被分别存储到两个不同的库，这就会导致分布式事务发生。
+面对这种问题，最好的解决思路就是考虑如何避免分布式事务的发生。只要想办法让跟一个用户相关的所有模型数据全部存入到一个库中，就可以避免分布式事务了。由于每个模型数据的分库分表路由规则又是由各个表的主键id决定的(例如user_id、login_id)，所以只要对各个表的主键生成规则进行定制，就可以保证一个用户的所有模型数据全部存到同一个库。假设有下面的id生成规则：
+开始的两位是标识模型位，例如user_id以01开头，login_id以02开头。
+接下来的11位是sequence递增序列号，如果想要更多的ID可以扩大这部分的位数，但对于存储用户信息而言，11位的长度足够。
+接下来是分库分表位，如果每个模型的分库分表算法都相同，那么只要保证每个模型的主键ID的分库分表位都相同，就能保证一个用户的所有模型数据都会存到同一个库中。
+最后一位是id校验位，这一位根据前面15位的内容生成，方便对一个id进行校验。
+根据这个思想，我们可以在用户注册的时候先生成user_id，user_id的分库分表位可以随机生成。然后在为其它模型生成主键id时(例如login_id)，必须让这个模型的主键id的分库分表位与user_id的分库分表位相同。另外一点也要注意，一个表的查询条件不一定只有主键id一个，如果有其它查询条件列，那就要保证那一列的生成规则也要包含相同的分库分表位，否则就不能使用该列进行查询。
+通过这种方式，就可以保证一个用户的所有模型数据全部存储到同一个库中，有效的避免分布式事务的发生。
+事务补偿 通常情况下，应对高并发的一个主要手段就是增加分布式缓存(如redis)以提高查询性能。增加分布式缓存后系统查询数据的流程如下图：
+即先尝试从缓存中查询数据，如果缓存命中就直接返回结果，否则尝试从DB中查询数据。如果查询DB命中则将数据补充到缓存，以便下次查询时可以命中缓存。
+而在更新数据时，通常是先更新DB中的数据，DB写入成功后再更新缓存中的数据。那么就有一个问题，如何保证缓存和DB间数据的一致性？由于缓存和DB是两个不同的实体，写入DB成功后再去更新缓存，如果缓存更新失败(例如网络抖动造成短暂的缓存不可用)就会造成缓存和DB的不一致。此时按照上图的查询逻辑，先查缓存就会查询到“脏”的数据，就会严重影响业务。这也是一个典型的分布式事务问题——缓存和DB要嘛同时更新成功，要嘛同时更新失败。解决这个问题的一个较好方式就是事务补偿。
+我们可以在DB中创建一张事务补偿表transaction_log，transaction_log表可以和业务数据在一个库中，也可以在不同的库。在更新数据前，先将要更新的模型数据记录到transaction_log中。例如我们更新user_info表中的数据，就将userId记录到transaction_log中。
+transaction_log记录成功后，再去更新业务数据表user_info中的内容，最后更新缓存中的userInfo数据。缓存更新成功后，就可以删除transaction_log表中对应的记录。
+假设在更新完user_info表之后，由于网络抖动等原因导致缓存更新失败，则transaction_log表中对应的记录就会一直存在，表示这个事务没有完成的一种记录。
+应用会创建一个定时任务，周期性的扫描transaction_log表中的记录(例如每隔2S扫描一次)。发现有符合条件的记录，就尝试执行补偿逻辑。例如更新用户信息时，DB中的user_info表更新成功，但缓存更新失败，定时任务发现transaction_log表中对应的记录没有删除且已经超过正常等待时间，就尝试使缓存和DB一致(可以删除缓存中对应的数据，也可以根据userId重新查询DB再补充的缓存)。补偿任务执行完成后，就可以删除transaction_log表中对应的记录。如果补偿任务执行再次失败，就保留transaction_log表中的记录，等待下个周期再次执行。
+事务补偿这种方式保证的是事务的最终一致性，即如果发生意外，会存在一个时间窗口(例如2S)，在这个窗口内DB和缓存间是不一致的，但能保证最终两者的数据是一致的。至于定时任务周期的设定，要结合业务对“脏”数据的敏感程度以及系统的负载能力。
+事务型消息 对于一个金融系统，假设有一个需求是用户注册成功后自动为用户创建一个账户。客户的信息维护在客户中心系统，客户的账户信息维护的账务中心系统，如果用户注册成功，必须保证客户的账户在账务系统创建成功。这显然也是一个分布式事务问题。
+处理这个问题，显然也可以采用上一小节介绍的事务补偿机制来处理。但注册和开户并不要求一定是同步完成，且需要感知用户注册成功事件的系统并不只有账务系统一个(例如营销系统可能也需要感知用户注册成功的事件，给用户发优惠券)，所以使用消息机制异步通知更加合适。那么问题就变成了“如果用户注册成功，一定要保证消息发送成功”。
+应对这种场景，可以使用事务型消息。但前提条件是使用的MQ中间件必须支持事务型消息，比如阿里的RocketMQ。目前市面上其它一些主流的MQ中间件都不支持事务型消息，比如Kafka和RabbitMQ都不支持。
+下面的序列图是事务型消息的执行流程：
+相比于普通消息，发布者发送消息后，MQ并不是马上将消息发送给订阅者，而仅仅是将消息持久化存储下来。
+发送消息成功之后，发布者执行本地事务。例如我们例子中提到的用户注册。
+根据本地事务执行是否成功，发布者决定对之前已经发送的消息是commit还是rollback。如果是rollback，MQ会删除之前存储的消息。假设我们这里发送commit。
+MQ接收到发布者发送的commit后，才会将消息发送给订阅者。之后，就可以利用MQ的消息可靠传输特性促使订阅者完成剩余事务操作，例如上面例子中提到的开户操作。
+细心的小伙伴会发现，如果在上图中的第5步发生问题导致发送commit失败，不还是会导致消息发布者和消息订阅者间事务的不一致吗？为了防止这种情况的发生，增加MQ超时回调机制。
+下面的序列图是事务型消息commit失败时的执行流程：
+当MQ长时间收不到发布者的commit/rollback通知时，MQ会回调发布者应用询问本地事务是否执行成功，是commit还是rollback之前的消息。发布者需要提供对应的callback，在callback中判断本地事务是否执行成功。
+TCC两阶段提交 在某些场景下，一个分布式事务可能会涉及到多个参与者，且每个参与者需要根据自己当时的状态对事务进行响应。
+假设这样一个场景，一个电商网站可以允许用户在支付时选择多种支付方式。例如总共需要支付100元钱，用户可以选择积分支付10元，账户余额支付90元。用户的积分由营销系统负责，账户余额由账务系统负责，订单的状态管理由订单系统负责。
+首先，要先确保事务的各个参与者满足条件才能执行事务。例如积分系统要确保用户的积分超过10元钱，账务系统要确保用户的账户余额大于90元钱才能发起这次交易。
+其次，就是要满足事务的原子性。这里的用户积分、用户余额、订单状态，要嘛全部处理成功，要嘛全部保持不变。
+应对这种分布式事务场景，可以采用TCC两阶段提交的方式进行处理。关于TCC的详细描述，大家也可以参考下这篇博文，我觉的讲的很好。
+TCC将整个事务分成两个阶段——try和commit/cancel。TCC整个流程具有三种角色——事务发起者、事务参与者、事务协调者。以上面的订单支付为例，采用TCC实现处理事务的流程如下：
+第一阶段try，订单系统分别调用promotion和account两个系统，询问该用户是否有足够的积分和账户余额。为了防止资源争抢，在这个阶段会对资源进行锁定，即营销系统会锁住用户的10元积分，账务系统会锁住用户的90元账户余额。
+如果在try阶段有任何一个参与者处理失败(例如用户积分不够10元或者用户的余额不够90元)，则事务发起方(订单系统)会通知事务协调组件，后者会通知所有的事务参与者cancel在try阶段锁定的资源。
+如果在try阶段所有的参与者都处理成功，则事务发起方通知协调者commit这个事务，协调者会通知所有的参与者完成事务的commit。这时系统会完成真正的余额和积分扣减。2.2步是假设订单系统也要更新订单的状态。
+但仅是这样处理还是有一致性问题，例如在第二阶段commit时如果发生宕机、网络抖动等异常情况，就可能导致事务处于“非最终一致”状态(参与者只执行了try阶段，没有执行第二阶段。或部分参与者第二阶段commit成功，部分参与者commit失败)。为了应对这种情况，需要增加事务日志，以便发生异常时恢复事务。
+可以利用DB这种可靠存储来记录事务日志。日志中应包含事务执行过程中的上下文、事务执行状态、事务的参与者等信息。事务日志可以由事务发起发负责记录，也可以交由事务协调方进行记录。
+事务日志可以由主事务记录日志和从事务记录日志组成：
+主事务记录日志用于记录事务发起方信息以及事务执行的整体状态。
+从事务记录日志用于记录所有的事务参与者信息，以及每个参与者所属的从事务的执行状态。与主事务记录日志是一对多的关系。
+有了事务日志后，就可以周期性的不断扫描事务日志，找到异常中断的事务。根据事务日志中记录的信息，推动剩余的参与者commit或者cancel，以便使整个分布式事务达到“最终一致性”。
+下面是commit阶段发生异常时的事务补偿逻辑：
+TCC两阶段提交的实现需要注意如下事项：
+事务中的任何一个参与者都要确保在try阶段操作成功，在第二阶段就一定能commit成功。
+参与者在实现commit和cancel接口时要考虑幂等，对重复的commit/cancel请求要能够正确处理。
+业务上要考虑对两阶段中间状态(一阶段已完成，二阶段未开始)的处理。一般可以通过一些特殊文案，比如显示当前被冻结的账户余额。
+对于状态型数据，当多个事务共同操作同一个资源时，要确保资源隔离。例如账户余额，确保不同的事务操作的金额是隔离的，彼此互不影响。
+由于网络丢包、乱序等因素的影响，可能会导致参与者接收到一阶段try请求后，永远收不到commit/cancel请求，导致参与者的资源一直被锁定，永远不会被释放，这种情况叫做事务悬挂。为了防止事务悬挂的发生，可以在第一阶段try成功后，指定一个最大等待时间。超过这个最大等待时间就自动释放被锁定的资源。
+总结 传统的单机事务应满足A(原子性)、C(一致性)、I(隔离型)、D(持久性)四个特性，属于刚性事务。由于分布式系统具有多个节点的特点，要求完全满足ACID这四个规范会非常的困难。所以就诞生了柔性事务BASE理论(Basic availability、Soft state、Eventual consistency)。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/45fc2b818c83a4009d70f833db62377a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-08-01T21:43:30+08:00" />
+<meta property="article:modified_time" content="2019-08-01T21:43:30+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">分布式事务处理方式总结</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div class="rich_media_content" id="js_content"> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">在项目开发中，经常会需要处理分布式事务。例如数据库分库分表之后，原来在一个单库上的操作可能会跨越多个数据库。系统服务化拆分之后，原来的在一个系统上的操作可能会跨越多个系统。就连我们平时经常使用到的缓存(如redis、memcache等)也可能涉及分布式事务，因为缓存和数据库是两个不同的实体，如何保证数据在缓存和数据库间的一致性也是要重点考虑的。分布式事务就是指事务要处理的资源分别位于分布式系统中的不同节点之上的事务。<br>对于单机系统，通常我们借助数据库实现本地事务，例如下面JDBC代码实现了一个事务：</p> 
+ <p><span class="selectCode code-tool" style='background-image:url("https://ss.csdn.net/p?https://mmbiz.qpic.cn/mmbiz_svg/tqRiaNianNl1mHhXFeBtFsFRgmgicawWDvorkaLFRVGFhDbCXF5Yb06LtE7eLicNxRr1fNrF1IyUibwdk8jkoZv4L0Wze5TIVv6Xt/640?wx_fmt=svg");width:16px;' title=""></span><span class="copyCode code-tool" style='background-image:url("https://ss.csdn.net/p?https://mmbiz.qpic.cn/mmbiz_svg/tqRiaNianNl1mHhXFeBtFsFRgmgicawWDvorkaLFRVGFhDbCXF5Yb06LtE7eLicNxRr1fNrF1IyUibwdk8jkoZv4L0Wze5TIVv6Xt/640?wx_fmt=svg");width:16px;background-position:-16px 0px;' title=""></span></p> 
+ <pre class="hljs erlang" style="font-family:'Source Code Pro', Consolas, Menlo, Monaco, 'Courier New', monospace;font-size:.93em;line-height:1.45;border:none;background-image:url(&quot;https://img-blog.csdnimg.cn/img_convert/07c1cbf338145f9d4838c2f35f54175e.png;);"></pre> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">由于在分布式系统中，多个系统无法共用同一个数据库链接，所以无法简单借用上面的处理方式实现分布式事务。<br>下面将介绍几种本人在实际开发中使用过的处理分布式事务的方式，最后再引出分布式事务的相关理论并进行总结。</p> 
+ <h3 style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;line-height:1.5em;font-size:1.75em;border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:rgb(238,238,238);">避免出现分布式事务</h3> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">由于分布式事务比较难于处理，所以应该尽量避免分布式事务的发生。例如对于一个客户信息系统，由于注册用户数太多导致存储的数据量过大，所以对其进行分库分表存储。而客户信息模型又分为多个子模型，对应数据库中的多个表，例如客户基本信息表、客户登录账号表、客户登录密码表、客户联系方式表等等。假设登录账号表和客户基本信息表的关联关系如下所示：</p> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;"><span class="img-wrap" style="text-align:center;"><img style="border:none;vertical-align:middle;" title="clipboard.png" src="https://images2.imgbox.com/83/d9/UUGqIikX_o.png" alt="640?wx_fmt=png"></span></p> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">user_id和login_id分别是两个表的主键，user_id还作为login_info表的外键使两个表关联。在用户注册时会自动生成user_id和login_id的值。<strong>user_info和login_info两个表分别采用user_id和login_id计算分库分表规则</strong>。假设我们对每个模型分十库一百表存储，即存在user_info_00 ~ user_info_99一百个表，其中user_info_00 ~ user_info_09属于第一个库，user_info_10 ~ user_info_19属于第二个库，依次类推。<br>在分库分表之后，如果我们不仔细考虑user_id和login_id的生成规则(例如随意生成一个数字字符串或简单使用递增sequence)，就可能导致同一个用户的user_info信息和login_info信息被分别存储到两个不同的库，这就会导致分布式事务发生。<br>面对这种问题，最好的解决思路就是考虑如何避免分布式事务的发生。只要想办法让跟一个用户相关的所有模型数据全部存入到一个库中，就可以避免分布式事务了。由于每个模型数据的分库分表路由规则又是由各个表的主键id决定的(例如user_id、login_id)，所以只要对各个表的主键生成规则进行定制，就可以保证一个用户的所有模型数据全部存到同一个库。假设有下面的id生成规则：</p> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;"><span class="img-wrap" style="text-align:center;"><img style="border:none;vertical-align:middle;" title="clipboard.png" src="https://images2.imgbox.com/d0/6f/YEo8yXo6_o.png" alt="640?wx_fmt=png"></span></p> 
+ <ul style="margin-left:3em;" class="list-paddingleft-2"><li><p>开始的两位是标识模型位，例如user_id以01开头，login_id以02开头。</p></li><li><p>接下来的11位是sequence递增序列号，如果想要更多的ID可以扩大这部分的位数，但对于存储用户信息而言，11位的长度足够。</p></li><li><p>接下来是分库分表位，如果每个模型的分库分表算法都相同，那么只要保证每个模型的主键ID的分库分表位都相同，就能保证一个用户的所有模型数据都会存到同一个库中。</p></li><li><p>最后一位是id校验位，这一位根据前面15位的内容生成，方便对一个id进行校验。</p></li></ul> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">根据这个思想，我们可以在用户注册的时候先生成user_id，user_id的分库分表位可以随机生成。然后在为其它模型生成主键id时(例如login_id)，必须让这个模型的主键id的分库分表位与user_id的分库分表位相同。另外一点也要注意，一个表的查询条件不一定只有主键id一个，如果有其它查询条件列，那就要保证那一列的生成规则也要包含相同的分库分表位，否则就不能使用该列进行查询。<br>通过这种方式，就可以保证一个用户的所有模型数据全部存储到同一个库中，有效的避免分布式事务的发生。</p> 
+ <h3 style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;line-height:1.5em;font-size:1.75em;border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:rgb(238,238,238);">事务补偿</h3> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">通常情况下，应对高并发的一个主要手段就是增加分布式缓存(如redis)以提高查询性能。增加分布式缓存后系统查询数据的流程如下图：</p> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;"><span class="img-wrap" style="text-align:center;"><img style="border:none;vertical-align:middle;" title="clipboard.png" src="https://images2.imgbox.com/e8/38/J3zIlvDV_o.png" alt="640?wx_fmt=png"></span></p> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">即先尝试从缓存中查询数据，如果缓存命中就直接返回结果，否则尝试从DB中查询数据。如果查询DB命中则将数据补充到缓存，以便下次查询时可以命中缓存。<br>而在更新数据时，通常是先更新DB中的数据，DB写入成功后再更新缓存中的数据。那么就有一个问题，<strong>如何保证缓存和DB间数据的一致性？</strong>由于缓存和DB是两个不同的实体，写入DB成功后再去更新缓存，如果缓存更新失败(例如网络抖动造成短暂的缓存不可用)就会造成缓存和DB的不一致。此时按照上图的查询逻辑，先查缓存就会查询到“脏”的数据，就会严重影响业务。这也是一个典型的分布式事务问题——缓存和DB要嘛同时更新成功，要嘛同时更新失败。解决这个问题的一个较好方式就是事务补偿。<br>我们可以在DB中创建一张事务补偿表transaction_log，transaction_log表可以和业务数据在一个库中，也可以在不同的库。在更新数据前，先将要更新的模型数据记录到transaction_log中。例如我们更新user_info表中的数据，就将userId记录到transaction_log中。<br>transaction_log记录成功后，再去更新业务数据表user_info中的内容，最后更新缓存中的userInfo数据。缓存更新成功后，就可以删除transaction_log表中对应的记录。<br>假设在更新完user_info表之后，由于网络抖动等原因导致缓存更新失败，则transaction_log表中对应的记录就会一直存在，表示这个事务没有完成的一种记录。<br>应用会创建一个定时任务，周期性的扫描transaction_log表中的记录(例如每隔2S扫描一次)。发现有符合条件的记录，就尝试执行补偿逻辑。例如更新用户信息时，DB中的user_info表更新成功，但缓存更新失败，定时任务发现transaction_log表中对应的记录没有删除且已经超过正常等待时间，就尝试使缓存和DB一致(可以删除缓存中对应的数据，也可以根据userId重新查询DB再补充的缓存)。补偿任务执行完成后，就可以删除transaction_log表中对应的记录。如果补偿任务执行再次失败，就保留transaction_log表中的记录，等待下个周期再次执行。<br>事务补偿这种方式保证的是事务的最终一致性，即如果发生意外，会存在一个时间窗口(例如2S)，在这个窗口内DB和缓存间是不一致的，但能保证最终两者的数据是一致的。至于定时任务周期的设定，要结合业务对“脏”数据的敏感程度以及系统的负载能力。</p> 
+ <h3 style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;line-height:1.5em;font-size:1.75em;border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:rgb(238,238,238);">事务型消息</h3> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">对于一个金融系统，假设有一个需求是用户注册成功后自动为用户创建一个账户。客户的信息维护在客户中心系统，客户的账户信息维护的账务中心系统，如果用户注册成功，必须保证客户的账户在账务系统创建成功。这显然也是一个分布式事务问题。<br>处理这个问题，显然也可以采用上一小节介绍的事务补偿机制来处理。但注册和开户并不要求一定是同步完成，且需要感知用户注册成功事件的系统并不只有账务系统一个(例如营销系统可能也需要感知用户注册成功的事件，给用户发优惠券)，所以使用消息机制异步通知更加合适。那么问题就变成了“如果用户注册成功，一定要保证消息发送成功”。<br>应对这种场景，可以使用事务型消息。但前提条件是使用的MQ中间件必须支持事务型消息，比如阿里的RocketMQ。目前市面上其它一些主流的MQ中间件都不支持事务型消息，比如Kafka和RabbitMQ都不支持。<br>下面的序列图是事务型消息的执行流程：</p> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;"><span class="img-wrap" style="text-align:center;"><img style="border:none;vertical-align:middle;" title="clipboard.png" src="https://images2.imgbox.com/49/1c/d9QpZiH3_o.png" alt="640?wx_fmt=png"></span></p> 
+ <ul style="margin-left:3em;" class="list-paddingleft-2"><li><p>相比于普通消息，发布者发送消息后，MQ并不是马上将消息发送给订阅者，而仅仅是将消息持久化存储下来。</p></li><li><p>发送消息成功之后，发布者执行本地事务。例如我们例子中提到的用户注册。</p></li><li><p>根据本地事务执行是否成功，发布者决定对之前已经发送的消息是commit还是rollback。如果是rollback，MQ会删除之前存储的消息。假设我们这里发送commit。</p></li><li><p>MQ接收到发布者发送的commit后，才会将消息发送给订阅者。之后，就可以利用MQ的消息可靠传输特性促使订阅者完成剩余事务操作，例如上面例子中提到的开户操作。</p></li></ul> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">细心的小伙伴会发现，如果在上图中的第5步发生问题导致发送commit失败，不还是会导致消息发布者和消息订阅者间事务的不一致吗？为了防止这种情况的发生，增加MQ超时回调机制。<br>下面的序列图是事务型消息commit失败时的执行流程：</p> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;"><span class="img-wrap" style="text-align:center;"><img style="border:none;vertical-align:middle;" title="clipboard.png" src="https://images2.imgbox.com/9d/90/7nny1x80_o.png" alt="640?wx_fmt=png"></span></p> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">当MQ长时间收不到发布者的commit/rollback通知时，MQ会回调发布者应用询问本地事务是否执行成功，是commit还是rollback之前的消息。发布者需要提供对应的callback，在callback中判断本地事务是否执行成功。</p> 
+ <h3 style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;line-height:1.5em;font-size:1.75em;border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:rgb(238,238,238);">TCC两阶段提交</h3> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">在某些场景下，一个分布式事务可能会涉及到多个参与者，且每个参与者需要根据自己当时的状态对事务进行响应。<br>假设这样一个场景，一个电商网站可以允许用户在支付时选择多种支付方式。例如总共需要支付100元钱，用户可以选择积分支付10元，账户余额支付90元。用户的积分由营销系统负责，账户余额由账务系统负责，订单的状态管理由订单系统负责。</p> 
+ <ul style="margin-left:3em;" class="list-paddingleft-2"><li><p>首先，要先确保事务的各个参与者满足条件才能执行事务。例如积分系统要确保用户的积分超过10元钱，账务系统要确保用户的账户余额大于90元钱才能发起这次交易。</p></li><li><p>其次，就是要满足事务的原子性。这里的用户积分、用户余额、订单状态，要嘛全部处理成功，要嘛全部保持不变。</p></li></ul> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">应对这种分布式事务场景，可以采用TCC两阶段提交的方式进行处理。关于TCC的详细描述，大家也可以参考下这篇博文，我觉的讲的很好。<br>TCC将整个事务分成两个阶段——try和commit/cancel。TCC整个流程具有三种角色——事务发起者、事务参与者、事务协调者。以上面的订单支付为例，采用TCC实现处理事务的流程如下：</p> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;"><span class="img-wrap" style="text-align:center;"><img style="border:none;vertical-align:middle;" title="clipboard.png" src="https://images2.imgbox.com/f8/7f/V6sKGQME_o.png" alt="640?wx_fmt=png"></span></p> 
+ <ul style="margin-left:3em;" class="list-paddingleft-2"><li><p>第一阶段try，订单系统分别调用promotion和account两个系统，询问该用户是否有足够的积分和账户余额。为了防止资源争抢，在这个阶段会对资源进行锁定，即营销系统会锁住用户的10元积分，账务系统会锁住用户的90元账户余额。</p></li><li><p>如果在try阶段有任何一个参与者处理失败(例如用户积分不够10元或者用户的余额不够90元)，则事务发起方(订单系统)会通知事务协调组件，后者会通知所有的事务参与者cancel在try阶段锁定的资源。</p></li><li><p>如果在try阶段所有的参与者都处理成功，则事务发起方通知协调者commit这个事务，协调者会通知所有的参与者完成事务的commit。这时系统会完成真正的余额和积分扣减。2.2步是假设订单系统也要更新订单的状态。</p></li></ul> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">但仅是这样处理还是有一致性问题，例如在第二阶段commit时如果发生宕机、网络抖动等异常情况，就可能导致事务处于“非最终一致”状态(参与者只执行了try阶段，没有执行第二阶段。或部分参与者第二阶段commit成功，部分参与者commit失败)。为了应对这种情况，需要增加事务日志，以便发生异常时恢复事务。<br>可以利用DB这种可靠存储来记录事务日志。日志中应包含事务执行过程中的上下文、事务执行状态、事务的参与者等信息。事务日志可以由事务发起发负责记录，也可以交由事务协调方进行记录。<br>事务日志可以由主事务记录日志和从事务记录日志组成：</p> 
+ <ul style="margin-left:3em;" class="list-paddingleft-2"><li><p><strong>主事务记录日志</strong>用于记录事务发起方信息以及事务执行的整体状态。</p></li><li><p><strong>从事务记录日志</strong>用于记录所有的事务参与者信息，以及每个参与者所属的从事务的执行状态。与主事务记录日志是一对多的关系。</p></li></ul> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">有了事务日志后，就可以周期性的不断扫描事务日志，找到异常中断的事务。根据事务日志中记录的信息，推动剩余的参与者commit或者cancel，以便使整个分布式事务达到“最终一致性”。<br>下面是commit阶段发生异常时的事务补偿逻辑：</p> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;"><span class="img-wrap" style="text-align:center;"><img style="border:none;vertical-align:middle;" title="clipboard.png" src="https://images2.imgbox.com/40/7d/yphf8YqT_o.png" alt="640?wx_fmt=png"></span></p> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">TCC两阶段提交的实现需要注意如下事项：</p> 
+ <ol style="margin-left:3em;" class="list-paddingleft-2"><li><p>事务中的任何一个参与者都要确保在try阶段操作成功，在第二阶段就一定能commit成功。</p></li><li><p>参与者在实现commit和cancel接口时要考虑幂等，对重复的commit/cancel请求要能够正确处理。</p></li><li><p>业务上要考虑对两阶段中间状态(一阶段已完成，二阶段未开始)的处理。一般可以通过一些特殊文案，比如显示当前被冻结的账户余额。</p></li><li><p>对于状态型数据，当多个事务共同操作同一个资源时，要确保资源隔离。例如账户余额，确保不同的事务操作的金额是隔离的，彼此互不影响。</p></li><li><p>由于网络丢包、乱序等因素的影响，可能会导致参与者接收到一阶段try请求后，永远收不到commit/cancel请求，导致参与者的资源一直被锁定，永远不会被释放，这种情况叫做事务悬挂。为了防止事务悬挂的发生，可以在第一阶段try成功后，指定一个最大等待时间。超过这个最大等待时间就自动释放被锁定的资源。</p></li></ol> 
+ <h3 style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;line-height:1.5em;font-size:1.75em;border-bottom-width:1px;border-bottom-style:solid;border-bottom-color:rgb(238,238,238);">总结</h3> 
+ <p style="font-family:'-apple-system', BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC', 'Microsoft YaHei', 'Source Han Sans SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;font-size:15px;">传统的单机事务应满足A(原子性)、C(一致性)、I(隔离型)、D(持久性)四个特性，属于刚性事务。由于分布式系统具有多个节点的特点，要求完全满足ACID这四个规范会非常的困难。所以就诞生了柔性事务BASE理论(Basic availability、Soft state、Eventual consistency)。<br>相比于单机事务，分布式事务在A和D上仍能够严格保证，但在C和I上就要有一定程度的限制放宽(允许看到中间状态数据、最终一致性)。</p> 
+ <p><br></p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f058864a6237fc2642cf8c2224f5a662/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">tushare接口get_realtime_quotes报错：AssertionError: 33 columns passed, passed data had 34 columns</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/90dd54b3579ff7455942f87d75964a8e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">SQL优化系列 - （一）SQL语句优化</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>STM32F4系列探究1——三重ADC扫描连续采样&#43;DMA双缓冲区存储 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="STM32F4系列探究1——三重ADC扫描连续采样&#43;DMA双缓冲区存储" />
+<meta property="og:description" content="文章目录 前言一、STM32F4的ADC理论知识学习1.基础知识2.扫描模式与连续模式3.单ADC模式下双缓存机制的实现4.三重同步采样模式 二、由定时器触发的单缓冲区模式1.时钟树配置2.ADC部分配置3.定时器部分配置4.中断配置总结5.main.c修改 三、连续模式下的双缓冲区模式1.Cube设置修改2.main.c修改 前言 本文的主要目的是通过学习官方文档，掌握使用STM32CubeMx实现STM32F446ZET6芯片的多重ADC采样与DMA存储的功能，STM32F4系列在使用Cube时均可以参考本文章
+一、STM32F4的ADC理论知识学习 1.基础知识 STM32F446系列有3个ADC，即ADC1，ADC2和ADC3，其中ADC1有19个通道，ADC2和ADC3有16个通道。需要注意的ADC的主要参数如下所示：
+12-bit,10-bit,8-bit或者6-bit采样拥有扫描模式，连续模式有单重模式，双重模式和三重模式在双重/三重模式中也可开启DMA数据存储可以使用VREF&#43;提供外置的精确参考电压供ADC采样在转换结束或者采样值超出设定阈值时产生中断VREF-必须接到VSSA 下图是关于ADC所使用到的各引脚的电平要求，在设计电路时应注意要对模拟电源电压和数字电源电压进行隔离，对模拟地和数字地进行隔离。一般推荐使用外部芯片产生的高精度参考电压作为VREF&#43;确保ADC采样精度。
+三个ADC的每个通道都对应芯片上相应的IO引脚，具体可以参考芯片的datasheet，这里不再赘述。需要注意的是，ADC1的17，18通道分别接到了内部基准源和VBAT/Vsense上，没有接到IO引脚上，其中18通道意味着VBAT/4和温度传感器只能选择一个进行测量。至于内部基准源Vrefint，其有助于提高ADC的测量准确度。该内部基准源的出厂测量值存储在内存的一个地址上，读取后即可作为参考电压来校准ADC的采样值。该地址在手册中有写，不同型号芯片的位置可能不同。
+STM32F446的最高采样速率为2.4MSPS，而ADC完成一次采样加转换最少需要3&#43;12=15个周期，这意味着ADCCLK的最高频率为36MHz，而ADCCLK由PCLK2分频而来，因此在配置时钟树时要注意相关参数。
+2.扫描模式与连续模式 一个ADC有多个通道，在扫描模式下，ADC依次对选好的通道序列进行采样，并在对通道序列整个采样完一次后可以产生一个中断用于处理采集到的数据。扫描模式又可以分为单个转换模式和连续转换模式，连续转换模式下，当通道序列采样完后，又从头开始重新采样。
+在连续采样模式下，采样到的数据如何及时处理是一个大难题，一个方法是利用每次系列采样完毕时产生的中断及时将数据进行处理或者转移走，但该方法费时费力，占用CPU资源，会出现时序配合的问题。一般在连续采样模式下，都是使用DMA将数据存储在一个BUFF里，这个BUFF可以存储很多数据，在数据存满时会触发中断，此时应停止采样，并对数据进行处理。
+3.单ADC模式下双缓存机制的实现 那么问题来了，如果我需要一直连续的采样，中间不进行暂停，有没有好的办法呢。STM32提供了双缓存机制，也就是当数据存储满BUFF1后触发中断，通过操作使DMA开始将数据存储到BUFF2，此时就可以对BUFF1进行操作了，BUFF2存满后同理切换到BUFF1并开始处理BUFF2的数据。再单ADC模式下，该机制的实现很简单，但是无法通过Cube进行设置，需要手动添加两部分代码，如下所示：
+首先在DMA初始化函数中添加如下代码：
+if (HAL_DMAEx_MultiBufferStart((&amp;hadc1)-&gt;DMA_Handle,(uint32_t)&amp;hadc1.Instance-&gt;DR,mem0addr,mem1addr,memsize)!= HAL_OK){ printf(&#34;\r\n HAL_DMAEx_MultiBufferStart failed!&#34;); } HAL_ADC_Start_DMA(&amp;hadc1,(uint32_t *)mem0addr, memsize); __HAL_DMA_ENABLE_IT(&amp;hdma_adc1,DMA_IT_TC); //开启传输完成中断	接着是在DMA中断中修改代码令BUFF切换：
+void DMA2_Stream0_IRQHandler(void) { if(__HAL_DMA_GET_FLAG(&amp;hdma_adc1,DMA_FLAG_TCIF0_4)!=RESET)//DMA传输完成{ __HAL_DMA_CLEAR_FLAG(&amp;hdma_adc1,DMA_FLAG_TCIF0_4);//清除DMA传输完成中断标志位 if (hdma_adc1.Instance-&gt;CR&amp;(1 &lt;&lt; 19))//buf0已满,正常处理buf1 { DMAFLAG=0; }else //buf1已满,正常处理buf0 { DMAFLAG=1; } } } 只要添加以上两部分代码就可以实现双缓存功能。
+在一些简单的功能实现中，并不需要使用连续模式，而是使用定时器以特定的频率进行扫描采样。这时候需要对ADC的触发源进行配置，来确定在什么情况下触发一次ADC采样。此时可以利用ADC采样完毕后的中断进行数据的处理，该方式适用于定时器触发的频率较低时的采样，可以适应绝大部分情况下的采样需求。
+4.三重同步采样模式 多重ADC的使用有多种模式，这里只介绍一种模式，三重规则同步模式(triple injected simultaneous mode)，即由ADC1控制ADC2和ADC3，三个ADC同时触发一次转换。
+在三重ADC模式下，DMA有3种模式来传输数据，这里只介绍最常用的模式，注意该模式在双重ADC模式下不可使用：
+先传输ADC1的一个半字(half-word)，再传输ADC2的一个半字，接着传输ADC3的一个半字，接着传输ADC1的一个半字，如此循环往复。
+再三重规则同步模式下，需要注意三个ADC的采样通道序列的长度应是相等的，可以按照下图中的序列进行采样。再每个Conversion后，都会产生三个DMA传输请求，依次传输ADC1，ADC2，ADC3的数据。请注意，这和双重模式下的DMA是不同的，具体请参考手册。
+二、由定时器触发的单缓冲区模式 首先实现一个简单的但能满足大多数情况的模式，即由定时器触发ADC进行一定频率的采样，在DMA的目标缓冲区填满后，触发中断进行数据的处理。需要注意的是，如果打开DMA Continuous Requesets，新采样的数据会覆盖原来的缓冲区，因此要及时对数据进行处理，注意时序问题。
+1.时钟树配置 首先要关注系统时钟，也就是SYSCLK。这里为了保证时钟的精确性，我使用了25MHz的外接晶振HSE作为时钟源，经过简单的数学计算配置SYSCLK为120MHz，配置PCLK2为60MHz，这意味着ADCCLK的最高频率为30MHz。具体时钟树配置如下所示：
+2.ADC部分配置 通过阅读手册可以知道，三重ADC同步采样模式下，由ADC1进行整体的管理与触发。因此，关于多重ADC模式的设置位于ADC1的配置界面中。分别使能ADC1，ADC2，ADC3，根据我自己的需求，每个ADC的规则序列有4个通道，ADC1的设置界面如下所示：
+需要注意的是，当不使能DMA Continuous Requests时，DMA在填满缓冲区一次后不会再进行数据的传输，因此一般情况下都应该打开该选项。在ADC1的DMA界面添加DMA，如下图所示，模式设置为Circular：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/bbbc6ef7e3b80e9284f078a32587c5a2/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-04-25T20:26:07+08:00" />
+<meta property="article:modified_time" content="2021-04-25T20:26:07+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">STM32F4系列探究1——三重ADC扫描连续采样&#43;DMA双缓冲区存储</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#_11" rel="nofollow">前言</a></li><li><a href="#STM32F4ADC_17" rel="nofollow">一、STM32F4的ADC理论知识学习</a></li><li><ul><li><a href="#1_18" rel="nofollow">1.基础知识</a></li><li><a href="#2_35" rel="nofollow">2.扫描模式与连续模式</a></li><li><a href="#3ADC_38" rel="nofollow">3.单ADC模式下双缓存机制的实现</a></li><li><a href="#4_67" rel="nofollow">4.三重同步采样模式</a></li></ul> 
+  </li><li><a href="#_76" rel="nofollow">二、由定时器触发的单缓冲区模式</a></li><li><ul><li><a href="#1_78" rel="nofollow">1.时钟树配置</a></li><li><a href="#2ADC_81" rel="nofollow">2.ADC部分配置</a></li><li><a href="#3_89" rel="nofollow">3.定时器部分配置</a></li><li><a href="#4_94" rel="nofollow">4.中断配置总结</a></li><li><a href="#5mainc_96" rel="nofollow">5.main.c修改</a></li></ul> 
+  </li><li><a href="#_124" rel="nofollow">三、连续模式下的双缓冲区模式</a></li><li><ul><li><a href="#1Cube_125" rel="nofollow">1.Cube设置修改</a></li><li><a href="#2mainc_129" rel="nofollow">2.main.c修改</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<hr color="#000000" size='1"'> 
+<h2><a id="_11"></a>前言</h2> 
+<p><font color="#999AAA">本文的主要目的是通过学习官方文档，掌握使用STM32CubeMx实现STM32F446ZET6芯片的多重ADC采样与DMA存储的功能，STM32F4系列在使用Cube时均可以参考本文章</font></p> 
+<hr color="#000000" size='1"'> 
+<h2><a id="STM32F4ADC_17"></a>一、STM32F4的ADC理论知识学习</h2> 
+<h3><a id="1_18"></a>1.基础知识</h3> 
+<p>    STM32F446系列有3个ADC，即ADC1，ADC2和ADC3，其中ADC1有19个通道，ADC2和ADC3有16个通道。需要注意的ADC的主要参数如下所示：</p> 
+<ul><li>12-bit,10-bit,8-bit或者6-bit采样</li><li>拥有扫描模式，连续模式</li><li>有单重模式，双重模式和三重模式</li><li>在双重/三重模式中也可开启DMA数据存储</li><li>可以使用VREF+提供外置的精确参考电压供ADC采样</li><li>在转换结束或者采样值超出设定阈值时产生中断</li><li>VREF-必须接到VSSA</li></ul> 
+<p>    下图是关于ADC所使用到的各引脚的电平要求，在设计电路时应注意要对模拟电源电压和数字电源电压进行隔离，对模拟地和数字地进行隔离。一般推荐使用外部芯片产生的高精度参考电压作为VREF+确保ADC采样精度。</p> 
+<div align="center"> 
+ <img src="https://images2.imgbox.com/b7/90/BtorOPLA_o.png"> 
+</div> 
+<p>    三个ADC的每个通道都对应芯片上相应的IO引脚，具体可以参考芯片的datasheet，这里不再赘述。需要注意的是，ADC1的17，18通道分别接到了内部基准源和VBAT/Vsense上，没有接到IO引脚上，其中18通道意味着VBAT/4和温度传感器只能选择一个进行测量。至于内部基准源Vrefint，其有助于提高ADC的测量准确度。该内部基准源的出厂测量值存储在内存的一个地址上，读取后即可作为参考电压来校准ADC的采样值。该地址在手册中有写，不同型号芯片的位置可能不同。<br>     STM32F446的最高采样速率为2.4MSPS，而ADC完成一次采样加转换最少需要3+12=15个周期，这意味着ADCCLK的最高频率为36MHz，而ADCCLK由PCLK2分频而来，因此在配置时钟树时要注意相关参数。</p> 
+<h3><a id="2_35"></a>2.扫描模式与连续模式</h3> 
+<p>    一个ADC有多个通道，在扫描模式下，ADC依次对选好的通道序列进行采样，并在对通道序列整个采样完一次后可以产生一个中断用于处理采集到的数据。扫描模式又可以分为单个转换模式和连续转换模式，连续转换模式下，当通道序列采样完后，又从头开始重新采样。<br>     在连续采样模式下，采样到的数据如何及时处理是一个大难题，一个方法是利用每次系列采样完毕时产生的中断及时将数据进行处理或者转移走，但该方法费时费力，占用CPU资源，会出现时序配合的问题。一般在连续采样模式下，都是使用DMA将数据存储在一个BUFF里，这个BUFF可以存储很多数据，在数据存满时会触发中断，此时应停止采样，并对数据进行处理。</p> 
+<h3><a id="3ADC_38"></a>3.单ADC模式下双缓存机制的实现</h3> 
+<p>    那么问题来了，如果我需要一直连续的采样，中间不进行暂停，有没有好的办法呢。STM32提供了双缓存机制，也就是当数据存储满BUFF1后触发中断，通过操作使DMA开始将数据存储到BUFF2，此时就可以对BUFF1进行操作了，BUFF2存满后同理切换到BUFF1并开始处理BUFF2的数据。再单ADC模式下，该机制的实现很简单，但是无法通过Cube进行设置，需要手动添加两部分代码，如下所示：<br>     首先在DMA初始化函数中添加如下代码：</p> 
+<pre><code class="prism language-c"><span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">HAL_DMAEx_MultiBufferStart</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hadc1<span class="token punctuation">)</span><span class="token operator">-&gt;</span>DMA_Handle<span class="token punctuation">,</span><span class="token punctuation">(</span>uint32_t<span class="token punctuation">)</span><span class="token operator">&amp;</span>hadc1<span class="token punctuation">.</span>Instance<span class="token operator">-&gt;</span>DR<span class="token punctuation">,</span>mem0addr<span class="token punctuation">,</span>mem1addr<span class="token punctuation">,</span>memsize<span class="token punctuation">)</span><span class="token operator">!=</span> HAL_OK<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+ 	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"\r\n HAL_DMAEx_MultiBufferStart failed!"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token function">HAL_ADC_Start_DMA</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hadc1<span class="token punctuation">,</span><span class="token punctuation">(</span>uint32_t <span class="token operator">*</span><span class="token punctuation">)</span>mem0addr<span class="token punctuation">,</span> memsize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token function">__HAL_DMA_ENABLE_IT</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hdma_adc1<span class="token punctuation">,</span>DMA_IT_TC<span class="token punctuation">)</span><span class="token punctuation">;</span>    <span class="token comment">//开启传输完成中断		</span>
+</code></pre> 
+<p>    接着是在DMA中断中修改代码令BUFF切换：</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">DMA2_Stream0_IRQHandler</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token function">__HAL_DMA_GET_FLAG</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hdma_adc1<span class="token punctuation">,</span>DMA_FLAG_TCIF0_4<span class="token punctuation">)</span><span class="token operator">!=</span>RESET<span class="token punctuation">)</span><span class="token comment">//DMA传输完成{<!-- --></span>
+        <span class="token function">__HAL_DMA_CLEAR_FLAG</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hdma_adc1<span class="token punctuation">,</span>DMA_FLAG_TCIF0_4<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//清除DMA传输完成中断标志位</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>hdma_adc1<span class="token punctuation">.</span>Instance<span class="token operator">-&gt;</span>CR<span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token number">1</span> <span class="token operator">&lt;&lt;</span> <span class="token number">19</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token comment">//buf0已满,正常处理buf1</span>
+    	<span class="token punctuation">{<!-- --></span>
+			DMAFLAG<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span><span class="token keyword">else</span> <span class="token comment">//buf1已满,正常处理buf0</span>
+		<span class="token punctuation">{<!-- --></span>
+	  	DMAFLAG<span class="token operator">=</span><span class="token number">1</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>    只要添加以上两部分代码就可以实现双缓存功能。</p> 
+<p>    在一些简单的功能实现中，并不需要使用连续模式，而是使用定时器以特定的频率进行扫描采样。这时候需要对ADC的触发源进行配置，来确定在什么情况下触发一次ADC采样。此时可以利用ADC采样完毕后的中断进行数据的处理，该方式适用于定时器触发的频率较低时的采样，可以适应绝大部分情况下的采样需求。</p> 
+<h3><a id="4_67"></a>4.三重同步采样模式</h3> 
+<p>    多重ADC的使用有多种模式，这里只介绍一种模式，三重规则同步模式(triple injected simultaneous mode)，即由ADC1控制ADC2和ADC3，三个ADC同时触发一次转换。<br>     在三重ADC模式下，DMA有3种模式来传输数据，这里只介绍最常用的模式，注意该模式在双重ADC模式下不可使用：<br>     先传输ADC1的一个半字(half-word)，再传输ADC2的一个半字，接着传输ADC3的一个半字，接着传输ADC1的一个半字，如此循环往复。<br>     再三重规则同步模式下，需要注意三个ADC的采样通道序列的长度应是相等的，可以按照下图中的序列进行采样。再每个Conversion后，都会产生三个DMA传输请求，依次传输ADC1，ADC2，ADC3的数据。请注意，这和双重模式下的DMA是不同的，具体请参考手册。</p> 
+<div align="center"> 
+ <img src="https://images2.imgbox.com/8e/27/dOcGlTmJ_o.png"> 
+</div> 
+<h2><a id="_76"></a>二、由定时器触发的单缓冲区模式</h2> 
+<p>首先实现一个简单的但能满足大多数情况的模式，即由定时器触发ADC进行一定频率的采样，在DMA的目标缓冲区填满后，触发中断进行数据的处理。需要注意的是，如果打开DMA Continuous Requesets，新采样的数据会覆盖原来的缓冲区，因此要及时对数据进行处理，注意时序问题。</p> 
+<h3><a id="1_78"></a>1.时钟树配置</h3> 
+<p>    首先要关注系统时钟，也就是SYSCLK。这里为了保证时钟的精确性，我使用了25MHz的外接晶振HSE作为时钟源，经过简单的数学计算配置SYSCLK为120MHz，配置PCLK2为60MHz，这意味着ADCCLK的最高频率为30MHz。具体时钟树配置如下所示：<br> <img src="https://images2.imgbox.com/bd/41/Yei2IlAi_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="2ADC_81"></a>2.ADC部分配置</h3> 
+<p>通过阅读手册可以知道，三重ADC同步采样模式下，由ADC1进行整体的管理与触发。因此，关于多重ADC模式的设置位于ADC1的配置界面中。分别使能ADC1，ADC2，ADC3，根据我自己的需求，每个ADC的规则序列有4个通道，ADC1的设置界面如下所示：<br> <img src="https://images2.imgbox.com/b5/a5/xgOOgjW0_o.png" alt="在这里插入图片描述"><br> 需要注意的是，当不使能DMA Continuous Requests时，DMA在填满缓冲区一次后不会再进行数据的传输，因此一般情况下都应该打开该选项。在ADC1的DMA界面添加DMA，如下图所示，模式设置为Circular：<br> <img src="https://images2.imgbox.com/5e/ec/Y7pUhAir_o.png" alt="在这里插入图片描述"><br> 对于ADC2和ADC3的设置则较为简单：<br> <img src="https://images2.imgbox.com/32/9e/YxYWcKeJ_o.png" alt="在这里插入图片描述"><br> 同样要注意打开DMA Continuous Requests，并分别在ADC2与ADC3的DMA界面添加相应的DMA，并将模式设置为Circular。</p> 
+<h3><a id="3_89"></a>3.定时器部分配置</h3> 
+<p>从ADC1的配置中可以发现，ADC使用了TIM2的Trigger Out event进行触发，因此要对TIM2进行相应的配置。在STM32F4系列中，TIM2的时钟源为PCLK1。由时钟树可知，其时钟频率为60MHz，对于定时器的触发时间，有如下公式：<br> 发生中断时间=(Prescaler+1)* (Period+1)/PCLK1<br> 若设置ADC的采样频率为10KHz ，则有Prescaler=59,Period=99,具体配置如下：<br> <img src="https://images2.imgbox.com/7d/1d/8RxsOxSj_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="4_94"></a>4.中断配置总结</h3> 
+<p>ADC1,ADC2,ADC3的DMA中断都是默认开启的，不需要修改。定时器中断与其他外设的中断可以根据自己的需求进行开启，需要注意的是，如果使用了SDIO，则在SD卡读写时应当关闭所有中断。</p> 
+<h3><a id="5mainc_96"></a>5.main.c修改</h3> 
+<p>在初始化函数后，添加如下代码即可启动ADC与定时器，需要注意定时器应在ADC启动后再启动，如果想要触发定时器中断，则应使用函数HAL_TIM_Base_Start_IT(&amp;htim2)，具体代码如下：</p> 
+<pre><code class="prism language-c">	<span class="token keyword">if</span><span class="token punctuation">(</span><span class="token function">HAL_ADC_Start</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hadc3<span class="token punctuation">)</span><span class="token operator">!=</span>HAL_OK<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+		<span class="token function">Error_Handler</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">if</span><span class="token punctuation">(</span><span class="token function">HAL_ADC_Start</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hadc2<span class="token punctuation">)</span><span class="token operator">!=</span>HAL_OK<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+		<span class="token function">Error_Handler</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">if</span><span class="token punctuation">(</span><span class="token function">HAL_ADCEx_MultiModeStart_DMA</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hadc1<span class="token punctuation">,</span><span class="token punctuation">(</span>uint32_t<span class="token operator">*</span><span class="token punctuation">)</span>ADC_Result<span class="token punctuation">,</span><span class="token number">48</span><span class="token punctuation">)</span><span class="token operator">!=</span>HAL_OK<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+		<span class="token function">Error_Handler</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token function">HAL_TIM_Base_Start</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>htim2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>其中ADC_Result即为DMA传输的目标缓冲区，其数据格式为uint16_t，其大小可以自定，但应当为一次规则序列采样的数据数目的整数倍。<br> 再main.c中实现DMA回调函数，即可进行数据处理，一般推荐在回调函数中将标志位置1，在while循环中进行相应的操作，并将标志置0。回调函数示例代码如下所示：</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">HAL_ADC_ConvCpltCallback</span><span class="token punctuation">(</span>ADC_HandleTypeDef<span class="token operator">*</span> hadc<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	DMAFLAG<span class="token operator">++</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">void</span> <span class="token function">HAL_ADC_ConvHalfCpltCallback</span><span class="token punctuation">(</span>ADC_HandleTypeDef<span class="token operator">*</span> hadc<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	DMA_HALF_FLAG<span class="token operator">++</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>上述两个函数分别时DMA缓冲区全满与缓冲区半满的回调函数，打开位于stm32f4xx_hal_dma.c的HAL_DMA_RegisterCallback(DMA_HandleTypeDef <em>hdma, HAL_DMA_CallbackIDTypeDef CallbackID, void (</em> pCallback)(DMA_HandleTypeDef *_hdma))可以知道，每个DMA通道都有很多个回调函数，分别在缓冲区全满，缓冲区半满，双缓存情况下的缓冲区1（另一个是缓冲区0）全满，双缓存情况下的缓冲区1半满等中断下触发相应回调。在本例中，Cube为ADC注册了DMA缓冲区全满，半满以及错误的回调函数，只需要在main.c中对相关回调进行重写即可在触发相应中断时执行自己想要进行的操作。<br> 实际上，有了半满中断后，双缓存的意义便不太大了。在一些特殊情况下，比如需要在采样过程中修改缓冲区的地址，则需要利用DMA的双缓存机制的相关函数，因此下一节对双缓存机制进行探究。</p> 
+<h2><a id="_124"></a>三、连续模式下的双缓冲区模式</h2> 
+<h3><a id="1Cube_125"></a>1.Cube设置修改</h3> 
+<p>只需要在ADC1，ADC2与ADC3的设置中关闭定时器触发的设置并打开连续模式即可，如下所示：<br> <img src="https://images2.imgbox.com/e2/bc/a5KjpWEU_o.png" alt="在这里插入图片描述"><br> 此时定时器TIM2可以选择关闭。</p> 
+<h3><a id="2mainc_129"></a>2.main.c修改</h3> 
+<p>需要注意的是，STM32的双缓存机制的设置函数理论上为HAL_DMAEx_MultiBufferStart_IT()，但是使用该函数无法进行缓冲区的切换，可能是官方文档存在一定BUG。为此，我摸索出可以实现相关机制的配置代码如下：</p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">HAL_ADC_MutiM1ConvCpltCallback</span><span class="token punctuation">(</span>DMA_HandleTypeDef <span class="token operator">*</span>_hdma<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token function">HAL_DMA_RegisterCallback</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hadc1<span class="token punctuation">)</span><span class="token operator">&gt;</span>DMA_Handle<span class="token punctuation">,</span>HAL_DMA_XFER_M1CPLT_CB_ID<span class="token punctuation">,</span>HAL_ADC_MutiM1ConvCpltCallback<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">HAL_DMAEx_MultiBufferStart</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hadc1<span class="token punctuation">)</span><span class="token operator">-&gt;</span>DMA_Handle<span class="token punctuation">,</span><span class="token punctuation">(</span>uint32_t<span class="token punctuation">)</span><span class="token operator">&amp;</span>hadc1<span class="token punctuation">.</span>Instance<span class="token operator">-&gt;</span>DR<span class="token punctuation">,</span><span class="token punctuation">(</span>uint32_t<span class="token punctuation">)</span>buf0<span class="token punctuation">,</span><span class="token punctuation">(</span>uint32_t<span class="token punctuation">)</span>buf1<span class="token punctuation">,</span>AD_BufferSize<span class="token punctuation">)</span><span class="token operator">!=</span> HAL_OK<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+ 	<span class="token function">printf</span><span class="token punctuation">(</span><span class="token string">"\r\n HAL_DMAEx_MultiBufferStart failed!"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">if</span><span class="token punctuation">(</span><span class="token function">HAL_ADC_Start</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hadc3<span class="token punctuation">)</span><span class="token operator">!=</span>HAL_OK<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+	<span class="token function">Error_Handler</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">if</span><span class="token punctuation">(</span><span class="token function">HAL_ADC_Start</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hadc2<span class="token punctuation">)</span><span class="token operator">!=</span>HAL_OK<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+	<span class="token function">Error_Handler</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">if</span><span class="token punctuation">(</span><span class="token function">HAL_ADCEx_MultiModeStart_DMA</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hadc1<span class="token punctuation">,</span><span class="token punctuation">(</span>uint32_t<span class="token operator">*</span><span class="token punctuation">)</span>buf0<span class="token punctuation">,</span>AD_BufferSize<span class="token punctuation">)</span><span class="token operator">!=</span>HAL_OK<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+	<span class="token function">Error_Handler</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token function">__HAL_DMA_ENABLE_IT</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hdma_adc1<span class="token punctuation">,</span>DMA_IT_TC<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token function">__HAL_DMA_DISABLE_IT</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>hdma_adc1<span class="token punctuation">,</span>DMA_IT_HT<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>在上述代码中，首先利用RegisterCallback函数注册dma的缓冲区2全满回调函数，这样在缓存2填满后会触发回调函数进入用户定义的HAL_ADC_MutiM1ConvCpltCallback()中。同时使用非中断模式启动DMA的双缓存存储，在ADC启动后打开缓冲区全满中断，即DMA_IT_TC标志，可以根据需要选择是否打开缓冲区半满中断，即DMA_IT_HT标志。要注意的是，如果要打开缓冲区半满中断，应当给缓冲区2添加一个缓冲区半满回调函数，只需要再注册函数的调用中将ID从HAL_DMA_XFER_M1CPLT_CB_ID改为HAL_DMA_XFER_M1HALFCPLT_CB_ID，同时再自行定义一个回调函数即可。<br> 双缓存机制的意义在于可以改变缓冲区的目标地址，需要使用<br> HAL_DMAEx_ChangeMemory()函数，打开stm32f4xx_hal_dma_ex.c文件即可查看该函数的定义和调用方法。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e552745770f36f46d9760089301f20b6/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">tensorflow2中 tensor转为numpy</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/304b762ca06a239ef5ad89c69f969d43/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">CICD系列之harbor</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

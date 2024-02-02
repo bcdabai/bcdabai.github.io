@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>velero和minio实现k8s数据的备份和恢复 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="velero和minio实现k8s数据的备份和恢复" />
+<meta property="og:description" content="一、概述: Velero（以前称为 Heptio Ark）为您提供了备份和恢复 Kubernetes 集群资源和持久卷的工具，可以安全的备份、恢复和迁移Kubernetes集群资源和持久卷。
+Velero主要提供以下能力
+备份群集并在丢失时进行还原。 将群集资源迁移到其他群集。 将生产群集复制到开发和测试群集。 Velero 支持备份存储
+Azure BloB 存储 Google Cloud 存储 AWS S3 及兼容S3 的存储（比如：MinIO） Aliyun OSS 存储 velero和etcd快照备份的区别：
+etcd快照备份是全局备份，即使一个资源对象需要恢复也需要做全局恢复到备份状态及会影响其他的pod和其他namespace的资源
+velero可以有针对性的备份，比如按照namespace单独备份、只备份单独资源对象等，在恢复的时候只恢复单独的namespace或资源对象，不影响其他namespace中pod的运行
+velero支持ceph，oss等对象存储，etcd快照是一个本地文件
+velero支持任务计划实现周期备份，但etcd快照备份也可以基于cronjob实现
+velero存储方式:
+Restic方式备份
+Restic 是一款 GO 语言开发的开源免费且快速、高效和安全的跨平台备份工具。它是文件系统级别备份持久卷数据并将其发送到 Velero 的对象存储。执行速度取决于本地IO能力，网络带宽和对象存储性能，相对快照方式备份慢。 但如果当前集群或者存储出现问题，由于所有资源和数据都存储在远端的对象存储上， 用Restic方式备份可以很容易的将应用恢复。 Tips： 使用 Restic 来对 PV 进行备份会有一些限制：
+不支持备份 hostPath，支持EFS、AzureFile、NFS、emptyDir、local 或其他没有本地快照概念的卷类型 备份数据标志只能通过 Pod 来识别 单线程操作大量文件比较慢 快照方式备份
+Velero使用一组 BackupItemAction 插件针对 PersistentVolumeClaims 进行备份，执行速度快。它创建一个以 PersistentVolumeClaim 作为源的 VolumeSnapshot 对象， 此 VolumeSnapshot 对象与用作源的 PersistentVolumeClaim 位于同一命名空间中，与VolumeSnapshot对应的 VolumeSnapshotContent 对象是一个集群范围的资源，将指向存储系统中基于磁盘的实际快照。Velero 备份时将所有 VolumeSnapshots 和 VolumeSnapshotContents 对象上传到对象存储系统， 但是Velero 备份后的数据资源仍然保存在集群的存储上。数据可用性依赖于本地存储的高可用性，因为如果是由于存储故障导致的应用问题，Velero的快照备份机制并不能恢复应用数据。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/405b5e8eb287022ef0227fd6694c72d4/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-08-21T16:16:30+08:00" />
+<meta property="article:modified_time" content="2023-08-21T16:16:30+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">velero和minio实现k8s数据的备份和恢复</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a></h2> 
+<h2><a id="_1"></a>一、概述:</h2> 
+<p>Velero（以前称为 Heptio Ark）为您提供了备份和恢复 Kubernetes 集群资源和持久卷的工具，可以安全的备份、恢复和迁移Kubernetes集群资源和持久卷。<br> <strong>Velero主要提供以下能力</strong></p> 
+<pre><code>备份群集并在丢失时进行还原。
+将群集资源迁移到其他群集。
+将生产群集复制到开发和测试群集。
+</code></pre> 
+<p><strong>Velero 支持备份存储</strong></p> 
+<pre><code>Azure BloB 存储
+Google Cloud 存储
+AWS S3 及兼容S3 的存储（比如：MinIO）
+Aliyun OSS 存储
+</code></pre> 
+<p><strong>velero和etcd快照备份的区别：</strong></p> 
+<blockquote> 
+ <p>etcd快照备份是全局备份，即使一个资源对象需要恢复也需要做全局恢复到备份状态及会影响其他的pod和其他namespace的资源<br> velero可以有针对性的备份，比如按照namespace单独备份、只备份单独资源对象等，在恢复的时候只恢复单独的namespace或资源对象，不影响其他namespace中pod的运行<br> velero支持ceph，oss等对象存储，etcd快照是一个本地文件<br> velero支持任务计划实现周期备份，但etcd快照备份也可以基于cronjob实现</p> 
+</blockquote> 
+<p><strong>velero存储方式:</strong><br> Restic方式备份<br> Restic 是一款 GO 语言开发的开源免费且快速、高效和安全的跨平台备份工具。它是文件系统级别备份持久卷数据并将其发送到 Velero 的对象存储。执行速度取决于本地IO能力，网络带宽和对象存储性能，相对快照方式备份慢。 但如果当前集群或者存储出现问题，由于所有资源和数据都存储在远端的对象存储上， 用Restic方式备份可以很容易的将应用恢复。 Tips： 使用 Restic 来对 PV 进行备份会有一些限制：</p> 
+<pre><code>不支持备份 hostPath，支持EFS、AzureFile、NFS、emptyDir、local 或其他没有本地快照概念的卷类型
+备份数据标志只能通过 Pod 来识别
+单线程操作大量文件比较慢
+</code></pre> 
+<p><strong>快照方式备份</strong><br> Velero使用一组 BackupItemAction 插件针对 PersistentVolumeClaims 进行备份，执行速度快。它创建一个以 PersistentVolumeClaim 作为源的 VolumeSnapshot 对象， 此 VolumeSnapshot 对象与用作源的 PersistentVolumeClaim 位于同一命名空间中，与VolumeSnapshot对应的 VolumeSnapshotContent 对象是一个集群范围的资源，将指向存储系统中基于磁盘的实际快照。Velero 备份时将所有 VolumeSnapshots 和 VolumeSnapshotContents 对象上传到对象存储系统， 但是Velero 备份后的数据资源仍然保存在集群的存储上。数据可用性依赖于本地存储的高可用性，因为如果是由于存储故障导致的应用问题，Velero的快照备份机制并不能恢复应用数据。</p> 
+<p><strong>简介</strong><br> Velero 是一款云原生时代的灾难恢复和迁移工具，采用 Go 语言编写，并在 github 上进行了开源，利用 velero 用户可以安全的备份、恢复和迁移 Kubernetes 集群资源和持久卷。</p> 
+<ul><li>开源地址：https://github.com/vmware-tanzu/velero</li><li>官方文档：https://velero.io/docs/v1.11/</li></ul> 
+<h3><a id="11__48"></a>1.1 支持的版本列表</h3> 
+<p><img src="https://images2.imgbox.com/88/42/pGAlINVs_o.png" alt="image.png"></p> 
+<h3><a id="1docker_50"></a>1.安装docker</h3> 
+<pre><code class="prism language-shell"><span class="token function">wget</span> <span class="token parameter variable">-O</span> /etc/yum.repos.d/docker-ce.repo https://download.docker.com/linux/centos/docker-ce.repo
+<span class="token function">sed</span> <span class="token parameter variable">-i</span> <span class="token string">'s+download.docker.com+mirrors.aliyun.com/docker-ce+'</span> /etc/yum.repos.d/docker-ce.repo
+
+
+yum <span class="token function">install</span> docker-ce <span class="token parameter variable">-y</span>
+
+systemctl <span class="token builtin class-name">enable</span> <span class="token function">docker</span> <span class="token operator">&amp;&amp;</span> systemctl daemon-reload <span class="token operator">&amp;&amp;</span> systemctl restart <span class="token function">docker</span> <span class="token operator">&amp;&amp;</span> systemctl status <span class="token function">docker</span>
+
+</code></pre> 
+<h3><a id="2minio_63"></a>2.安装minio</h3> 
+<pre><code class="prism language-shell"><span class="token function">mkdir</span> <span class="token parameter variable">-p</span> /data/minio/data
+
+
+<span class="token function">docker</span> run <span class="token parameter variable">-p</span> <span class="token number">9000</span>:9000 <span class="token parameter variable">-p</span> <span class="token number">9090</span>:9090 <span class="token punctuation">\</span>
+ <span class="token parameter variable">--name</span> minio <span class="token punctuation">\</span>
+ <span class="token parameter variable">-d</span> <span class="token parameter variable">--restart</span><span class="token operator">=</span>always <span class="token punctuation">\</span>
+ <span class="token parameter variable">-e</span> <span class="token string">"MINIO_ACCESS_KEY=admin"</span> <span class="token punctuation">\</span>
+ <span class="token parameter variable">-e</span> <span class="token string">"MINIO_SECRET_KEY=admin123456"</span> <span class="token punctuation">\</span>
+ <span class="token parameter variable">-v</span> /data/minio/data:/data  <span class="token punctuation">\</span>
+ <span class="token parameter variable">-v</span> /data/minio/config:/root/.minio <span class="token punctuation">\</span>
+ minio/minio  server<span class="token punctuation">\</span>
+ /data --console-address <span class="token string">":9090"</span> <span class="token parameter variable">-address</span> <span class="token string">":9000"</span>
+</code></pre> 
+<h3><a id="3ip9090_80"></a>3.访问部署机器ip的9090</h3> 
+<p><a href="http://127.0.0.1:9090" rel="nofollow">http://192.168.100.225:9090</a></p> 
+<p><strong>创建Buckets桶名为: data</strong><br> <img src="https://images2.imgbox.com/4b/34/3O20WRhJ_o.png" alt="image.png"></p> 
+<h3><a id="4velero_85"></a>4.安装velero</h3> 
+<p>说明：在能连接到k8s集群并安装有kubectl命令行的主机上安装velero</p> 
+<pre><code class="prism language-shell"><span class="token comment">#下载</span>
+<span class="token function">wget</span> https://github.com/vmware-tanzu/velero/releases/download/v1.10.0/velero-v1.10.0-linux-amd64.tar.gz
+<span class="token function">tar</span> xvf velero-v1.10.0-linux-amd64.tar.gz
+<span class="token function">cp</span> velero-v1.10.0-linux-amd64/velero /usr/local/bin/
+velero version
+
+</code></pre> 
+<p>#创建velero凭证</p> 
+<pre><code class="prism language-shell"><span class="token function">cat</span> <span class="token operator">&gt;</span> credentials-velero <span class="token operator">&lt;&lt;</span> <span class="token string">EOF
+[default]
+aws_access_key_id = admin
+aws_secret_access_key = admin123456
+EOF</span>
+</code></pre> 
+<p>安装 velero</p> 
+<pre><code class="prism language-shell"><span class="token comment">#bucket要填写在minio控制台创建的名字：data</span>
+<span class="token comment">#secret-file要指向前面创建的秘钥文件：/root/credentials-velero</span>
+<span class="token comment">#安装时velero需加上--use-restic参数表示使用restic备份pv数据</span>
+
+
+velero <span class="token function">install</span> <span class="token punctuation">\</span>
+    <span class="token parameter variable">--provider</span> aws <span class="token punctuation">\</span>
+    <span class="token parameter variable">--kubeconfig</span> ~/.kube/config <span class="token punctuation">\</span>
+    <span class="token parameter variable">--plugins</span> velero/velero-plugin-for-aws:v1.4.1 <span class="token punctuation">\</span>
+    <span class="token parameter variable">--bucket</span> data <span class="token punctuation">\</span>
+    --secret-file /root/credentials-velero <span class="token punctuation">\</span>
+    --use-volume-snapshots<span class="token operator">=</span>false <span class="token punctuation">\</span>
+    --backup-location-config     <span class="token assign-left variable">region</span><span class="token operator">=</span>minio,s3ForcePathStyle<span class="token operator">=</span><span class="token string">"true"</span>,s3Url<span class="token operator">=</span>http://192.168.100.225:9000
+
+
+
+
+<span class="token comment">#检查pod</span>
+kubectl <span class="token parameter variable">-n</span> velero get po
+
+
+
+</code></pre> 
+<h3><a id="5_137"></a>5.创建测试应用</h3> 
+<pre><code class="prism language-shell"><span class="token comment">#检查pod</span>
+kubectl <span class="token parameter variable">-n</span> velero get po
+
+
+kubectl create ns <span class="token builtin class-name">test</span> 
+kubectl <span class="token parameter variable">-n</span> <span class="token builtin class-name">test</span> create deploy nignx <span class="token parameter variable">--image</span><span class="token operator">=</span>nginx 
+kubectl <span class="token parameter variable">-n</span> <span class="token builtin class-name">test</span> create deploy httpd <span class="token parameter variable">--image</span><span class="token operator">=</span>httpd
+
+kubectl <span class="token parameter variable">-n</span> <span class="token builtin class-name">test</span> get po
+
+
+
+</code></pre> 
+<h3><a id="51_test_154"></a>5.1 备份test命名空间</h3> 
+<pre><code class="prism language-shell">
+<span class="token comment">#执行备份后就看到如下的图片信息了</span>
+
+<span class="token comment">#不备份pv</span>
+velero backup create backup-test --include-namespaces <span class="token builtin class-name">test</span> <span class="token parameter variable">-n</span> velero
+
+
+
+<span class="token comment">#查看备份</span>
+velero get backup
+
+
+</code></pre> 
+<p><img src="https://images2.imgbox.com/8f/93/8oMhD7iH_o.png" alt="image.png"></p> 
+<h3><a id="6test_173"></a>6.删除test命名空间</h3> 
+<pre><code class="prism language-bash">kubectl delete deploy  <span class="token parameter variable">-n</span> <span class="token builtin class-name">test</span> <span class="token parameter variable">--all</span> <span class="token comment">#删除空间后，空间下的所有容器都没有了，下面我们就恢复</span>
+kubectl get pods <span class="token parameter variable">-n</span> <span class="token builtin class-name">test</span>
+</code></pre> 
+<h3><a id="7_180"></a>7.恢复备份</h3> 
+<pre><code class="prism language-bash">velero restore create --from-backup backup-test <span class="token parameter variable">--wait</span>
+
+kubectl get pods <span class="token parameter variable">-n</span> <span class="token builtin class-name">test</span> <span class="token comment">#现在重新看到pod了</span>
+
+
+</code></pre> 
+<h2><a id="testAB_195"></a>二、备份test表空间,集群A还原至集群B</h2> 
+<p><img src="https://images2.imgbox.com/b7/85/NdcQhz4I_o.png" alt="image.png"></p> 
+<h3><a id="1podpv110_199"></a>1.查看pod,注释pv信息-这步骤1.10版本可以不用做</h3> 
+<p>kubectl -n test get po</p> 
+<blockquote> 
+ <p>NAME READY STATUS RESTARTS AGE<br> csi-rbd-demo-block-pod 1/1 Running 0 59s</p> 
+</blockquote> 
+<pre><code class="prism language-shell"><span class="token comment">#查看pod的volumes信息</span>
+kubectl <span class="token parameter variable">-n</span> <span class="token builtin class-name">test</span> describe pod csi-rbd-demo-block-pod
+
+
+<span class="token comment">#注释掉po中的pv的信息</span>
+kubectl <span class="token parameter variable">-n</span> <span class="token builtin class-name">test</span> annotate pod csi-rbd-demo-block-pod backup.velero.io/backup-volumes<span class="token operator">=</span>data
+
+
+</code></pre> 
+<p><img src="https://images2.imgbox.com/80/5c/BmUAmdWz_o.png" alt="image.png"></p> 
+<h3><a id="2defaultpv_224"></a>2.备份default表空间加pv</h3> 
+<pre><code class="prism language-shell"><span class="token comment">#备份</span>
+velero backup create 01backup-test-pv --snapshot-volumes --include-namespaces <span class="token builtin class-name">test</span>
+
+
+
+<span class="token comment">#查看备份</span>
+velero get backup
+
+
+</code></pre> 
+<h3><a id="3testpv_237"></a>3.还原test加pv</h3> 
+<pre><code class="prism language-shell"><span class="token comment">#查看备份</span>
+velero get backup
+
+<span class="token comment"># 恢复带pv的pod</span>
+velero  restore create --from-backup 01backup-test-pv --restore-volumes
+
+
+<span class="token comment">#验证</span>
+kubectl <span class="token parameter variable">-n</span> <span class="token builtin class-name">test</span> get po,pv
+
+
+<span class="token comment">#删除备份</span>
+<span class="token builtin class-name">echo</span> Y <span class="token operator">|</span> velero delete backup 01backup-test-pv
+
+
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/5723d56f3c80451be633b329a3c7d060/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">阿里云OSS对象存储上传文件（二）C&#43;&#43;上传（含代码）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/fe87753e29065dce7cb910085af62906/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">搜维尔科技：scalefit-工业运动员职业安全与健康的新途径</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

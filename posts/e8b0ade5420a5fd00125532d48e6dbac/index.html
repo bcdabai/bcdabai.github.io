@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>操作系统实验Ucore:Kernel_init(四) - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="操作系统实验Ucore:Kernel_init(四)" />
+<meta property="og:description" content="本文首发于我的博客
+上一节进行到了kernel_init的printf_kernelinfo，继续往下分析
+1.pmm_init 这个函数，顾名思义是用来初始化物理内存的函数，这个函数只会调用gdt_init()
+这里我稍微修改了一下代码框架，原本的gdt_pd的定义为注释部分
+这段代码看上去没问题，但是实际跑的时候就会发现gdt_pd的两个字段都是0。
+我写了一个程序来模拟这种情况，看上去好像没有问题，但这个程序是无法通过编译的。
+这个错误告诉我们编译器无法在执行前算出a1的地址。所以不可以这样初始化变量。
+至于为什么会这样，改天再研究吧。现在先关注到实验上来。总之，这样改完之后，程序就可以正确运行了。
+关于TSS的部分现在先不用管，然后就到了lgdt函数的位置了
+我们要执行pmm_init的意义就在于我们需要重新为内核建立段描述符。第一次建立段描述符还是在bootasm中，那时候我们刚从实模式进入保护模式，那时候建立的段描述符有3个
+空描述符
+代码段描述符
+数据段描述符
+现在内核需要建立六个描述符
+对于我们的操作系统来说，所有的段描述符都是可以访问4G的内存的，唯一的区别在于权限的不同，我们实际上并没有使用分段机制，这叫做 平坦内存模型(Flat memory model)。
+在使用lgdt指令加载完gdt之后，刷新各个段寄存器。最后还会执行一条ljmp指令
+关于这个ljmp，在实模式进入保护模式时也有涉及，但当时没有注意，现在看到书上的描述，才知道这样做的意义。
+使用ljmp指令可以重新加载CS段寄存器，并刷新其对应的缓存器，使其指向正确的地址
+在实模式进入保护模式时，这样做的另一个目的是清空流水线，在进入把保护模式时，ljmp之后的指令已经进入了流水线，而且完成了译码阶段，所以要清空流水线，重新按照32位模式加载指令。（理解这部分内容需要了解CPU流水线）
+至此，内存的段描述符就建立完成了。gdt_init函数也全部执行完了
+2.pic_init 这段程序没有深入的研究，其和操作系统的内核也没有太大的关系，主要是和初始化外设（另一个原因是我也不会…）。暂时先了解：
+这个东西是 8259A芯片，pic的全称是（Programmable Interrupt Controller）可编程的中断控制器
+所有的外部中断都不直接于CPU进行通讯，而是由8259A统一收集中断请求后再交给CPU
+8259A芯片可以编程屏蔽部分外界中断，对于一个中断，其能被处理的先决条件是没有被8259A芯片屏蔽且CPU没有屏蔽外界中断（Eflags 寄存器的 IF 位）
+一个8259A只有八个中断引脚，一般使用两个8259A组成级联（Cascade）关系。这样一共支持15个外部中断，我们可以编程来给中断引脚分配中断号
+outb(IO_PIC1 &#43; 1, IRQ_OFFSET);
+outb(IO_PIC2 &#43; 1, IRQ_OFFSET &#43; 8);
+这两句话比较关键，告诉我们主片的中断号从32开始，从片的从40开始
+至于为什么从这里开始，是因为Intel将32以下的终端号保留使用，用户正常情况下可以使用32-255号中断
+3.idt_init 初始化完8259之后，就要初始化中断的处理了。
+这个部分比较复杂，需要多看几次才能理解，我也尽量讲清楚。
+在idt_init中，需要初始化中断描述符表，这个表的位置在数据段中。一共有255个表项，对应着可以接收的255个中断号。由于CPU在接收到中断的时候会根据此项来确定中断处理函数的地址，所以一个idt表项中应当含有中断处理函数的CS：IP值，在这里就是CS段选择子和中断处理程序的偏移量。
+我们使用kernel的代码段作为段选择子，偏移由__vectors数组指定。注意，现在所有的段选择子的基址都是0，也即是说，偏移的地址就是实际的物理地址。
+__vectors数组存放在数据段中，依据255 * 4 的方式组织，每一项是一个指向对应异常处理函数地址的指针。
+异常处理函数有255个，由vector开头加上异常号，这些函数连续的放在代码段中。
+每一个异常处理函数的工作都是类似的，先push异常号，然后跳转，至于为什么这样，后文再说。
+现在来总结一下一共用到了哪些变量
+idt[256] 位置：数据段 作用：用来根据异常号选择异常处理程序。__vectors 位置：数据段 作用：用来初始化idt，与中断处理无关。vectorX函数 位置：代码段 作用：实际的异常处理函数。 4.中断 之后就是初始化时钟，使能中断，我们主要来看看中断时如何处理 的。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/e8b0ade5420a5fd00125532d48e6dbac/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-12-01T14:57:02+08:00" />
+<meta property="article:modified_time" content="2021-12-01T14:57:02+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">操作系统实验Ucore:Kernel_init(四)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>本文首发于<a href="http://120.76.248.237/?p=153" rel="nofollow">我的博客</a><br> 上一节进行到了kernel_init的printf_kernelinfo，继续往下分析</p> 
+<h2><a id="1pmm_init_2"></a>1.pmm_init</h2> 
+<p>这个函数，顾名思义是用来初始化物理内存的函数，这个函数只会调用gdt_init()<br> <img src="https://images2.imgbox.com/79/ad/mSXj4d3k_o.png" alt="在这里插入图片描述"><br> 这里我稍微修改了一下代码框架，原本的gdt_pd的定义为注释部分<br> <img src="https://images2.imgbox.com/a7/78/8mDCtoHA_o.png" alt="在这里插入图片描述"><br> 这段代码看上去没问题，但是实际跑的时候就会发现gdt_pd的两个字段都是0。<br> <img src="https://images2.imgbox.com/ad/5c/7TzVKAXg_o.png" alt="在这里插入图片描述"><br> 我写了一个程序来模拟这种情况，看上去好像没有问题，但这个程序是无法通过编译的。<br> <img src="https://images2.imgbox.com/1c/db/1F2Assez_o.png" alt="在这里插入图片描述"><br> 这个错误告诉我们编译器无法在执行前算出a1的地址。所以不可以这样初始化变量。</p> 
+<p>至于为什么会这样，改天再研究吧。现在先关注到实验上来。总之，这样改完之后，程序就可以正确运行了。</p> 
+<p>关于TSS的部分现在先不用管，然后就到了lgdt函数的位置了<br> <img src="https://images2.imgbox.com/bb/c5/lwpAXWgr_o.png" alt="在这里插入图片描述"><br> 我们要执行pmm_init的意义就在于我们需要重新为内核建立段描述符。第一次建立段描述符还是在bootasm中，那时候我们刚从实模式进入保护模式，那时候建立的段描述符有3个</p> 
+<ul><li> <p>空描述符</p> </li><li> <p>代码段描述符</p> </li><li> <p>数据段描述符</p> </li></ul> 
+<p>现在内核需要建立六个描述符<br> <img src="https://images2.imgbox.com/fb/61/2PuQemHe_o.png" alt="在这里插入图片描述"><br> 对于我们的操作系统来说，所有的段描述符都是可以访问4G的内存的，唯一的区别在于权限的不同，我们实际上并没有使用分段机制，这叫做 平坦内存模型(Flat memory model)。</p> 
+<p>在使用lgdt指令加载完gdt之后，刷新各个段寄存器。最后还会执行一条ljmp指令</p> 
+<p>关于这个ljmp，在实模式进入保护模式时也有涉及，但当时没有注意，现在看到书上的描述，才知道这样做的意义。</p> 
+<ul><li> <p>使用ljmp指令可以重新加载CS段寄存器，并刷新其对应的缓存器，使其指向正确的地址</p> </li><li> <p>在实模式进入保护模式时，这样做的另一个目的是清空流水线，在进入把保护模式时，ljmp之后的指令已经进入了流水线，而且完成了译码阶段，所以要清空流水线，重新按照32位模式加载指令。（理解这部分内容需要了解CPU流水线）</p> </li></ul> 
+<p>至此，内存的段描述符就建立完成了。gdt_init函数也全部执行完了</p> 
+<h2><a id="2pic_init_39"></a>2.pic_init</h2> 
+<p>这段程序没有深入的研究，其和操作系统的内核也没有太大的关系，主要是和初始化外设（另一个原因是我也不会…）。暂时先了解：</p> 
+<ul><li> <p>这个东西是 8259A芯片，pic的全称是（Programmable Interrupt Controller）可编程的中断控制器</p> </li><li> <p>所有的外部中断都不直接于CPU进行通讯，而是由8259A统一收集中断请求后再交给CPU</p> </li><li> <p>8259A芯片可以编程屏蔽部分外界中断，对于一个中断，其能被处理的先决条件是没有被8259A芯片屏蔽且CPU没有屏蔽外界中断（Eflags 寄存器的 IF 位）</p> </li><li> <p>一个8259A只有八个中断引脚，一般使用两个8259A组成级联（Cascade）关系。这样一共支持15个外部中断，我们可以编程来给中断引脚分配中断号</p> </li><li> <p>outb(IO_PIC1 + 1, IRQ_OFFSET);<br> outb(IO_PIC2 + 1, IRQ_OFFSET + 8);<br> 这两句话比较关键，告诉我们主片的中断号从32开始，从片的从40开始</p> </li></ul> 
+<p>至于为什么从这里开始，是因为Intel将32以下的终端号保留使用，用户正常情况下可以使用32-255号中断</p> 
+<h2><a id="3idt_init_56"></a>3.idt_init</h2> 
+<p>初始化完8259之后，就要初始化中断的处理了。</p> 
+<p>这个部分比较复杂，需要多看几次才能理解，我也尽量讲清楚。<br> <img src="https://images2.imgbox.com/91/ca/0bqsHMHh_o.png" alt="在这里插入图片描述"><br> 在idt_init中，需要初始化中断描述符表，这个表的位置在数据段中。一共有255个表项，对应着可以接收的255个中断号。由于CPU在接收到中断的时候会根据此项来确定中断处理函数的地址，所以一个idt表项中应当含有中断处理函数的CS：IP值，在这里就是CS段选择子和中断处理程序的偏移量。</p> 
+<p>我们使用kernel的代码段作为段选择子，偏移由__vectors数组指定。注意，现在所有的段选择子的基址都是0，也即是说，偏移的地址就是实际的物理地址。</p> 
+<p>__vectors数组存放在数据段中，依据255 * 4 的方式组织，每一项是一个指向对应异常处理函数地址的指针。</p> 
+<p>异常处理函数有255个，由vector开头加上异常号，这些函数连续的放在代码段中。<br> <img src="https://images2.imgbox.com/cd/1a/xIgdVsxZ_o.png" alt="在这里插入图片描述"><br> 每一个异常处理函数的工作都是类似的，先push异常号，然后跳转，至于为什么这样，后文再说。</p> 
+<p>现在来总结一下一共用到了哪些变量</p> 
+<ul><li>idt[256] 位置：数据段 作用：用来根据异常号选择异常处理程序。</li><li>__vectors 位置：数据段 作用：用来初始化idt，与中断处理无关。</li><li>vectorX函数 位置：代码段 作用：实际的异常处理函数。</li></ul> 
+<h2><a id="4_76"></a>4.中断</h2> 
+<p>之后就是初始化时钟，使能中断，我们主要来看看中断时如何处理 的。</p> 
+<p>关于中断的处理，需要分成两个部分，一个是CPU硬件的部分，一个是操作系统的部分。</p> 
+<p>首先说硬件，ucore的指导书上写的很详细，我这里总结一下，不过先阶段我并没有考虑权限的问题，因为第一个用户进程还没有起来，我们现在一直都在内核态。</p> 
+<p>cpu的工作为：</p> 
+<ul><li> <p>再执行每一条指令之后，都检查有没有中断产生</p> </li><li> <p>如果有中断，则根据 IDTR 找到 IDT，在根据中断编号找到对应的IDT表项</p> </li><li> <p>压入 eflags ，cs ，eip ， errorcode</p> </li><li> <p>跳转到异常处理函数（根据idt的cs和eip）</p> </li></ul> 
+<p>cpu执行完之后，栈中就有了eflags，cs，ip和errcode。然后再由操作系统接手。</p> 
+<p>操作系统的工作：</p> 
+<p>首先调用的时 vectorX 函数，此函数push 异常号，调用 __alltraps 函数。<br> <img src="https://images2.imgbox.com/25/f5/uiNLNhBD_o.png" alt="在这里插入图片描述"><br> __alltraps 压入 ds ，es ， fs ，gs再压入所有的通用寄存器，然后将段寄存器换成内核代码段，最后压入 esp，call trap 函数。</p> 
+<p>trap函数使用C语言写的，需要一个类型为 trapframe 的参数。真个过程的关键，就在于这个参数是怎么传递的。</p> 
+<h2><a id="5__102"></a>5. 中断的参数传递</h2> 
+<p>首先我们看一下从中断开始到进入trap函数，栈里究竟多了些什么。</p> 
+<p>CPU压入了eflags，cs，eip，errorcode。</p> 
+<p>vectorX压入了中断号</p> 
+<p>__alltraps压入了ds，es，fs，gs + 通用寄存器 + esp<br> <img src="https://images2.imgbox.com/94/bf/J8b2B8O2_o.png" alt="在这里插入图片描述"><br> 画出图来就是这个样子。一般来说，函数的调用会由编译器来组织参数的传递，但是我们这次时从汇编语言到C语言只能自己来手动传递参数，更具上一篇文章的经验，我们知道，返回地址上面的一个数据就是函数的最左参数，这里是esp，也就是说，我们将esp当作第一个参数传入了trap函数</p> 
+<p>当我们压入esp时，esp指向的是我们压入的倒数第二个数据，也就是通用寄存器的最后一个。</p> 
+<p>再看esp上面的栈结构，比对一下trapframe结构体，会发现竟然是完全一模一样的！<br> <img src="https://images2.imgbox.com/4e/76/WXicgfuy_o.png" alt="在这里插入图片描述"><br> 传进去的参数就是一个指向trapeframe的指针，这里需要根据实际的内存来构造trapframe结构体，需要注意的就是，通用寄存器的地址最低（最后入栈），所以在结构体中的第一个，还有就是由于push的都是32位的数据，要对16位的段寄存器进行填充。</p> 
+<p>这样构造完成之后，在trap函数中就可以快乐的访问trapframe的内容了</p> 
+<p>当然到现在还只是猜测，我门需要验证一下，打开gdb，扫描一下内存，就会发现：<br> <img src="https://images2.imgbox.com/d2/29/JawLoLNK_o.png" alt="在这里插入图片描述"><br> 从高地址往低地址，依次是</p> 
+<p>0x00000216：eflags</p> 
+<p>0x00000008：cs （内核数据段，第一个段描述符，偏移8）</p> 
+<p>0x0010007a: eip（对应lab1里的while（1）代码）</p> 
+<p>0x00000000：errorcode（这个不太清楚，可能没有）</p> 
+<p>0x00000020：32，中断号</p> 
+<p>0x00000010：内核数据段（ds，第二个段描述符，偏移16）</p> 
+<p>。。。</p> 
+<p>0x00007b8c：作为参数的esp</p> 
+<p>0x00102bf1：__alltraps函数的返回地址</p> 
+<p>事实证明，内存的分布确实如此</p> 
+<h2><a id="6code_144"></a>6.code</h2> 
+<p>第二个编程任务，要求我们每100个ticks在终端输出100ticks</p> 
+<p>有了前面的基础，这个就非常简单了，只要在trap_dispath里加几句就行。<br> <img src="https://images2.imgbox.com/05/d0/81Z0pN9L_o.png" alt="在这里插入图片描述"><br> 效果就是每秒输出一个“100 ticks”，同理，其他的异常也在这个函数里实现。</p> 
+<h2><a id="7_150"></a>7.总结</h2> 
+<p>到这里，Lab1就算做完了，整体上入门实验还是比较困难的，要求的前置知识有很多。我也是尽量的弄明白一些部分，还有些不太懂得就先跳过了…</p> 
+<p>下一篇来回答Lab1提出的的几个问题</p> 
+<p>如有错误，欢迎指出~</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/b0547140fac844b9440c0f06272a01df/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">SpringCloud Gateway路由配置方式(不包含熔断)</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/2c75ac091066b63f19979529a325f700/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">每天五分钟玩转K8S（五）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>mybatis-plus批量保存异常及效率优化 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="mybatis-plus批量保存异常及效率优化" />
+<meta property="og:description" content="最近基于自己公司内部服务维护，发现其中调度中心近期出现不少错误日志，但是该任务却是正常执行，生成的报表数据也是正常的，所以很多天没有发现问题
+这就匪夷所思了，
+经仔细排查发现，是触发了feign超时hystrix熔断器机制
+也就是说子服务出现了执行时间过长的情况
+是什么让它花费这么多时间去执行呢，只有一个for循环，组装list&lt;object&gt;
+这个组装过程在java看来是非常快，根本不可能出现问题
+我发现了
+iXxxxService.saveBatch(xxxx); mybatisplus3.3.2自带的批量保存的sql接口
+跟踪代码的实现
+在接口发现IService
+@Transactional( rollbackFor = {Exception.class} ) default boolean saveBatch(Collection&lt;T&gt; entityList) { return this.saveBatch(entityList, 1000); } boolean saveBatch(Collection&lt;T&gt; entityList, int batchSize); ServiceImpl的实现 @Transactional( rollbackFor = {Exception.class} ) public boolean saveBatch(Collection&lt;T&gt; entityList, int batchSize) { String sqlStatement = this.sqlStatement(SqlMethod.INSERT_ONE); return this.executeBatch(entityList, batchSize, (sqlSession, entity) -&gt; { sqlSession.insert(sqlStatement, entity); }); } protected &lt;E&gt; boolean executeBatch(Collection&lt;E&gt; list, int batchSize, BiConsumer&lt;SqlSession, E&gt; consumer) { Assert." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/10836252cd9405a26ef1ee8e4c08d300/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-15T15:46:49+08:00" />
+<meta property="article:modified_time" content="2024-01-15T15:46:49+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">mybatis-plus批量保存异常及效率优化</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>最近基于自己公司内部服务维护，发现其中调度中心近期出现不少错误日志，但是该任务却是正常执行，生成的报表数据也是正常的，所以很多天没有发现问题</p> 
+<p>这就匪夷所思了，</p> 
+<p>   经仔细排查发现，是触发了feign超时hystrix熔断器机制</p> 
+<p>也就是说子服务出现了执行时间过长的情况</p> 
+<p>是什么让它花费这么多时间去执行呢，只有一个for循环，组装list&lt;object&gt;</p> 
+<p>这个组装过程在java看来是非常快，根本不可能出现问题</p> 
+<p>我发现了</p> 
+<pre><code class="hljs"> iXxxxService.saveBatch(xxxx);</code></pre> 
+<p>mybatisplus3.3.2自带的批量保存的sql接口</p> 
+<p>跟踪代码的实现</p> 
+<p>在接口发现IService</p> 
+<pre><code class="hljs">   @Transactional(
+        rollbackFor = {Exception.class}
+    )
+    default boolean saveBatch(Collection&lt;T&gt; entityList) {
+        return this.saveBatch(entityList, 1000);
+    }
+
+    boolean saveBatch(Collection&lt;T&gt; entityList, int batchSize);</code></pre> 
+<pre>ServiceImpl的实现</pre> 
+<pre><code class="hljs"> @Transactional(
+        rollbackFor = {Exception.class}
+    )
+    public boolean saveBatch(Collection&lt;T&gt; entityList, int batchSize) {
+        String sqlStatement = this.sqlStatement(SqlMethod.INSERT_ONE);
+        return this.executeBatch(entityList, batchSize, (sqlSession, entity) -&gt; {
+            sqlSession.insert(sqlStatement, entity);
+        });
+    }</code></pre> 
+<pre><code class="hljs">protected &lt;E&gt; boolean executeBatch(Collection&lt;E&gt; list, int batchSize, BiConsumer&lt;SqlSession, E&gt; consumer) {
+        Assert.isFalse(batchSize &lt; 1, "batchSize must not be less than one", new Object[0]);
+        return !CollectionUtils.isEmpty(list) &amp;&amp; this.executeBatch((sqlSession) -&gt; {
+            int size = list.size();
+            int i = 1;
+
+            for(Iterator var6 = list.iterator(); var6.hasNext(); ++i) {
+                E element = var6.next();
+                consumer.accept(sqlSession, element);
+                if (i % batchSize == 0 || i == size) {
+                    sqlSession.flushStatements();
+                }
+            }
+
+        });
+    }</code></pre> 
+<p>可以看到这个是累计到一定数量一起 flush。</p> 
+<p>很多人认为这是mybatisplus设计的一个缺陷，是一条一条去做插入，其实这是错误，这种写法不仅没错还写的非常负责，具体接下来看</p> 
+<h3>方法一</h3> 
+<p>首先要结合数据库驱动来配合，大家注意这个 rewriteBatchedStatements 玩意，其实mybatisplus批量保存与这个的首肯有很大关系</p> 
+<p>没有加它之前</p> 
+<p>这是没加之前最好的成绩</p> 
+<p><img alt="" height="49" src="https://images2.imgbox.com/2a/cc/XF8A34tR_o.png" width="478"></p> 
+<p>加了之后最差的成绩</p> 
+<p><img alt="" height="39" src="https://images2.imgbox.com/f4/97/g3ZC4dZx_o.png" width="289"></p> 
+<p>可以非常直观的看出效率明显提高了好几倍，所以呢千万别误会mybatisplus这个设计，人家完全交给你自主控制，你非得说是它的问题这就不好了</p> 
+<h3>方法二</h3> 
+<p>相比上面方法一的就比较粗暴了</p> 
+<p>我直接拿过来重写saveBatch，或者增加一个特殊的批量保存</p> 
+<h4>第一步</h4> 
+<p>继承mybatisplus自带的BaseMapper（这里为什么要继承我就不说了哈，懂的都懂），添加我们自定义的批量保存方法</p> 
+<pre>zxsSaveBatch</pre> 
+<pre><code class="hljs">import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+
+import java.util.Collection;
+public interface BaseMapperPlus &lt;T&gt; extends BaseMapper&lt;T&gt; {
+
+    Integer zxsSaveBatch(Collection&lt;T&gt; entityList);
+
+}</code></pre> 
+<h4>第二步</h4> 
+<p>继承AbstractMethod，因为我们要改写它的批量插入语句，换成我们自己想要实现的方式</p> 
+<pre><code class="hljs">import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.core.enums.SqlMethod;
+import com.baomidou.mybatisplus.core.injector.AbstractMethod;
+import com.baomidou.mybatisplus.core.metadata.TableFieldInfo;
+import com.baomidou.mybatisplus.core.metadata.TableInfo;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import com.baomidou.mybatisplus.core.toolkit.sql.SqlScriptUtils;
+import lombok.AllArgsConstructor;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+import lombok.experimental.Accessors;
+import org.apache.ibatis.executor.keygen.Jdbc3KeyGenerator;
+import org.apache.ibatis.executor.keygen.KeyGenerator;
+import org.apache.ibatis.executor.keygen.NoKeyGenerator;
+import org.apache.ibatis.mapping.MappedStatement;
+import org.apache.ibatis.mapping.SqlSource;
+
+import java.util.List;
+import java.util.function.Predicate;
+
+@NoArgsConstructor
+@AllArgsConstructor
+public class ZxsSaveBatch extends AbstractMethod {
+
+    /**
+     * 字段筛选条件
+     */
+    @Setter
+    @Accessors(chain = true)
+    private Predicate&lt;TableFieldInfo&gt; predicate;
+
+    @SuppressWarnings("Duplicates")
+    @Override
+    public MappedStatement injectMappedStatement(Class&lt;?&gt; mapperClass, Class&lt;?&gt; modelClass, TableInfo tableInfo) {
+        KeyGenerator keyGenerator = new NoKeyGenerator();
+        SqlMethod sqlMethod = SqlMethod.INSERT_ONE;
+        List&lt;TableFieldInfo&gt; fieldList = tableInfo.getFieldList();
+        String insertSqlColumn = tableInfo.getKeyInsertSqlColumn(false) +
+            this.filterTableFieldInfo(fieldList, predicate, TableFieldInfo::getInsertSqlColumn, EMPTY);
+        String columnScript = LEFT_BRACKET + insertSqlColumn.substring(0, insertSqlColumn.length() - 1) + RIGHT_BRACKET;
+        String insertSqlProperty = tableInfo.getKeyInsertSqlProperty(ENTITY_DOT, false) +
+            this.filterTableFieldInfo(fieldList, predicate, i -&gt; i.getInsertSqlProperty(ENTITY_DOT), EMPTY);
+        insertSqlProperty = LEFT_BRACKET + insertSqlProperty.substring(0, insertSqlProperty.length() - 1) + RIGHT_BRACKET;
+        String valuesScript = SqlScriptUtils.convertForeach(insertSqlProperty, "list", null, ENTITY, COMMA);
+        String keyProperty = null;
+        String keyColumn = null;
+        // 表包含主键处理逻辑,如果不包含主键当普通字段处理
+        if (tableInfo.havePK()) {
+            if (tableInfo.getIdType() == IdType.AUTO) {
+                /* 自增主键 */
+                keyGenerator = new Jdbc3KeyGenerator();
+                keyProperty = tableInfo.getKeyProperty();
+                keyColumn = tableInfo.getKeyColumn();
+            } else {
+                if (null != tableInfo.getKeySequence()) {
+                    keyGenerator = TableInfoHelper.genKeyGenerator(getMethod(sqlMethod), tableInfo, builderAssistant);
+                    keyProperty = tableInfo.getKeyProperty();
+                    keyColumn = tableInfo.getKeyColumn();
+                }
+            }
+        }
+        String sql = String.format(sqlMethod.getSql(), tableInfo.getTableName(), columnScript, valuesScript);
+        SqlSource sqlSource = languageDriver.createSqlSource(configuration, sql, modelClass);
+        return this.addInsertMappedStatement(mapperClass, modelClass, getMethod(sqlMethod), sqlSource, keyGenerator, keyProperty, keyColumn);
+    }
+
+    @Override
+    public String getMethod(SqlMethod sqlMethod) {
+        // 自定义 mapper 方法名
+        return "zxsSaveBatch";
+    }
+}
+</code></pre> 
+<h4>第三步</h4> 
+<p>继承DefaultSqlInjector，把我们的方法添加进去</p> 
+<pre><code class="hljs">import com.baomidou.mybatisplus.core.injector.AbstractMethod;
+import com.baomidou.mybatisplus.core.injector.DefaultSqlInjector;
+
+import java.util.List;
+
+public class ZxsSqlIntorPlus extends DefaultSqlInjector {
+    @Override
+    public List&lt;AbstractMethod&gt; getMethodList(Class&lt;?&gt; mapperClass) {
+        List&lt;AbstractMethod&gt; methodList = super.getMethodList(mapperClass);//获取之前所有的方法
+        methodList.add(new ZxsSaveBatch()); //添加自己的方法
+        return methodList;
+    }
+
+}</code></pre> 
+<h4>第四步</h4> 
+<p>注入到spring</p> 
+<pre><code class="hljs">@Bean
+    public ZxsSqlIntorPlus zxsSqlIntorPlus() {
+        return new ZxsSqlIntorPlus();
+    }</code></pre> 
+<h4>第五步</h4> 
+<p>使用方法</p> 
+<p>之前我们是通过service.saveBatch(Xxxx)来实现批量插入的</p> 
+<p>这里我们需要改个地方,将原本的BaseMapper改成我们新创建的BaseMapperPlus</p> 
+<p>这是我的例子，当然，你也可以是其它的</p> 
+<pre><code class="hljs">public interface TestMapper extends BaseMapper&lt;Test&gt; {
+}
+
+</code></pre> 
+<p>改为</p> 
+<pre><code class="hljs">public interface TestMapper extends BaseMapperPlus&lt;Test&gt; {
+}</code></pre> 
+<p>然后在service里面通过baseMapper.zxsSaveBatch(Xxxx)</p> 
+<p>当然你也可以重写mybatisplus中IService的批量保存的</p> 
+<p></p> 
+<p>测一下速度，发现不用设置rewriteBatchedStatements，执行速度也更快了，几乎和rewriteBatchedStatements=true的速度相当</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/53209989eb4647d07fd6c10e9a662e95/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">ElasticSearch扫盲概念篇[ES系列] - 第500篇</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b9fae3785460151e6aa9569e3d1b0e0d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【错误】tcpreplay: Symbol `pcap_version‘ has different size in shared object, consider re-linking</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

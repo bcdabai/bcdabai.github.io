@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>brpc组件bvar源码解析（三）Variable、Reducer和Adder - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="brpc组件bvar源码解析（三）Variable、Reducer和Adder" />
+<meta property="og:description" content="1.Variable类 Variable是所有bvar的基类，是一个纯虚类。拥有的唯一的成员变量是_name。
+Variable类中的接口分为几类：
+描述相关的
+子类实现纯虚函数describe，目的是将bvar的值写入ostream。 get_description不是纯虚函数，它调用了describe写入ostringstream，返回ostringstream的string。
+曝光相关的
+例如：expose，expose_impl，expose_as，list_exposed，count_exposed，describe_exposed，dump_exposed等。核心是expose_impl，下文介绍。 函数expose_impl 函数expose_impl是实现曝光的核心逻辑。所谓“曝光”就是把bvar的地址存到一个公共的map中，以便后续可以遍历和查询到。
+具体的做法是：
+（1）根据prefix&#43;name生成统一格式的曝光名称_name：非字母、非数字的全部转成下划线
+（2）根据（1）生成的曝光名称_name查询所属的VarMapWithLock：
+首先对_name进行了简单的hash，然后对VarMapWithLock数组s_var_maps的长度SUB_MAP_COUNT取模得到i，返回s_var_maps的第i个成员。这里这么做的目的是为了减少VarMapWithLock中的锁竞争的频率。
+（3）根据_name查询VarMapWithLock中是否存在key为_name的记录
+VarMapWithLock其实就是加了锁的hashmap。
+如果查不到，则插入pair&lt;name, VarEntry&gt;，VarEntry的var变量赋值this值，display_filter变量赋值入参display_filter。
+display_filter是枚举类型DisplayFilter，表示显示到文本中、html中还是全部。list_exposed函数会将入参和所有VarEntry的display_filter进行与操作，只输出满足条件的bvar。
+（4）如果（3）能查到记录，说明有同名bar已经进行了曝光，则根据gflags进行相关处理（直接abort或者打印error log）
+函数hide 很容易理解，就是根据_name从对应的VarMapWithLock中删除记录。
+函数list_exposed 遍历所有曝光的bvar，即遍历s_var_maps中的所有map的所有pair，选出满足display_filter条件的bvar的name保存到names数组中。
+遍历s_var_maps中的每个map时，首先都需要先加锁，才能遍历map中的每个pair。为了防止个数太多、加锁时间过长，遍历每超过一定个数（256个），都主动释放一下锁。
+函数describe_exposed 即根据name从s_var_maps查询到VarEntry*，调用该bvar的describe函数，结果保存到os中。
+函数dump_exposed 查询所有曝光的bvar，将符合options中的通配符white_wildcards和black_wildcards条件的bvar都调用dumper-&gt;dump函数。例如white_wildcards = “foo_bar_*”; black_wildcards = “*var5”。函数返回值是dump的bvar的个数。
+如果通配符white_wildcards是空的，那么先通过list_exposed得到所有曝光的bvar的name，然后对name进行排序，遍历name数组，对于符合通配符条件的name，调用describe_exposed函数将该bvar的描述保存到ostream，然后调用dumper-&gt;dump函数，传入name和保存描述的ostream转成的字符串。
+Dumper是一个纯虚类，由开发者自己继承实现。
+2.Reducer类 Reducer类定义：
+3个模板类型：
+T：bvar保存的值的类型
+Op：“累加”的op
+InvOp：与“累加”相反操作的OP，默认是VoidOp即无具体操作；这个介绍采样的时候再具体介绍。
+成员变量：
+构造函数：
+add_cr_non_integral是如果T不是整型则增加const&amp;修饰。
+identity赋值T的默认构造函数生成的对象，如果T是POD类型，则T()就是0值。
+_combiner：AgentCombiner&lt;T, T, Op&gt;类的对象；AgentCombiner的第1、第2模板参数都是T，说明它的结果类型和元素类型是相同的、都是T（介绍AgentCombiner时说过这2个类型可以不同）
+_sampler：ReducerSampler&lt;Reducer, T, Op, InvOp&gt;类型的指针，此处设置为NULL，只有当前bvar有采样需要，即成员函数get_sampler被调用时_sampler才会被new出来。
+_series_sampler：嵌套类SeriesSampler类型的指针，此处设置为NULL，后面介绍采样时再介绍。
+_inv_op：InvOp类的对象。
+Op类的对象在_combiner中有保存，所以不需要重复保存；
+函数operator&lt;&lt; 函数operator&lt;&lt;是对bvar增加值时调用的，例如
+bvar::Adder&lt;int&gt; sum; sum &lt;&lt; 1 &lt;&lt; 2 &lt;&lt; 3 &lt;&lt; 4; LOG(INFO) &lt;&lt; sum." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/cf687ab1beb4a84a67e5284836f934d0/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-05-19T17:26:43+08:00" />
+<meta property="article:modified_time" content="2022-05-19T17:26:43+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">brpc组件bvar源码解析（三）Variable、Reducer和Adder</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="1Variable_0"></a>1.Variable类</h2> 
+<p>Variable是所有bvar的基类，是一个纯虚类。拥有的唯一的成员变量是_name。</p> 
+<p>Variable类中的接口分为几类：</p> 
+<ol><li>描述相关的<br> <img src="https://images2.imgbox.com/9e/4a/95f0axtU_o.png" alt="在这里插入图片描述"><br> 子类实现纯虚函数describe，目的是将bvar的值写入ostream。</li></ol> 
+<p>get_description不是纯虚函数，它调用了describe写入ostringstream，返回ostringstream的string。</p> 
+<ol start="2"><li>曝光相关的<br> 例如：expose，expose_impl，expose_as，list_exposed，count_exposed，describe_exposed，dump_exposed等。核心是expose_impl，下文介绍。</li></ol> 
+<h3><a id="expose_impl_15"></a>函数expose_impl</h3> 
+<p><img src="https://images2.imgbox.com/12/ba/ID3Goxb2_o.png" alt="在这里插入图片描述"><br> 函数expose_impl是实现曝光的核心逻辑。所谓“曝光”就是把bvar的地址存到一个公共的map中，以便后续可以遍历和查询到。</p> 
+<p>具体的做法是：<br> （1）根据prefix+name生成统一格式的曝光名称_name：非字母、非数字的全部转成下划线<br> （2）根据（1）生成的曝光名称_name查询所属的VarMapWithLock：<br> 首先对_name进行了简单的hash，然后对VarMapWithLock数组s_var_maps的长度SUB_MAP_COUNT取模得到i，返回s_var_maps的第i个成员。这里这么做的目的是为了减少VarMapWithLock中的锁竞争的频率。<br> <img src="https://images2.imgbox.com/6b/94/kXQ6PDsP_o.png" alt="在这里插入图片描述"></p> 
+<p>（3）根据_name查询VarMapWithLock中是否存在key为_name的记录<br> VarMapWithLock其实就是加了锁的hashmap。<br> <img src="https://images2.imgbox.com/77/6e/KoNAmDSP_o.png" alt="在这里插入图片描述"></p> 
+<p>如果查不到，则插入pair&lt;name, VarEntry&gt;，VarEntry的var变量赋值this值，display_filter变量赋值入参display_filter。<br> <img src="https://images2.imgbox.com/3b/7c/64GLQpHJ_o.png" alt="在这里插入图片描述"><br> display_filter是枚举类型DisplayFilter，表示显示到文本中、html中还是全部。list_exposed函数会将入参和所有VarEntry的display_filter进行与操作，只输出满足条件的bvar。<br> <img src="https://images2.imgbox.com/f0/14/6zarc7Zr_o.png" alt="在这里插入图片描述"></p> 
+<p>（4）如果（3）能查到记录，说明有同名bar已经进行了曝光，则根据gflags进行相关处理（直接abort或者打印error log）</p> 
+<h3><a id="hide_36"></a>函数hide</h3> 
+<p><img src="https://images2.imgbox.com/b0/2c/0jV8rXIZ_o.png" alt="在这里插入图片描述"><br> 很容易理解，就是根据_name从对应的VarMapWithLock中删除记录。</p> 
+<h3><a id="list_exposed_40"></a>函数list_exposed</h3> 
+<p><img src="https://images2.imgbox.com/71/6a/iViQFHBT_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/18/c7/QwSH27EI_o.png" alt="在这里插入图片描述"></p> 
+<p>遍历所有曝光的bvar，即遍历s_var_maps中的所有map的所有pair，选出满足display_filter条件的bvar的name保存到names数组中。</p> 
+<p>遍历s_var_maps中的每个map时，首先都需要先加锁，才能遍历map中的每个pair。为了防止个数太多、加锁时间过长，遍历每超过一定个数（256个），都主动释放一下锁。</p> 
+<h3><a id="describe_exposed_48"></a>函数describe_exposed</h3> 
+<p><img src="https://images2.imgbox.com/9f/d9/8JufNsZn_o.png" alt="在这里插入图片描述"><br> 即根据name从s_var_maps查询到VarEntry*，调用该bvar的describe函数，结果保存到os中。</p> 
+<h3><a id="dump_exposed_53"></a>函数dump_exposed</h3> 
+<p><img src="https://images2.imgbox.com/6c/65/iaQHgLXs_o.png" alt="在这里插入图片描述"><br> 查询所有曝光的bvar，将符合options中的通配符white_wildcards和black_wildcards条件的bvar都调用dumper-&gt;dump函数。例如white_wildcards = “foo_bar_*”; black_wildcards = “*var5”。函数返回值是dump的bvar的个数。</p> 
+<p>如果通配符white_wildcards是空的，那么先通过list_exposed得到所有曝光的bvar的name，然后对name进行排序，遍历name数组，对于符合通配符条件的name，调用describe_exposed函数将该bvar的描述保存到ostream，然后调用dumper-&gt;dump函数，传入name和保存描述的ostream转成的字符串。</p> 
+<p>Dumper是一个纯虚类，由开发者自己继承实现。<br> <img src="https://images2.imgbox.com/6a/e0/yXwn4kAX_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="2Reducer_63"></a>2.Reducer类</h2> 
+<p>Reducer类定义：<br> <img src="https://images2.imgbox.com/2a/c3/FeMP10cv_o.png" alt="在这里插入图片描述"><br> 3个模板类型：<br> T：bvar保存的值的类型<br> Op：“累加”的op<br> InvOp：与“累加”相反操作的OP，默认是VoidOp即无具体操作；这个介绍采样的时候再具体介绍。</p> 
+<p>成员变量：<br> <img src="https://images2.imgbox.com/b4/1d/kijKhfWh_o.png" alt="在这里插入图片描述"><br> 构造函数：<br> <img src="https://images2.imgbox.com/36/7d/eDd3a7C1_o.png" alt="在这里插入图片描述"><br> add_cr_non_integral是如果T不是整型则增加const&amp;修饰。<br> identity赋值T的默认构造函数生成的对象，如果T是POD类型，则T()就是0值。</p> 
+<p>_combiner：AgentCombiner&lt;T, T, Op&gt;类的对象；AgentCombiner的第1、第2模板参数都是T，说明它的结果类型和元素类型是相同的、都是T（介绍AgentCombiner时说过这2个类型可以不同）<br> _sampler：ReducerSampler&lt;Reducer, T, Op, InvOp&gt;类型的指针，此处设置为NULL，只有当前bvar有采样需要，即成员函数get_sampler被调用时_sampler才会被new出来。<br> _series_sampler：嵌套类SeriesSampler类型的指针，此处设置为NULL，后面介绍采样时再介绍。<br> _inv_op：InvOp类的对象。</p> 
+<p>Op类的对象在_combiner中有保存，所以不需要重复保存；</p> 
+<h3><a id="operator_88"></a>函数operator&lt;&lt;</h3> 
+<p><img src="https://images2.imgbox.com/2c/09/TEuSdwYy_o.png" alt="在这里插入图片描述"><br> 函数operator&lt;&lt;是对bvar增加值时调用的，例如</p> 
+<pre><code>bvar::Adder&lt;int&gt; sum;
+sum &lt;&lt; 1 &lt;&lt; 2 &lt;&lt; 3 &lt;&lt; 4;
+LOG(INFO) &lt;&lt; sum.get_value(); // 10
+</code></pre> 
+<p>具体实现是：<br> （1）调用_combiner的get_or_create_tls_agent函数，获得此bvar在当前线程tls数据中存储的agent的地址；<br> （2）然后调用agent-&gt;element.modify，传入Op对象和入参value，内部通过call_op_returning_void调用Op对象的函数operator()实现element当前值与入参value的“累加”、并将新值保存到agent-&gt;element。<br> <img src="https://images2.imgbox.com/b4/b5/Bm9TFiNC_o.png" alt="在这里插入图片描述"><br> （3）返回当前对象的引用，以便实现连续操作；<br> （4）这个函数调用栈完全没有锁，所以即使bvar在不同线程调用性能也很高。</p> 
+<h3><a id="get_value_103"></a>函数get_value</h3> 
+<p><img src="https://images2.imgbox.com/8b/3c/ABFHz60o_o.png" alt="在这里插入图片描述"><br> 这个函数目的是获得bvar的最新值，那么就要把在各个线程tls存储的agent的值进行“累加”。<br> 实现上由于_combiner.combine_agents已经封装好了这个功能，所以直接调用并返回即可。</p> 
+<p>_combiner.combine_agents调用栈底部有加锁操作，所以应该尽量少调用。</p> 
+<h3><a id="describe_111"></a>函数describe</h3> 
+<p><img src="https://images2.imgbox.com/5d/83/ONxcctdW_o.png" alt="在这里插入图片描述"><br> 调用get_value获得最新值保存到os中，如果T为string类型并且quote_string为true，则前后加上引号。</p> 
+<h3><a id="expose_impl_115"></a>函数expose_impl</h3> 
+<p><img src="https://images2.imgbox.com/25/5a/gygJLC9q_o.png" alt="在这里插入图片描述"></p> 
+<p>这里override了基类虚函数Variable::expose_impl。主要是调用了Variable::expose_impl进行了实际的曝光操作，然后根据条件和参数初始化了_series_sampler（这个后面介绍采样时再介绍）。</p> 
+<h2><a id="3Adder_124"></a>3.Adder类</h2> 
+<p><img src="https://images2.imgbox.com/71/ed/9MlZnWqy_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/ea/a0/qqCIMrMM_o.png" alt="在这里插入图片描述"><br> 由于父类Reducer该实现的都实现了，所以Adder定义就比较简洁了。重点就是传3个模板参数，一个是值类型T，一个是“累加”Op：AddTo类，一个是“逆反”Op：MinusFrom类。</p> 
+<p>Op有一个注意点是：必须把新值保存到第一个参数lhs中，而不是返回。</p> 
+<p>（待续）</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/00e6f16b22272000f009d925a443c5eb/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">中介模式(python)</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/59a7798cc8986330be284897029eebdf/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">报错:ImproperlyConfigured: Requested setting INSTALLED_APPS, but settings are not configured.</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

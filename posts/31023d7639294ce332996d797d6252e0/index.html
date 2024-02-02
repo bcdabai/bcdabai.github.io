@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>在Unity3D中控制动画播放 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="在Unity3D中控制动画播放" />
+<meta property="og:description" content="用Unity3D也算是好久了，但是每次做项目总还是能学到新的东西。这次做一个TPS的项目就遇到了这样一个问题，如何同时在上下半身播放不同的动画？解决方法其实是很简单，但由于对于动画资源的了解不足导致问题不断，最后是彻彻底底的研究了一遍Unity3D的动画系统（Legacy），虽然4.0出了新的动画控制系统，使用了一下功能相比原来确实强大不少，但还是将这次对于原先的动画系统的学习总结记录下来，毕竟这些动画的概念与策略是通用的，而且因为4.0在mac上目前貌似还没有破解所以项目还是得在3.5上做。相信对于深入理解新的动画系统也会很有帮助。
+一、Unity3D动画系统相关类 1.1 AnimationClip AnimationClip是Unity3D中播放动画的最基本对象，通过FBX导入的各个动画对象其实就是一个AnimationClip。这个类已关键帧的形式记录了骨骼关节在各个时间节点上的位置、旋转信息，根据帧频率frameRate结合播放模式wrapMode通过插值计算即可播放出连续的骨骼动画。
+1.2 AnimationState 每个AnimationState包含了一个AnimationClip，并记录这个动画片段的一些播放控制属性，实际上是一个AnimationClip的包装器。
+其中比较重要的参数有layer,weight, enabled, speed, blendMode这几项。这些参数的具体含义将在自定义混合动画控制中详细解释，在简单的动画控制时并不需要对AnimationState进行直接操作。
+1.3 Animation Animation是Unity3D的动画播放控制组件，包含了一系列的AnimationState对象，提供各种动画播放及控制方法。常用方法有Play(), CrossFade(), Stop()。在脚本中通过animation即可直接引用同一物体上的Animation控件。
+二、简单动画播放控制 所谓简单动画播放控制就是同一时间只有一个动作，比如Standard Assets中的那个水管工，静止idle，走walk，跑run，跳跃jump，攻击attack这些动作都是全身动作，同一时间只应该做一种动作，只有在动作切换时需要将两种切换动作进行混合以达到平滑过渡的效果，以上的操作使用Animation提供的CrossFade()方法即可达到。无论是CrossFade还是Play理论上都只需要在切换动画时调用一次即可，当然重复的调用并不会影响动画的播放，当Unity3D检测到当前播放的动画与函数调用使用的动画一样后会忽略该次调用。
+三、自定义混合动画控制 3.1 多动画同时播放的需求 在大多数情况下简单的动画播放控制已经足够，然而当游戏变得复杂时，单动画播放带来的问题就是美术工作量的急剧增加。
+最为典型的就是第三人称射击（动作）游戏，通常来说游戏中的人物会有各种上身动作如瞄准、射击、换子弹等，而下身则对应站立，行走（通常还是四个方向的行走动作）。这时候如果只能播放一个动作的话就需要美工制作大量的动作（站立瞄准、站立射击、跑步瞄准、跑步射击等等），其工作量可想而知。显然，最为效率的方式是美工分别做出上半身以及下半身的动作，然后由程序根据游戏角色的操作将两者动作混合起来同时播放。而这就涉及到了多动画同时播放的需求。此时简单的CrossFade()方法已经不能满足了，我们需要通过AnimationState来对动画播放进行自定义的控制。
+3.2 使用AnimationState控制动画播放 Unity3D的动画播放实际上都是通过AnimationState来进行控制的，Animation组件中提供的CrossFade,Play等方法其实就是将一系列对AnimationState参数进行设置的操作进行了封装。
+其中主要相关的参数有四个：
+layer: 该动画片段(AnimationClip)所在的播放层次。
+weight: 该动画片段在动画混合中所占的权重(0~1)
+enable: 该动画片段是否进行播放
+blendMode: 混合方式，有两种Blend和Additive
+默认初始化情况下Animation组件中的全部AnimationState的layer=0,weight=0, enable=false。Animation组件默认播放的AnimationState的layer=0, weight=1, enable=true。
+一、Unity3D动画播放策略
+Unity3D在进行动画播放时按照下面的策略进行：
+1.找到最高一层的全部AnimationState
+2.将其中enable为true且weight &gt; 0的AnimationState中的clip加入混合池(虚构的一个概念)
+3.如果当前混合池中全部blendMode为Blend的clip的权重相加少于1，则找到下一层的全部AnimationState。重复2.
+4.对混合池中的全部clip进行混合操作，生成最终的动作。
+在进行最终混合时所有clip的实际权重会进行归一化处理，即相加为1，处理时根据blendMode的不同结果也会有所差异，下面的例子会进一步说明。
+二、使用AnimationState控制播放的实例
+举几个实际的例子对Unity3D的动画混合策略进行说明。对于AnimationState的设置全部放在Start或Awake中进行。并且注意把Animation组件中的默认播放动画设为None，取消选中Player Automatically，原因正如前文所述，默认播放的AnimationState参数初始值与其他State不同，会对实验造成影响。
+1. 同一层动画的混合播放
+AnimationState right= animation[“run_right”];
+AnimationState idle= animation[“idle”];
+right.layer = 1;right.weight = 1; right.enable = true;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/31023d7639294ce332996d797d6252e0/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-07-16T10:45:50+08:00" />
+<meta property="article:modified_time" content="2020-07-16T10:45:50+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">在Unity3D中控制动画播放</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>用<a href="http://lib.csdn.net/base/unity3d" rel="nofollow">Unity3D</a>也算是好久了，但是每次做项目总还是能学到新的东西。这次做一个TPS的项目就遇到了这样一个问题，如何同时在上下半身播放不同的动画？解决方法其实是很简单，但由于对于动画资源的了解不足导致问题不断，最后是彻彻底底的研究了一遍Unity3D的动画系统（Legacy），虽然4.0出了新的动画控制系统，使用了一下功能相比原来确实强大不少，但还是将这次对于原先的动画系统的学习总结记录下来，毕竟这些动画的概念与策略是通用的，而且因为4.0在mac上目前貌似还没有破解所以项目还是得在3.5上做。相信对于深入理解新的动画系统也会很有帮助。</p> 
+<h2><a name="t0"></a>一、Unity3D动画系统相关类</h2> 
+<h3><a name="t1"></a>1.1 AnimationClip</h3> 
+<p>AnimationClip是Unity3D中播放动画的最基本对象，通过FBX导入的各个动画对象其实就是一个AnimationClip。这个类已关键帧的形式记录了骨骼关节在各个时间节点上的位置、旋转信息，根据帧频率frameRate结合播放模式wrapMode通过插值计算即可播放出连续的骨骼动画。</p> 
+<h3><a name="t2"></a>1.2 AnimationState</h3> 
+<p>每个AnimationState包含了一个AnimationClip，并记录这个动画片段的一些播放控制属性，实际上是一个AnimationClip的包装器。</p> 
+<p>其中比较重要的参数有layer,weight, enabled, speed, blendMode这几项。这些参数的具体含义将在自定义混合动画控制中详细解释，在简单的动画控制时并不需要对AnimationState进行直接操作。</p> 
+<h3><a name="t3"></a>1.3 Animation</h3> 
+<p>Animation是Unity3D的动画播放控制组件，包含了一系列的AnimationState对象，提供各种动画播放及控制方法。常用方法有Play(), CrossFade(), Stop()。在脚本中通过animation即可直接引用同一物体上的Animation控件。</p> 
+<p> </p> 
+<h2><a name="t4"></a>二、简单动画播放控制</h2> 
+<p>所谓简单动画播放控制就是同一时间只有一个动作，比如Standard Assets中的那个水管工，静止idle，走walk，跑run，跳跃jump，攻击attack这些动作都是全身动作，同一时间只应该做一种动作，只有在动作切换时需要将两种切换动作进行混合以达到平滑过渡的效果，以上的操作使用Animation提供的CrossFade()方法即可达到。无论是CrossFade还是Play理论上都只需要在切换动画时调用一次即可，当然重复的调用并不会影响动画的播放，当Unity3D检测到当前播放的动画与函数调用使用的动画一样后会忽略该次调用。</p> 
+<p> </p> 
+<h2><a name="t5"></a>三、自定义混合动画控制</h2> 
+<h3><a name="t6"></a>3.1 多动画同时播放的需求</h3> 
+<p>在大多数情况下简单的动画播放控制已经足够，然而当游戏变得复杂时，单动画播放带来的问题就是美术工作量的急剧增加。</p> 
+<p>最为典型的就是第三人称射击（动作）游戏，通常来说游戏中的人物会有各种上身动作如瞄准、射击、换子弹等，而下身则对应站立，行走（通常还是四个方向的行走动作）。这时候如果只能播放一个动作的话就需要美工制作大量的动作（站立瞄准、站立射击、跑步瞄准、跑步射击等等），其工作量可想而知。显然，最为效率的方式是美工分别做出上半身以及下半身的动作，然后由程序根据游戏角色的操作将两者动作混合起来同时播放。而这就涉及到了多动画同时播放的需求。此时简单的CrossFade()方法已经不能满足了，我们需要通过AnimationState来对动画播放进行自定义的控制。</p> 
+<h3><a name="t7"></a>3.2 使用AnimationState控制动画播放</h3> 
+<p>Unity3D的动画播放实际上都是通过AnimationState来进行控制的，Animation组件中提供的CrossFade,Play等方法其实就是将一系列对AnimationState参数进行设置的操作进行了封装。</p> 
+<p>其中主要相关的参数有四个：</p> 
+<p>layer: 该动画片段(AnimationClip)所在的播放层次。</p> 
+<p>weight: 该动画片段在动画混合中所占的权重(0~1)</p> 
+<p>enable: 该动画片段是否进行播放</p> 
+<p>blendMode: 混合方式，有两种Blend和Additive</p> 
+<p>默认初始化情况下Animation组件中的全部AnimationState的layer=0,weight=0, enable=false。Animation组件默认播放的AnimationState的layer=0, weight=1, enable=true。</p> 
+<p> </p> 
+<p>一、Unity3D动画播放策略</p> 
+<p>Unity3D在进行动画播放时按照下面的策略进行：</p> 
+<p>1.找到最高一层的全部AnimationState</p> 
+<p>2.将其中enable为true且weight &gt; 0的AnimationState中的clip加入混合池(虚构的一个概念)</p> 
+<p>3.如果当前混合池中全部blendMode为Blend的clip的权重相加少于1，则找到下一层的全部AnimationState。重复2.</p> 
+<p>4.对混合池中的全部clip进行混合操作，生成最终的动作。</p> 
+<p>在进行最终混合时所有clip的实际权重会进行归一化处理，即相加为1，处理时根据blendMode的不同结果也会有所差异，下面的例子会进一步说明。</p> 
+<p> </p> 
+<p>二、使用AnimationState控制播放的实例</p> 
+<p>举几个实际的例子对Unity3D的动画混合策略进行说明。对于AnimationState的设置全部放在Start或Awake中进行。并且注意把Animation组件中的默认播放动画设为None，取消选中Player Automatically，原因正如前文所述，默认播放的AnimationState参数初始值与其他State不同，会对实验造成影响。</p> 
+<p>1. 同一层动画的混合播放</p> 
+<p>AnimationState right= animation[“run_right”];</p> 
+<p>AnimationState idle= animation[“idle”];</p> 
+<p>right.layer = 1;right.weight = 1; right.enable = true;</p> 
+<p>idle = 1; idle.weight= 1; idle.enable = true;</p> 
+<p> 运行结果是角色动画介于行走与静止之间，体现两个动画1:1的混合效果</p> 
+<p>2. 高层动画覆盖下层动画</p> 
+<p> right.layer = 1; right.weight = 1;right.enable = true;</p> 
+<p>idle = 0; idle.weight = 1; idle.enable = true;</p> 
+<p> 运行结果是角色行走</p> 
+<p>3. 高层动画与下层动画混合</p> 
+<p>right.layer = 1; right.weight = 0.5f; right.enable = true;</p> 
+<p>idle = 0; idle.weight = 1; idle.enable = true;</p> 
+<p>运行结果与1相同，idle的实际weight为1 * (1 – 0.5f)</p> 
+<p>4. 使用Additive混合不同层动画</p> 
+<p>right.layer = 1; right.weight = 1; right.enable = true;</p> 
+<p>right.blendMode = BlendMode.Addictive;</p> 
+<p>idle = 0; idle.weight = 1; idle.enable = true;</p> 
+<p> 运行结果与1相同，idle的实际weight为1/(1+1)</p> 
+<p> </p> 
+<p>三、其他的动画播放控制参数</p> 
+<p>speed: 控制动画播放速度，比如调整射击速度就是将该值提高</p> 
+<p>time: 当前动画所在时间点</p> 
+<p>warpMode: 动画循环方式，有一次、循环、镜像循环PingPong</p> 
+<h3><a name="t8"></a>3.3 自定义动画过渡</h3> 
+<p>动画过渡实际上就是两种动画混合权重的过渡，前一种动画的权重由1渐变为0，后一种由0变为1，由此实现动画的平滑过渡。在实际操作时，并不需要过渡时在Update()中每帧去调整两种动画AnimationState的权重weight。Animation控件提供了Blend()方法帮助在后台自动计算这种过渡，其使用方法与CrossFade类似，详见Unity3D的script手册。</p> 
+<h3><a name="t9"></a>3.4 Play(), CrossFade()背后的操作</h3> 
+<p>了解这些基本方法背后进行的操作在同时使用AnimationState对动作进行控制时十分有用。</p> 
+<p>首先是Play(stringanimationName)（Play() = Play(default Animation name)）这个方法实际上是将animationName所在层的全部其他AnimationState的weight置为0，enable置为false，将animationName的weight置为1, enable置为true。</p> 
+<p>CrossFade()与Play()大致相同，只不过他并不直接将其他的AnimationState的weight置为0，而是调用Blend()方法将其向0进行渐变，一旦该AnimationState的weight变为0再将其enable设置为false。</p> 
+<p>由此可见，当你设置了多层AnimationState后，仅仅调用这两个方法很可能并不能达到你想要的动画控制效果。当然，这两个方法最后有一个默认参数PlayMode来调整执行策略（区别就在于操作对象仅仅在该层还是全部AnimationState对象），总之这一节通过阐述Play与CrossFade背后的操作，希望使我们在使用AnimationState进行混合动画控制编程时能够正确的使用这两个方法以达到期望的效果。</p> 
+<h3><a name="t10"></a>3.5 局部动画</h3> 
+<p>以上所介绍的AnimationState操作只是多动画的手动播放及混合控制，还并没有涉及到如何向开头所讲的上下半身播放不同的动画。要在同一个角色上同时播放两个不同的动作使用局部动画即可。</p> 
+<p>一、生成局部动画</p> 
+<p>在Unity3D中有两种方式实现局部动画，一是使用AnimationState的AddMixingTransform方法，该方法传入一个骨骼节点的Transform，调用后该动画片段AnimationClip便只会影响该节点及其子骨骼，而对其他骨骼关节并不再影响。</p> 
+<p>另一种方法是在动画模型制作时就只对局部的骨骼制作动画，其他骨骼在整个动画片段中都保持不变，这样生成的动画片段AnimationClip中就不会包括对那些不变骨骼的关键帧信息，也就不会对其他骨骼关节进行影响。（这是我根据动画播放的实际控制结果进行的推测，在Unity3D的官方文档中好像并没有直接说明，仍需查证）</p> 
+<p>了解第二种方法十分重要，虽然还只是推测。因为在与美术沟通前你可能并不知道导入的是一个局部动画，而将其当成全身动画，使得在进行动画混合控制时产生了意想不到的结果。我在一次项目中发现明明角色应该进入idle状态，但是双腿仍然在跑动，为此花了两天时间查证，也是直接促成了这篇文章的诞生，最终发现原来美术给的idle只有上半身有动画，下半身没有，因此虽然idle比跑动高一层，但下半身并不能覆盖。</p> 
+<p> </p> 
+<p>二、局部动画的混合</p> 
+<p>局部动画的混合策略与前述Unity3D动画播放策略相同，只不过只是影响局部骨骼。这也就是说，上半身与下半身的动画无论谁所在的层更高，权重多少都不会影响另外半身的动画播放。但是上层的半身动画会覆盖下层的全身动画或与之混合，而全身动画中不包含在半身动画中的骨骼则完全不受影响。</p> 
+<p> </p> 
+<h2><a name="t11"></a>四、射击类游戏应用</h2> 
+<p>参考Unity3.5的官方例子Angry Robot。在这个例子中很好的实现了上下半身的独立旋转，射击动作与跑步动作的半身分离。这一节以此作为样例进行分析。</p> 
+<p>动作资源：</p> 
+<p>run_forward,fun_backward, run_left, run_right。四方向的跑动，全身动作，全部置于第1层。</p> 
+<p>Idle。静止，全身动作，位于第2层。</p> 
+<p>Attack。攻击，半身动作，位于第4层。混合方式Additive</p> 
+<p>操作控制：</p> 
+<p>初始化，全部动作的weight置为1，Attack的enable置为false，其余为true。这样初始状态下Attack不播放，Idle覆盖跑动动作，角色表现为静止站立动作。</p> 
+<p>移动时将Idle的weight根据速度向0渐变，开放跑动动作。使用CrossFade()在四个跑动动作中选择合适的动作进行播放。停止时再将Idle的weight逐渐置为1，重新覆盖跑动动作。</p> 
+<p>攻击时将Attack的enable置为true，停止攻击时置为false。由于Attack动作在最高层，且混合模式为Additive，因此站立攻击时Attack动作与行走动作上半身进行混合，跑动攻击时Attack动作与跑动动作上半身进行混合。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f5df94fd35b667e03fff9fb5859503b4/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">permission denied, access ‘/usr/local/lib/node_modules‘  node_modules没有写权限</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/62940473f469bbfe66e46107b8a77e98/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">软考是什么-有什么用-怎么报名-考试内容</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

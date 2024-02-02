@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>基于STM32从零写操作系统系列---将printf指向串口输出 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="基于STM32从零写操作系统系列---将printf指向串口输出" />
+<meta property="og:description" content="如有不详细的描述、错误或疑问，欢迎留言！！！ 基于STM32从零写操作系统系列---前言与目录 这里有很多关于ARM的文档：http://infocenter.arm.com/help/index.jsp 为什么需要printf？ 首先，这个printf不是标准C中的printf，这个printf是自己参考标准库实现的。只是简单地完成了打印输出int，long long int， unsigned int， unsigned long long int， float， double和十六进制数等功能。主要用于在以后的学习中，输出变量、寄存器等的数据，便于调试程序。
+1.函数调用中的参数传递 根据《Procedure Call Standard for the ARM ® Architecture》（文章结尾有下载分享）这个文档可知，标准规定在寄存器（r0-r3）和堆栈中传递参数。对于采用少量参数的子程序，仅使用寄存器，大大减少了调用的开销。还有就是，char，short，int这些类型的数据入栈时，会占用4字节的空间；long long int，double等的8字节数据入栈时，只会放置到8字节对齐的地址上。下面通过反汇编查看参数传递的过程：
+C语言调用过程:
+反汇编：
+先了解test_func1函数的参数（long long int a1, ...）中的“...”省略号，它表示这是一个可变参数列表。用于表示将来调用该函数时，可能会传递除参数a1以外的一个、两个或多个的参数给test_func1函数。那么如何获取可变参数列表中的参数呢？经过上面的标准文档说明和反汇编代码的分析，然后参照网上的一些分享，用以下的方法获取可变参数列表：
+自定义va_list类型，typedef char *va_list。其实就是一个指向char类型的指针，void类型的指针void *应该更合理（没试过）。va_list指针用于指向可变参数列表中的不同类型的参数。定义宏va_start(ap,v),ap就是va_list类型的变量，v就是靠近可变参数列表左边的第一个参数（这里是a1参数）；这个宏的目的就是用a1变量在栈中的地址初始化va_list类型的ap指针，让它指向可变参数列表中的第一个参数（这里是a2）。定义宏va_arg(ap,t),ap就是va_list类型的变量，已通过va_start（ap，v）初始化；t就是要获取的参数的类型，如在这里要获取a2参数，就是va_arg(ap，int)；这个宏的作用是首先用sizeof（t）判断要获取的参数的类型t的大小，如果是小于等于4字节，就按4字节大小在栈中取值，如果大于4字节（在这里就默认为8字节），就需要判断ap指针是否在8字节对齐的地址上，如果是就直接在当前位置取8字节数据，ap=ap&#43;8指向下一个数据，如果不是，ap就需要ap=ap&#43;4加4到达8字节对齐的地址上取8字节数据，ap=ap&#43;8再加8指向下一个数据。定义宏va_end（ap），ap就是va_list类型的变量，这个宏用于销毁ap指针，就是出于安全让指针指向0地址处（相当于NULL指针）。定义宏_INTSIZEOF(n)，n是数据类型，源于计算4字节对齐。 通过定义了上面的宏，我们就可以在test_func1函数中使用这些宏去获取可变参数列表中的参数了。用法如下：
+2.printf实现 printf的实现就是需要用到可变参数列表，定义好上面的宏后，就需要开始写如何格式化输出信息了。所谓的格式化，可以简单理解为在一串字符串中使用占位符表示将要输出的数据，如“a = %d\r\n”,%d就相当于占位符，表示这个位置将用一个十进制有符号整型数据（int）来代替。
+怎么实现呢？其实就是通过读取格式化字符串中的每个字符，当读取到%百分号时，再读取%百分号的下一个字符，判断是什么字符，如‘d’这个字符表示将数据转换为十进制后输出。本次实验的printf只实现了一下几种格式输出：
+1.十进制整型输出（包括d,u,ld,lu）
+首先就是就是计算这个十进制数有几位，如123，很明显有3位，代码实现如下：
+“/”斜杠表示求除法中的商，如123除以10的商为12，余数为3
+例如，s32_tmp = 123；第一次计算，123除以10的商为12，即s32_tmp = 12,count = 1;第二次计算，12除以10的商为1，即s32_tmp = 1,count = 2;第三次计算，1除以10的商为0，即s32_tmp = 0,count = 3。此时s32_tmp=0，退出while循环。求得count=3，即表示123这个数有3位。
+然后，从高位到低位输出十进制数，代码如下：
+“%”百分号表示除法中求余数，如123除以10的商为12，余数为3
+pow_10()这个函数用于求10的n次方，如pow_10(2)返回10的2次方100的值。这里需要注意pow_10()的返回值定义为long long int类型，否则在格式化长整型（ld,lu）时会出错。
+myputc(),用于串口输出一个字符。
+例如，s32_tmp = 123；输出第一个字符，123除以10的2次方，商为1，余数23，即c = 1,s32_tmp = 23,c &#43; ‘0’表示1加0的ascii码0x30，就是1的ascii码0x31，然后串口输出0x31,这会在串口调试助手中显示字符1。以后的输出也是相似的，直到count为0，退出while循环。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/9fe7af0e908273b38944d8ef77c10c12/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-03-03T15:51:13+08:00" />
+<meta property="article:modified_time" content="2019-03-03T15:51:13+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">基于STM32从零写操作系统系列---将printf指向串口输出</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h4>如有不详细的描述、错误或疑问，欢迎留言！！！</h4> 
+<h4><a href="https://blog.csdn.net/drsonxu/article/details/86649030">基于STM32从零写操作系统系列---前言与目录</a></h4> 
+<h3>这里有很多关于ARM的文档：<a href="http://infocenter.arm.com/help/index.jsp" rel="nofollow">http://infocenter.arm.com/help/index.jsp</a></h3> 
+<h3>为什么需要printf？</h3> 
+<p>首先，这个printf不是标准C中的printf，这个printf是自己参考标准库实现的。只是简单地完成了打印输出int，long long int， unsigned int， unsigned long long int， float， double和十六进制数等功能。主要用于在以后的学习中，输出变量、寄存器等的数据，便于调试程序。</p> 
+<h4>1.函数调用中的参数传递</h4> 
+<p>根据《Procedure Call Standard for the ARM ® Architecture》（文章结尾有下载分享）这个文档可知，标准规定在寄存器（r0-r3）和堆栈中传递参数。对于采用少量参数的子程序，仅使用寄存器，大大减少了调用的开销。还有就是，char，short，int这些类型的数据入栈时，会占用4字节的空间；long long int，double等的8字节数据入栈时，只会放置到8字节对齐的地址上。下面通过反汇编查看参数传递的过程：</p> 
+<p>C语言调用过程:</p> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/db/eb/ZK2eJMHG_o.png"></p> 
+<p>反汇编：</p> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/fc/d8/q7my6xrU_o.png"></p> 
+<p> 先了解test_func1函数的参数（long long int a1, ...）中的“...”省略号，它表示这是一个可变参数列表。用于表示将来调用该函数时，可能会传递除参数a1以外的一个、两个或多个的参数给test_func1函数。那么如何获取可变参数列表中的参数呢？经过上面的标准文档说明和反汇编代码的分析，<a href="https://freesoftman.iteye.com/blog/949230" rel="nofollow">然后参照网上的一些分享</a>，用以下的方法获取可变参数列表：</p> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/9c/3d/VQoRc5AR_o.png"></p> 
+<ol><li>自定义va_list类型，typedef char *va_list。其实就是一个指向char类型的指针，void类型的指针void *应该更合理（没试过）。va_list指针用于指向可变参数列表中的不同类型的参数。</li><li>定义宏va_start(ap,v),ap就是va_list类型的变量，v就是靠近可变参数列表左边的第一个参数（这里是a1参数）；这个宏的目的就是用a1变量在栈中的地址初始化va_list类型的ap指针，让它指向可变参数列表中的第一个参数（这里是a2）。</li><li>定义宏va_arg(ap,t),ap就是va_list类型的变量，已通过va_start（ap，v）初始化；t就是要获取的参数的类型，如在这里要获取a2参数，就是va_arg(ap，int)；这个宏的作用是首先用sizeof（t）判断要获取的参数的类型t的大小，如果是小于等于4字节，就按4字节大小在栈中取值，如果大于4字节（在这里就默认为8字节），就需要判断ap指针是否在8字节对齐的地址上，如果是就直接在当前位置取8字节数据，ap=ap+8指向下一个数据，如果不是，ap就需要ap=ap+4加4到达8字节对齐的地址上取8字节数据，ap=ap+8再加8指向下一个数据。</li><li>定义宏va_end（ap），ap就是va_list类型的变量，这个宏用于销毁ap指针，就是出于安全让指针指向0地址处（相当于NULL指针）。</li><li>定义宏_INTSIZEOF(n)，n是数据类型，源于计算4字节对齐。</li></ol> 
+<p>通过定义了上面的宏，我们就可以在test_func1函数中使用这些宏去获取可变参数列表中的参数了。用法如下：</p> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/55/f2/gaMCsp7H_o.png"></p> 
+<h4> 2.printf实现</h4> 
+<p>printf的实现就是需要用到可变参数列表，定义好上面的宏后，就需要开始写如何格式化输出信息了。所谓的格式化，可以简单理解为在一串字符串中使用占位符表示将要输出的数据，如“a = %d\r\n”,%d就相当于占位符，表示这个位置将用一个十进制有符号整型数据（int）来代替。</p> 
+<p>怎么实现呢？其实就是通过读取格式化字符串中的每个字符，当读取到%百分号时，再读取%百分号的下一个字符，判断是什么字符，如‘d’这个字符表示将数据转换为十进制后输出。本次实验的printf只实现了一下几种格式输出：</p> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/0e/84/qGOY46lc_o.png"></p> 
+<p> 1.十进制整型输出（包括d,u,ld,lu）</p> 
+<p><img alt="" class="has" height="120" src="https://images2.imgbox.com/95/10/9thstPpk_o.png" width="614"> </p> 
+<p>首先就是就是计算这个十进制数有几位，如123，很明显有3位，代码实现如下：</p> 
+<p><img alt="" class="has" height="70" src="https://images2.imgbox.com/e4/ea/9lLzAIjz_o.png" width="290"></p> 
+<p>“/”斜杠表示求除法中的商，如123除以10的商为12，余数为3</p> 
+<p>例如，s32_tmp = 123；第一次计算，123除以10的商为12，即s32_tmp = 12,count = 1;第二次计算，12除以10的商为1，即s32_tmp = 1,count = 2;第三次计算，1除以10的商为0，即s32_tmp = 0,count = 3。此时s32_tmp=0，退出while循环。求得count=3，即表示123这个数有3位。</p> 
+<p>然后，从高位到低位输出十进制数，代码如下：</p> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/8d/b2/HinFYeJK_o.png"></p> 
+<p> “%”百分号表示除法中求余数，如123除以10的商为12，余数为3</p> 
+<p>pow_10()这个函数用于求10的n次方，如pow_10(2)返回10的2次方100的值。这里需要注意pow_10()的返回值定义为long long int类型，否则在格式化长整型（ld,lu）时会出错。</p> 
+<p>myputc(),用于串口输出一个字符。</p> 
+<p>例如，s32_tmp = 123；输出第一个字符，123除以10的2次方，商为1，余数23，即c = 1,s32_tmp = 23,c + ‘0’表示1加0的ascii码0x30，就是1的ascii码0x31，然后串口输出0x31,这会在串口调试助手中显示字符1。以后的输出也是相似的，直到count为0，退出while循环。</p> 
+<p>注意，如果s32_tmp = -123，求得的c的值也是负的，在myputc()中就需要用‘0’-c,才能输出正确的字符。</p> 
+<p>2.十六进制输出</p> 
+<p>输出十六进制与输出十进制差不多，只是一个除以16，一个除以10。代码如下：</p> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/f2/78/f2LeGTaf_o.png"></p> 
+<p>3.浮点输出</p> 
+<p>将浮点数分成整数部分和小数部分，整数部分的处理如上面说明的；小数部分通过将小数乘以10，再强制类型转换为long long int类型（这里需要小心强制类型转换后，数据的变化；由于float（例外，转换后为64位）和double都是64位，刚开始是转换为char类型的，后来成就出错了，应该是符号位在转换时改变了，导致出错），如，-0.1234乘以10得-1.234，转换后为-1。负浮点数输出代码实现如下：</p> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/0e/17/i8rzwF7r_o.png"></p> 
+<p> 4.回车，换行</p> 
+<p><img alt="" class="has" height="118" src="https://images2.imgbox.com/0f/81/u20Aju39_o.png" width="345"></p> 
+<h4>3.串口字符输出函数</h4> 
+<p>如何初始化串口，请看<a href="https://blog.csdn.net/drsonxu/article/details/87715007">基于STM32从零写操作系统系列---基于寄存器写串口驱动</a>，这里有详细的步骤。或参考文章结尾分享的源代码，会有所不同，但原理一样。</p> 
+<p>字符输出函数代码实现如下：</p> 
+<p><img alt="" class="has" height="113" src="https://images2.imgbox.com/0c/7d/slYOPQUc_o.png" width="555"></p> 
+<h4>4.效果</h4> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/4c/a8/JXGt1N1e_o.png"></p> 
+<p> <img alt="" class="has" src="https://images2.imgbox.com/11/31/Hod1IdLU_o.png"></p> 
+<h4>5.代码编译</h4> 
+<p>这里解释一些自己定义的编译指令：</p> 
+<ol><li>printf功能，我是通过编译成库来提供的，所以首先要编译库命令，在项目根目录\printf_proj输入make mylib编译库</li><li>清除库的.o文件，make clean_libobj</li><li>make编译项目</li><li>make all_clean,用于清除所有编译后得到的文件，包括库</li><li>make clean,清除所有编译后得到的文件，除lib文件夹下的文件</li></ol> 
+<h4>6.小结 </h4> 
+<p>printf的功能基本实现了，代码比较粗糙，还可以进行修改；实现的方法，我就想到这种，如有其它好方法请介绍给我！！下面有源代码分享和arm文档分享，以及串口调试工具。</p> 
+<p>源代码包文件名：printf_proj.zip</p> 
+<p>百度云分享：</p> 
+<p>链接：https://pan.baidu.com/s/1DlzYMo8oZsnF9ammJuuZoQ <br> 提取码：dc5h </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/bc0ff6ed86071e4c4ae493b216ed1dfb/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">搭配linux&#43;Anaconda&#43;TensorFlow&#43;Keras&#43;GPU环境</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/2199532a605264a35d94dbf1bd1c5c56/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">restful api 规范那些事</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

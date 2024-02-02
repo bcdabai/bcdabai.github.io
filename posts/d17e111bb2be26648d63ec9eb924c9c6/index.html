@@ -1,0 +1,1696 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>基于双vip的GTID的半同步主从复制MySQL高可用集群 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="基于双vip的GTID的半同步主从复制MySQL高可用集群" />
+<meta property="og:description" content="基于双vip的GTID的半同步主从复制MySQL高可用集群 基于双vip的GTID的半同步主从复制MySQL高可用集群一.项目介绍1.拓扑图2.详细介绍 二.前期准备1.项目环境2.IP划分3.根据ip规划配置好静态ip4.修改主机名方便管理5.配置ansible免密通道 三. 项目步骤1.安装部署ansible1.利用xftp上传MySQL软件包（mysql-5.7.43-linux-glibc2.12-x86_64.tar.gz）和MySQL Router的安装包(mysql-router-community-8.0.21-1.el7.x86_64.rpm)以及Node Exporter的软件包(node_exporter-1.6.1.linux-amd64.tar.gz)2.编写安装mysql和node_porters的脚本3.编写playbook批量部署mysql、mysqlroute、node_exporters、dns等软件 2.同步mysql数据1.导出master上的mysql上的数据2.使用scp把all_db.SQL传递给ansible3.使用ansible下发到slave集群机器上 3.配置基于GTID的半同步主从复制1.在master上安装配置半同步的插件2.修改master配置文件 /etc/my.conf 并开启gtid功能3.在每台从服务器上配置安装半同步的插件，配置slave配置文件4.在master上新建一个授权用户，给slave1和salve2来复制二进制日志5.在slave2上创建授权用户，给salve3复制二进制日志6.在slave上配置master info的信息7.查看8.验证GTID的半同步主从复制9.配置slave3延迟备份服务器 4.master创建一个计划任务，远程同步到slave4异地备份服务器1.在slave4上操作2.查看rsync和xinetd监听的进程3.在数据源master服务器操作4.测试数据源master服务器192.168.153 到slave异地备份服务器192.168.153.154之间的数据同步5.数据源服务器上安装sersync工具，实现自动的实时的同步6.创建计划任务 5.部署mysqlrouter中间件实现读写分离，安装keepalived部署双vip实现高可用安装部署mysql-router软件1.修改配置文件2.启动MySQL router服务,监听了7001和7002端口3.在master上创建两个用户实现读写分离4.测试在只读账户中操作在读写账户上操作 5.安装keepalived部署双vip实现高可用 6.搭建DNS服务器1.修改dns配置文件，任意ip可以访问本机的53端口，并且允许dns解析2.编辑dns次要配置文件/etc/named.rfc1912.zones，增加一条主域名记录3.修改linux客户机的dns服务器的地址为搭建的dns服务器192.169.153.1454.查看效果 7.监控部署1.利用xftp把安装包拉取进来2.一键源码安装prometheus3.把prometheus做成一个服务来进行管理4.在node节点服务器上安装exporter程序，已经在ansible的playbook中安装完成5.在prometheus server里添加安装了exporter程序的机器6.配置部署grafana 8.sysbench压力测试1.安装sysbench工具2.调大内核资源限制3.在master上创建测试库4.基于sysbench构造测试表和测试数据5.数据库读写性能测试（获取测试数据）把prepare改成run6.执行完成压测之后可以将run改成cleanup，清除数据 四.出现的问题1.在使用ansble一键配置之后输入mysql无法找到命令2.在配置grafana的时候没数据3.压力测试的时候，由于内核参数的限制，导致无法起太多的线程4.主从复制时，只在slave上进行了操作，导致事务数比主服务器还要多，主从复制一直起不来5.虚拟机内存不够，新建不了虚拟机 五.项目心得 基于双vip的GTID的半同步主从复制MySQL高可用集群 一.项目介绍 1.拓扑图 2.详细介绍 项目名称：基于双vip的GTID的半同步主从复制MySQL高可用集群
+项目环境：centos7.9，mysql5.7.43，mysqlrouter8.0.21，keepalived 1.3.5，ansible 2.9.27，prometheus-2.47.0，grafana-enterprise-10.1.1-1，node_exporter-1.6.1等。
+项目描述：
+本项目的目的是构建一个高可用的能实现读写分离的高效的MySQL集群，确保业务的稳定，能沟通方便的监控整个集群，同时能批量的去部署和管理整个集群。
+项目步骤：
+1.配置好ansible服务器并建立免密通道，一键安装MySQL、mysqlroute、node_exporters、dns等软件，在master上导出基础数据到ansible上，发布到所有slave服务器上并导入
+2.安装好半同步相关的插件，开启gtid功能，启动主从复制服务，配置延迟备份服务器，从slave1上拿二进制日志
+3.在master上创建一个计划任务每天2:30进行数据库的备份脚本，使用rsync&#43;sersync远程同步到slave4异地备份服务器上
+4.安装部署mysqlrouter中间件软件，实现读写分离；安装keepalived实现高可用，配置2个vrrp实例实现双vip的高可用功能
+5.搭建DNS域名服务器，配置一个域名对应2个vip，实现基于DNS的负载均衡，访问同一URL解析出双vip地址
+6.使用sysbench整个MySQL集群的性能（cpu、IO、内存等）进行压力测试，安装部署prometheus实现监控，grafana出图了解系统性能的瓶颈并调优
+二.前期准备 1.项目环境 cecentos7.9，mysql5.7.43，mysqlrouter8.0.21，keepalived 1.3.5，ansible 2.9.27，prometheus-2.47.0，grafana-enterprise-10.1.1-1，node_exporter-1.6.1等
+2.IP划分 准备11台centos7.9的虚拟机，并且分配IP地址：
+主机名IPDNS服务器192.168.153.145mysqlrouter1192.168.153.155mysqlrouter2192.168.153.147master192.168.153.150slave1192.168.153.151slave2192.168.153.152slave3192.168.153.153slave4192.168.153.154ansible192.168.153.148监控服务器192.168.153.149sysbench压力测试机192.168.153.144 3.根据ip规划配置好静态ip [root@master ~]# vi /etc/sysconfig/network-scripts/ifcfg-ens33 BOOTPROTO=static #静态配置ip NAME=ens33 #网卡名称ens33 DEVICE=ens33 #本机网卡ens33 ONBOOT=yes #开机启动 IPADDR=192.168.153.150 #ip地址 PREFIX=24 #子网掩码24 GATEWAY=192.168.153.2 #我选择的是NAT网络，所以网关是路由器ip 192.168.153.2 DNS1=114.114.114.114 #dns服务器114." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/d17e111bb2be26648d63ec9eb924c9c6/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-12-31T18:57:03+08:00" />
+<meta property="article:modified_time" content="2023-12-31T18:57:03+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">基于双vip的GTID的半同步主从复制MySQL高可用集群</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>基于双vip的GTID的半同步主从复制MySQL高可用集群</h4> 
+ <ul><li><a href="#vipGTIDMySQL_1" rel="nofollow">基于双vip的GTID的半同步主从复制MySQL高可用集群</a></li><li><ul><li><a href="#_3" rel="nofollow">一.项目介绍</a></li><li><ul><li><a href="#1_5" rel="nofollow">1.拓扑图</a></li><li><a href="#2_9" rel="nofollow">2.详细介绍</a></li></ul> 
+   </li><li><a href="#_34" rel="nofollow">二.前期准备</a></li><li><ul><li><a href="#1_36" rel="nofollow">1.项目环境</a></li><li><a href="#2IP_40" rel="nofollow">2.IP划分</a></li><li><a href="#3ipip_58" rel="nofollow">3.根据ip规划配置好静态ip</a></li><li><a href="#4_79" rel="nofollow">4.修改主机名方便管理</a></li><li><a href="#5ansible_88" rel="nofollow">5.配置ansible免密通道</a></li></ul> 
+   </li><li><a href="#__129" rel="nofollow">三. 项目步骤</a></li><li><ul><li><a href="#1ansible_131" rel="nofollow">1.安装部署ansible</a></li><li><ul><li><a href="#1xftpMySQLmysql5743linuxglibc212x86_64targzMySQL_Routermysqlroutercommunity80211el7x86_64rpmNode_Exporternode_exporter161linuxamd64targz_156" rel="nofollow">1.利用xftp上传MySQL软件包（mysql-5.7.43-linux-glibc2.12-x86_64.tar.gz）和MySQL Router的安装包(mysql-router-community-8.0.21-1.el7.x86_64.rpm)以及Node Exporter的软件包(node_exporter-1.6.1.linux-amd64.tar.gz)</a></li><li><a href="#2mysqlnode_porters_171" rel="nofollow">2.编写安装mysql和node_porters的脚本</a></li><li><a href="#3playbookmysqlmysqlroutenode_exportersdns_319" rel="nofollow">3.编写playbook批量部署mysql、mysqlroute、node_exporters、dns等软件</a></li></ul> 
+    </li><li><a href="#2mysql_501" rel="nofollow">2.同步mysql数据</a></li><li><ul><li><a href="#1mastermysql_503" rel="nofollow">1.导出master上的mysql上的数据</a></li><li><a href="#2scpall_dbSQLansible_515" rel="nofollow">2.使用scp把all_db.SQL传递给ansible</a></li><li><a href="#3ansibleslave_527" rel="nofollow">3.使用ansible下发到slave集群机器上</a></li></ul> 
+    </li><li><a href="#3GTID_645" rel="nofollow">3.配置基于GTID的半同步主从复制</a></li><li><ul><li><a href="#1master_647" rel="nofollow">1.在master上安装配置半同步的插件</a></li><li><a href="#2master_etcmyconf_gtid_657" rel="nofollow">2.修改master配置文件 /etc/my.conf 并开启gtid功能</a></li><li><a href="#3slave_677" rel="nofollow">3.在每台从服务器上配置安装半同步的插件，配置slave配置文件</a></li><li><a href="#4masterslave1salve2_717" rel="nofollow">4.在master上新建一个授权用户，给slave1和salve2来复制二进制日志</a></li><li><a href="#5slave2salve3_729" rel="nofollow">5.在slave2上创建授权用户，给salve3复制二进制日志</a></li><li><a href="#6slavemaster_info_740" rel="nofollow">6.在slave上配置master info的信息</a></li><li><a href="#7_788" rel="nofollow">7.查看</a></li><li><a href="#8GTID_801" rel="nofollow">8.验证GTID的半同步主从复制</a></li><li><a href="#9slave3_868" rel="nofollow">9.配置slave3延迟备份服务器</a></li></ul> 
+    </li><li><a href="#4masterslave4_883" rel="nofollow">4.master创建一个计划任务，远程同步到slave4异地备份服务器</a></li><li><ul><li><a href="#1slave4_885" rel="nofollow">1.在slave4上操作</a></li><li><a href="#2rsyncxinetd_945" rel="nofollow">2.查看rsync和xinetd监听的进程</a></li><li><a href="#3master_959" rel="nofollow">3.在数据源master服务器操作</a></li><li><a href="#4master192168153_slave192168153154_1006" rel="nofollow">4.测试数据源master服务器192.168.153 到slave异地备份服务器192.168.153.154之间的数据同步</a></li><li><a href="#5sersync_1021" rel="nofollow">5.数据源服务器上安装sersync工具，实现自动的实时的同步</a></li><li><a href="#6_1093" rel="nofollow">6.创建计划任务</a></li></ul> 
+    </li><li><a href="#5mysqlrouterkeepalivedvip_1115" rel="nofollow">5.部署mysqlrouter中间件实现读写分离，安装keepalived部署双vip实现高可用</a></li><li><ul><li><a href="#mysqlrouter_1117" rel="nofollow">安装部署mysql-router软件</a></li><li><a href="#1_1131" rel="nofollow">1.修改配置文件</a></li><li><a href="#2MySQL_router70017002_1154" rel="nofollow">2.启动MySQL router服务,监听了7001和7002端口</a></li><li><a href="#3master_1167" rel="nofollow">3.在master上创建两个用户实现读写分离</a></li><li><a href="#4_1189" rel="nofollow">4.测试</a></li><li><ul><li><a href="#_1195" rel="nofollow">在只读账户中操作</a></li><li><a href="#_1199" rel="nofollow">在读写账户上操作</a></li></ul> 
+     </li><li><a href="#5keepalivedvip_1205" rel="nofollow">5.安装keepalived部署双vip实现高可用</a></li></ul> 
+    </li><li><a href="#6DNS_1367" rel="nofollow">6.搭建DNS服务器</a></li><li><ul><li><a href="#1dnsip53dns_1390" rel="nofollow">1.修改dns配置文件，任意ip可以访问本机的53端口，并且允许dns解析</a></li><li><a href="#2dnsetcnamedrfc1912zones_1408" rel="nofollow">2.编辑dns次要配置文件/etc/named.rfc1912.zones，增加一条主域名记录</a></li><li><a href="#3linuxdnsdns192169153145_1441" rel="nofollow">3.修改linux客户机的dns服务器的地址为搭建的dns服务器192.169.153.145</a></li><li><a href="#4_1453" rel="nofollow">4.查看效果</a></li></ul> 
+    </li><li><a href="#7_1469" rel="nofollow">7.监控部署</a></li><li><ul><li><a href="#1xftp_1471" rel="nofollow">1.利用xftp把安装包拉取进来</a></li><li><a href="#2prometheus_1478" rel="nofollow">2.一键源码安装prometheus</a></li><li><a href="#3prometheus_1507" rel="nofollow">3.把prometheus做成一个服务来进行管理</a></li><li><a href="#4nodeexporteransibleplaybook_1543" rel="nofollow">4.在node节点服务器上安装exporter程序，已经在ansible的playbook中安装完成</a></li><li><a href="#5prometheus_serverexporter_1545" rel="nofollow">5.在prometheus server里添加安装了exporter程序的机器</a></li><li><a href="#6grafana_1592" rel="nofollow">6.配置部署grafana</a></li></ul> 
+    </li><li><a href="#8sysbench_1631" rel="nofollow">8.sysbench压力测试</a></li><li><ul><li><a href="#1sysbench_1633" rel="nofollow">1.安装sysbench工具</a></li><li><a href="#2_1640" rel="nofollow">2.调大内核资源限制</a></li><li><a href="#3master_1648" rel="nofollow">3.在master上创建测试库</a></li><li><a href="#4sysbench_1655" rel="nofollow">4.基于sysbench构造测试表和测试数据</a></li><li><a href="#5preparerun_1733" rel="nofollow">5.数据库读写性能测试（获取测试数据）把prepare改成run</a></li><li><a href="#6runcleanup_1792" rel="nofollow">6.执行完成压测之后可以将run改成cleanup，清除数据</a></li></ul> 
+   </li></ul> 
+   </li><li><a href="#_1814" rel="nofollow">四.出现的问题</a></li><li><ul><li><a href="#1ansblemysql_1816" rel="nofollow">1.在使用ansble一键配置之后输入mysql无法找到命令</a></li><li><a href="#2grafana_1845" rel="nofollow">2.在配置grafana的时候没数据</a></li><li><a href="#3_1859" rel="nofollow">3.压力测试的时候，由于内核参数的限制，导致无法起太多的线程</a></li><li><a href="#4slave_1863" rel="nofollow">4.主从复制时，只在slave上进行了操作，导致事务数比主服务器还要多，主从复制一直起不来</a></li><li><a href="#5_1867" rel="nofollow">5.虚拟机内存不够，新建不了虚拟机</a></li></ul> 
+   </li><li><a href="#_1871" rel="nofollow">五.项目心得</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h2><a id="vipGTIDMySQL_1"></a>基于双vip的GTID的半同步主从复制MySQL高可用集群</h2> 
+<h3><a id="_3"></a>一.项目介绍</h3> 
+<h4><a id="1_5"></a>1.拓扑图</h4> 
+<p><img src="https://images2.imgbox.com/d4/3e/dYaAExDQ_o.png" alt="image-20231231184956560"></p> 
+<h4><a id="2_9"></a>2.详细介绍</h4> 
+<p>项目名称：<strong>基于双vip的GTID的半同步主从复制MySQL高可用集群</strong><br> 项目环境：centos7.9，mysql5.7.43，mysqlrouter8.0.21，keepalived 1.3.5，<a href="https://so.csdn.net/so/search?q=ansible&amp;spm=1001.2101.3001.7020">ansible</a> 2.9.27，prometheus-2.47.0，grafana-enterprise-10.1.1-1，node_exporter-1.6.1等。</p> 
+<p><mark>项目描述</mark>：</p> 
+<blockquote> 
+ <p>本项目的目的是构建一个高可用的能实现读写分离的高效的MySQL集群，确保业务的稳定，能沟通方便的监控整个集群，同时能批量的去部署和管理整个集群。</p> 
+</blockquote> 
+<p><strong>项目步骤</strong>：</p> 
+<blockquote> 
+ <p>1.配置好ansible服务器并建立免密通道，一键安装MySQL、mysqlroute、node_exporters、dns等软件，在master上导出基础数据到ansible上，发布到所有slave服务器上并导入</p> 
+ <p>2.安装好半同步相关的插件，开启gtid功能，启动主从复制服务，配置延迟备份服务器，从slave1上拿二进制日志</p> 
+ <p>3.在master上创建一个计划任务每天2:30进行数据库的备份脚本，使用rsync+sersync远程同步到slave4异地备份服务器上</p> 
+ <p>4.安装部署mysqlrouter中间件软件，实现读写分离；安装keepalived实现高可用，配置2个vrrp实例实现双vip的高可用功能</p> 
+ <p>5.搭建DNS域名服务器，配置一个域名对应2个vip，实现基于DNS的负载均衡，访问同一URL解析出双vip地址</p> 
+ <p>6.使用sysbench整个MySQL集群的性能（cpu、IO、内存等）进行压力测试，安装部署prometheus实现监控，grafana出图了解系统性能的瓶颈并调优</p> 
+</blockquote> 
+<h3><a id="_34"></a>二.前期准备</h3> 
+<h4><a id="1_36"></a>1.项目环境</h4> 
+<blockquote> 
+ <p>cecentos7.9，mysql5.7.43，mysqlrouter8.0.21，keepalived 1.3.5，<a href="https://so.csdn.net/so/search?q=ansible&amp;spm=1001.2101.3001.7020">ansible</a> 2.9.27，prometheus-2.47.0，grafana-enterprise-10.1.1-1，node_exporter-1.6.1等</p> 
+</blockquote> 
+<h4><a id="2IP_40"></a>2.IP划分</h4> 
+<p>准备11台centos7.9的虚拟机，并且分配IP地址：</p> 
+<table><thead><tr><th align="center">主机名</th><th align="center">IP</th></tr></thead><tbody><tr><td align="center">DNS服务器</td><td align="center">192.168.153.145</td></tr><tr><td align="center">mysqlrouter1</td><td align="center">192.168.153.155</td></tr><tr><td align="center">mysqlrouter2</td><td align="center">192.168.153.147</td></tr><tr><td align="center">master</td><td align="center">192.168.153.150</td></tr><tr><td align="center">slave1</td><td align="center">192.168.153.151</td></tr><tr><td align="center">slave2</td><td align="center">192.168.153.152</td></tr><tr><td align="center">slave3</td><td align="center">192.168.153.153</td></tr><tr><td align="center">slave4</td><td align="center">192.168.153.154</td></tr><tr><td align="center">ansible</td><td align="center">192.168.153.148</td></tr><tr><td align="center">监控服务器</td><td align="center">192.168.153.149</td></tr><tr><td align="center">sysbench压力测试机</td><td align="center">192.168.153.144</td></tr></tbody></table> 
+<h4><a id="3ipip_58"></a>3.根据ip规划配置好静态ip</h4> 
+<pre><code class="prism language-pegjs">[root@master ~]# vi /etc/sysconfig/network-scripts/ifcfg-ens33 
+BOOTPROTO=static #静态配置ip
+NAME=ens33 #网卡名称ens33
+DEVICE=ens33 #本机网卡ens33
+ONBOOT=yes #开机启动
+IPADDR=192.168.153.150 #ip地址
+PREFIX=24 #子网掩码24
+GATEWAY=192.168.153.2 #我选择的是NAT网络，所以网关是路由器ip 192.168.153.2
+DNS1=114.114.114.114 #dns服务器114.114.114.114
+ 
+[root@master ~]# service network restart #重启网络
+Restarting network (via systemctl):                        [  确定  ]
+[root@master ~]# ip add #查看ip
+[root@master ~]# ping www.baidu.com #测试能否上网
+</code></pre> 
+<h4><a id="4_79"></a>4.修改主机名方便管理</h4> 
+<pre><code class="prism language-pegjs">[root@mysql-master ~]# hostnamectl set-hostname mysql-master #修改指定主机名，方便辨认
+[root@mysql-master ~]# su -
+</code></pre> 
+<h4><a id="5ansible_88"></a>5.配置ansible免密通道</h4> 
+<pre><code class="prism language-pegjs">[root@ansible ~]# ssh-keygen
+Generating public/private rsa key pair.
+Enter file in which to save the key (/root/.ssh/id_rsa): 
+Created directory '/root/.ssh'.
+Enter passphrase (empty for no passphrase): 
+Enter same passphrase again: 
+Your identification has been saved in /root/.ssh/id_rsa.
+Your public key has been saved in /root/.ssh/id_rsa.pub.
+The key fingerprint is:
+SHA256:uSX20PtsydUfYFov6VR0a7Q/BM5uWH/dCMpHYJOxOIA root@ansible
+The key's randomart image is:
++---[RSA 2048]----+
+|     ..   .o     |
+|    E  . .=. . o.|
+|        o..oo + +|
+|         +  oB * |
+|        S.ooB.Oo+|
+|       . *o+.*o=*|
+|        . oo+o. =|
+|           o+.  .|
+|           .o    |
++----[SHA256]-----+
+[root@ansible ~]# 
+
+[root@ansible ~]# cd .ssh/
+[root@ansible .ssh]# ssh-copy-id -i id_rsa.pub root@192.168.153.150 #master
+[root@ansible .ssh]# ssh-copy-id -i id_rsa.pub root@192.168.153.151 #salve1
+[root@ansible .ssh]# ssh-copy-id -i id_rsa.pub root@192.168.153.152 #salve2
+[root@ansible .ssh]# ssh-copy-id -i id_rsa.pub root@192.168.153.153 #salve3
+[root@ansible .ssh]# ssh-copy-id -i id_rsa.pub root@192.168.153.154 #salve4
+[root@ansible .ssh]# ssh-copy-id -i id_rsa.pub root@192.168.153.145 #DNS
+[root@ansible .ssh]# ssh-copy-id -i id_rsa.pub root@192.168.153.145 #mysqlrouter1
+[root@ansible .ssh]# ssh-copy-id -i id_rsa.pub root@192.168.153.147 #mysqlrouter2
+[root@ansible .ssh]# ssh-copy-id -i id_rsa.pub root@192.168.153.149 #prometheus
+</code></pre> 
+<h3><a id="__129"></a>三. 项目步骤</h3> 
+<h4><a id="1ansible_131"></a>1.安装部署ansible</h4> 
+<pre><code class="prism language-pegjs">[root@ansible ~]# yum install -y epel-release
+[root@ansible ~]# yum install ansible -y
+</code></pre> 
+<pre><code class="prism language-pegjs">#修改配置文件，配置以下八台，监控和压力测试机单独部署
+[root@localhost ~]# vim /etc/ansible/hosts
+[mysqlrouter]
+192.168.153.155
+192.168.153.147
+
+[mysql]
+192.168.153.150
+192.168.153.151
+192.168.153.152
+192.168.153.153
+192.168.153.154
+
+[dns]
+192.168.153.145
+</code></pre> 
+<h5><a id="1xftpMySQLmysql5743linuxglibc212x86_64targzMySQL_Routermysqlroutercommunity80211el7x86_64rpmNode_Exporternode_exporter161linuxamd64targz_156"></a>1.利用xftp上传MySQL软件包（mysql-5.7.43-linux-glibc2.12-x86_64.tar.gz）和MySQL Router的安装包(mysql-router-community-8.0.21-1.el7.x86_64.rpm)以及Node Exporter的软件包(node_exporter-1.6.1.linux-amd64.tar.gz)</h5> 
+<p><img src="https://images2.imgbox.com/c7/ea/dNbfQQcj_o.png" alt="image-20231229113345171"></p> 
+<pre><code class="prism language-pegjs">[root@ansible ~]# ls
+anaconda-ks.cfg                                 node_exporter.sh
+mysql-5.7.43-linux-glibc2.12-x86_64.tar.gz      onekey_install_mysql.sh
+mysql-router-community-8.0.21-1.el7.x86_64.rpm  software_install.yaml
+node_exporter-1.6.1.linux-amd64.tar.gz
+[root@ansible ~]# 
+</code></pre> 
+<h5><a id="2mysqlnode_porters_171"></a>2.编写安装mysql和node_porters的脚本</h5> 
+<pre><code class="prism language-pegjs">[root@ansible ~]# cat node_exporter.sh 
+#!/bin/bash
+
+cd ~
+
+tar xf node_exporter-1.6.1.linux-amd64.tar.gz
+
+mv node_exporter-1.6.1.linux-amd64 /node_exporter
+
+cd /node_exporter
+
+PATH=/node_exporter:$PATH
+
+echo "PATH=/node_exporter:$PATH" &gt;&gt;/root/.bashrc
+
+nohup node_exporter --web.listen-address 0.0.0.0:8090 &amp;
+
+[root@ansible ~]# 
+[root@ansible ~]# cat onekey_install_mysql.sh 
+#!/bin/bash
+
+#解决软件的依赖关系
+yum  install cmake ncurses-devel gcc  gcc-c++  vim  lsof bzip2 openssl-devel ncurses-compat-libs -y
+
+#解压mysql二进制安装包
+tar  xf  mysql-5.7.43-linux-glibc2.12-x86_64.tar.gz
+
+#移动mysql解压后的文件到/usr/local下改名叫mysql
+mv mysql-5.7.43-linux-glibc2.12-x86_64 /usr/local/mysql
+
+#新建组和用户 mysql
+groupadd mysql
+#mysql这个用户的shell 是/bin/false 属于mysql组 
+useradd -r -g mysql -s /bin/false mysql
+
+#关闭firewalld防火墙服务，并且设置开机不要启动
+service firewalld stop
+systemctl  disable  firewalld
+
+#临时关闭selinux
+setenforce 0
+#永久关闭selinux
+sed -i '/^SELINUX=/ s/enforcing/disabled/'  /etc/selinux/config
+
+#新建存放数据的目录
+mkdir  /data/mysql -p
+#修改/data/mysql目录的权限归mysql用户和mysql组所有，这样mysql用户可以对这个文件夹进行读写了
+chown mysql:mysql /data/mysql/
+#只是允许mysql这个用户和mysql组可以访问，其他人都不能访问
+chmod 750 /data/mysql/
+
+#进入/usr/local/mysql/bin目录
+cd /usr/local/mysql/bin/
+
+#初始化mysql
+./mysqld  --initialize --user=mysql --basedir=/usr/local/mysql/  --datadir=/data/mysql  &amp;&gt;passwd.txt
+
+#让mysql支持ssl方式登录的设置
+./mysql_ssl_rsa_setup --datadir=/data/mysql/
+
+#获得临时密码
+tem_passwd=$(cat passwd.txt |grep "temporary"|awk '{print $NF}')
+  #$NF表示最后一个字段
+  # abc=$(命令)  优先执行命令，然后将结果赋值给abc 
+
+# 修改PATH变量，加入mysql bin目录的路径
+#临时修改PATH变量的值
+export PATH=/usr/local/mysql/bin/:$PATH
+#重新启动linux系统后也生效，永久修改
+echo  'PATH=/usr/local/mysql/bin:$PATH' &gt;&gt;/root/.bashrc
+
+#复制support-files里的mysql.server文件到/etc/init.d/目录下叫mysqld
+cp  ../support-files/mysql.server   /etc/init.d/mysqld
+
+#修改/etc/init.d/mysqld脚本文件里的datadir目录的值
+sed  -i '70c  datadir=/data/mysql'  /etc/init.d/mysqld
+
+#生成/etc/my.cnf配置文件
+cat  &gt;/etc/my.cnf  &lt;&lt;EOF
+[mysqld_safe]
+
+[client]
+socket=/data/mysql/mysql.sock
+
+[mysqld]
+socket=/data/mysql/mysql.sock
+port = 3306
+open_files_limit = 8192
+innodb_buffer_pool_size = 512M
+character-set-server=utf8
+
+[mysql]
+auto-rehash
+prompt=\\u@\\d \\R:\\m  mysql&gt;
+EOF
+
+#修改内核的open file的数量
+ulimit -n 1000000
+#设置开机启动的时候也配置生效
+echo "ulimit -n 1000000" &gt;&gt;/etc/rc.local
+chmod +x /etc/rc.d/rc.local
+
+
+#将mysqld添加到linux系统里服务管理名单里
+/sbin/chkconfig --add mysqld
+#设置mysqld服务开机启动
+/sbin/chkconfig mysqld on
+
+#启动mysqld进程
+service mysqld start
+
+#初次修改密码需要使用--connect-expired-password 选项
+#-e 后面接的表示是在mysql里需要执行命令  execute 执行
+#set password='Sanchuang123#';  修改root用户的密码为Sanchuang123#
+mysql -uroot -p$tem_passwd --connect-expired-password   -e  "set password='Sanchuang123#';"
+
+
+#检验上一步修改密码是否成功，如果有输出能看到mysql里的数据库，说明成功。
+mysql -uroot -p'Sanchuang123#'  -e "show databases;"
+
+
+</code></pre> 
+<pre><code class="prism language-pegjs">[root@ansible ~]# cat node_exporter.sh 
+#!/bin/bash
+#进入root家目录
+cd ~
+#解压node_exporters源码包
+tar xf node_exporter-1.6.1.linux-amd64.tar.gz
+#改名
+mv  node_exporter-1.6.1.linux-amd64 /node_exporter
+cd /node_exporter
+#修改PATH环境变量
+PATH=/node_exporter:$PATH 
+echo "PATH=/node_exporter:$PATH" &gt;&gt;/root/.bashrc
+#后台运行，监听8090端口
+nohup node_exporter --web.listen-address 0.0.0.0:8090  &amp;
+
+</code></pre> 
+<h5><a id="3playbookmysqlmysqlroutenode_exportersdns_319"></a>3.编写playbook批量部署mysql、mysqlroute、node_exporters、dns等软件</h5> 
+<pre><code class="prism language-pegjs">[root@ansible ~]# vim software_install.yaml
+- hosts: mysql #mysql集群
+  remote_user: root
+  tasks:  
+  - name: copy mysql.tar.gz     #上传MySQL安装包到mysql主机组
+    copy: src=/root/mysql-5.7.43-linux-glibc2.12-x86_64.tar.gz dest=/root/
+  - name: copy mysql.sh     #上传脚本到mysql主机组
+    copy: src=/root/onekey_install_mysql.sh dest=/root/
+  - name: install mysql #安装MySQL
+    script: /root/onekey_install_mysql.sh
+
+- hosts: mysqlrouter #mysqlrouter服务器
+  remote_user: root
+  tasks:
+  - name: copy file     #上传mysqlrouter安装包到服务器
+    copy: src=/root/mysql-router-community-8.0.21-1.el7.x86_64.rpm dest=/root/
+  - name: install mysqlrouter #安装mysqlrouter
+    shell:  rpm -ivh mysql-router-community-8.0.21-1.el7.x86_64.rpm
+  - name: install keepalived  #安装keepalived实现高可用
+    yum: name=keepalived state=installed
+
+- hosts: dns #dns服务器
+  remote_user: root
+  tasks:
+  - name: install dns
+    yum: name=bind.* state=installed
+
+
+- hosts: mysqlrouter mysql #调用本地node_exporter脚本，批量安装部署node_exporter，为prometheus采集数据
+  remote_user: root
+  tasks:
+  - name: copy file     #上传node_exporter安装包到服务器
+    copy: src=/root/node_exporter-1.6.1.linux-amd64.tar.gz dest=/root/
+  - name: copy file     #上传脚本到服务器
+    copy: src=/root/node_exporter.sh dest=/root/
+  - name: install node_exporters  #执行脚本
+    script: /root/node_exporter.sh
+    tags: install_exporter
+  - name: start node_exporters  #后台运行node_exporters
+    shell: nohup node_exporter --web.listen-address 0.0.0.0:8090 &amp;
+    tags: start_exporters  #打标签，方便后面直接跳转到此处批量启动node_exporters
+</code></pre> 
+<pre><code class="prism language-pegjs">'检查一下语法'
+[root@ansible ~]# ansible-playbook --syntax-check software_install.yaml
+
+playbook: software_install.yaml
+[root@ansible ~]# 
+
+</code></pre> 
+<p><code>开始执行</code></p> 
+<pre><code class="prism language-pegjs">[root@ansible ~]# ansible-playbook software_install.yaml
+
+PLAY [mysql] ***************************************************************************************
+
+TASK [Gathering Facts] *****************************************************************************
+ok: [192.168.153.150]
+ok: [192.168.153.152]
+ok: [192.168.153.153]
+ok: [192.168.153.154]
+ok: [192.168.153.151]
+
+TASK [copy mysql.tar.gz] ***************************************************************************
+changed: [192.168.153.150]
+changed: [192.168.153.153]
+changed: [192.168.153.152]
+changed: [192.168.153.151]
+changed: [192.168.153.154]
+
+TASK [copy mysql.sh] *******************************************************************************
+changed: [192.168.153.150]
+changed: [192.168.153.153]
+changed: [192.168.153.151]
+changed: [192.168.153.154]
+changed: [192.168.153.152]
+
+TASK [install mysql] *******************************************************************************
+changed: [192.168.153.154]
+changed: [192.168.153.151]
+changed: [192.168.153.153]
+changed: [192.168.153.150]
+changed: [192.168.153.152]
+
+PLAY [mysqlrouter] *********************************************************************************
+
+TASK [Gathering Facts] *****************************************************************************
+ok: [192.168.153.155]
+ok: [192.168.153.147]
+
+TASK [copy file] ***********************************************************************************
+changed: [192.168.153.155]
+changed: [192.168.153.147]
+
+TASK [install mysqlrouter] *************************************************************************
+[WARNING]: Consider using the yum, dnf or zypper module rather than running 'rpm'.  If you need to
+use command because yum, dnf or zypper is insufficient you can add 'warn: false' to this command
+task or set 'command_warnings=False' in ansible.cfg to get rid of this message.
+changed: [192.168.153.155]
+changed: [192.168.153.147]
+
+TASK [install keepalived] **************************************************************************
+changed: [192.168.153.155]
+changed: [192.168.153.147]
+
+PLAY [dns] *****************************************************************************************
+
+TASK [Gathering Facts] *****************************************************************************
+ok: [192.168.153.145]
+
+TASK [install dns] *********************************************************************************
+changed: [192.168.153.145]
+
+PLAY [mysqlrouter:mysql] ***************************************************************************
+
+TASK [Gathering Facts] *****************************************************************************
+ok: [192.168.153.147]
+ok: [192.168.153.155]
+ok: [192.168.153.150]
+ok: [192.168.153.151]
+ok: [192.168.153.152]
+ok: [192.168.153.153]
+ok: [192.168.153.154]
+
+TASK [copy file] ***********************************************************************************
+changed: [192.168.153.155]
+changed: [192.168.153.150]
+changed: [192.168.153.147]
+changed: [192.168.153.152]
+changed: [192.168.153.151]
+changed: [192.168.153.153]
+changed: [192.168.153.154]
+
+TASK [copy file] ***********************************************************************************
+changed: [192.168.153.155]
+changed: [192.168.153.147]
+changed: [192.168.153.150]
+changed: [192.168.153.152]
+changed: [192.168.153.151]
+changed: [192.168.153.153]
+changed: [192.168.153.154]
+
+TASK [install node_exporters] **********************************************************************
+changed: [192.168.153.155]
+changed: [192.168.153.151]
+changed: [192.168.153.147]
+changed: [192.168.153.150]
+changed: [192.168.153.152]
+changed: [192.168.153.153]
+changed: [192.168.153.154]
+
+TASK [start node_exporters] ************************************************************************
+changed: [192.168.153.152]
+changed: [192.168.153.155]
+changed: [192.168.153.147]
+changed: [192.168.153.151]
+changed: [192.168.153.150]
+changed: [192.168.153.154]
+changed: [192.168.153.153]
+
+PLAY RECAP *****************************************************************************************
+192.168.153.145            : ok=2    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+192.168.153.155            : ok=9    changed=7    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+192.168.153.147            : ok=9    changed=7    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+192.168.153.150            : ok=9    changed=7    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+192.168.153.151            : ok=9    changed=7    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+192.168.153.152            : ok=9    changed=7    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+192.168.153.153            : ok=9    changed=7    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+192.168.153.154            : ok=9    changed=7    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0   
+
+[root@ansible ~]# 
+
+</code></pre> 
+<h4><a id="2mysql_501"></a>2.同步mysql数据</h4> 
+<h5><a id="1mastermysql_503"></a>1.导出master上的mysql上的数据</h5> 
+<pre><code class="prism language-pegjs">[root@mysql-master ~]# mysqldump -uroot -p'Sanchaung123#'  --all-databases  &gt;all_db.SQL
+mysqldump: [Warning] Using a password on the command line interface can be insecure.
+mysqldump: Got error: 1045: Access denied for user 'root'@'localhost' (using password: YES) when trying to connect
+[root@mysql-master ~]# ls
+all_db.SQL       mysql-5.7.43-linux-glibc2.12-x86_64.tar.gz  node_exporter.sh
+anaconda-ks.cfg  node_exporter-1.6.1.linux-amd64.tar.gz      onekey_install_mysql.sh
+[root@mysql-master ~]# 
+</code></pre> 
+<h5><a id="2scpall_dbSQLansible_515"></a>2.使用scp把all_db.SQL传递给ansible</h5> 
+<pre><code class="prism language-pegjs">[root@ansible ~]# scp  root@192.168.153.150:/root/all_db.SQL   /root
+all_db.SQL                                                                                                       100%    0     0.0KB/s   00:00    
+[root@ansible ~]# ls
+all_db.SQL       mysql-5.7.43-linux-glibc2.12-x86_64.tar.gz      node_exporter-1.6.1.linux-amd64.tar.gz  onekey_install_mysql.sh
+anaconda-ks.cfg  mysql-router-community-8.0.21-1.el7.x86_64.rpm  node_exporter.sh                        software_install.yaml
+[root@ansible ~]# 
+
+</code></pre> 
+<h5><a id="3ansibleslave_527"></a>3.使用ansible下发到slave集群机器上</h5> 
+<pre><code class="prism language-pegjs">ansible mysql -m copy -a "src=/root/all_db.SQL dest=/root/"
+ansible mysql -m shell -a "mysql -uroot -p'Sanchuang123#' &lt;all_db.SQL"
+</code></pre> 
+<p><mark>效果</mark></p> 
+<pre><code class="prism language-pegjs">[root@ansible ~]# ansible mysql -m copy -a "src=/root/all_db.SQL dest=/root/"
+192.168.153.153 | CHANGED =&gt; {
+    "ansible_facts": {
+        "discovered_interpreter_python": "/usr/bin/python"
+    }, 
+    "changed": true, 
+    "checksum": "da39a3ee5e6b4b0d3255bfef95601890afd80709", 
+    "dest": "/root/all_db.SQL", 
+    "gid": 0, 
+    "group": "root", 
+    "md5sum": "d41d8cd98f00b204e9800998ecf8427e", 
+    "mode": "0644", 
+    "owner": "root", 
+    "secontext": "system_u:object_r:admin_home_t:s0", 
+    "size": 0, 
+    "src": "/root/.ansible/tmp/ansible-tmp-1703827454.67-25212-144285109251097/source", 
+    "state": "file", 
+    "uid": 0
+}
+192.168.153.151 | CHANGED =&gt; {
+    "ansible_facts": {
+        "discovered_interpreter_python": "/usr/bin/python"
+    }, 
+    "changed": true, 
+    "checksum": "da39a3ee5e6b4b0d3255bfef95601890afd80709", 
+    "dest": "/root/all_db.SQL", 
+    "gid": 0, 
+    "group": "root", 
+    "md5sum": "d41d8cd98f00b204e9800998ecf8427e", 
+    "mode": "0644", 
+    "owner": "root", 
+    "secontext": "system_u:object_r:admin_home_t:s0", 
+    "size": 0, 
+    "src": "/root/.ansible/tmp/ansible-tmp-1703827454.74-25208-115323625408171/source", 
+    "state": "file", 
+    "uid": 0
+}
+192.168.153.154 | CHANGED =&gt; {
+    "ansible_facts": {
+        "discovered_interpreter_python": "/usr/bin/python"
+    }, 
+    "changed": true, 
+    "checksum": "da39a3ee5e6b4b0d3255bfef95601890afd80709", 
+    "dest": "/root/all_db.SQL", 
+    "gid": 0, 
+    "group": "root", 
+    "md5sum": "d41d8cd98f00b204e9800998ecf8427e", 
+    "mode": "0644", 
+    "owner": "root", 
+    "secontext": "system_u:object_r:admin_home_t:s0", 
+    "size": 0, 
+    "src": "/root/.ansible/tmp/ansible-tmp-1703827454.72-25215-134472582139467/source", 
+    "state": "file", 
+    "uid": 0
+}
+192.168.153.150 | SUCCESS =&gt; {
+    "ansible_facts": {
+        "discovered_interpreter_python": "/usr/bin/python"
+    }, 
+    "changed": false, 
+    "checksum": "da39a3ee5e6b4b0d3255bfef95601890afd80709", 
+    "dest": "/root/all_db.SQL", 
+    "gid": 0, 
+    "group": "root", 
+    "mode": "0644", 
+    "owner": "root", 
+    "path": "/root/all_db.SQL", 
+    "secontext": "unconfined_u:object_r:admin_home_t:s0", 
+    "size": 0, 
+    "state": "file", 
+    "uid": 0
+}
+192.168.153.152 | CHANGED =&gt; {
+    "ansible_facts": {
+        "discovered_interpreter_python": "/usr/bin/python"
+    }, 
+    "changed": true, 
+    "checksum": "da39a3ee5e6b4b0d3255bfef95601890afd80709", 
+    "dest": "/root/all_db.SQL", 
+    "gid": 0, 
+    "group": "root", 
+    "md5sum": "d41d8cd98f00b204e9800998ecf8427e", 
+    "mode": "0644", 
+    "owner": "root", 
+    "secontext": "system_u:object_r:admin_home_t:s0", 
+    "size": 0, 
+    "src": "/root/.ansible/tmp/ansible-tmp-1703827454.86-25209-185887644266718/source", 
+    "state": "file", 
+    "uid": 0
+}
+[root@ansible ~]# 
+[root@ansible ~]# ansible mysql -m shell -a "mysql -uroot -p'Sanchuang123#' &lt;all_db.SQL"
+192.168.153.150 | CHANGED | rc=0 &gt;&gt;
+mysql: [Warning] Using a password on the command line interface can be insecure.
+192.168.153.153 | CHANGED | rc=0 &gt;&gt;
+mysql: [Warning] Using a password on the command line interface can be insecure.
+192.168.153.154 | CHANGED | rc=0 &gt;&gt;
+mysql: [Warning] Using a password on the command line interface can be insecure.
+192.168.153.152 | CHANGED | rc=0 &gt;&gt;
+mysql: [Warning] Using a password on the command line interface can be insecure.
+192.168.153.151 | CHANGED | rc=0 &gt;&gt;
+mysql: [Warning] Using a password on the command line interface can be insecure.
+[root@ansible ~]# 
+
+</code></pre> 
+<h4><a id="3GTID_645"></a>3.配置基于GTID的半同步主从复制</h4> 
+<h5><a id="1master_647"></a>1.在master上安装配置半同步的插件</h5> 
+<pre><code class="prism language-pegjs">root@(none) 14:07  mysql&gt;INSTALL PLUGIN rpl_semi_sync_master SONAME 'semisync_master.so';
+Query OK, 0 rows affected (0.03 sec)
+
+root@(none) 14:18  mysql&gt;exit
+
+</code></pre> 
+<h5><a id="2master_etcmyconf_gtid_657"></a>2.修改master配置文件 /etc/my.conf 并开启gtid功能</h5> 
+<pre><code class="prism language-pegjs">[root@mysql-master ~]# vim /etc/my.cnf
+[mysqld]
+
+#开启二进制日志
+log_bin
+server_id = 1
+
+#开启半同步功能，需要提前安装半同步的插件
+rpl_semi_sync_master_enabled=1
+rpl_semi_sync_master_timeout=1000 # 1 second
+
+#开启gtid功能
+gtid-mode=ON
+enforce-gtid-consistency=ON
+
+</code></pre> 
+<h5><a id="3slave_677"></a>3.在每台从服务器上配置安装半同步的插件，配置slave配置文件</h5> 
+<pre><code class="prism language-pegjs">root@(none) 14:23  mysql&gt;install plugin rpl_semi_sync_slave SONAME 'semisync_slave.so';
+Query OK, 0 rows affected (0.04 sec)
+
+root@(none) 14:28  mysql&gt;set global rpl_semi_sync_slave_enabled = 1;
+Query OK, 0 rows affected (0.01 sec)
+
+root@(none) 14:28  mysql&gt;
+
+</code></pre> 
+<pre><code class="prism language-pegjs">[root@mysql-salve2 ~]# vim /etc/my.cnf
+[mysqld]
+
+#log bin 二进制日志
+log_bin
+server_id = 2 #注意：每台slave的id都不一样
+expire_logs_days = 15 #二进制日志保存15天
+
+#开启半同步，需要提前安装半同步的插件
+rpl_semi_sync_slave_enabled=1
+
+#开启gtid功能
+gtid-mode=ON
+enforce-gtid-consistency=ON
+log_slave_updates=ON
+
+</code></pre> 
+<p><code>最后一定要记得刷新服务</code></p> 
+<pre><code class="prism language-pegjs">[root@mysql-salve2 ~]# service mysqld restart
+Shutting down MySQL.. SUCCESS! 
+Starting MySQL.. SUCCESS! 
+</code></pre> 
+<h5><a id="4masterslave1salve2_717"></a>4.在master上新建一个授权用户，给slave1和salve2来复制二进制日志</h5> 
+<pre><code class="prism language-pegjs">grant replication slave on *.* to 'gaohui'@'192.168.153.%' identified by '123456';
+
+root@(none) 17:33  mysql&gt;grant replication slave on *.* to 'gaohui'@'192.168.153.%' identified by '123456';
+Query OK, 0 rows affected, 1 warning (1.02 sec)
+
+root@(none) 17:41  mysql&gt;
+
+</code></pre> 
+<h5><a id="5slave2salve3_729"></a>5.在slave2上创建授权用户，给salve3复制二进制日志</h5> 
+<pre><code class="prism language-pegjs">grant replication slave on *.* to 'gaofei'@'192.168.153.%' identified by '123456';
+
+root@(none) 17:42  mysql&gt;grant replication slave on *.* to 'gaofei'@'192.168.153.%' identified by '123456';
+Query OK, 0 rows affected, 1 warning (0.02 sec)
+
+root@(none) 17:42  mysql&gt;
+</code></pre> 
+<h5><a id="6slavemaster_info_740"></a>6.在slave上配置master info的信息</h5> 
+<p><mark>在slave1和slave2上:</mark></p> 
+<pre><code class="prism language-pegjs">root@(none) 17:45  mysql&gt;stop slave;
+Query OK, 0 rows affected, 1 warning (0.00 sec)
+
+root@(none) 17:45  mysql&gt;reset slave all;
+Query OK, 0 rows affected (0.00 sec)
+
+root@(none) 17:45  mysql&gt;
+    -&gt; change master to master_host='192.168.153.150' ,
+    -&gt; master_user='gaohui',
+    -&gt; master_password='123456',
+    -&gt; master_port=3306,
+    -&gt; master_auto_position=1;
+Query OK, 0 rows affected, 2 warnings (0.02 sec)
+
+root@(none) 17:46  mysql&gt;start slave;
+Query OK, 0 rows affected (0.00 sec)
+
+root@(none) 17:46  mysql&gt;
+
+</code></pre> 
+<p><mark>在slave3上：</mark></p> 
+<pre><code class="prism language-pegjs">root@(none) 17:48  mysql&gt;stop slave;
+Query OK, 0 rows affected, 1 warning (0.00 sec)
+
+root@(none) 17:48  mysql&gt;reset slave all;
+Query OK, 0 rows affected (0.01 sec)
+
+root@(none) 17:48  mysql&gt;change master to master_host='192.168.153.152' ,
+    -&gt; master_user='gaofei',
+    -&gt; master_password='123456',
+    -&gt; master_port=3306,
+    -&gt; master_auto_position=1;
+Query OK, 0 rows affected, 2 warnings (0.02 sec)
+
+root@(none) 17:49  mysql&gt;start slave;
+Query OK, 0 rows affected (0.00 sec)
+
+root@(none) 17:50  mysql&gt;
+</code></pre> 
+<h5><a id="7_788"></a>7.查看</h5> 
+<pre><code class="prism language-pegjs">在slave上查看
+root@(none) 16:34  scmysql&gt;show slave status\G;
+
+在master上查看
+root@(none) 16:35  mysql&gt;show variables like "%semi_sync%";
+
+在slave上查看
+root@(none) 16:35  scmysql&gt;show variables like "%semi_sync%";
+</code></pre> 
+<h5><a id="8GTID_801"></a>8.验证GTID的半同步主从复制</h5> 
+<pre><code class="prism language-pegjs">在master上新建库或者表，在slave上看有没有
+</code></pre> 
+<p>主：</p> 
+<pre><code class="prism language-pegjs">root@(none) 17:54  mysql&gt;create database gaohui;
+Query OK, 1 row affected (0.01 sec)
+
+
+root@(none) 17:54  mysql&gt;use gaohui;
+Database changed
+
+root@gaohui 17:54  mysql&gt;CREATE TABLE t1 (id INT);
+Query OK, 0 rows affected (0.02 sec)
+
+root@gaohui 17:55  mysql&gt;INSERT INTO t1 (id) VALUES (1), (2);
+Query OK, 2 rows affected (0.09 sec)
+Records: 2  Duplicates: 0  Warnings: 0
+
+root@gaohui 17:56  mysql&gt;select * from t1;
++------+
+| id   |
++------+
+|    1 |
+|    2 |
++------+
+2 rows in set (0.00 sec)
+
+</code></pre> 
+<p>从：</p> 
+<pre><code class="prism language-pegjs">root@(none) 17:51  mysql&gt;show databases;
++--------------------+
+| Database           |
++--------------------+
+| information_schema |
+| gaohui             |
+| mysql              |
+| performance_schema |
+| sys                |
++--------------------+
+5 rows in set (0.00 sec)
+
+root@(none) 17:56  mysql&gt;use gaohui;
+Reading table information for completion of table and column names
+You can turn off this feature to get a quicker startup with -A
+
+Database changed
+root@gaohui 17:57  mysql&gt;select * from t1;
++------+
+| id   |
++------+
+|    1 |
+|    2 |
++------+
+2 rows in set (0.00 sec)
+
+root@gaohui 17:57  mysql&gt;
+
+</code></pre> 
+<h5><a id="9slave3_868"></a>9.配置slave3延迟备份服务器</h5> 
+<pre><code class="prism language-pegjs">#停止同步服务
+root@(none) 13:42  mysql&gt;stop slave;
+#延迟10分钟再备份
+root@(none) 13:42  mysql&gt;change master to master_delay = 600;
+#开始同步
+root@(none) 13:43  mysql&gt;start slave;
+#查看设置情况
+root@(none) 13:43  mysql&gt;show slave status\G;
+SQL_Delay: 60
+
+</code></pre> 
+<h4><a id="4masterslave4_883"></a>4.master创建一个计划任务，远程同步到slave4异地备份服务器</h4> 
+<h5><a id="1slave4_885"></a>1.在slave4上操作</h5> 
+<pre><code class="prism language-pegjs">[root@mysql-salve4 ~]# vim onekey_install_rsync_slave.sh
+#!/bin/bash
+
+#创建备份目录
+mkdir  /backup
+
+#关闭firewalld防火墙服务，并且设置开机不要启动
+service firewalld stop
+systemctl  disable  firewalld
+#临时关闭selinux
+setenforce 0
+#永久关闭selinux
+sed -i '/^SELINUX=/ s/enforcing/disabled/'  /etc/selinux/config
+
+#安装rsync服务端软件
+yum install rsync xinetd -y
+
+#设置开机启动
+echo '/usr/bin/rsync --daemon --config=/etc/rsyncd.conf' &gt;&gt;/etc/rc.d/rc.local
+chmod +x /etc/rc.d/rc.local
+
+#生成/etc/rsyncd.conf配置文件
+cat  &gt;/etc/rsyncd.conf  &lt;&lt;EOF
+uid = root
+gid = root
+use chroot = yes
+max connections = 0
+log file = /var/log/rsyncd.log
+pid file = /var/run/rsyncd.pid
+lock file = /var/run/rsync.lock
+secrets file = /etc/rsync.pass
+motd file = /etc/rsyncd.Motd
+
+[back_data]
+     path = /backup
+     comment = A directory in which data is stored
+     ignore errors = yes
+     read only = no
+     hosts allow = 192.168.153.150
+EOF
+
+#创建用户认证文件
+cat  &gt;/etc/rsync.pass  &lt;&lt;EOF
+slave:123456
+EOF
+
+#设置文件所有者读取、写入权限
+chmod 600 /etc/rsyncd.conf  
+chmod 600 /etc/rsync.pass
+
+#启动rsync
+/usr/bin/rsync --daemon --config=/etc/rsyncd.conf
+#启动xinetd(xinetd是一个提供保姆服务的进程，rsync是它照顾的进程)
+systemctl start xinetd
+
+</code></pre> 
+<h5><a id="2rsyncxinetd_945"></a>2.查看rsync和xinetd监听的进程</h5> 
+<pre><code class="prism language-pegjs">[root@mysql-salve4 ~]# ps aux|grep rsync
+root      18653  0.0  0.0 114852   572 ?        Ss   18:24   0:00 /usr/bin/rsync --daemon --config=/etc/rsyncd.conf
+root      18663  0.0  0.0 112824   972 pts/0    S+   18:24   0:00 grep --color=auto rsync
+[root@mysql-salve4 ~]# ps aux|grep xinetd
+root      18661  0.0  0.0  25044   588 ?        Ss   18:24   0:00 /usr/sbin/xinetd -stayalive -pidfile /var/run/xinetd.pid
+root      18665  0.0  0.0 112824   976 pts/0    S+   18:24   0:00 grep --color=auto xinetd
+[root@mysql-salve4 ~]# 
+</code></pre> 
+<h5><a id="3master_959"></a>3.在数据源master服务器操作</h5> 
+<pre><code class="prism language-pegjs">[root@mysql-master ~]# vim onekey_install_rsync_master.sh
+#!/bin/bash
+
+#关闭firewalld防火墙服务，并且设置开机不要启动
+service firewalld stop
+systemctl  disable  firewalld
+#临时关闭selinux
+setenforce 0
+#永久关闭selinux
+sed -i '/^SELINUX=/ s/enforcing/disabled/'  /etc/selinux/config
+
+#安装rsync服务端软件
+yum install rsync xinetd -y
+
+#设置开机启动
+echo '/usr/bin/rsync --daemon --config=/etc/rsyncd.conf' &gt;&gt;/etc/rc.d/rc.local
+chmod +x /etc/rc.d/rc.local
+
+#生成/etc/rsyncd.conf配置文件
+cat  &gt;/etc/rsyncd.conf  &lt;&lt;EOF
+log file = /var/log/rsyncd.log
+pid file = /var/run/rsyncd.pid
+lock file = /var/run/rsync.lock
+motd file = /etc/rsyncd.Motd
+[Sync]
+    comment = Sync
+    uid = root
+    gid = root
+    port= 873
+EOF
+
+#启动xinetd(xinetd是一个提供保姆服务的进程，rsync是它照顾的进程)
+systemctl start xinetd
+
+#创建认证密码文件，该密码应与slave服务器中的/etc/rsync.pass中的密码一致 
+cat  &gt;/etc/passwd.txt  &lt;&lt;EOF
+123456
+EOF
+
+#设置文件所有者读取、写入权限
+chmod 600 /etc/passwd.txt 
+
+</code></pre> 
+<h5><a id="4master192168153_slave192168153154_1006"></a>4.测试数据源master服务器192.168.153 到slave异地备份服务器192.168.153.154之间的数据同步</h5> 
+<pre><code class="prism language-pegjs"> [root@mysql-master backup]# rsync -avH --port=873 --progress --delete  /backup root@192.168.153.154::back_data --password-file=/etc/passwd.txt
+
+sending incremental file list
+backup/
+backup/halou/
+
+sent 89 bytes  received 20 bytes  10.38 bytes/sec
+total size is 0  speedup is 0.00
+[root@mysql-master backup]# 
+
+</code></pre> 
+<h5><a id="5sersync_1021"></a>5.数据源服务器上安装sersync工具，实现自动的实时的同步</h5> 
+<p>一键安装安装sersync工具</p> 
+<pre><code class="prism language-pegjs">[root@mysql-master ~]# vim onekey_install_sersync.sh
+#!/bin/bash
+cd ~
+#修改inotify默认参数（inotify默认内核参数值太小）
+sysctl -w fs.inotify.max_queued_events="99999999"
+sysctl -w fs.inotify.max_user_watches="99999999"
+sysctl -w fs.inotify.max_user_instances="65535"
+
+#下载并安装sersync
+yum install wget -y
+wget http://down.whsir.com/downloads/sersync2.5.4_64bit_binary_stable_final.tar.gz
+
+#解压并改名
+tar xf sersync2.5.4_64bit_binary_stable_final.tar.gz
+mv /root/GNU-Linux-x86 /usr/local/sersync
+
+#创建rsync
+cd /usr/local/sersync/
+cp confxml.xml confxml.xml.bak
+cp confxml.xml data_configxml.xml   #data_configxml.xml 是后面需要使用的配置文件
+
+#修改data_configxml.xml配置文件
+#修改需要备份的路径为/backup
+sed -i 's/watch="\/opt\/tongbu"/watch="\/backup"/' /usr/local/sersync/data_configxml.xml
+#修改服务器信息为slave4远程备份服务器
+sed -i 's/ip="127.0.0.1" name="tongbu1"/ip="192.168.153.154" name="back_data"/' /usr/local/sersync/data_configxml.xml
+#开启身份认证，修改密码文件为/etc/passwd.txt
+sed -i 's/start="false" users="root" passwordfile="\/etc\/rsync.pas"/start="true" users="root" passwordfile="\/etc\/passwd.txt"/' /usr/local/sersync/data_configxml.xml
+
+
+#添加到PATH变量
+PATH=/usr/local/sersync/:$PATH
+echo 'PATH=/usr/local/sersync/:$PATH'  &gt;&gt;/root/.bashrc
+
+#启动
+sersync2 -d -r -o  /usr/local/sersync/data_configxml.xml
+
+#设计开机启动
+echo '/usr/local/sersync/sersync2 -d -r -o  /usr/local/sersync/data_configxml.xml' &gt;&gt;/etc/rc.local 
+
+</code></pre> 
+<p><code>永久修改参数方法</code></p> 
+<pre><code class="prism language-pegjs">[root@mysql-master ~]# vim /etc/sysctl.conf
+fs.inotify.max_queued_events=99999999
+fs.inotify.max_user_watches=99999999
+fs.inotify.max_user_instances=65535
+</code></pre> 
+<p><mark>查看是否成功</mark></p> 
+<pre><code class="prism language-pegjs">[root@mysql-master backup]# ps aux|grep sersync
+root      30021  0.0  0.0 157860   704 ?        Ssl  10:05   0:00 sersync2 -d -r -o /usr/local/sersync/data_configxml.xml
+root      30040  0.0  0.0 112824   972 pts/0    S+   10:09   0:00 grep --color=auto sersync
+[root@mysql-master backup]# mkdir gaofei
+[root@mysql-master backup]# ls
+gaofei  halou
+
+[root@mysql-salve4 ~]# cd /backup/
+[root@mysql-salve4 backup]# ls
+gaofei  halou
+[root@mysql-salve4 backup]# 
+</code></pre> 
+<h5><a id="6_1093"></a>6.创建计划任务</h5> 
+<blockquote> 
+ <p>在master上操作</p> 
+ <p>每天2:30进行数据库的备份脚本</p> 
+</blockquote> 
+<pre><code class="prism language-pegjs">[root@mysql-master ~]# crontab -e
+30 2 * * * bash /root/backup_log.sh
+
+[root@mysql-master ~]# crontab -l
+30 2 * * * bash /root/backup_log.sh
+[root@mysql-master ~]# 
+</code></pre> 
+<pre><code class="prism language-pegjs">[root@mysql-master ~]# vim /root/backup_log.sh
+mysqldump -uroot -p'Sanchuang123#'  --all-databases  &gt;/backup/all_db.SQL
+</code></pre> 
+<h4><a id="5mysqlrouterkeepalivedvip_1115"></a>5.部署mysqlrouter中间件实现读写分离，安装keepalived部署双vip实现高可用</h4> 
+<h5><a id="mysqlrouter_1117"></a>安装部署mysql-router软件</h5> 
+<blockquote> 
+ <p>之前在playbook里边已经安装部署过了</p> 
+</blockquote> 
+<pre><code class="prism language-pegjs">[root@mysql-router1 ~]# ls
+anaconda-ks.cfg                                 node_exporter-1.6.1.linux-amd64.tar.gz
+mysql-router-community-8.0.21-1.el7.x86_64.rpm  node_exporter.sh
+[root@mysql-router1 ~]# 
+
+</code></pre> 
+<h5><a id="1_1131"></a>1.修改配置文件</h5> 
+<pre><code class="prism language-pegjs">[root@mysql-router1 ~]# vim /etc/mysqlrouter/mysqlrouter.conf
+#在最下边加上
+
+#read
+[routing:slave]
+bind_address = 0.0.0.0:7001
+destinations = 192.168.153.150:3306,192.168.153.151:3306
+mode = read-only
+connect_timeout = 1
+
+#write and read
+[routing:master]
+bind_address = 0.0.0.0:7002
+destinations = 192.168.153.150:3306
+mode = read-write
+connect_timeout = 1
+</code></pre> 
+<h5><a id="2MySQL_router70017002_1154"></a>2.启动MySQL router服务,监听了7001和7002端口</h5> 
+<pre><code class="prism language-pegjs">[root@mysql-router2 ~]# service mysqlrouter restart
+Redirecting to /bin/systemctl restart mysqlrouter.service
+
+[root@mysql-router1 ~]# netstat -anplut|grep mysql
+tcp        0      0 0.0.0.0:7001            0.0.0.0:*               LISTEN      27732/mysqlrouter   
+tcp        0      0 0.0.0.0:7002            0.0.0.0:*               LISTEN      27732/mysqlrouter   
+[root@mysql-router1 ~]# 
+
+</code></pre> 
+<h5><a id="3master_1167"></a>3.在master上创建两个用户实现读写分离</h5> 
+<p><code>一个是读的，一个是写的</code></p> 
+<pre><code class="prism language-pegjs">root@(none) 10:47  mysql&gt;grant all on *.* to 'scwrite'@'%' identified by 'Sanchuang123#';
+Query OK, 0 rows affected, 1 warning (0.01 sec)
+
+root@(none) 10:49  mysql&gt;grant select on *.* to 'scread'@'%' identified by 'Sanchuang123#';
+Query OK, 0 rows affected, 1 warning (0.00 sec)
+
+</code></pre> 
+<p><mark>由于实现了半同步复制，故需要将slave机器上面的scwrite用户删除</mark></p> 
+<pre><code class="prism language-pegjs">root@gaohui 10:50  mysql&gt;drop user 'scwrite'@'%';
+Query OK, 0 rows affected (0.01 sec)
+
+root@gaohui 10:50  mysql&gt;
+</code></pre> 
+<h5><a id="4_1189"></a>4.测试</h5> 
+<p><img src="https://images2.imgbox.com/ef/14/GU81diJ8_o.png" alt="image-20231230110101810"></p> 
+<p><img src="https://images2.imgbox.com/58/f6/wi2rmP3a_o.png" alt="image-20231230110454189"></p> 
+<h6><a id="_1195"></a>在只读账户中操作</h6> 
+<p><img src="https://images2.imgbox.com/1f/ab/I0TLFHkx_o.png" alt="image-20231230110835974"></p> 
+<h6><a id="_1199"></a>在读写账户上操作</h6> 
+<p><img src="https://images2.imgbox.com/94/37/ONc6CeKl_o.png" alt="image-20231230111027263"></p> 
+<blockquote> 
+ <p>测试成功</p> 
+</blockquote> 
+<h5><a id="5keepalivedvip_1205"></a>5.安装keepalived部署双vip实现高可用</h5> 
+<p><code>在mysql-route1上</code></p> 
+<pre><code class="prism language-pegjs">[root@mysql-router1 ~]# vim /etc/keepalived/keepalived.conf
+! Configuration File for keepalived
+
+global_defs {
+   notification_email {
+     acassen@firewall.loc
+     failover@firewall.loc
+     sysadmin@firewall.loc
+   }
+   notification_email_from Alexandre.Cassen@firewall.loc
+   smtp_server 192.168.200.1
+   smtp_connect_timeout 30
+   router_id LVS_DEVEL
+   vrrp_skip_check_adv_addr
+   #vrrp_strict
+   vrrp_garp_interval 0
+   vrrp_gna_interval 0
+}
+
+vrrp_instance VI_1 {
+    state MASTER
+    interface ens33
+    virtual_router_id 88
+    priority 120
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        192.168.153.88
+    }
+}
+vrrp_instance VI_2 {
+    state MASTER
+    interface ens33
+    virtual_router_id 99
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }   
+    virtual_ipaddress {
+        192.168.153.99
+    }   
+}
+
+
+</code></pre> 
+<blockquote> 
+ <p>router1和route2的不同是优先级两个调换一下,这样就会形成双vip</p> 
+</blockquote> 
+<p><code>在mysql-router2上</code></p> 
+<pre><code class="prism language-pegjs">[root@mysql-router2 ~]# cat /etc/keepalived/keepalived.conf
+! Configuration File for keepalived
+
+global_defs {
+   notification_email {
+     acassen@firewall.loc
+     failover@firewall.loc
+     sysadmin@firewall.loc
+   }
+   notification_email_from Alexandre.Cassen@firewall.loc
+   smtp_server 192.168.200.1
+   smtp_connect_timeout 30
+   router_id LVS_DEVEL
+   vrrp_skip_check_adv_addr
+   vrrp_strict
+   vrrp_garp_interval 0
+   vrrp_gna_interval 0
+}
+vrrp_instance VI_1 {
+    state MASTER
+    interface ens33
+    virtual_router_id 88
+    priority 100
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        192.168.153.88
+    }
+}
+vrrp_instance VI_2 {
+    state MASTER
+    interface ens33
+    virtual_router_id 99
+    priority 120
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        192.168.153.99
+    }
+}
+</code></pre> 
+<p><mark>记得刷新服务</mark></p> 
+<pre><code class="prism language-pegjs">[root@mysql-router1 ~]# service keepalived restart
+Redirecting to /bin/systemctl restart keepalived.service
+[root@mysql-router1 ~]# 
+</code></pre> 
+<p><mark>查看是否配置成功</mark></p> 
+<pre><code class="prism language-pegjs">#'router1:'
+[root@mysql-router1 ~]# ip add
+1: lo: &lt;LOOPBACK,UP,LOWER_UP&gt; mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: ens33: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 00:0c:29:fc:08:6a brd ff:ff:ff:ff:ff:ff
+    inet 192.168.153.146/24 brd 192.168.153.255 scope global noprefixroute dynamic ens33
+       valid_lft 1580sec preferred_lft 1580sec
+    inet 192.168.153.88/32 scope global ens33
+       valid_lft forever preferred_lft forever
+    inet6 fe80::c143:aa4e:4eda:6960/64 scope link noprefixroute 
+       valid_lft forever preferred_lft forever
+[root@mysql-router1 ~]# 
+
+#'router2:'
+[root@mysql-router2 ~]# ip add
+1: lo: &lt;LOOPBACK,UP,LOWER_UP&gt; mtu 65536 qdisc noqueue state UNKNOWN group default qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: ens33: &lt;BROADCAST,MULTICAST,UP,LOWER_UP&gt; mtu 1500 qdisc pfifo_fast state UP group default qlen 1000
+    link/ether 00:0c:29:10:87:f8 brd ff:ff:ff:ff:ff:ff
+    inet 192.168.153.147/24 brd 192.168.153.255 scope global noprefixroute ens33
+       valid_lft forever preferred_lft forever
+    inet 192.168.153.99/32 scope global ens33
+       valid_lft forever preferred_lft forever
+    inet6 fe80::20c:29ff:fe10:87f8/64 scope link 
+       valid_lft forever preferred_lft forever
+[root@mysql-router2 ~]# 
+
+</code></pre> 
+<h4><a id="6DNS_1367"></a>6.搭建DNS服务器</h4> 
+<p>参考文档：https://blog.csdn.net/qq_51235445/article/details/124898262?fromshare=blogdetail</p> 
+<pre><code class="prism language-pegjs">#'关闭防火墙和selinux'
+[root@dns ~]# systemctl stop firewalld
+[root@dns ~]# systemctl disable firewalld
+Removed symlink /etc/systemd/system/multi-user.target.wants/firewalld.service.
+Removed symlink /etc/systemd/system/dbus-org.fedoraproject.FirewallD1.service.
+[root@dns ~]# vim /etc/selinux/config
+SELINUX=disabled
+[root@dns ~]# su
+</code></pre> 
+<pre><code class="prism language-pegjs">[root@dns ~]# systemctl enable named  #开机启动dns服务
+Created symlink from /etc/systemd/system/multi-user.target.wants/named.service to /usr/lib/systemd/system/named.service.
+
+[root@dns ~]# systemctl start named  #启动dns服务
+[root@dns ~]# 
+</code></pre> 
+<h5><a id="1dnsip53dns_1390"></a>1.修改dns配置文件，任意ip可以访问本机的53端口，并且允许dns解析</h5> 
+<pre><code class="prism language-pegjs">[root@dns ~]# vim /etc/named.conf
+options {
+        listen-on port 53 { any; };  #修改
+        listen-on-v6 port 53 { any; }; #修改
+        directory       "/var/named";
+        dump-file       "/var/named/data/cache_dump.db";
+        statistics-file "/var/named/data/named_stats.txt";
+        memstatistics-file "/var/named/data/named_mem_stats.txt";
+        recursing-file  "/var/named/data/named.recursing";
+        secroots-file   "/var/named/data/named.secroots";
+        allow-query     { any; }; #修改
+#重启named服务
+[root@dns ~]# service named restart
+</code></pre> 
+<h5><a id="2dnsetcnamedrfc1912zones_1408"></a>2.编辑dns次要配置文件/etc/named.rfc1912.zones，增加一条主域名记录</h5> 
+<pre><code class="prism language-pegjs">[root@dns named]# vim /etc/named.rfc1912.zones
+zone "gaohui.com" IN {
+        type master; #类型为主域名
+        file "gaohui.com.zone"; #gaohui.com域名的数据文件，需要去/var/named/下创建
+        allow-update { none; };
+};
+
+</code></pre> 
+<pre><code class="prism language-pegjs">[root@dns named]# ls
+data  dynamic  named.ca  named.empty  named.localhost  named.loopback  slaves
+[root@dns named]# cp -a named.localhost gaohui.com.zone
+[root@dns named]# ls
+data  dynamic  gaohui.com.zone  named.ca  named.empty  named.localhost  named.loopback  slaves
+[root@dns named]# vim gaohui.com.zone 
+$TTL 1D
+@       IN SOA  @ rname.invalid. (
+                                        0       ; serial
+                                        1D      ; refresh
+                                        1H      ; retry
+                                        1W      ; expire
+                                        3H )    ; minimum
+        NS      @
+        A       192.168.153.145
+www IN  A       192.168.153.88
+www IN  A       192.168.153.99
+
+</code></pre> 
+<h5><a id="3linuxdnsdns192169153145_1441"></a>3.修改linux客户机的dns服务器的地址为搭建的dns服务器192.169.153.145</h5> 
+<pre><code class="prism language-pegjs">[root@dns named]# vim /etc/resolv.conf
+#Generated by NetworkManager
+#nameserver 114.114.114.114
+nameserver 192.168.153.145
+[root@dns named]# service named restart
+Redirecting to /bin/systemctl restart named.service
+
+</code></pre> 
+<h5><a id="4_1453"></a>4.查看效果</h5> 
+<pre><code class="prism language-pegjs">[root@dns named]# nslookup www.gaohui.com
+Server:		192.168.153.145
+Address:	192.168.153.145#53
+
+Name:	www.gaohui.com
+Address: 192.168.153.99
+Name:	www.gaohui.com
+Address: 192.168.153.88
+[root@dns named]# 
+</code></pre> 
+<blockquote> 
+ <p><strong>同一域名解析出了中间件mysqlrouter的双vip地址，实现了基于dns的负载均衡</strong></p> 
+</blockquote> 
+<h4><a id="7_1469"></a>7.监控部署</h4> 
+<h5><a id="1xftp_1471"></a>1.利用xftp把安装包拉取进来</h5> 
+<pre><code class="prism language-pegjs">[root@prometheus ~]# ls
+anaconda-ks.cfg  prometheus-2.47.0.linux-amd64.tar.gz
+</code></pre> 
+<h5><a id="2prometheus_1478"></a>2.一键源码安装prometheus</h5> 
+<pre><code class="prism language-pegjs">[root@prometheus ~]# vim onekey_install_prometheus.sh 
+#!/bin/bash
+
+#创建存放prometheus的目录
+mkdir /prom
+
+#解压并改名
+tar xf ./prometheus-2.47.0.linux-amd64.tar.gz -C /prom
+mv /prom/prometheus-2.47.0.linux-amd64 /prom/prometheus
+
+#添加到PATH变量
+PATH=/prom/prometheus:$PATH
+echo "PATH=/prom/prometheus:$PATH " &gt;&gt;/root/.bashrc
+
+#nohub后台执行启动
+nohup prometheus  --config.file=/prom/prometheus/prometheus.yml &amp;
+
+#关闭防火墙
+service firewalld stop
+systemctl disable firewalld 
+
+#关闭 selinux
+sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+
+</code></pre> 
+<h5><a id="3prometheus_1507"></a>3.把prometheus做成一个服务来进行管理</h5> 
+<pre><code class="prism language-pegjs">[root@prometheus prometheus]# vim /usr/lib/systemd/system/prometheus.service
+[Unit]
+Description=prometheus
+
+[Service]
+ExecStart=/prom/prometheus/prometheus --config.file=/prom/prometheus/prometheus.yml
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+
+#重新加载systemd相关的服务
+[root@prometheus prometheus]# systemctl daemon-reload
+
+</code></pre> 
+<blockquote> 
+ <p><mark>第一次因为是使用nohup 方式启动的prometheus，还是需要使用后kill 的方式杀死第一次启动的进程；后面可以使用service方式管理prometheus了</mark></p> 
+</blockquote> 
+<pre><code class="prism language-pegjs">[root@prometheus prometheus]# ps aux|grep prometheus
+root      24794  0.1  2.4 1316264 45584 pts/0   Sl   15:14   0:00 prometheus --config.file=/prom/prometheus/prometheus.yml
+root      24900  0.0  0.0 112824   976 pts/0    S+   15:19   0:00 grep --color=auto prometheus
+[root@prometheus prometheus]# kill -9 24794
+
+[root@prometheus prometheus]# ps aux|grep prometheus
+root      24902  0.0  0.0 112824   972 pts/0    S+   15:19   0:00 grep --color=auto prometheus
+
+[root@prometheus prometheus]# service prometheus start
+[root@prometheus prometheus]# service prometheus stop
+</code></pre> 
+<h5><a id="4nodeexporteransibleplaybook_1543"></a>4.在node节点服务器上安装exporter程序，已经在ansible的playbook中安装完成</h5> 
+<h5><a id="5prometheus_serverexporter_1545"></a>5.在prometheus server里添加安装了exporter程序的机器</h5> 
+<pre><code class="prism language-pegjs">[root@prometheus prometheus]# vim /prom/prometheus/prometheus.yml
+    static_configs:
+      - targets: ["localhost:9090"]
+#从这开始添加！！！！！！！！！！
+  - job_name: "master"
+    static_configs:
+      - targets: ["192.168.153.150:8090"]
+
+  - job_name: "slave1"
+    static_configs:
+      - targets: ["192.168.153.151:8090"]
+
+  - job_name: "slave2"
+    static_configs:
+      - targets: ["192.168.153.152:8090"]
+
+  - job_name: "slave3"
+    static_configs:
+      - targets: ["192.168.153.153:8090"]
+
+  - job_name: "slave4"
+    static_configs:
+      - targets: ["192.168.153.154:8090"]
+
+  - job_name: "mysqlrouter1"
+    static_configs:
+      - targets: ["192.168.153.155:8090"]
+  - job_name: "mysqlrouter2"
+    static_configs:
+      - targets: ["192.168.153.147:8090"]
+
+</code></pre> 
+<p><mark>刷新服务</mark></p> 
+<pre><code class="prism language-pegjs">#重启prometheus服务  
+[root@prometheus prometheus]# service  prometheus restart
+</code></pre> 
+<p>访问9090端口</p> 
+<p><img src="https://images2.imgbox.com/1d/68/MIpdxbHp_o.png" alt="image-20231231161928620"></p> 
+<h5><a id="6grafana_1592"></a>6.配置部署grafana</h5> 
+<p>先用迅雷下载https://dl.grafana.com/enterprise/release/grafana-enterprise-10.1.1-1.x86_64.rpm</p> 
+<p>再用xftp拖进来安装</p> 
+<pre><code class="prism language-pegjs">[root@prometheus grafana]# ls
+grafana-enterprise-10.1.1-1.x86_64.rpm
+[root@prometheus grafana]# yum install grafana-enterprise-10.1.1-1.x86_64.rpm -y
+</code></pre> 
+<p><code>启动grafana</code></p> 
+<pre><code class="prism language-pegjs">[root@prometheus grafana]# service grafana-server start  
+Starting grafana-server (via systemctl):                   [  确定  ]
+[root@prometheus grafana]# systemctl enable grafana-server  #设置开机自启动
+</code></pre> 
+<blockquote> 
+ <p>grafana监听的端口号是3000</p> 
+ <p>http://192.168.153.149:3000/<br> 默认的用户名和密码是<br> 用户名admin<br> 密码admin</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/0b/85/EbA2PLTy_o.png" alt="image-20231230154802301"></p> 
+<p><strong>配置数据源</strong></p> 
+<p><img src="https://images2.imgbox.com/41/32/iEGPuG06_o.png" alt="image-20231230155054383"></p> 
+<p><img src="https://images2.imgbox.com/71/27/GZCw43F4_o.png" alt="image-20231230155157189"></p> 
+<p><img src="https://images2.imgbox.com/5a/f5/kbCTEx1k_o.png" alt="image-20231231161819778"></p> 
+<blockquote> 
+ <p>模板id号:8919</p> 
+</blockquote> 
+<h4><a id="8sysbench_1631"></a>8.sysbench压力测试</h4> 
+<h5><a id="1sysbench_1633"></a>1.安装sysbench工具</h5> 
+<pre><code class="prism language-pegjs">[root@localhost ~]# yum install epel-release -y
+[root@localhost ~]# yum install sysbench -y
+</code></pre> 
+<h5><a id="2_1640"></a>2.调大内核资源限制</h5> 
+<pre><code class="prism language-pegjs">[root@localhost ~]# ulimit -n 100000
+[root@localhost ~]# ulimit -u 100000
+[root@localhost ~]# ulimit -s 100000
+</code></pre> 
+<h5><a id="3master_1648"></a>3.在master上创建测试库</h5> 
+<pre><code class="prism language-pegjs">root@(none) 17:11  mysql&gt;create database test_db;   #创建测试库
+Query OK, 1 row affected (0.00 sec)
+</code></pre> 
+<h5><a id="4sysbench_1655"></a>4.基于sysbench构造测试表和测试数据</h5> 
+<pre><code class="prism language-pegjs">[root@localhost ~]# sysbench --db-driver=mysql --time=300 --threads=10 --report-interval=1 --mysql-host=www.gaohui.com --mysql-port=7002 --mysql-user=scwrite --mysql-password=Sanchuang123# --mysql-db=test_db --tables=10 --table_size=50 oltp_read_write --db-ps-mode=disable prepare
+sysbench 1.0.17 (using system LuaJIT 2.0.4)
+
+Initializing worker threads...
+
+Creating table 'sbtest8'...
+Creating table 'sbtest4'...
+Creating table 'sbtest2'...
+Creating table 'sbtest10'...
+Creating table 'sbtest3'...
+Inserting 50 records into 'sbtest4'
+Inserting 50 records into 'sbtest8'
+Inserting 50 records into 'sbtest10'
+Inserting 50 records into 'sbtest3'
+Creating a secondary index on 'sbtest4'...
+Creating a secondary index on 'sbtest8'...
+Inserting 50 records into 'sbtest2'
+Creating a secondary index on 'sbtest10'...
+Creating a secondary index on 'sbtest3'...
+Creating a secondary index on 'sbtest2'...
+Creating table 'sbtest6'...
+Creating table 'sbtest9'...
+Creating table 'sbtest7'...
+Creating table 'sbtest5'...
+Creating table 'sbtest1'...
+Inserting 50 records into 'sbtest9'
+Inserting 50 records into 'sbtest5'
+Inserting 50 records into 'sbtest6'
+Inserting 50 records into 'sbtest7'
+Inserting 50 records into 'sbtest1'
+Creating a secondary index on 'sbtest5'...
+Creating a secondary index on 'sbtest7'...
+Creating a secondary index on 'sbtest6'...
+Creating a secondary index on 'sbtest9'...
+Creating a secondary index on 'sbtest1'...
+[root@localhost ~]# 
+
+</code></pre> 
+<blockquote> 
+ <p><strong>命令行中的参数说明：</strong></p> 
+ <p>**–db-driver=mysql：**代表数据库驱动</p> 
+ <hr> 
+ <p>**–time=300：**这个就是说连续访问300秒</p> 
+ <hr> 
+ <p>**–threads=10：**这个就是说用10个线程模拟并发访问</p> 
+ <hr> 
+ <p>**–report-interval=1：**这个就是说每隔1秒输出一下压测情况</p> 
+ <hr> 
+ <p>**–mysql-host=www.gaohui.com --mysql-port=7002 --mysql-user=scwrite --mysql-password=Sanchuang123#：**数据库的用户和密码等信息</p> 
+ <p>**–mysql-db=test_db --tables=10 --table_size=50：**这一串的意思，就是说在test_db这个库里，构造10个测试表，每个测试表里构造50条测试数据，测试表的名字会是类似于sbtest1，sbtest2这个样子的</p> 
+ <p>**oltp_read_write：**这个就是说，执行oltp数据库的读写测试</p> 
+ <p>**–db-ps-mode=disable：**这个就是禁止ps模式</p> 
+ <p>**prepare：**意思是参照这个命令的设置去构造出来我们需要的数据库里的数据，他会自动创建10个测试表，每个表里创建50条测试数据，所以这个工具是非常的方便的。</p> 
+</blockquote> 
+<h5><a id="5preparerun_1733"></a>5.数据库读写性能测试（获取测试数据）把prepare改成run</h5> 
+<blockquote> 
+ <p>这里有个问题 如果我用www.gaohui.com去登录，会超时</p> 
+</blockquote> 
+<pre><code class="prism language-pegjs">[root@localhost ~]# sysbench --db-driver=mysql --time=300 --threads=10 --report-interval=1 --mysql-host=192.168.153.88 --mysql-port=7002 --mysql-user=scwrite --mysql-password=Sanchuang123# --mysql-db=test_db --tables=10 --table_size=50 oltp_read_write --db-ps-mode=disable run
+sysbench 1.0.17 (using system LuaJIT 2.0.4)
+
+Running the test with following options:
+Number of threads: 10
+Report intermediate results every 1 second(s)
+Initializing random number generator from current time
+
+
+Initializing worker threads...
+
+Threads started!
+
+[ 1s ] thds: 10 tps: 323.63 qps: 6666.45 (r/w/o: 4696.68/1308.52/661.25) lat (ms,95%): 34.95 err/s: 4.00 reconn/s: 0.00
+[ 2s ] thds: 10 tps: 493.32 qps: 9932.49 (r/w/o: 6961.55/1980.29/990.65) lat (ms,95%): 27.66 err/s: 6.00 reconn/s: 0.00
+[ 3s ] thds: 10 tps: 525.00 qps: 10661.98 (r/w/o: 7488.98/2112.00/1061.00) lat (ms,95%): 24.83 err/s: 9.00 reconn/s: 0.00
+[ 4s ] thds: 10 tps: 532.99 qps: 10745.89 (r/w/o: 7530.92/2143.98/1070.99) lat (ms,95%): 24.38 err/s: 5.00 reconn/s: 0.00
+[ 5s ] thds: 10 tps: 534.99 qps: 10804.84 (r/w/o: 7583.89/2144.97/1075.98) lat (ms,95%): 24.83 err/s: 6.00 reconn/s: 0.00
+[ 6s ] thds: 10 tps: 542.03 qps: 10992.55 (r/w/o: 7714.38/2185.11/1093.05) lat (ms,95%): 24.38 err/s: 9.00 reconn/s: 0.00
+[ 7s ] thds: 10 tps: 536.96 qps: 10831.28 (r/w/o: 7602.50/2149.86/1078.93) lat (ms,95%): 24.83 err/s: 6.00 reconn/s: 0.00
+[ 8s ] thds: 10 tps: 546.04 qps: 10955.84 (r/w/o: 7668.59/2194.17/1093.08) lat (ms,95%): 23.10 err/s: 0.00 reconn/s: 0.00
+[ 9s ] thds: 10 tps: 546.93 qps: 10983.58 (r/w/o: 7694.00/2191.72/1097.86) lat (ms,95%): 23.52 err/s: 4.00 reconn/s: 0.00
+[ 10s ] thds: 10 tps: 539.02 qps: 10761.49 (r/w/o: 7532.35/2149.10/1080.05) lat (ms,95%): 23.95 err/s: 2.00 reconn/s: 0.00
+[ 11s ] thds: 10 tps: 534.02 qps: 10838.47 (r/w/o: 7609.33/2155.09/1074.05) lat (ms,95%): 23.95 err/s: 6.00 reconn/s: 0.00
+
+</code></pre> 
+<p>执行完300s之后</p> 
+<pre><code class="prism language-pegjs">SQL statistics:
+    queries performed:
+        read:                            2215234  // 在300.0257秒的时间内执行了2215234次读请求
+        write:                           628913   // 在300.0257秒的时间内执行了628913次写请求
+        other:                           314876   // 在300.0257秒的时间内执行了314876次其他请求
+        total:                           3159023  // 在300.0257秒的时间内执行了3159023次总的请求
+    transactions:                        156645 (522.10 per sec.) // 在300.0257秒的时间内执行了156645次事务, 平均每秒执行522.10次
+    queries:                             3159023 (10529.16 per sec.) // 在300.0257秒的时间内执行了3159023次查询, 平均每秒执行10529.16次
+    ignored errors:                      1586   (5.29 per sec.) // 在300.0257秒的时间内发生了1586个忽略的错误, 平均每秒发生5.29个
+    reconnects:                          0      (0.00 per sec.) // 在300.0257秒的时间内没有发生重新连接的次数
+General statistics:
+    total time:                          300.0257s  // 总时间为300.0257秒
+    total number of events:              156645      // 总事件数量为156645个
+Latency (ms):
+         min:                                   11.43    // 最小延迟为11.43毫秒
+         avg:                                   19.15    // 平均延迟为19.15毫秒
+         max:                                   65.59    // 最大延迟为65.59毫秒
+         95th percentile:                       25.28    // 95% 的请求延迟在25.28毫秒以内
+         sum:                              2999415.26    // 总延迟为2999415.26毫秒
+Threads fairness:
+    events (avg/stddev):           15664.5000/50.32  // 事件的平均值为15664.5000，标准偏差为50.32
+    execution time (avg/stddev):   299.9415/0.01     // 执行时间的平均值为299.9415秒，标准偏差为0.01秒
+</code></pre> 
+<h5><a id="6runcleanup_1792"></a>6.执行完成压测之后可以将run改成cleanup，清除数据</h5> 
+<pre><code class="prism language-pegjs">[root@localhost ~]# sysbench --db-driver=mysql --time=300 --threads=10 --report-interval=1 --mysql-host=192.168.153.88 --mysql-port=7002 --mysql-user=scwrite --mysql-password=Sanchuang123# --mysql-db=test_db --tables=10 --table_size=50 oltp_read_write --db-ps-mode=disable cleanup
+sysbench 1.0.17 (using system LuaJIT 2.0.4)
+
+Dropping table 'sbtest1'...
+Dropping table 'sbtest2'...
+Dropping table 'sbtest3'...
+Dropping table 'sbtest4'...
+Dropping table 'sbtest5'...
+Dropping table 'sbtest6'...
+Dropping table 'sbtest7'...
+Dropping table 'sbtest8'...
+Dropping table 'sbtest9'...
+Dropping table 'sbtest10'...
+[root@localhost ~]# 
+
+</code></pre> 
+<h3><a id="_1814"></a>四.出现的问题</h3> 
+<h4><a id="1ansblemysql_1816"></a>1.在使用ansble一键配置之后输入mysql无法找到命令</h4> 
+<blockquote> 
+ <p>解决的办法是: 修改 ~/.bashrc</p> 
+ <p>更改环境变量: export PATH=/usr/local/mysql/bin:/node_exporter:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:$PATH</p> 
+ <p>最后再：source ~/.bashrc</p> 
+</blockquote> 
+<pre><code class="prism language-pegjs">[root@mysql-slave3 ~]# vim .bashrc 
+# .bashrc
+
+# User specific aliases and functions
+
+alias rm='rm -i'
+alias cp='cp -i'
+alias mv='mv -i'
+
+# Source global definitions
+if [ -f /etc/bashrc ]; then
+	. /etc/bashrc
+fi
+export PATH=/usr/local/mysql/bin:/node_exporter:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:$PATH
+
+[root@mysql-slave3 ~]# source ~/.bashrc
+</code></pre> 
+<h4><a id="2grafana_1845"></a>2.在配置grafana的时候没数据</h4> 
+<blockquote> 
+ <p>很奇怪，Prometheus有数据，但是grafana没出图</p> 
+</blockquote> 
+<p><code>解决办法</code>:</p> 
+<blockquote> 
+ <p>先看一下自带的Prometheus2.0有没有数据</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/a8/24/Yi4825bP_o.png" alt="image-20231231163611463"></p> 
+<p><mark>如果有数据，那可能是模板不适配的问题</mark></p> 
+<blockquote> 
+ <p>我换成了id为8919的版本，就出来效果了</p> 
+</blockquote> 
+<h4><a id="3_1859"></a>3.压力测试的时候，由于内核参数的限制，导致无法起太多的线程</h4> 
+<blockquote> 
+ <p>修改内核限制参数，以及调大mysql中与内核相关的参数</p> 
+</blockquote> 
+<h4><a id="4slave_1863"></a>4.主从复制时，只在slave上进行了操作，导致事务数比主服务器还要多，主从复制一直起不来</h4> 
+<blockquote> 
+ <p>查看报错信息，是事务数比主服务器还要多—&gt;尽可能删除比主服务器还要多出来的数据，在reset master，并重新设置master_info信息</p> 
+</blockquote> 
+<h4><a id="5_1867"></a>5.虚拟机内存不够，新建不了虚拟机</h4> 
+<blockquote> 
+ <p>可以适当的给slave少一点内存，电脑内存实在不够，就换内存条吧</p> 
+</blockquote> 
+<h3><a id="_1871"></a>五.项目心得</h3> 
+<blockquote> 
+ <p>​ 1.一定要规划好整个集群的架构，配置要细心，脚本和软件要提前准备好，边做边修改<br> ​ 2.防火墙和selinux的必须都关闭<br> ​ 3.静态配置ip固定好，不要一关电脑，再打开ip变了<br> ​ 4.对MySQL的集群和高可用有了深入的理解<br> ​ 5.认识到了数据备份的重要性<br> ​ 6.深刻的体会到了rsync+sersync数据同步工具的便利与好处<br> ​ 7.对自动化批量部署和监控有了更加多的应用和理解<br> ​ 8.keepalived的配置需要更加细心和IP地址的规划有了新的认识<br> ​ 9.对双vip的使用，添加2条负载均衡记录实现dns轮询，达到向2个vip负载均衡器上分流</p> 
+</blockquote>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/b112a368f81331053e773f09ff2b762d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">2024年的学习规划和碎碎念</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/87bebfce76fd7f85b1f964baabb3d4f6/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Windows java网络数据传输，idea jar包乱码问题，idea正常显示，jar包运行出现乱码</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

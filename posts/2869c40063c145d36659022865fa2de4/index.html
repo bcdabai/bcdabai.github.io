@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【分布式id生成系统——leaf源码】 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【分布式id生成系统——leaf源码】" />
+<meta property="og:description" content="分布式id生成系统——leaf源码 号段模式双buffer优化id获取 Leaf ，分布式 ID 生成系统，有两种生成 ID 的方式： 号段模式Snowflake模式 号段模式 由于号段模式依赖于数据库表，我们先看一下相关的数据库表：
+biz_tag：针对不同业务需求，用biz_tag字段来隔离，如果以后需要扩容时，只需对biz_tag分库分表即可
+max_id：当前业务号段的最大值，用于计算下一个号段
+step：步长，也就是每次获取ID的数量
+random_step: 每次getid时随机增加的长度
+对应的实体类如下
+import java.util.concurrent.atomic.AtomicLong; /** * @author left */ public class Segment { private AtomicLong value = new AtomicLong(0); //对 long 类型的变量进行原子操作，这里就是产生的id值 private volatile long max; //当前号段起始id private volatile int step; //每次缓存数量 private volatile int randomStep; //随机增长 private final SegmentBuffer buffer; //双buffer } 这样一看，就是在把数据库的自增方式放到了内存中，相当于加了一层缓存，减少了数据库的访问次数。但其实做的比这更好，程序通过一种双 Buffer 优化方式，提前缓存下一个 Segement，降低网络请求的耗时。
+双buffer优化 思路如下
+数据库表对应的实体类如下：
+/** * @author leaf */ public class LeafAlloc { private String key; private long maxId; private int step; private String updateTime; private int randomStep; } 这个类是用于缓存的类" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/2869c40063c145d36659022865fa2de4/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-11-10T17:54:51+08:00" />
+<meta property="article:modified_time" content="2023-11-10T17:54:51+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【分布式id生成系统——leaf源码】</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>分布式id生成系统——leaf源码</h4> 
+ <ul><li><a href="#_5" rel="nofollow">号段模式</a></li><li><ul><li><a href="#buffer_35" rel="nofollow">双buffer优化</a></li><li><a href="#id_224" rel="nofollow">id获取</a></li></ul> 
+ </li></ul> 
+</div> 
+<br> Leaf ，分布式 ID 生成系统，有两种生成 ID 的方式： 
+<p></p> 
+<ul><li>号段模式</li><li>Snowflake模式</li></ul> 
+<h2><a id="_5"></a>号段模式</h2> 
+<p>由于号段模式依赖于数据库表，我们先看一下相关的数据库表：<br> <img src="https://images2.imgbox.com/65/ef/mzxMP7qK_o.png" alt="在这里插入图片描述"></p> 
+<p>biz_tag：针对不同业务需求，用biz_tag字段来隔离，如果以后需要扩容时，只需对biz_tag分库分表即可<br> max_id：当前业务号段的最大值，用于计算下一个号段<br> step：步长，也就是每次获取ID的数量<br> random_step: 每次getid时随机增加的长度</p> 
+<p>对应的实体类如下</p> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> <span class="token import"><span class="token namespace">java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span>atomic<span class="token punctuation">.</span></span><span class="token class-name">AtomicLong</span></span><span class="token punctuation">;</span>
+
+<span class="token comment">/**
+ * @author left
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">Segment</span> <span class="token punctuation">{<!-- --></span>
+
+	<span class="token keyword">private</span> <span class="token class-name">AtomicLong</span> value <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">AtomicLong</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//对 long 类型的变量进行原子操作，这里就是产生的id值</span>
+
+	<span class="token keyword">private</span> <span class="token keyword">volatile</span> <span class="token keyword">long</span> max<span class="token punctuation">;</span> <span class="token comment">//当前号段起始id</span>
+
+	<span class="token keyword">private</span> <span class="token keyword">volatile</span> <span class="token keyword">int</span> step<span class="token punctuation">;</span>  <span class="token comment">//每次缓存数量</span>
+
+	<span class="token keyword">private</span> <span class="token keyword">volatile</span> <span class="token keyword">int</span> randomStep<span class="token punctuation">;</span> <span class="token comment">//随机增长</span>
+
+	<span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">SegmentBuffer</span> buffer<span class="token punctuation">;</span> <span class="token comment">//双buffer</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这样一看，就是在把数据库的自增方式放到了内存中，相当于加了一层缓存，减少了数据库的访问次数。但其实做的比这更好，程序通过一种双 Buffer 优化方式，提前缓存下一个 Segement，降低网络请求的耗时。</p> 
+<h3><a id="buffer_35"></a>双buffer优化</h3> 
+<p>思路如下<br> <img src="https://images2.imgbox.com/fc/30/VmWJ8Jrs_o.png" alt="在这里插入图片描述"></p> 
+<p>数据库表对应的实体类如下：</p> 
+<pre><code class="prism language-java"><span class="token comment">/**
+ * @author leaf
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">LeafAlloc</span> <span class="token punctuation">{<!-- --></span>
+
+	<span class="token keyword">private</span> <span class="token class-name">String</span> key<span class="token punctuation">;</span>
+
+	<span class="token keyword">private</span> <span class="token keyword">long</span> maxId<span class="token punctuation">;</span>
+
+	<span class="token keyword">private</span> <span class="token keyword">int</span> step<span class="token punctuation">;</span>
+
+	<span class="token keyword">private</span> <span class="token class-name">String</span> updateTime<span class="token punctuation">;</span>
+
+	<span class="token keyword">private</span> <span class="token keyword">int</span> randomStep<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这个类是用于缓存的类</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">SegmentBuffer</span> <span class="token punctuation">{<!-- --></span>
+
+	<span class="token keyword">private</span> <span class="token class-name">String</span> key<span class="token punctuation">;</span>  <span class="token comment">//对应了数据库中的biz_tag</span>
+
+	<span class="token comment">/**
+	 * 双buffer
+	 */</span>
+	<span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Segment</span><span class="token punctuation">[</span><span class="token punctuation">]</span> segments<span class="token punctuation">;</span>
+
+	<span class="token comment">/**
+	 * 当前的使用的segment的index
+	 */</span>
+	<span class="token keyword">private</span> <span class="token keyword">volatile</span> <span class="token keyword">int</span> currentPos<span class="token punctuation">;</span>
+
+	<span class="token comment">/**
+	 * 下一个segment是否处于可切换状态
+	 */</span>
+	<span class="token keyword">private</span> <span class="token keyword">volatile</span> <span class="token keyword">boolean</span> nextReady<span class="token punctuation">;</span>
+
+	<span class="token comment">/**
+	 * 是否初始化完成
+	 */</span>
+	<span class="token keyword">private</span> <span class="token keyword">volatile</span> <span class="token keyword">boolean</span> initOk<span class="token punctuation">;</span>
+
+	<span class="token comment">/**
+	 * 线程是否在运行中
+	 */</span>
+	<span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">AtomicBoolean</span> threadRunning<span class="token punctuation">;</span>
+
+	<span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">ReadWriteLock</span> lock<span class="token punctuation">;</span>
+
+	<span class="token keyword">private</span> <span class="token keyword">volatile</span> <span class="token keyword">int</span> step<span class="token punctuation">;</span>
+
+	<span class="token keyword">private</span> <span class="token keyword">volatile</span> <span class="token keyword">int</span> minStep<span class="token punctuation">;</span>
+
+	<span class="token keyword">private</span> <span class="token keyword">volatile</span> <span class="token keyword">long</span> updateTimestamp<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>下面从具体代码来体现：<br> 首先是程序启动后，对SegmentService进行实例化，在通过构造方法实例化SegmentService时，首先对IDAllocDao进行了创建，这里的dao层没有直接用@Mapper注解去创建实现，而是通过实现类实现IDAllocDaoImpl方式（主要原因应该是作为被引入的包，mapper注解可能扫描不到对应的sql吧）。</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Service</span><span class="token punctuation">(</span><span class="token string">"SegmentService"</span><span class="token punctuation">)</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">SegmentService</span> <span class="token punctuation">{<!-- --></span>
+
+	<span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">Logger</span> logger <span class="token operator">=</span> <span class="token class-name">LoggerFactory</span><span class="token punctuation">.</span><span class="token function">getLogger</span><span class="token punctuation">(</span><span class="token class-name">SegmentService</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">IDGen</span> idGen<span class="token punctuation">;</span>
+
+	<span class="token keyword">public</span> <span class="token class-name">SegmentService</span><span class="token punctuation">(</span><span class="token class-name">DataSource</span> dataSource<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">InitException</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">// Config Dao</span>
+		<span class="token class-name">IDAllocDao</span> dao <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">IDAllocDaoImpl</span><span class="token punctuation">(</span>dataSource<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+		<span class="token comment">// Config ID Gen</span>
+		idGen <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">SegmentIDGenImpl</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">SegmentIDGenImpl</span><span class="token punctuation">)</span> idGen<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">setDao</span><span class="token punctuation">(</span>dao<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>idGen<span class="token punctuation">.</span><span class="token function">init</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			logger<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"Segment Service Init Successfully"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">InitException</span><span class="token punctuation">(</span><span class="token string">"Segment Service Init Fail"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+
+	<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token class-name">IDAllocDaoImpl</span><span class="token punctuation">(</span><span class="token class-name">DataSource</span> dataSource<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 创建事务工厂</span>
+    <span class="token class-name">TransactionFactory</span> transactionFactory <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">JdbcTransactionFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 创建MyBatis环境</span>
+    <span class="token class-name">Environment</span> environment <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Environment</span><span class="token punctuation">(</span><span class="token string">"development"</span><span class="token punctuation">,</span> transactionFactory<span class="token punctuation">,</span> dataSource<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 创建MyBatis配置对象</span>
+    <span class="token class-name">Configuration</span> configuration <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Configuration</span><span class="token punctuation">(</span>environment<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 添加IDAllocMapper映射</span>
+    configuration<span class="token punctuation">.</span><span class="token function">addMapper</span><span class="token punctuation">(</span><span class="token class-name">IDAllocMapper</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">// 构建SqlSessionFactory</span>
+    sqlSessionFactory <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">SqlSessionFactoryBuilder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span>configuration<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<p>接下来这里的<code>idGen.init()</code>，初始化发号器，方法调用了updateCacheFromDb()和updateCacheFromDbAtEveryMinute()对数据进行缓存。updateCacheFromDb()中，SegmentBuffer buffer = new SegmentBuffer();创建了SegmentBuffer，初始化时建立一个Segment[]数组保存了当前的SegmentBuffer 。其他就是初始化需要的值<br> <img src="https://images2.imgbox.com/22/61/wb6UtRFY_o.png" alt="在这里插入图片描述"><br> 主要代码及注释如下：</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Override</span>
+	<span class="token keyword">public</span> <span class="token keyword">boolean</span> <span class="token function">init</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		logger<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"Init ..."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">// 确保加载到kv后才初始化成功</span>
+		<span class="token function">updateCacheFromDb</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		initOk <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+		<span class="token comment">//60s的定时更新号段</span>
+		<span class="token function">updateCacheFromDbAtEveryMinute</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">return</span> initOk<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+<span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">updateCacheFromDb</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		logger<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"update cache from db"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> dbTags <span class="token operator">=</span> dao<span class="token punctuation">.</span><span class="token function">getAllTags</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>dbTags <span class="token operator">==</span> <span class="token keyword">null</span> <span class="token operator">||</span> dbTags<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">return</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+			<span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> cacheTags <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>cache<span class="token punctuation">.</span><span class="token function">keySet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token class-name">Set</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> insertTagsSet <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashSet</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>dbTags<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token class-name">Set</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> removeTagsSet <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashSet</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>cacheTags<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token comment">// db中新加的tags灌进cache</span>
+			<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> cacheTags<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token class-name">String</span> tmp <span class="token operator">=</span> cacheTags<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				insertTagsSet<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>tmp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+			<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">String</span> tag <span class="token operator">:</span> insertTagsSet<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token class-name">SegmentBuffer</span> buffer <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">SegmentBuffer</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				buffer<span class="token punctuation">.</span><span class="token function">setKey</span><span class="token punctuation">(</span>tag<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token comment">//取当前位置的Segment，第一次取第一个位置的</span>
+				<span class="token class-name">Segment</span> segment <span class="token operator">=</span> buffer<span class="token punctuation">.</span><span class="token function">getCurrent</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token comment">//初始化为0</span>
+				segment<span class="token punctuation">.</span><span class="token function">setValue</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">AtomicLong</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				segment<span class="token punctuation">.</span><span class="token function">setMax</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				segment<span class="token punctuation">.</span><span class="token function">setStep</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token comment">//缓存</span>
+				cache<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>tag<span class="token punctuation">,</span> buffer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				logger<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"Add tag {} from db to IdCache, SegmentBuffer {}"</span><span class="token punctuation">,</span> tag<span class="token punctuation">,</span> buffer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+			<span class="token comment">//遍历数据库中的tags，如果数据库中的存在，removeTagsSet就不保存</span>
+			<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> dbTags<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token class-name">String</span> tmp <span class="token operator">=</span> dbTags<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				removeTagsSet<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>tmp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+			<span class="token comment">// cache中已失效的tags从cache删除</span>
+			<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">String</span> tag <span class="token operator">:</span> removeTagsSet<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				cache<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>tag<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				logger<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"Remove tag {} from IdCache"</span><span class="token punctuation">,</span> tag<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			logger<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"update cache from db exception"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+</code></pre> 
+<p>updateCacheFromDbAtEveryMinute()做了一个定时任务，定时刷新updateCacheFromDb();</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">updateCacheFromDbAtEveryMinute</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token class-name">ScheduledExecutorService</span> service <span class="token operator">=</span> <span class="token class-name">Executors</span><span class="token punctuation">.</span><span class="token function">newSingleThreadScheduledExecutor</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ThreadFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token annotation punctuation">@Override</span>
+			<span class="token comment">//指定线程内容</span>
+			<span class="token keyword">public</span> <span class="token class-name">Thread</span> <span class="token function">newThread</span><span class="token punctuation">(</span><span class="token class-name">Runnable</span> r<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token class-name">Thread</span> t <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Thread</span><span class="token punctuation">(</span>r<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				t<span class="token punctuation">.</span><span class="token function">setName</span><span class="token punctuation">(</span><span class="token string">"check-idCache-thread"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token comment">//设置为守护线程，如果主线程结束，跟着结束</span>
+				t<span class="token punctuation">.</span><span class="token function">setDaemon</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">return</span> t<span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">//定时任务执行，60s后每60s执行一次</span>
+		service<span class="token punctuation">.</span><span class="token function">scheduleWithFixedDelay</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Runnable</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token annotation punctuation">@Override</span>
+			<span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token function">updateCacheFromDb</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span><span class="token punctuation">,</span> <span class="token number">60</span><span class="token punctuation">,</span> <span class="token number">60</span><span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span><span class="token constant">SECONDS</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="id_224"></a>id获取</h3> 
+<p>这里通过请求一个用户注册接口，来获取一个用户id。通过fegin调用来调用getId服务<br> <img src="https://images2.imgbox.com/9a/70/AxPKrVCM_o.png" alt="在这里插入图片描述"><br> 获取id的代码如下：</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Override</span>
+	<span class="token keyword">public</span> <span class="token class-name">Result</span> <span class="token function">get</span><span class="token punctuation">(</span><span class="token keyword">final</span> <span class="token class-name">String</span> key<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>initOk<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">Result</span><span class="token punctuation">(</span><span class="token constant">EXCEPTION_ID_IDCACHE_INIT_FALSE</span><span class="token punctuation">,</span> <span class="token class-name">Status</span><span class="token punctuation">.</span><span class="token constant">EXCEPTION</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token comment">//通过key获取缓存</span>
+		<span class="token class-name">SegmentBuffer</span> buffer <span class="token operator">=</span> cache<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>buffer <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>buffer<span class="token punctuation">.</span><span class="token function">isInitOk</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token comment">//未初始化，锁住这个buffer，其他线程不可修改</span>
+				<span class="token keyword">synchronized</span> <span class="token punctuation">(</span>buffer<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+					<span class="token keyword">if</span> <span class="token punctuation">(</span>buffer<span class="token punctuation">.</span><span class="token function">isInitOk</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+						<span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+						    <span class="token comment">//从数据库中更新号段</span>
+							<span class="token function">updateSegmentFromDb</span><span class="token punctuation">(</span>key<span class="token punctuation">,</span> buffer<span class="token punctuation">.</span><span class="token function">getCurrent</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+							logger<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"Init buffer. Update leafkey {} {} from db"</span><span class="token punctuation">,</span> key<span class="token punctuation">,</span> buffer<span class="token punctuation">.</span><span class="token function">getCurrent</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+							buffer<span class="token punctuation">.</span><span class="token function">setInitOk</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+						<span class="token punctuation">}</span>
+						<span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+							logger<span class="token punctuation">.</span><span class="token function">warn</span><span class="token punctuation">(</span><span class="token string">"Init buffer {} exception"</span><span class="token punctuation">,</span> buffer<span class="token punctuation">.</span><span class="token function">getCurrent</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+						<span class="token punctuation">}</span>
+					<span class="token punctuation">}</span>
+				<span class="token punctuation">}</span>
+			<span class="token punctuation">}</span>
+			<span class="token keyword">return</span> <span class="token function">getIdFromSegmentBuffer</span><span class="token punctuation">(</span>cache<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>key<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">Result</span><span class="token punctuation">(</span><span class="token constant">EXCEPTION_ID_KEY_NOT_EXISTS</span><span class="token punctuation">,</span> <span class="token class-name">Status</span><span class="token punctuation">.</span><span class="token constant">EXCEPTION</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+</code></pre> 
+<p>第一个核心代码：从数据库中更新号段<br> <img src="https://images2.imgbox.com/a3/13/aVu07MWc_o.png" alt="在这里插入图片描述"><br> ①：如果buffer是没有初始化，首先对数据库的号段最大值进行更新，更新完成后，获取结果，这里相当于是获取了一次缓存。更新方式是让max_id增加一次step。目前库中的step是100，也就是每次取100个号<br> <img src="https://images2.imgbox.com/b3/3e/9pNaxAgK_o.png" alt="在这里插入图片描述"></p> 
+<p>②：第二种情况是，buffer已经初始化了，但是未发生过更新，这里就是走额外线程去获取第二层缓存了。<br> ③④：一个segment的过期时间是15分钟，未过期，nextStep正常扩容为2倍，并且数据库进行更新<br> ⑤：</p> 
+<p><img src="https://images2.imgbox.com/b1/1d/pKNCjhtL_o.png" alt="在这里插入图片描述"><br> ⑥⑦：上诉对step操作完成后，根据key更新max_id，max_id值更新为max_id+step，相当于如果15分钟后，未使用的id将会被舍弃。<br> ⑧：上面的三个if完成后，获取到value值，对当前的segment设置。</p> 
+<p>第二个核心代码：从缓存中获取id<br> <img src="https://images2.imgbox.com/0a/98/XRzmKzgZ_o.png" alt="在这里插入图片描述"><br> ①：<br> <img src="https://images2.imgbox.com/81/31/qI9urxUK_o.png" alt="在这里插入图片描述"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/5620305e0571c19f72a86327cfe85fd5/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">mysql的sql_mode参数</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/fa16ed6e2b1a28e8da74758a428eb23b/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">mac使用VMware Fusion安装Centos 7系统</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

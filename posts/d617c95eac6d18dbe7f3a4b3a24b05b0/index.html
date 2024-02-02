@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【源码】看一看Spring如何使用三级缓存解决循环依赖问题 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【源码】看一看Spring如何使用三级缓存解决循环依赖问题" />
+<meta property="og:description" content="【源码】看一看Spring如何使用三级缓存解决循环依赖问题 我们之前文章讲Bean的创建过程中，提到了如果当前bean依赖的其它bean，就会调用getBean()方法把依赖的bean先创建出来
+可是你有没有想过，如果当前Bean依赖于另一个Bean，而另一个Bean又就形成了依赖于当前Bean，或者当前Bean依赖于自己，这样依赖关系形成了一个闭环。这就是我们这篇文章将要说的Bean的循环依赖问题！
+首先我们要明确Spring不是能够解决所有情况下的循环依赖问题的，只能解决：
+出现循环依赖的Bean必须是单例Bean依赖注入的方式不能全是构造器注入 IOC容器默认的单例Singleton的场景，并且使用setter方法注入，是支持循环依赖的，不会报错。看下面A和B产生循环依赖的例子。
+但是原型Prototype的场景是不支持循环依赖的，会报错。
+再来说说全是构造器注入的方式，下面的代码，A中注入B的方式是通过构造器，B中注入A的方式也是通过构造器，这个时候循环依赖是**无法被解决的。**同样也会报错！
+Caused by: org.springframework.beans.factory.BeanCurrentlyInCreationException: Error creating bean with name &#39;a&#39;: Requested bean is currently in creation: Is there an unresolvable circular reference? 那么Spring到底是如何解决Bean的循环依赖的问题？实际上是利用了三级缓存来解决的！
+只有单例的bean会通过三级缓存提前暴露来解决循环依赖问题，而非单例的bean，每次从容器中获取都是一个新的对象，都会重新创建，所以非单例的bean是没有缓存的，不会将其放到三级缓存中
+我们之前说过在创建Bean的时候，首先调用getBean()方法
+getBean()方法会调用getSingleton()方法先尝试从缓存中获取这个Bean
+三级缓存的核心就是getSingleton()方法！
+整个缓存分为三级（本质是三个Map集合）：
+一级缓存 singletonObjects：存放已经经历完了完整生命周期的Bean对象。即已经初始化好了的Bean二级缓存 earlySingletonObjects：存放早期暴露出来的Bean对象，Bean的生命周期还未结束，属性还没有填充完整。即存放的是已经实例化但是还没有初始化的Bean三级缓存 singletonFactories：存放可以生成Bean的工厂。假设A类实现了FactoryBean，那么依赖注入的时候不是A类，而是A类产生的Bean。二级缓存中存放的就是从这个工厂获取的Bean。 （1）getSingleton()方法首先会在一级缓存中查找，如果没有就返回null
+（2）在一级缓存中没有查找到这个Bean，说明这个Bean还没有被完整的创建出来，此时会调用getSingleton()参数为ObjectFactory重载方法
+（3）重载个这个方法会先将beanName放入到singletonsCurrentlyInCreation这个集合中，标志着这个单例Bean正在创建
+（4）标记完这个Bean正在创建以后，就开始调用createBean()方法来创建这个Bean。这个createBean()方法我们已经很熟悉了，在之前的创建Bean的过程那篇文章中已经详细讲过了。再实例化这个Bean之前，BeanPostProcessor后置处理器会尝试返回这个Bean的代理对象，也就是说，开启了AOP代理之后，当前Bean注入并不是依赖的Bean，而是注入的这个Bean的代理对象。如果返回的代理对象不为null，就直接返回这个代理对象来替代想要创建的这个Bean，如果返回的代理对象为null，那么就会继续执行剩下的流程，对这个将要创建的Bean进行实例化、属性填充、初始化。
+（5）如果没有直接返回代理对象，就会调用doCreateBean()方法，
+调用createBeanInstance()方法先利用反射机制或者构造器实例化这个Bean
+只有当这个实例化的Bean，是正在创建中的并且是单例Bean，而且允许提前暴露，才会把这个Bean添加到三级缓存中。
+（6）实例化完成并且添加到了三级缓存之后，就开始对这个Bean进行属性填充。如果在属性填充的过程中发现当前Bean依赖于其它Bean，就会查找这个依赖的Bean，和之前说的流程也是一样的，先从缓存中查找，如果没有找到，就会创建这个依赖的的Bean，并填充属性。
+（7）如果在给依赖的Bean填充属性的发现它也依赖于上一个Bean，造成了循环依赖的情况。**此时两个互相依赖的Bean都是实例化完了，但是还没有进行属性填充，也没有进行初始化。**当前Bean会调用getSingleton()方法，依次从一级、二级、三级缓存中去找依赖的上一个Bean。
+我们说上一个Bean之前已经被实例化并且添加到了三级缓存中，于是当前Bean就会从三级缓存中获取到上一个BeanFactory的创建工厂，通过beanFactory就可以得到上一个实例化的Bean。由于通过工厂已经实例化出来一个Bean，所以把上一个Bean放到二级缓存中，同时从三级缓存中删除，这样之后其它bean如果也依赖于这个Bean的话，就可以直接从二级缓存中获取到了。
+（8）当前Bean得到所依赖的上一个Bean实例之后，就可以继续进行属性填充，并且进行初始化了
+（9）这样当前Bean被创建出来之后放到了一级缓存中，此时上一个Bean还是处于创建中的状态，那么回过头来继续创建这个处于创建中状态的Bean，由于它所依赖的Bean已经创建出来并且放到了一级缓存中，所以它可以直接从一级缓存中直接获取到这个依赖的Bean，然后继续完成属性填充和初始化。最后也会把自己放到一级缓存中。
+这样多个Bean之间的循环依赖的问题就解决了，实际上依靠的是Bean的“中间态”这个概念，指的就是已经实例化但是没有进行初始化的Bean。相当于一个Bean的半成品。但是如果是使用构造器注入的bean，不能解决循环依赖问题。因为实例化过程就是通过构造器创建的，Bean如果连实例化都没有完成，也就不能不可能放到二级缓存中提前暴露出来。
+到这你是不是觉得三级缓存为什么要使用工厂而不是直接使用引用？换而言之，为什么需要这个三级缓存，直接通过二级缓存暴露一个Bean引用不行吗？
+实际上这个工厂的目的在于延迟对实例化阶段生成的对象的代理，只有真正发生循环依赖的时候，才去提前生成代理对象，否则只会创建一个工厂并将其放入到三级缓存中，但是不会去通过这个工厂去真正创建对象。如果要使用二级缓存解决循环依赖，意味着所有Bean在实例化后就要完成AOP代理。
+也就是说，在没有AOP代理的时候，三级缓存实际上直接返回的是实例化阶段的Bean对象，并存放到二级缓存中，依赖注入的也是这个实例化Bean对象。但是在有AOP代理时，三级缓存中的Bean工厂才会创建一个代理对象并返回，并将代理对象存放二级缓存中。并且在Bean对象初始化完成之后，通过禁用三级缓存，从二级缓存中获取代理对象来替换Bean本身，并存放到一级缓存中。
+所以简单总结一下源码的实现：
+Spring使用了三级缓存来解决多个Bean循环依赖的问题，这三个缓存实际上是三个Map集合，一级缓存用来保存已经创建好的单例Bean，二级缓存用来提前暴露Bean，三级缓存用来提前暴露Bean工厂。
+假设A、B产生了循环依赖，那么在实例化A的时候就会将它放入到三级缓存中，接着在填充属性时，发现依赖了B，那么就会执行同样的流程，将B实例化后也放入到三级缓存中。当B进行属性填充的时候，又发现B也依赖于A，这时候就会从三级缓冲中查找到提前暴露出来的A工厂，通过A工厂得到实例化的A，然后把A放入到二级缓存中，同时从三级缓存中移除掉。B得到A之后就会继续进行属性填充以及初始化工作，当B被完整的创建出来之后就会放到一级缓存中，并出清掉二级缓存，此时B的创建流程结束。接下来就会继续执行处于正在创建中状态的A，由于A依赖的B已经创建好放在一级缓存中了，此时A在属性填充时可以直接从一级缓存中获取到B，完成属性填充以及初始化的工作。这样A、B就都创建了出来。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/d617c95eac6d18dbe7f3a4b3a24b05b0/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-09-28T22:18:19+08:00" />
+<meta property="article:modified_time" content="2021-09-28T22:18:19+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【源码】看一看Spring如何使用三级缓存解决循环依赖问题</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="Spring_0"></a>【源码】看一看Spring如何使用三级缓存解决循环依赖问题</h2> 
+<p>我们之前文章讲Bean的创建过程中，提到了如果<strong>当前bean依赖的其它bean</strong>，就会调用<code>getBean()</code>方法<strong>把依赖的bean先创建出来</strong></p> 
+<p><img src="https://images2.imgbox.com/52/b7/ZTIKMVsJ_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-zINLeAR1-1632838308544)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210927011148129.png)]"></p> 
+<p>可是你有没有想过，如果当前Bean依赖于另一个Bean，而另一个Bean又就形成了依赖于当前Bean，或者当前Bean依赖于自己，这样依赖关系形成了一个闭环。这就是我们这篇文章将要说的Bean的循环依赖问题！</p> 
+<p><img src="https://images2.imgbox.com/77/f6/ogJ3HQDZ_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-YWHd76gR-1632838308547)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210818140848592.png)]"></p> 
+<p>首先我们要明确Spring不是能够解决所有情况下的循环依赖问题的，只能解决：</p> 
+<ul><li>出现循环依赖的Bean<strong>必须是单例Bean</strong></li><li>依赖注入的方式<strong>不能全是构造器注入</strong></li></ul> 
+<p>IOC容器默认的<strong>单例Singleton的场景，并且使用setter方法注入，是支持循环依赖的，不会报错</strong>。看下面A和B产生循环依赖的例子。</p> 
+<p><img src="https://images2.imgbox.com/bf/81/sgYlcF2N_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-TcH5mKNj-1632838308551)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210818142825737.png)]"></p> 
+<p><img src="https://images2.imgbox.com/3c/d5/krOxk8zV_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-KVyue4tW-1632838308555)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210818142844080.png)]"></p> 
+<p><img src="https://images2.imgbox.com/49/1f/40phijUY_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-a8LKTxQE-1632838308558)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210818143017297.png)]"></p> 
+<p><img src="https://images2.imgbox.com/a1/06/u1TGmRxd_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-D7Wel8H2-1632838308560)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210818143108776.png)]"></p> 
+<p><strong>但是原型<code>Prototype</code>的场景是不支持循环依赖的，会报错。</strong><br> <img src="https://images2.imgbox.com/6d/f6/8Uo1rSLk_o.png" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/a6/d7/QizdRDQN_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-zpUBkwh8-1632838308567)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210818143221433.png)]"></p> 
+<p>再来说说<strong>全是构造器注入</strong>的方式，下面的代码，A中注入B的方式是通过构造器，B中注入A的方式也是通过构造器，这个时候循环依赖是**无法被解决的。**同样也会报错！</p> 
+<p><img src="https://images2.imgbox.com/39/4a/UVuUbkmd_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-iRcxCJWF-1632838308568)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928144959110.png)]"></p> 
+<pre><code class="prism language-java"><span class="token class-name">Caused</span> by<span class="token operator">:</span> <span class="token class-name"><span class="token namespace">org<span class="token punctuation">.</span>springframework<span class="token punctuation">.</span>beans<span class="token punctuation">.</span>factory<span class="token punctuation">.</span></span>BeanCurrentlyInCreationException</span><span class="token operator">:</span> <span class="token class-name">Error</span> creating bean <span class="token keyword">with</span> <span class="token namespace">name</span> <span class="token string">'a'</span><span class="token operator">:</span> <span class="token class-name">Requested</span> bean is currently in creation<span class="token operator">:</span> <span class="token class-name">Is</span> there an unresolvable circular reference<span class="token operator">?</span>
+</code></pre> 
+<p>那么Spring到底是如何解决Bean的循环依赖的问题？实际上是利用了<strong>三级缓存</strong>来解决的！</p> 
+<p><strong>只有单例</strong>的bean会通过<strong>三级缓存提前暴露</strong>来解决循环依赖问题，而非单例的bean，每次从容器中获取都是一个新的对象，都会重新创建，所以非单例的bean是没有缓存的，不会将其放到三级缓存中</p> 
+<p>我们之前说过在创建Bean的时候，首先调用<code>getBean()</code>方法<br> <img src="https://images2.imgbox.com/0a/e0/Z1CcolPh_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-SMbkgr3G-1632838308569)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928160802564.png)]"></p> 
+<p><code>getBean()</code>方法会调用<code>getSingleton()</code>方法<strong>先尝试从缓存中获取这个Bean</strong></p> 
+<p><img src="https://images2.imgbox.com/bd/1c/p5gdJdRf_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-2ppKWCdw-1632838308570)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928161117709.png)]"></p> 
+<p><strong>三级缓存的核心就是<code>getSingleton()</code>方法！</strong></p> 
+<p>整个缓存分为三级（本质是<strong>三个Map集合</strong>）：</p> 
+<ul><li>一级缓存 <code>singletonObjects</code>：存放已经<strong>经历完了完整生命周期</strong>的Bean对象。<strong>即已经初始化好了的Bean</strong></li><li>二级缓存 <code>earlySingletonObjects</code>：存放<strong>早期暴露出来</strong>的Bean对象，Bean的生命周期还未结束，属性还没有填充完整。<strong>即存放的是已经实例化但是还没有初始化的Bean</strong></li><li>三级缓存 <code>singletonFactories</code>：存放可以<strong>生成Bean的工厂</strong>。<strong>假设A类实现了FactoryBean，那么依赖注入的时候不是A类，而是A类产生的Bean</strong>。<strong>二级缓存中存放的就是从这个工厂获取的Bean。</strong></li></ul> 
+<p><img src="https://images2.imgbox.com/f2/95/Y62qb1Qf_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-9Sd7nSXb-1632838308571)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210818144754438.png)]"></p> 
+<p>（1）<code>getSingleton()</code>方法首先会在<strong>一级缓存中查找</strong>，如果没有就返回null</p> 
+<p><img src="https://images2.imgbox.com/14/e9/muT35ddJ_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-VqdEVBH7-1632838308572)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928162821642.png)]"></p> 
+<p>（2）在一级缓存中没有查找到这个Bean，说明这个Bean<strong>还没有被完整的创建出来</strong>，此时会调用<code>getSingleton()</code>参数为<code>ObjectFactory</code>重载方法</p> 
+<p><img src="https://images2.imgbox.com/07/17/SnAtFKv4_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-rbJIk9fS-1632838308572)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928164636514.png)]"></p> 
+<p>（3）重载个这个方法会先将<code>beanName</code>放入到<code>singletonsCurrentlyInCreation</code>这个集合中，<strong>标志着这个单例Bean正在创建</strong><br> <img src="https://images2.imgbox.com/d3/e2/wV1i4XOA_o.png" alt="在这里插入图片描述"></p> 
+<p>（4）标记完这个Bean正在创建以后，就开始调用<code>createBean()</code>方法来创建这个Bean。这个createBean()方法我们已经很熟悉了，在之前的创建Bean的过程那篇文章中已经详细讲过了。再实例化这个Bean之前，BeanPostProcessor后置处理器会尝试返回这个Bean的<strong>代理对象</strong>，也就是说，开启了AOP代理之后，<strong>当前Bean注入并不是依赖的Bean，而是注入的这个Bean的代理对象</strong>。如果返回的代理对象不为null，就直接返回这个代理对象来替代想要创建的这个Bean，如果返回的代理对象为null，那么就会继续执行剩下的流程，对这个将要创建的Bean进行<strong>实例化、属性填充、初始化。</strong></p> 
+<p><img src="https://images2.imgbox.com/fa/6a/69kRcV7g_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-Kas5Mxpg-1632838308575)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928164313896.png)]"></p> 
+<p>（5）如果没有直接返回代理对象，就会调用<code>doCreateBean()</code>方法，</p> 
+<p><img src="https://images2.imgbox.com/28/82/FNKUynjs_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-pZC1mbpb-1632838308576)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928170708178.png)]"></p> 
+<p>调用<code>createBeanInstance()</code>方法<strong>先利用反射机制或者构造器实例化这个Bean</strong></p> 
+<p><img src="https://images2.imgbox.com/13/c5/cEy6UJj7_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-rz5qWndd-1632838308577)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928171000615.png)]"></p> 
+<p>只有当这个实例化的Bean，是<strong>正在创建中</strong>的并且是<strong>单例Bean</strong>，而且<strong>允许提前暴露</strong>，才会把这个Bean添加到<strong>三级缓存中。</strong></p> 
+<p><img src="https://images2.imgbox.com/3b/64/L27QOSXU_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-He7qjIPQ-1632838308578)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928171448772.png)]"></p> 
+<p>（6）实例化完成并且添加到了三级缓存之后，就开始对这个Bean进行<strong>属性填充</strong>。如果在属性填充的过程中发现当前Bean依赖于其它Bean，就会查找这个依赖的Bean，和之前说的流程也是一样的，先从缓存中查找，如果没有找到，就会创建这个依赖的的Bean，并填充属性。</p> 
+<p><img src="https://images2.imgbox.com/d3/0e/HJt2gW0X_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-WMOQtxro-1632838308579)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928172748606.png)]"></p> 
+<p>（7）如果在给依赖的Bean填充属性的发现它也依赖于上一个Bean，造成了循环依赖的情况。**此时两个互相依赖的Bean都是实例化完了，但是还没有进行属性填充，也没有进行初始化。**当前Bean会调用<code>getSingleton()</code>方法，依次从一级、二级、三级缓存中去找依赖的上一个Bean。</p> 
+<p><img src="https://images2.imgbox.com/a8/85/cQPAg2FR_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-7ASaJany-1632838308580)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928193539810.png)]"></p> 
+<p>我们说上一个Bean之前已经被实例化并且添加到了三级缓存中，于是当前Bean就会从三级缓存中获取到上一个BeanFactory的创建工厂，通过beanFactory就可以得到上一个实例化的Bean。由于通过工厂已经实例化出来一个Bean，所以<strong>把上一个Bean放到二级缓存中，同时从三级缓存中删除</strong>，这样之后其它bean如果也依赖于这个Bean的话，就可以直接从二级缓存中获取到了。</p> 
+<p><img src="https://images2.imgbox.com/1e/f3/ejsyg40i_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-KdPRSBks-1632838308581)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928194130254.png)]"></p> 
+<p><img src="https://images2.imgbox.com/55/ad/pwx4CXt2_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-4n9jla8A-1632838308583)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928195822329.png)]"></p> 
+<p>（8）当前Bean得到所依赖的上一个Bean实例之后，就可以继续进行属性填充，并且进行初始化了</p> 
+<p><img src="https://images2.imgbox.com/9d/8c/m3mf9B62_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-4S9ejDs7-1632838308585)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928200317377.png)]"></p> 
+<p>（9）这样当前Bean被创建出来之后放到了一级缓存中，此时上一个Bean还是处于创建中的状态，那么回过头来继续创建这个处于创建中状态的Bean，由于它所依赖的Bean已经创建出来并且放到了一级缓存中，所以它可以直接从一级缓存中直接获取到这个依赖的Bean，然后继续完成属性填充和初始化。最后也会把自己放到一级缓存中。</p> 
+<p><strong>这样多个Bean之间的循环依赖的问题就解决了，实际上依靠的是Bean的“中间态”这个概念，指的就是已经实例化但是没有进行初始化的Bean。相当于一个Bean的半成品。但是如果是使用构造器注入的bean，不能解决循环依赖问题。因为实例化过程就是通过构造器创建的，Bean如果连实例化都没有完成，也就不能不可能放到二级缓存中提前暴露出来。</strong></p> 
+<p>到这你是不是觉得三级缓存为什么要使用工厂而不是直接使用引用？换而言之，为什么需要这个三级缓存，直接通过二级缓存暴露一个Bean引用不行吗？</p> 
+<p><strong>实际上这个工厂的目的在于延迟对实例化阶段生成的对象的代理，只有真正发生循环依赖的时候，才去提前生成代理对象，否则只会创建一个工厂并将其放入到三级缓存中，但是不会去通过这个工厂去真正创建对象</strong>。<strong>如果要使用二级缓存解决循环依赖，意味着所有Bean在实例化后就要完成AOP代理。</strong></p> 
+<p><strong>也就是说，在没有AOP代理的时候，三级缓存实际上直接返回的是实例化阶段的Bean对象，并存放到二级缓存中，依赖注入的也是这个实例化Bean对象。但是在有AOP代理时，三级缓存中的Bean工厂才会创建一个代理对象并返回，并将代理对象存放二级缓存中。并且在Bean对象初始化完成之后，通过禁用三级缓存，从二级缓存中获取代理对象来替换Bean本身，并存放到一级缓存中。</strong></p> 
+<p><img src="https://images2.imgbox.com/de/c1/lzTSAsIF_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-Uf9P1iax-1632838308588)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928214924351.png)]"></p> 
+<p>所以简单总结一下源码的实现：</p> 
+<p>Spring使用了三级缓存来解决多个Bean循环依赖的问题，这三个缓存实际上是三个Map集合，一级缓存用来保存已经创建好的单例Bean，二级缓存用来提前暴露Bean，三级缓存用来提前暴露Bean工厂。</p> 
+<p>假设A、B产生了循环依赖，那么在实例化A的时候就会将它放入到三级缓存中，接着在填充属性时，发现依赖了B，那么就会执行同样的流程，将B实例化后也放入到三级缓存中。当B进行属性填充的时候，又发现B也依赖于A，这时候就会从三级缓冲中查找到提前暴露出来的A工厂，通过A工厂得到实例化的A，然后把A放入到二级缓存中，同时从三级缓存中移除掉。B得到A之后就会继续进行属性填充以及初始化工作，当B被完整的创建出来之后就会放到一级缓存中，并出清掉二级缓存，此时B的创建流程结束。接下来就会继续执行处于正在创建中状态的A，由于A依赖的B已经创建好放在一级缓存中了，此时A在属性填充时可以直接从一级缓存中获取到B，完成属性填充以及初始化的工作。这样A、B就都创建了出来。</p> 
+<p><img src="https://images2.imgbox.com/9d/d6/Q343THCf_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-DPAaFBfm-1632838308590)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20210928203849880.png)]"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/aec667586183ff4490ed50f6abf7e340/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">用python爬取快手评论（烂活新整）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ba386a7e5e8fdb54051628f38e843f94/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Windows RPC 初体验</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

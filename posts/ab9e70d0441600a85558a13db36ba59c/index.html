@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Linux CFS调度 记录 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Linux CFS调度 记录" />
+<meta property="og:description" content="调度类 不同的进程采用不同的调度策略，目前Linux内核中默认实现了4种调度策略，分别是deadline、realtime、CFS 和 idle，它们分别使用struct sched_class来定义调度类。
+调度类 描述 调度策略
+dl_sched_class deadline调度器 SCHED_DEADLINE
+rt_sched_class 实时调度器 SCHED_FIFO、SCHED_RR
+fair_sched_class 完全公平调度器 SCHED_NORMAL、SCHED_BATCH
+idle_sched_class idle task SCHED_IDLE
+激活进程调度(Scheduler Core）层： 可以用两种方式激活调度，一种是直接的主调度器，比如进程打算睡眠或者其他原因放弃CPU；另外一种是通过周期性调度器，以固定的频率运行，不时检测是否有必要进行进程切换
+PS：
+3.与fork的交互
+除了以上两种场景，即周期性调度器以及主调度器之外，fork创建出新进程的时候也会出现与调度器类的交互，其入口函数是sched_fork：
+// kernel/sched/core.c int sched_fork(unsigned long clone_flags, struct task_struct *p) { if (p-&gt;sched_class-&gt;task_fork) p-&gt;sched_class-&gt;task_fork(p); } sched_fork函数中会调用到对应调度器类的task_fork成员函数来处理，下面讲到CFS调度器的时候再详细分析对应的函数。
+上下文切换： 当进程A切换到进程B的时候，如何能正常切换回去，需要保存当时的现场，包含用户空间的页表、用户空间的栈和硬件上下文信息
+struct sched_class { const struct sched_class *next;//指向下一个调度类，按照优先级 void (*enqueue_task) (struct rq *rq, struct task_struct *p, int flags);//向该调度类的runqueue(就绪队列)中添加进程 void (*dequeue_task) (struct rq *rq, struct task_struct *p, int flags);//向该调度类的runqueue(就绪队列)中删除进程 void (*check_preempt_curr)(struct rq *rq, struct task_struct *p, int flags);//当一个进程被唤醒或者创建的时候，需要检查当前进程是否可以抢占当前cpu上正在运行的进程，如果可以抢占需要标记TIF_NEED_RESCHED flag。 //从runqueue中选择一个最适合运行的task struct task_struct * (*pick_next_task)(struct rq *rq, struct task_struct *prev, struct rq_flags *rf); 优先级 Linux 进程 分为 3 种类型 , &#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/ab9e70d0441600a85558a13db36ba59c/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-07-03T21:42:56+08:00" />
+<meta property="article:modified_time" content="2022-07-03T21:42:56+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Linux CFS调度 记录</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atelier-sulphurpool-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="_0"></a>调度类</h3> 
+<p>不同的进程采用不同的调度策略，目前Linux内核中默认实现了4种调度策略，分别是deadline、realtime、CFS 和 idle，它们分别使用struct sched_class来定义调度类。<br> 调度类 描述 调度策略<br> dl_sched_class deadline调度器 SCHED_DEADLINE<br> rt_sched_class 实时调度器 SCHED_FIFO、SCHED_RR<br> fair_sched_class 完全公平调度器 SCHED_NORMAL、SCHED_BATCH<br> idle_sched_class idle task SCHED_IDLE</p> 
+<p><img src="https://images2.imgbox.com/d2/ed/3Xmfb0IR_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>激活进程调度(Scheduler Core）层：</strong> 可以用两种方式激活调度，一种是直接的<strong>主调度器</strong>，比如进程打算睡眠或者其他原因放弃CPU；另外一种是通过<strong>周期性调度器</strong>，以固定的频率运行，不时检测是否有必要进行进程切换</p> 
+<p>PS：<br> <strong>3.与fork的交互</strong></p> 
+<p>除了以上两种场景，即周期性调度器以及主调度器之外，fork创建出新进程的时候也会出现与调度器类的交互，其入口函数是sched_fork：</p> 
+<pre><code class="prism language-c"><span class="token comment">// kernel/sched/core.c</span>
+<span class="token keyword">int</span> <span class="token function">sched_fork</span><span class="token punctuation">(</span><span class="token keyword">unsigned</span> <span class="token keyword">long</span> clone_flags<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">task_struct</span> <span class="token operator">*</span>p<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span> 
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>p<span class="token operator">-&gt;</span>sched_class<span class="token operator">-&gt;</span>task_fork<span class="token punctuation">)</span>
+        p<span class="token operator">-&gt;</span>sched_class<span class="token operator">-&gt;</span><span class="token function">task_fork</span><span class="token punctuation">(</span>p<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>sched_fork函数中会调用到对应调度器类的task_fork成员函数来处理，下面讲到CFS调度器的时候再详细分析对应的函数。</p> 
+<p><strong>上下文切换：</strong> 当进程A切换到进程B的时候，如何能正常切换回去，需要保存当时的现场，包含用户空间的页表、用户空间的栈和硬件上下文信息</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">sched_class</span> <span class="token punctuation">{<!-- --></span>
+ <span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">sched_class</span> <span class="token operator">*</span>next<span class="token punctuation">;</span><span class="token comment">//指向下一个调度类，按照优先级</span>
+ <span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>enqueue_task<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">rq</span> <span class="token operator">*</span>rq<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">task_struct</span> <span class="token operator">*</span>p<span class="token punctuation">,</span> <span class="token keyword">int</span> flags<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//向该调度类的runqueue(就绪队列)中添加进程</span>
+ <span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>dequeue_task<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">rq</span> <span class="token operator">*</span>rq<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">task_struct</span> <span class="token operator">*</span>p<span class="token punctuation">,</span> <span class="token keyword">int</span> flags<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//向该调度类的runqueue(就绪队列)中删除进程</span>
+  <span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>check_preempt_curr<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">rq</span> <span class="token operator">*</span>rq<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">task_struct</span> <span class="token operator">*</span>p<span class="token punctuation">,</span> <span class="token keyword">int</span> flags<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//当一个进程被唤醒或者创建的时候，需要检查当前进程是否可以抢占当前cpu上正在运行的进程，如果可以抢占需要标记TIF_NEED_RESCHED flag。</span>
+
+      <span class="token comment">//从runqueue中选择一个最适合运行的task</span>
+ <span class="token keyword">struct</span> <span class="token class-name">task_struct</span> <span class="token operator">*</span> <span class="token punctuation">(</span><span class="token operator">*</span>pick_next_task<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">rq</span> <span class="token operator">*</span>rq<span class="token punctuation">,</span>
+                                       <span class="token keyword">struct</span> <span class="token class-name">task_struct</span> <span class="token operator">*</span>prev<span class="token punctuation">,</span>
+                                        <span class="token keyword">struct</span> <span class="token class-name">rq_flags</span> <span class="token operator">*</span>rf<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="_47"></a>优先级</h3> 
+<p>Linux 进程 分为 3 种类型 , " 限期进程 " , " 实时进程 " , " 普通进程 " ; 从 " 进程优先级 " 角度对比 , 优先级从高到低分别是 : 限期进程 &gt; 实时进程 &gt; 普通进程 ;</p> 
+<p>在 linux-5.6.18\include\linux\sched.h 头文件中 task_struct " 进程描述符 " 结构体 中定义了 进程优先级字段如下 :</p> 
+<pre><code class="prism language-c">	<span class="token keyword">int</span>				prio<span class="token punctuation">;</span> 				 <span class="token comment">// 调度优先级</span>
+	<span class="token keyword">int</span>				static_prio<span class="token punctuation">;</span> 		 <span class="token comment">// 静态优先级</span>
+	<span class="token keyword">int</span>				normal_prio<span class="token punctuation">;</span> 		 <span class="token comment">// 正常优先级</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>			rt_priority<span class="token punctuation">;</span> <span class="token comment">// 实时优先级</span>
+</code></pre> 
+<p>这里参考其他博客，具体见这篇<a href="https://blog.csdn.net/shulianghan/article/details/123786549?spm=1001.2014.3001.5501">优先级的描述</a>，下图是总结：<br> <img src="https://images2.imgbox.com/fb/83/SaVauEDn_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="_64"></a>就绪队列</h3> 
+<p>系统中每个CPU都会有一个全局的就绪队列（cpu runqueue），使用struct rq结构体描述，它是per-cpu类型，即每个cpu上都会有一个struct rq结构体。每一个调度类也有属于自己管理的就绪队列。例如，struct cfs_rq是CFS调度类的就绪队列，管理就绪态的struct sched_entity调度实体，后续通过pick_next_task接口从就绪队列中选择最适合运行的调度实体（虚拟时间最小的调度实体）。struct rt_rq是实时调度器就绪队列。struct dl_rq是Deadline调度器就绪队列。</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">rq</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">struct</span> <span class="token class-name">cfs_rq</span> cfs<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">rt_rq</span> rt<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">dl_rq</span> dl<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+ 
+<span class="token keyword">struct</span> <span class="token class-name">rb_root_cached</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">rb_root</span> rb_root<span class="token punctuation">;</span><span class="token comment">//红黑树的根节点</span>
+	<span class="token keyword">struct</span> <span class="token class-name">rb_node</span> <span class="token operator">*</span>rb_leftmost<span class="token punctuation">;</span><span class="token comment">//红黑树的最左边节点</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+ 
+<span class="token keyword">struct</span> <span class="token class-name">cfs_rq</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">load_weight</span> load<span class="token punctuation">;</span><span class="token comment">//就绪队列管理的所有调度实体权重之和</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span> nr_running<span class="token punctuation">;</span><span class="token comment">//调度实体的个数</span>
+	u64 min_vruntime<span class="token punctuation">;</span><span class="token comment">//就绪队列上的最小虚拟时间</span>
+	<span class="token keyword">struct</span> <span class="token class-name">rb_root_cached</span> tasks_timeline<span class="token punctuation">;</span><span class="token comment">//就绪队列红黑树的信息</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="_91"></a>调度实体</h3> 
+<p>Linux通过struct task_struct结构体描述每一个进程。但是调度类管理和调度的单位是调度实体，并不是task_struct。我们在struct task_struct结构体中可以找到以下不同调度类的调度实体。</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">task_struct</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">struct</span> <span class="token class-name">sched_entity</span>		se<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">sched_rt_entity</span>		rt<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">sched_dl_entity</span>		dl<span class="token punctuation">;</span>
+    <span class="token comment">/* ... */</span>
+<span class="token punctuation">}</span> 
+<span class="token keyword">struct</span> <span class="token class-name">sched_entity</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">load_weight</span>		load<span class="token punctuation">;</span><span class="token comment">//权重信息</span>
+	<span class="token keyword">struct</span> <span class="token class-name">rb_node</span>		run_node<span class="token punctuation">;</span><span class="token comment">//就绪队列红黑树上的挂载点</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span>		on_rq<span class="token punctuation">;</span><span class="token comment">//调度实体se加入就绪队列后，on_rq标志置为1，从就绪队列删除,on_rq置为0</span>
+	u64			sum_exec_runtime<span class="token punctuation">;</span><span class="token comment">//调度实体已经运行的实际时间总和</span>
+	u64			vruntime<span class="token punctuation">;</span><span class="token comment">//调度实体已经运行的虚拟时间总和</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/9a/25/lfnlBwdV_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="CFS_112"></a>CFS调度器</h2> 
+<p>CFS给每个进程安排一个虚拟运行时间vruntime，正在运行的进程vruntime随tick不断增大，没有运行的进程vruntime不变，vruntime小的会被优先运行<br> 对于不同优先级的进程，换算vruntime时优先级高的算少，优先级低的算多，这样优先级高的进程实际运行时间就变多了<br> 调度队列使用红黑树，红黑树的节点是调度实体</p> 
+<p><img src="https://images2.imgbox.com/a1/7d/MKvR99ZE_o.png" alt="在这里插入图片描述"></p> 
+<p>参考：<br> <a href="https://blog.csdn.net/u012294613/article/details/124224505">CFS框架以及完整流程：详细</a><br> <a href="https://blog.csdn.net/WellZZ1/article/details/106725099?spm=1001.2101.3001.6650.2&amp;utm_medium=distribute.pc_relevant.none-task-blog-2~default~CTRLIST~default-2-106725099-blog-120888715.pc_relevant_aa2&amp;depth_1-utm_source=distribute.pc_relevant.none-task-blog-2~default~CTRLIST~default-2-106725099-blog-120888715.pc_relevant_aa2&amp;utm_relevant_index=5">CFS流程：简略</a><br> <a href="https://blog.csdn.net/shulianghan/category_11737298.html">CFS专栏</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/b61168de497c7f37e0e374cae69c0946/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">银河麒麟v10 sp1 安装 PostgreSQL 11.16</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/df983bc8e20aa3e848a4197e42e21ca3/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">三、高质量编程与性能调优实战 青训营笔记</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

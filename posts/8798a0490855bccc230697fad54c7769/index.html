@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Mysql数据库分库分表问题&#43;引发问题&#43;中间件对比分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Mysql数据库分库分表问题&#43;引发问题&#43;中间件对比分析" />
+<meta property="og:description" content="Mysql数据库分库分表 一、背景-为什么要分表1. 读写的数据量限制：数据量太大2. 数据库连接数限制：并发访问多 二、分表方式2.1 垂直分表2.2 水平分表2.2.1 按关键字分表 2.2.2 按大小（范围）分表 2.2.3 按时间分表 三、分库分表引发的问题 四、分库分表中间件4.1 常见分表插件及其优缺点4.2 对比JDBC驱动和Proxy中间层两种方式 五、扩容问题5.1 路由规则5.2 双写过程 一、背景-为什么要分表 首先，要解决海量数据的问题，必须要用到分布式的存储集群。而绝大部分的电商大厂，它的在线交易这部分业务（比如订单、支付相关的系统）还是舍弃不了 MySQL，原因是只有 MySQL 这类关系型数据库才能提供金融级的事务保证。
+但是单机的MySQL 数据库在很多场景下不是太适合存 TB 级别以上的数据，因此MySQL必须用上分片思想，这就是分库分表。
+具体来说，MySQL什么时候需要分库分表？
+1. 读写的数据量限制：数据量太大 数据量大会导致：
+（1）装不下
+（2）数据量大的话SQL语句执行很慢（简单一条count语句，在1000w数据量下，也需要运行几秒甚至超过十秒）——慢查询最终拖累整个系统；
+2. 数据库连接数限制：并发访问多 数据库的连接是有限制的，不能无限制创建。
+（ MySQL 中可以使用 max_connections 查看默认的最大连接数，当访问连接数过多时，就会导致连接失败）
+以电商为例，假设存储没有进行分库，用户、商品、订单和交易，所有的业务请求都访问同一个数据库，产生的连接数是非常可观的，可能导致数据库无法支持业务请求。
+使用数据库连接池可以优化连接数问题，但是更好的方式是通过分库等手段，避免数据库连接成为业务瓶颈。
+二、分表方式 2.1 垂直分表 一张表按字段（列）分成多张表，改变表结构。
+常见思路是将长度比较大（text等）、访问频率低的字段，移到扩展表；
+将经常组合查询的列放在一张表中，充分发挥热点数据的操作效率。
+2.2 水平分表 一张表按记录（行）分成多张表，分完后结构仍相同。
+水平分表有不同的分库和分表规则，一般是通过业务主键，进行哈希取模操作。
+感觉遇到过的一些按关键字、按大小、按时间分表其实都属于水平分表。
+2.2.1 按关键字分表 这种方案适用于按关键字查询频繁的场景，关键字相同的数据，必须落在同张表，不然要是有列表分页查询，就会很烦。
+不足之处在于，可能有比较多的大客户落在同一张表，分表数据不均匀。假设在我们的场景，支持代理机构注册一个用户id，多个学生可以使用同一个用户id参加考试，那么某个用户的数据量有可能非常大。
+2.2.2 按大小（范围）分表 适用于数据和关键字无关的场景，如单纯的流水记录表，如果是和某个关键字扯上了关系，那么会导致跨表查询，比如查询某个用户的平均考试分数，就会比较麻烦，因为无法知道一个用户横跨了多少个子表。
+本方案优点是大小均匀，性能可控。这里建议每个分表不超过500万行数据，这样对数据库造成的压力不会太大；缺点是有比较多的场景限制。
+2.2.3 按时间分表 其优点在于思路简单，且很容易清理掉旧数据，整个表能自动变冷。缺点在于业务初期，对业务量的预估，会存在难度：可能一开始月表绰绰有余，后期随着业务量突飞猛进，一个月都有千万条甚至上亿条数据，此时又得进行拆分。另外，用该方案时一定要注意时间分割的节点，会不会造成有相关联的数据出现不一致。
+三、分库分表引发的问题 问题问题描述解决办法事务一致性跨库、表的分布式事务问题比如数据库拆分后，订单和库存在两个库中，一个下单减库存的操作，就涉及跨库事务。可以使用分布式事务中间件，实现 TCC 等事务模型；也可以使用基于本地消息表的分布式事务实现。跨节点关联查询查询的数据存在于多表、多库之间，SQL无法正常执行（1）利用中间件Mycat（仅支持两表join）的catlet插件（Share Join）：解析SQL拆分成单表操作-路由到对应表-结果返回mycat汇总（2）抽象出全局表，全局表每个分片中都有一份，让全局表和其他表join（3）按ER父子关系分库，有父子关系的表就会在同一个节点，避免分库连表查询；（4）数据全量丢到ES来关联查询跨节点分页、排序函数跨节点多库查询时，limit 分页、order by 排序等问题，就变得比较复杂了。（1）可以使用插件MyCat，跨节点分布式分页/排序的思路：需要先在不同的节点中将数据进行排序并返回，然后将不同节点返回的结果集进行汇总和再次排序；（2）将数据全量放到ES中（原理是scroll游标）主键避重分布式id问题：由于表中数据同时保存在不同数据库中，主键值平时使用的自增长就不好使了uuid、雪花算法、数据库维护区间分配等 四、分库分表中间件 4." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/8798a0490855bccc230697fad54c7769/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-10-08T23:35:25+08:00" />
+<meta property="article:modified_time" content="2023-10-08T23:35:25+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Mysql数据库分库分表问题&#43;引发问题&#43;中间件对比分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>Mysql数据库分库分表</h4> 
+ <ul><li><a href="#_1" rel="nofollow">一、背景-为什么要分表</a></li><li><ul><li><a href="#_2" rel="nofollow"></a></li><li><a href="#1__9" rel="nofollow">1. 读写的数据量限制：数据量太大</a></li><li><a href="#2__14" rel="nofollow">2. 数据库连接数限制：并发访问多</a></li></ul> 
+  </li><li><a href="#_21" rel="nofollow">二、分表方式</a></li><li><ul><li><a href="#_22" rel="nofollow"></a></li><li><a href="#21__23" rel="nofollow">2.1 垂直分表</a></li><li><a href="#22__27" rel="nofollow">2.2 水平分表</a></li><li><ul><li><a href="#221__31" rel="nofollow">2.2.1 按关键字分表</a></li></ul> 
+   </li><li><a href="#_32" rel="nofollow"></a></li><li><ul><li><a href="#222__36" rel="nofollow">2.2.2 按大小（范围）分表</a></li></ul> 
+   </li><li><a href="#_37" rel="nofollow"></a></li><li><ul><li><a href="#223__41" rel="nofollow">2.2.3 按时间分表</a></li></ul> 
+  </li></ul> 
+  </li><li><a href="#_43" rel="nofollow">三、分库分表引发的问题</a></li><li><ul><li><a href="#_44" rel="nofollow"></a></li></ul> 
+  </li><li><a href="#_53" rel="nofollow">四、分库分表中间件</a></li><li><ul><li><a href="#_54" rel="nofollow"></a></li><li><a href="#41__55" rel="nofollow">4.1 常见分表插件及其优缺点</a></li><li><a href="#42_JDBCProxy_62" rel="nofollow">4.2 对比JDBC驱动和Proxy中间层两种方式</a></li></ul> 
+  </li><li><a href="#_89" rel="nofollow">五、扩容问题</a></li><li><ul><li><a href="#_90" rel="nofollow"></a></li><li><a href="#51__91" rel="nofollow">5.1 路由规则</a></li><li><a href="#_92" rel="nofollow"></a></li><li><a href="#52__98" rel="nofollow">5.2 双写过程</a></li><li><a href="#_99" rel="nofollow"></a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h2><a id="_1"></a>一、背景-为什么要分表</h2> 
+<h3><a id="_2"></a></h3> 
+<p>首先，要解决海量数据的问题，必须要用到分布式的存储集群。而绝大部分的电商大厂，它的在线交易这部分业务（比如订单、支付相关的系统）还是舍弃不了 MySQL，原因是只有 MySQL 这类关系型数据库才能提供金融级的事务保证。</p> 
+<p>但是单机的MySQL 数据库在很多场景下不是太适合存 TB 级别以上的数据，因此MySQL必须用上<strong>分片思想</strong>，这就是分库分表。</p> 
+<p>具体来说，MySQL什么时候需要分库分表？</p> 
+<h3><a id="1__9"></a>1. 读写的数据量限制：数据量太大</h3> 
+<p>数据量大会导致：<br> （1）装不下<br> （2）数据量大的话SQL语句执行很慢（简单一条count语句，在1000w数据量下，也需要运行几秒甚至超过十秒）——慢查询最终拖累整个系统；</p> 
+<h3><a id="2__14"></a>2. 数据库连接数限制：并发访问多</h3> 
+<p>数据库的连接是有限制的，不能无限制创建。<br> （ MySQL 中可以使用 max_connections 查看默认的最大连接数，当访问连接数过多时，就会导致连接失败）<br> 以电商为例，假设存储没有进行分库，用户、商品、订单和交易，所有的业务请求都访问同一个数据库，产生的连接数是非常可观的，可能导致数据库无法支持业务请求。</p> 
+<p>使用数据库连接池可以优化连接数问题，但是更好的方式是通过分库等手段，避免数据库连接成为业务瓶颈。</p> 
+<h2><a id="_21"></a>二、分表方式</h2> 
+<h3><a id="_22"></a></h3> 
+<h3><a id="21__23"></a>2.1 垂直分表</h3> 
+<p>一张表按字段（列）分成多张表，改变表结构。<br> 常见思路是将长度比较大（text等）、访问频率低的字段，移到扩展表；<br> 将经常组合查询的列放在一张表中，充分发挥热点数据的操作效率。</p> 
+<h3><a id="22__27"></a>2.2 水平分表</h3> 
+<p>一张表按记录（行）分成多张表，分完后结构仍相同。<br> 水平分表有不同的分库和分表规则，一般是通过业务主键，进行哈希取模操作。<br> 感觉遇到过的一些按关键字、按大小、按时间分表其实都属于水平分表。</p> 
+<h4><a id="221__31"></a>2.2.1 按关键字分表</h4> 
+<h3><a id="_32"></a></h3> 
+<p>这种方案<strong>适用于按关键字查询频繁的场景</strong>，关键字相同的数据，必须落在同张表，不然要是有列表分页查询，就会很烦。</p> 
+<p>不足之处在于，可能有比较多的大客户落在同一张表，分表数据不均匀。假设在我们的场景，支持代理机构注册一个用户id，多个学生可以使用同一个用户id参加考试，那么某个用户的数据量有可能非常大。</p> 
+<h4><a id="222__36"></a>2.2.2 按大小（范围）分表</h4> 
+<h3><a id="_37"></a></h3> 
+<p><strong>适用于数据和关键字无关的场景</strong>，如单纯的流水记录表，如果是和某个关键字扯上了关系，那么会导致跨表查询，比如查询某个用户的平均考试分数，就会比较麻烦，因为无法知道一个用户横跨了多少个子表。</p> 
+<p>本方案优点是大小均匀，性能可控。这里建议每个分表不超过500万行数据，这样对数据库造成的压力不会太大；缺点是有比较多的场景限制。</p> 
+<h4><a id="223__41"></a>2.2.3 按时间分表</h4> 
+<p>其优点在于思路简单，且很容易清理掉旧数据，整个表能自动变冷。缺点在于业务初期，对业务量的预估，会存在难度：可能一开始月表绰绰有余，后期随着业务量突飞猛进，一个月都有千万条甚至上亿条数据，此时又得进行拆分。另外，用该方案时一定要注意时间分割的节点，会不会造成有相关联的数据出现不一致。</p> 
+<h2><a id="_43"></a>三、分库分表引发的问题</h2> 
+<h3><a id="_44"></a></h3> 
+<table><thead><tr><th>问题</th><th align="left">问题描述</th><th align="left">解决办法</th></tr></thead><tbody><tr><td>事务一致性</td><td align="left">跨库、表的分布式事务问题比如数据库拆分后，订单和库存在两个库中，一个下单减库存的操作，就涉及跨库事务。</td><td align="left">可以使用分布式事务中间件，实现 TCC 等事务模型；也可以使用基于本地消息表的分布式事务实现。</td></tr><tr><td>跨节点关联查询</td><td align="left">查询的数据存在于多表、多库之间，SQL无法正常执行</td><td align="left">（1）利用中间件<strong>Mycat</strong>（仅支持两表join）的catlet插件（Share Join）：解析SQL拆分成单表操作-路由到对应表-结果返回mycat汇总（2）抽象出<strong>全局表</strong>，全局表每个分片中都有一份，让全局表和其他表join（3）<strong>按ER父子关系分库</strong>，有父子关系的表就会在同一个节点，避免分库连表查询；（4）数据全量丢到<strong>ES</strong>来关联查询</td></tr><tr><td>跨节点分页、排序函数</td><td align="left">跨节点多库查询时，limit 分页、order by 排序等问题，就变得比较复杂了。</td><td align="left">（1）可以使用插件<strong>MyCat</strong>，跨节点分布式分页/排序的思路：需要先在不同的节点中将数据进行排序并返回，然后将不同节点返回的结果集进行汇总和再次排序；（2）将数据全量放到<strong>ES</strong>中（原理是scroll游标）</td></tr><tr><td>主键避重</td><td align="left">分布式id问题：由于表中数据同时保存在不同数据库中，主键值平时使用的自增长就不好使了</td><td align="left">uuid、雪花算法、数据库维护区间分配等</td></tr></tbody></table> 
+<h2><a id="_53"></a>四、分库分表中间件</h2> 
+<h3><a id="_54"></a></h3> 
+<h3><a id="41__55"></a>4.1 常见分表插件及其优缺点</h3> 
+<table><thead><tr><th>分库分表中间件</th><th>优点</th><th>缺点</th><th>性质</th></tr></thead><tbody><tr><td>mycat</td><td>解耦，使用不需要修改代码；性能高，JDBC 直连数据库，无需二次转发</td><td>增加复杂度，中间件运维成本</td><td>中间件-Proxy代理的形式</td></tr><tr><td>sharding-JDBC</td><td>轻量、简单；可以负责更多的内容，将数据迁移，分布式事务等纳入 Proxy 的范畴</td><td>无法跨语言</td><td>jar包，JDBC层</td></tr><tr><td>TDDL</td><td>淘宝团队开发的，属于 client 层方案；支持基本的 crud 语法和读写分离</td><td>不支持 join、多表查询等语法，目前应用较少、开源性较差</td><td>JDBC层</td></tr></tbody></table> 
+<h3><a id="42_JDBCProxy_62"></a>4.2 对比JDBC驱动和Proxy中间层两种方式</h3> 
+<p>注：该部分摘录自张亮老师（当当sharding-JDBC）回答</p> 
+<p>目前分库分表的中间件有两种思想，分别是：</p> 
+<ul><li>类似 Sharding-JDBC 及 TDDL 的增强版 JDBC 驱动思想</li><li>类似 Mycat 增加中间层，然后在中间层进行分库分表思想</li></ul> 
+<p>这两种思想都有什么优势和劣势呢，大公司的主流选型又是哪种呢？</p> 
+<p><strong>JDBC 驱动版的优点</strong>：</p> 
+<ol><li>轻量，范围更加容易界定，只是 JDBC 增强，不包括 HA、事务以及数据库元数据管理</li><li>开发的工作量较小，无需关注 nio，各个数据库协议等</li><li>运维无需改动，无需关注中间件本身的 HA</li><li>性能高，JDBC 直连数据库，无需二次转发</li><li>可支持各种基于 JDBC 协议的数据库，如：MySQL，Oralce，SQLServer</li></ol> 
+<p><strong>Proxy 版的优点</strong>：</p> 
+<ol><li>可以负责更多的内容，将数据迁移，分布式事务等纳入 Proxy 的范畴</li><li>更有效的管理数据库的连接</li><li>整合大数据思路，将 OLTP 和 OLAP 分离处理</li></ol> 
+<p><strong>使用建议：</strong></p> 
+<p>两种方式互相可以互补，建议使用 Java 的团队，且仅 OLTP 的互联网前端操作，有可能会使用多种数据库的情况，可以选择 JDBC 层的中间件；如果需要 OLAP 和 OLTP 混合，加以重量级的操作，如数据迁移，分布式事务等，可以考虑 Proxy 层的中间件。但目前开源的数据迁移和分布式事务的完善解决方案还不常见。NewSQL 这种改变数据库引擎的方式就不在这里讨论了。</p> 
+<h2><a id="_89"></a>五、扩容问题</h2> 
+<h3><a id="_90"></a></h3> 
+<h3><a id="51__91"></a>5.1 路由规则</h3> 
+<h3><a id="_92"></a></h3> 
+<p>路由规则与扩容过程密切相关，路由规则也即水平分表的方式（分片规则）</p> 
+<ol><li>如果分片规则是关键字（主键）进行哈希取模，扩容比较麻烦，分为停机扩容和不停机扩容。不停机扩容即动态扩容，依赖业务上的双写操作实现（详见后面补充）；</li><li>如果分片规则是按范围分片（按大小分片），则自动支持扩容，一张表满了直接新增表（或库）即可，缺点是数据访问可能不均匀；</li><li>实际项目可能会是两种分片规则的结合，比如先哈希取模分到某个节点，然后节点上再按范围分一层表。</li></ol> 
+<h3><a id="52__98"></a>5.2 双写过程</h3> 
+<h3><a id="_99"></a></h3> 
+<p>需要同时处理存量和增量数据，并且做好各种数据校验。</p> 
+<p>一般来说，具体的数据库扩容方式有基于原有存储增加节点，以及重新部署一套新的数据库两种策略，针对不同的扩容方式，需要不同的迁移方案和双写策略支持。</p> 
+<p>如果重新部署新的数据库存储，可以粗略地分为以下的步骤：</p> 
+<ul><li>创建一套新的订单数据库；</li><li>在某个时间点上，将历史数据按照新的路由规则分配到新的数据库中；</li><li>在旧数据库的操作中开启双写，同时写入到两个数据库；</li><li>用新的读写服务逐步替代旧服务，同步进行数据不一致校验，最后完成全面切流。</li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/7488ca3f75ad3c82c8309ef2f7cf31bf/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">软考程序员考试大纲（2023）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/24b9a0b450288d0f50b69092e61ac2b0/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">解决Outlook中的Funcaptcha新思路！</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

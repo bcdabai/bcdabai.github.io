@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>[Onnx简化库深度剖析] OnnxSimplifier和OnnxOptimizer解读-(4) - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="[Onnx简化库深度剖析] OnnxSimplifier和OnnxOptimizer解读-(4)" />
+<meta property="og:description" content=" [Onnx简化库深度剖析] OnnxSimplifier和OnnxOptimizer解读-(4) 简介 现在主要用于通过实操进行onnx简化库的每种pass的特性和效果。因为Pass实在太多，因此这里挑了一些效果显著的Pass进行呈现。 左边的是原始模型，右边的是特定Pass优化后的模型
+OnnxOptimizer各Pass的实操和特性说明 adjust_add 前：常量输入是A，动态输入是B后：常量输入是B, 动态输入是A特性：把动态输入变成Add算子的第一个input
+eliminate_common_subexpression 前：含有两个公共的表达式Y(Mul(X,Sigmoid(X)))后：合并只有一个特性：合并公共的结构 eliminate_if_with_const_cond 前：含有If算子，存在子图后：没有If算子，子图被暴露特性：cond确定的If算子被去除 eliminate_nop_cast 前：有一个Cast算子，to=float32,input_dtype=float32后：没有Cast算子特性：to=input_dtype的Cast被消除 eliminate_nop_flatten 前：存在Flatten算子后：没有Flatten算子特性：对shape不起作用的Flatten算子被消除 eliminate_nop_monotone_argmax 前：存在Y=ArgMax(Exp(X))这样的结构后：只有Y=ArgMax(X)特性：类似于Exp，只要是输出/输入是正相关的激活函数接入ArgMax算子后，该激活函数可以被消除而不影响结果 eliminate_nop_with_unit 前：存在很多乘1.0、加0.0等无效操作后：去除了很多无效的操作特性：消除掉同0并的And、同1乘的Mul、同0或的Or、同0加的Add、减0的Sub、除1的Div、方1的Pow、 无效的Concat eliminate_shape_gather 前：Y=Gather(Shape(X))后：Y=2特性：X的Shape已知，那么Y就是已知的。 fuse_add_bias_into_conv 前：B=Add(Conv2d(X,Y), A)后：B=Conv2d(X,Y,A)特性：把Add常量融合进Conv2d中 fuse_bn_into_conv 前：Y=BN(Conv2d(X))后：Y=Conv2d(X)特性：把BN融合进Conv2d中,主要因为重构了Conv2d的weight和bias fuse_consecutive_concats 前：存在很多axes一致的连续concat操作后：只有一个concat特性：合并很多axes一致的连续concat操作为一个 fuse_consecutive_log_softmax 前：Z=log(softmax(X))后：X=logsoftmax(X)特性：合并算子成为一个算子 fuse_qkv 前：普通的产生qkv的结构，拥有三个矩阵乘后：合并为一个矩阵乘，后续用split分开特性：对qkv结构特定优化 fuse_transpose_into_gemm 前：存在transpose执行矩阵转置操作后：转置操作被gemm的transA/B属性替代特性：消除transpose算子 总结 结束了，已经搞定了onnx官方的简化库的基本细节了。后面再续其他有趣的东东。 " />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/08adfad5b4d2233fa65c603fd6cd2a2c/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-12T16:31:48+08:00" />
+<meta property="article:modified_time" content="2024-01-12T16:31:48+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">[Onnx简化库深度剖析] OnnxSimplifier和OnnxOptimizer解读-(4)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="Onnx_OnnxSimplifierOnnxOptimizer4_0"></a>[Onnx简化库深度剖析] OnnxSimplifier和OnnxOptimizer解读-(4)</h2> 
+<h3><a id="_2"></a>简介</h3> 
+<pre><code>现在主要用于通过实操进行onnx简化库的每种pass的特性和效果。因为Pass实在太多，因此这里挑了一些效果显著的Pass进行呈现。
+</code></pre> 
+<p><strong>左边的是原始模型，右边的是特定Pass优化后的模型</strong></p> 
+<h3><a id="OnnxOptimizerPass_8"></a>OnnxOptimizer各Pass的实操和特性说明</h3> 
+<h4><a id="adjust_add_10"></a>adjust_add</h4> 
+<ul><li>前：常量输入是A，动态输入是B</li><li>后：常量输入是B, 动态输入是A</li><li>特性：把动态输入变成Add算子的第一个input<br> <img src="https://images2.imgbox.com/63/f0/U6QKVls1_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/23/cb/MgQGdvSv_o.png" alt="在这里插入图片描述"></li></ul> 
+<h4><a id="eliminate_common_subexpression_17"></a>eliminate_common_subexpression</h4> 
+<ul><li>前：含有两个公共的表达式Y(Mul(X,Sigmoid(X)))</li><li>后：合并只有一个</li><li>特性：合并公共的结构</li></ul> 
+<p><img src="https://images2.imgbox.com/58/49/c53N2yZr_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/d7/35/5qOsHlnY_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="eliminate_if_with_const_cond_27"></a>eliminate_if_with_const_cond</h4> 
+<ul><li>前：含有If算子，存在子图</li><li>后：没有If算子，子图被暴露</li><li>特性：cond确定的If算子被去除</li></ul> 
+<p><img src="https://images2.imgbox.com/1f/b2/Z0ufhlPN_o.png" alt="请添加图片描述"><img src="https://images2.imgbox.com/4b/ee/Fa10O9uB_o.png" alt="请添加图片描述"></p> 
+<h4><a id="eliminate_nop_cast_37"></a>eliminate_nop_cast</h4> 
+<ul><li>前：有一个Cast算子，to=float32,input_dtype=float32</li><li>后：没有Cast算子</li><li>特性：to=input_dtype的Cast被消除</li></ul> 
+<p><img src="https://images2.imgbox.com/50/ef/CU1QmUKV_o.png" alt="请添加图片描述"><img src="https://images2.imgbox.com/5b/ac/gqmISkrm_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="eliminate_nop_flatten_46"></a>eliminate_nop_flatten</h4> 
+<ul><li>前：存在Flatten算子</li><li>后：没有Flatten算子</li><li>特性：对shape不起作用的Flatten算子被消除</li></ul> 
+<p><img src="https://images2.imgbox.com/62/21/a1YeMjcv_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/6e/15/DW2KapIj_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="eliminate_nop_monotone_argmax_55"></a>eliminate_nop_monotone_argmax</h4> 
+<ul><li>前：存在Y=ArgMax(Exp(X))这样的结构</li><li>后：只有Y=ArgMax(X)</li><li>特性：类似于Exp，只要是输出/输入是正相关的激活函数接入ArgMax算子后，该激活函数可以被消除而不影响结果</li></ul> 
+<p><img src="https://images2.imgbox.com/be/88/l7Gxm8VO_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/36/f7/tS5NcySo_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="eliminate_nop_with_unit_65"></a>eliminate_nop_with_unit</h4> 
+<ul><li>前：存在很多乘1.0、加0.0等无效操作</li><li>后：去除了很多无效的操作</li><li>特性：消除掉同0并的And、同1乘的Mul、同0或的Or、同0加的Add、减0的Sub、除1的Div、方1的Pow、 无效的Concat</li></ul> 
+<p><img src="https://images2.imgbox.com/00/0c/2hXh0hps_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/6b/9c/oQSYIGgi_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="eliminate_shape_gather_75"></a>eliminate_shape_gather</h4> 
+<ul><li>前：Y=Gather(Shape(X))</li><li>后：Y=2</li><li>特性：X的Shape已知，那么Y就是已知的。</li></ul> 
+<p><img src="https://images2.imgbox.com/b9/91/D6qVwFRN_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/de/f9/asJGLmaD_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="fuse_add_bias_into_conv_85"></a>fuse_add_bias_into_conv</h4> 
+<ul><li>前：B=Add(Conv2d(X,Y), A)</li><li>后：B=Conv2d(X,Y,A)</li><li>特性：把Add常量融合进Conv2d中</li></ul> 
+<p><img src="https://images2.imgbox.com/da/77/4Vt41B0w_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/58/54/uLQgBbtN_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="fuse_bn_into_conv_95"></a>fuse_bn_into_conv</h4> 
+<ul><li>前：Y=BN(Conv2d(X))</li><li>后：Y=Conv2d(X)</li><li>特性：把BN融合进Conv2d中,主要因为重构了Conv2d的weight和bias</li></ul> 
+<p><img src="https://images2.imgbox.com/10/50/TzKMYTZG_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/08/d1/L6K9vFT2_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="fuse_consecutive_concats_105"></a>fuse_consecutive_concats</h4> 
+<ul><li>前：存在很多axes一致的连续concat操作</li><li>后：只有一个concat</li><li>特性：合并很多axes一致的连续concat操作为一个</li></ul> 
+<p><img src="https://images2.imgbox.com/49/80/PPbQ8Ka1_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/0e/95/cBE8rZyq_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="fuse_consecutive_log_softmax_115"></a>fuse_consecutive_log_softmax</h4> 
+<ul><li>前：Z=log(softmax(X))</li><li>后：X=logsoftmax(X)</li><li>特性：合并算子成为一个算子</li></ul> 
+<p><img src="https://images2.imgbox.com/4b/fd/pJxaOnJu_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/42/eb/2JzPQmH2_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="fuse_qkv_126"></a>fuse_qkv</h4> 
+<ul><li>前：普通的产生qkv的结构，拥有三个矩阵乘</li><li>后：合并为一个矩阵乘，后续用split分开</li><li>特性：对qkv结构特定优化</li></ul> 
+<p><img src="https://images2.imgbox.com/84/f2/HdTi2BcO_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/d7/b3/mIUhSIQD_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="fuse_transpose_into_gemm_134"></a>fuse_transpose_into_gemm</h4> 
+<ul><li>前：存在transpose执行矩阵转置操作</li><li>后：转置操作被gemm的transA/B属性替代</li><li>特性：消除transpose算子</li></ul> 
+<p><img src="https://images2.imgbox.com/30/31/BFc3NE8e_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/12/15/MLIgtLkr_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="_144"></a>总结</h3> 
+<pre><code>结束了，已经搞定了onnx官方的简化库的基本细节了。后面再续其他有趣的东东。
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/af86310085e3d30ebd5c292baf76a40a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">代码随想录算法训练营第17天（需复习 |（二叉树4 110.平衡二叉树 257. 二叉树的所有路径 404.左叶子之和</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/627c811ee1f8ebfe456eb9a828b5a9d9/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">JDBC 连接 MySQL 配置（附完整 demo）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

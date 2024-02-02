@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>DRF-源码解析-4.2-限流的流程：drf的限流源码，drf流量控制流程，drf如何流量控制 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="DRF-源码解析-4.2-限流的流程：drf的限流源码，drf流量控制流程，drf如何流量控制" />
+<meta property="og:description" content="流量控制的逻辑：
+1、设置一个唯一标识，作为cache的key
+2、请求访问时，构造唯一标识，从ceche中获取[时间1,时间2,时间3,…]
+3、根据设置流量控制规则，如：5/m (一分钟最多访问5次)，判断该唯一标识记录到cache中的访问时间的次数，是否满足请求的条件
+4、不满足，就抛出异常，前端收到请求过快的响应。满足访问，就直接访问。
+一、代码的准备 视图：
+class TestAPIView(APIView): authentication_classes=[MyJWTAuthentication] permission_classes = [AdminPermission,] def get(self,request) return Respponse({&#39;code&#39;:200,&#39;msg&#39;:&#39;测试通过&#39;}) 路由：
+path(&#39;test/&#39;,views.TestAPIView.as_view()) 请求方式：GET
+流量控制类：
+from rest_framework.throttling import SimpleRateThrottle #对请求源的IP进行限制 class IPThrottle(SimpleRateThrottle): # 在settings中配置频率时使用到的关键字，有scope来指定 scope = &#39;IP&#39; def get_cache_key(self, request, view): return f&#39;{self.scope}-{self.get_ident(request)}-throttle&#39; # 这里return什么，就以什么作为限制，这里限制ip，直接return ip就可以 return request.META.get(&#39;REMOTE_ADDR&#39;) # 可以在这里设置访问频率 # def get_rate(self): # return &#39;3/m&#39; 二、具体的流程 1、TestAPIView的as_view方法，当前实例对象没有，找父类的APIView的as_view
+@classmethod def as_view(cls, **initkwargs): #1、调用APIView父类的as_view方法 view = super().as_view(**initkwargs) view.cls = cls view.initkwargs = initkwargs #2、去除掉csrf校验 return csrf_exempt(view) 2、APIView的as_view是调用父类View的as_view方法" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/e8a1ffdb996313735c88a509d9ec9ffb/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-08T15:15:52+08:00" />
+<meta property="article:modified_time" content="2024-01-08T15:15:52+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">DRF-源码解析-4.2-限流的流程：drf的限流源码，drf流量控制流程，drf如何流量控制</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p><img src="https://images2.imgbox.com/b5/cd/WGyfEDnz_o.png" alt="请添加图片描述"></p> 
+<p>流量控制的逻辑：</p> 
+<p>1、设置一个唯一标识，作为cache的key</p> 
+<p>2、请求访问时，构造唯一标识，从ceche中获取[时间1,时间2,时间3,…]</p> 
+<p>3、根据设置流量控制规则，如：5/m (一分钟最多访问5次)，判断该唯一标识记录到cache中的访问时间的次数，是否满足请求的条件</p> 
+<p>4、不满足，就抛出异常，前端收到请求过快的响应。满足访问，就直接访问。</p> 
+<h4><a id="_15"></a>一、代码的准备</h4> 
+<p>视图：</p> 
+<pre><code class="prism language-python"><span class="token keyword">class</span> <span class="token class-name">TestAPIView</span><span class="token punctuation">(</span>APIView<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    authentication_classes<span class="token operator">=</span><span class="token punctuation">[</span>MyJWTAuthentication<span class="token punctuation">]</span>
+    permission_classes <span class="token operator">=</span> <span class="token punctuation">[</span>AdminPermission<span class="token punctuation">,</span><span class="token punctuation">]</span>
+    <span class="token keyword">def</span> <span class="token function">get</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span>request<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> Respponse<span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span><span class="token string">'code'</span><span class="token punctuation">:</span><span class="token number">200</span><span class="token punctuation">,</span><span class="token string">'msg'</span><span class="token punctuation">:</span><span class="token string">'测试通过'</span><span class="token punctuation">}</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>路由：</p> 
+<pre><code class="prism language-python">path<span class="token punctuation">(</span><span class="token string">'test/'</span><span class="token punctuation">,</span>views<span class="token punctuation">.</span>TestAPIView<span class="token punctuation">.</span>as_view<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>请求方式：GET</p> 
+<p>流量控制类：</p> 
+<pre><code>from rest_framework.throttling import SimpleRateThrottle
+
+
+#对请求源的IP进行限制
+class IPThrottle(SimpleRateThrottle):
+    # 在settings中配置频率时使用到的关键字，有scope来指定
+    scope = 'IP'
+
+    def get_cache_key(self, request, view):
+        return f'{self.scope}-{self.get_ident(request)}-throttle'
+        # 这里return什么，就以什么作为限制，这里限制ip，直接return ip就可以
+        return request.META.get('REMOTE_ADDR')
+    # 可以在这里设置访问频率
+    # def get_rate(self):
+    #     return '3/m'
+</code></pre> 
+<h4><a id="_59"></a>二、具体的流程</h4> 
+<p>1、TestAPIView的as_view方法，当前实例对象没有，找父类的APIView的as_view</p> 
+<pre><code class="prism language-python"><span class="token decorator annotation punctuation">@classmethod</span>
+<span class="token keyword">def</span> <span class="token function">as_view</span><span class="token punctuation">(</span>cls<span class="token punctuation">,</span> <span class="token operator">**</span>initkwargs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token comment">#1、调用APIView父类的as_view方法</span>
+    view <span class="token operator">=</span> <span class="token builtin">super</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>as_view<span class="token punctuation">(</span><span class="token operator">**</span>initkwargs<span class="token punctuation">)</span>
+    view<span class="token punctuation">.</span>cls <span class="token operator">=</span> cls
+    view<span class="token punctuation">.</span>initkwargs <span class="token operator">=</span> initkwargs
+    <span class="token comment">#2、去除掉csrf校验</span>
+    <span class="token keyword">return</span> csrf_exempt<span class="token punctuation">(</span>view<span class="token punctuation">)</span>
+</code></pre> 
+<p>2、APIView的as_view是调用父类View的as_view方法</p> 
+<pre><code class="prism language-python"><span class="token decorator annotation punctuation">@classonlymethod</span>
+<span class="token keyword">def</span> <span class="token function">as_view</span><span class="token punctuation">(</span>cls<span class="token punctuation">,</span> <span class="token operator">**</span>initkwargs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">view</span><span class="token punctuation">(</span>request<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        self <span class="token operator">=</span> cls<span class="token punctuation">(</span><span class="token operator">**</span>initkwargs<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>setup<span class="token punctuation">(</span>request<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span>
+        <span class="token keyword">if</span> <span class="token keyword">not</span> <span class="token builtin">hasattr</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> <span class="token string">'request'</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            <span class="token keyword">raise</span> AttributeError<span class="token punctuation">(</span>
+                <span class="token string">"%s instance has no 'request' attribute. Did you override "</span>
+                <span class="token string">"setup() and forget to call super()?"</span> <span class="token operator">%</span> cls<span class="token punctuation">.</span>__name__
+            <span class="token punctuation">)</span>
+            <span class="token keyword">return</span> self<span class="token punctuation">.</span>dispatch<span class="token punctuation">(</span>request<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span>
+        view<span class="token punctuation">.</span>view_class <span class="token operator">=</span> cls
+        view<span class="token punctuation">.</span>view_initkwargs <span class="token operator">=</span> initkwargs
+    <span class="token keyword">return</span> view
+ 
+<span class="token comment">#返回的是闭包view，</span>
+<span class="token comment">#view的功能就是self.dispatch()方法</span>
+</code></pre> 
+<p>3、as_view主要返回闭包，关于self.dispatch()方法</p> 
+<p>4、self是TestAPIView , 没有dispatch方法，调用父类APIView的dispatch方法</p> 
+<p>#简化后的源码</p> 
+<pre><code class="prism language-python">    <span class="token keyword">def</span> <span class="token function">dispatch</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> request<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment">#处理url中的参数</span>
+        self<span class="token punctuation">.</span>args <span class="token operator">=</span> args
+        self<span class="token punctuation">.</span>kwargs <span class="token operator">=</span> kwargs
+        <span class="token comment">#构建drf的request对象</span>
+        request <span class="token operator">=</span> self<span class="token punctuation">.</span>initialize_request<span class="token punctuation">(</span>request<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>request <span class="token operator">=</span> request
+        self<span class="token punctuation">.</span>headers <span class="token operator">=</span> self<span class="token punctuation">.</span>default_response_headers  <span class="token comment"># deprecate?</span>
+
+        <span class="token keyword">try</span><span class="token punctuation">:</span>
+            <span class="token comment">#认证、权限、限流的执行</span>
+            self<span class="token punctuation">.</span>initial<span class="token punctuation">(</span>request<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span>
+
+            <span class="token comment">#通过反射来执行TestAPIView中的get、post等方法</span>
+            <span class="token keyword">if</span> request<span class="token punctuation">.</span>method<span class="token punctuation">.</span>lower<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">in</span> self<span class="token punctuation">.</span>http_method_names<span class="token punctuation">:</span>
+                handler <span class="token operator">=</span> <span class="token builtin">getattr</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> request<span class="token punctuation">.</span>method<span class="token punctuation">.</span>lower<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                                  self<span class="token punctuation">.</span>http_method_not_allowed<span class="token punctuation">)</span>
+            <span class="token keyword">else</span><span class="token punctuation">:</span>
+                handler <span class="token operator">=</span> self<span class="token punctuation">.</span>http_method_not_allowed
+			<span class="token comment">#视图函数执行结果</span>
+            response <span class="token operator">=</span> handler<span class="token punctuation">(</span>request<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span>
+
+        <span class="token keyword">except</span> Exception <span class="token keyword">as</span> exc<span class="token punctuation">:</span>
+            response <span class="token operator">=</span> self<span class="token punctuation">.</span>handle_exception<span class="token punctuation">(</span>exc<span class="token punctuation">)</span>
+
+        self<span class="token punctuation">.</span>response <span class="token operator">=</span> self<span class="token punctuation">.</span>finalize_response<span class="token punctuation">(</span>request<span class="token punctuation">,</span> response<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span>response
+
+</code></pre> 
+<p>5、self.initial(request,)，TestAPIView中没有，找APIView的initial方法，</p> 
+<pre><code class="prism language-python">    <span class="token keyword">def</span> <span class="token function">initial</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> request<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment">#认证、权限、限流</span>
+        self<span class="token punctuation">.</span>perform_authentication<span class="token punctuation">(</span>request<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>check_permissions<span class="token punctuation">(</span>request<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>check_throttles<span class="token punctuation">(</span>request<span class="token punctuation">)</span>
+</code></pre> 
+<p>6、TestAPIView没有check_throttles,调用APIView的check_throttles</p> 
+<pre><code class="prism language-python">    <span class="token keyword">def</span> <span class="token function">check_throttles</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> request<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        throttle_durations <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+        <span class="token keyword">for</span> throttle <span class="token keyword">in</span> self<span class="token punctuation">.</span>get_throttles<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            <span class="token keyword">if</span> <span class="token keyword">not</span> throttle<span class="token punctuation">.</span>allow_request<span class="token punctuation">(</span>request<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+                throttle_durations<span class="token punctuation">.</span>append<span class="token punctuation">(</span>throttle<span class="token punctuation">.</span>wait<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+        <span class="token keyword">if</span> throttle_durations<span class="token punctuation">:</span>
+            durations <span class="token operator">=</span> <span class="token punctuation">[</span>
+                duration <span class="token keyword">for</span> duration <span class="token keyword">in</span> throttle_durations
+                <span class="token keyword">if</span> duration <span class="token keyword">is</span> <span class="token keyword">not</span> <span class="token boolean">None</span>
+            <span class="token punctuation">]</span>
+
+            duration <span class="token operator">=</span> <span class="token builtin">max</span><span class="token punctuation">(</span>durations<span class="token punctuation">,</span> default<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">)</span>
+            self<span class="token punctuation">.</span>throttled<span class="token punctuation">(</span>request<span class="token punctuation">,</span> duration<span class="token punctuation">)</span>
+</code></pre> 
+<ul><li> <p>​ self.get_throttles()，TestAPIView没有，调用父类APIView的get_throttles()</p> 
+  <ul><li> <pre><code class="prism language-python">    <span class="token keyword">def</span> <span class="token function">get_throttles</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">return</span> <span class="token punctuation">[</span>throttle<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">for</span> throttle <span class="token keyword">in</span> self<span class="token punctuation">.</span>throttle_classes<span class="token punctuation">]</span>
+</code></pre> </li></ul> </li><li> <p>具体流量控制了流程</p> 
+  <ul><li>获取到配置的[限流对象1,限流对象2,…]</li><li>执行限流对象.allow_request(request, self) 方法</li></ul> </li></ul> 
+<p>7、SimpleRateThrottle的allow_request方法</p> 
+<pre><code class="prism language-python"><span class="token keyword">class</span> <span class="token class-name">SimpleRateThrottle</span><span class="token punctuation">(</span>BaseThrottle<span class="token punctuation">)</span><span class="token punctuation">:</span>
+    <span class="token keyword">def</span> <span class="token function">__init__</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment">#获取限流的规则，如5/m , 没有就请求get_rate方法</span>
+        <span class="token keyword">if</span> <span class="token keyword">not</span> <span class="token builtin">getattr</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> <span class="token string">'rate'</span><span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            self<span class="token punctuation">.</span>rate <span class="token operator">=</span> self<span class="token punctuation">.</span>get_rate<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token comment">#解析限制规则5/m, 允许访问的次数，允许的时间（秒）</span>
+        self<span class="token punctuation">.</span>num_requests<span class="token punctuation">,</span> self<span class="token punctuation">.</span>duration <span class="token operator">=</span> self<span class="token punctuation">.</span>parse_rate<span class="token punctuation">(</span>self<span class="token punctuation">.</span>rate<span class="token punctuation">)</span>
+    <span class="token keyword">def</span> <span class="token function">allow_request</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> request<span class="token punctuation">,</span> view<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">if</span> self<span class="token punctuation">.</span>rate <span class="token keyword">is</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+            <span class="token keyword">return</span> <span class="token boolean">True</span>
+		<span class="token comment">#获取唯一标识，cache的key</span>
+        self<span class="token punctuation">.</span>key <span class="token operator">=</span> self<span class="token punctuation">.</span>get_cache_key<span class="token punctuation">(</span>request<span class="token punctuation">,</span> view<span class="token punctuation">)</span>
+        <span class="token keyword">if</span> self<span class="token punctuation">.</span>key <span class="token keyword">is</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+            <span class="token keyword">return</span> <span class="token boolean">True</span>
+		<span class="token comment">#获取历史访问的列表[时间点1,时间点2]</span>
+        self<span class="token punctuation">.</span>history <span class="token operator">=</span> self<span class="token punctuation">.</span>cache<span class="token punctuation">.</span>get<span class="token punctuation">(</span>self<span class="token punctuation">.</span>key<span class="token punctuation">,</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>now <span class="token operator">=</span> self<span class="token punctuation">.</span>timer<span class="token punctuation">(</span><span class="token punctuation">)</span>
+		<span class="token comment">#把历史列表中，超过1分钟的时间点移除（5/m）</span>
+        <span class="token keyword">while</span> self<span class="token punctuation">.</span>history <span class="token keyword">and</span> self<span class="token punctuation">.</span>history<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">&lt;=</span> self<span class="token punctuation">.</span>now <span class="token operator">-</span> self<span class="token punctuation">.</span>duration<span class="token punctuation">:</span>
+            self<span class="token punctuation">.</span>history<span class="token punctuation">.</span>pop<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token comment">#如果1分钟内访问的历史次数，大于等于规则5/m中的5，就是访问失败，抛出异常</span>
+        <span class="token keyword">if</span> <span class="token builtin">len</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>history<span class="token punctuation">)</span> <span class="token operator">&gt;=</span> self<span class="token punctuation">.</span>num_requests<span class="token punctuation">:</span>
+            <span class="token keyword">return</span> self<span class="token punctuation">.</span>throttle_failure<span class="token punctuation">(</span><span class="token punctuation">)</span>
+        <span class="token comment">#否则访问超过</span>
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span>throttle_success<span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre> 
+<ul><li>1、实例化对象时，就解析限流规则，如5/m</li><li>2、执行allow_request方法时 
+  <ul><li>判断符合要求的历史访问记录数是否大于等于5 
+    <ul><li>符合：return True</li><li>不符合：return False</li></ul> </li></ul> </li></ul> 
+<p>8、回到APIView.check_throttles()</p> 
+<pre><code class="prism language-python">    <span class="token keyword">def</span> <span class="token function">check_throttles</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> request<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token comment">#记录要等待多少时间，才能请求</span>
+        throttle_durations <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token punctuation">]</span>
+        <span class="token keyword">for</span> throttle <span class="token keyword">in</span> self<span class="token punctuation">.</span>get_throttles<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+            <span class="token comment">#如果限流类返回False，就把要等待时间放到throttle_durations列表中</span>
+            <span class="token keyword">if</span> <span class="token keyword">not</span> throttle<span class="token punctuation">.</span>allow_request<span class="token punctuation">(</span>request<span class="token punctuation">,</span> self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+                throttle_durations<span class="token punctuation">.</span>append<span class="token punctuation">(</span>throttle<span class="token punctuation">.</span>wait<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+        <span class="token keyword">if</span> throttle_durations<span class="token punctuation">:</span>
+            durations <span class="token operator">=</span> <span class="token punctuation">[</span>
+                duration <span class="token keyword">for</span> duration <span class="token keyword">in</span> throttle_durations
+                <span class="token keyword">if</span> duration <span class="token keyword">is</span> <span class="token keyword">not</span> <span class="token boolean">None</span>
+            <span class="token punctuation">]</span>
+			<span class="token comment">#取要等待的最长时间</span>
+            duration <span class="token operator">=</span> <span class="token builtin">max</span><span class="token punctuation">(</span>durations<span class="token punctuation">,</span> default<span class="token operator">=</span><span class="token boolean">None</span><span class="token punctuation">)</span>
+            self<span class="token punctuation">.</span>throttled<span class="token punctuation">(</span>request<span class="token punctuation">,</span> duration<span class="token punctuation">)</span>
+</code></pre> 
+<p>9、限流类.wait() 方法</p> 
+<pre><code class="prism language-python">    <span class="token keyword">def</span> <span class="token function">wait</span><span class="token punctuation">(</span>self<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        <span class="token keyword">if</span> self<span class="token punctuation">.</span>history<span class="token punctuation">:</span>
+            remaining_duration <span class="token operator">=</span> self<span class="token punctuation">.</span>duration <span class="token operator">-</span> <span class="token punctuation">(</span>self<span class="token punctuation">.</span>now <span class="token operator">-</span> self<span class="token punctuation">.</span>history<span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span>
+        <span class="token keyword">else</span><span class="token punctuation">:</span>
+            remaining_duration <span class="token operator">=</span> self<span class="token punctuation">.</span>duration
+
+        available_requests <span class="token operator">=</span> self<span class="token punctuation">.</span>num_requests <span class="token operator">-</span> <span class="token builtin">len</span><span class="token punctuation">(</span>self<span class="token punctuation">.</span>history<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token number">1</span>
+        <span class="token keyword">if</span> available_requests <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">:</span>
+            <span class="token keyword">return</span> <span class="token boolean">None</span>
+		<span class="token comment">#当前时间-最早一次符合的请求时间：还需要等待的时间</span>
+        <span class="token keyword">return</span> remaining_duration <span class="token operator">/</span> <span class="token builtin">float</span><span class="token punctuation">(</span>available_requests<span class="token punctuation">)</span>
+</code></pre> 
+<p>10、回到APIView.dispatch方法</p> 
+<pre><code class="prism language-python">    <span class="token keyword">def</span> <span class="token function">dispatch</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> request<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span><span class="token punctuation">:</span>
+        self<span class="token punctuation">.</span>args <span class="token operator">=</span> args
+        self<span class="token punctuation">.</span>kwargs <span class="token operator">=</span> kwargs
+        request <span class="token operator">=</span> self<span class="token punctuation">.</span>initialize_request<span class="token punctuation">(</span>request<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span>
+        self<span class="token punctuation">.</span>request <span class="token operator">=</span> request
+        self<span class="token punctuation">.</span>headers <span class="token operator">=</span> self<span class="token punctuation">.</span>default_response_headers  <span class="token comment"># deprecate?</span>
+
+        <span class="token keyword">try</span><span class="token punctuation">:</span>
+            <span class="token comment">#认证、权限、限流</span>
+            self<span class="token punctuation">.</span>initial<span class="token punctuation">(</span>request<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span>
+            
+            <span class="token comment">#反射TestAPIView,获取get方法，执行get方法，</span>
+            <span class="token keyword">if</span> request<span class="token punctuation">.</span>method<span class="token punctuation">.</span>lower<span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">in</span> self<span class="token punctuation">.</span>http_method_names<span class="token punctuation">:</span>
+                handler <span class="token operator">=</span> <span class="token builtin">getattr</span><span class="token punctuation">(</span>self<span class="token punctuation">,</span> request<span class="token punctuation">.</span>method<span class="token punctuation">.</span>lower<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                                  self<span class="token punctuation">.</span>http_method_not_allowed<span class="token punctuation">)</span>
+            <span class="token keyword">else</span><span class="token punctuation">:</span>
+                handler <span class="token operator">=</span> self<span class="token punctuation">.</span>http_method_not_allowed
+
+            response <span class="token operator">=</span> handler<span class="token punctuation">(</span>request<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span>
+
+        <span class="token keyword">except</span> Exception <span class="token keyword">as</span> exc<span class="token punctuation">:</span>
+            response <span class="token operator">=</span> self<span class="token punctuation">.</span>handle_exception<span class="token punctuation">(</span>exc<span class="token punctuation">)</span>
+
+        self<span class="token punctuation">.</span>response <span class="token operator">=</span> self<span class="token punctuation">.</span>finalize_response<span class="token punctuation">(</span>request<span class="token punctuation">,</span> response<span class="token punctuation">,</span> <span class="token operator">*</span>args<span class="token punctuation">,</span> <span class="token operator">**</span>kwargs<span class="token punctuation">)</span>
+        <span class="token keyword">return</span> self<span class="token punctuation">.</span>response
+</code></pre> 
+<ul><li>通过反射，拿到TestAPIView中对应的视图函数，执行完成，拿到函数执行结果。</li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3465cbd5c76914dc4498f0a539e6f9d5/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">DRF-源码解析-4.1-SimpleRateThrottle源码解析：SimpleRateThrottle源码解析，SimpleRateThrottle实现1/5m此类型的规则</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b94aa4cdb11db63076709cd7886ec1dc/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">UNI-APP_ios自动适应底部安全区背景，修改安全区背景</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

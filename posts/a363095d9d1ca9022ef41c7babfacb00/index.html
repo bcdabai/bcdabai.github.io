@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>android gralloc 小结 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="android gralloc 小结" />
+<meta property="og:description" content="从字面就可以看出来Gralloc接口是为了显示内存分配与释放 – Graphics Allocation。 它的主要目的有三个： Ø 为应用分配显示用内存； Ø 可以把显示内存在不同进程间进行映射； Ø 同步 通过加载gralloc抽象层（gralloc.xxx.so），可以打开fb设备（/dev/fb0）和gpu设备(/dev/graphic/)， fb设备用于操作framebuffer，gpu设备负责图形缓冲区的分配和释放。 对于SurfaceFlinger服务端的本地窗口FramebufferNativeWindow将分别打开fb设备和gpu设备， FramebufferNativeWindow通过gpu设备从Framebuffer中分配图形缓冲区，可用来GPU render。 通过fb设备来分配framebuffer，可以显示经SurfaceFlinger混合后的图像。 是在FrameBufferNativeWindow的构造代码中，可以看到打开fb0设备获取Framebuffer Info，然后使用gralloc为该FrameBufferNativeWindow分配两个或者三个Framebuffer，即双缓冲或者三缓冲。 而对于应用程序端的SurfaceTextureClient本地窗口，其需要的图形缓冲区也是由SurfaceFlinger服务端来分配，应用程序进程只需要将服务端分配的图形缓冲区映射到应用程序的虚拟地址空间，图形缓冲区的映射过程也是由Gralloc模块完成。 gpu设备 Gpu打开过程就是创建并初始化一个gralloc_context_t对象，gpu负责图形buffer的分配和释放。 fb设备 Fb设备打开过程就是创建并初始化一个fb_context_t对象，关于屏幕大小、格式、刷新频率等信息都是通过Framebuffer驱动来获取，最后将Framebuffer映射到SurfaceFlinger进程地址空间，并将映射后的首地址保持到private_module_t的framebuffer-&gt;base变量中。 可以认为Gralloc module中有两个设备gpu_alloc_device和fb_device，前者用于分配GPU0使用的内存和FB内存，GPU0内存管理使用ION allocator；后者用于获取分配Framebuffer Info并操作fb。 注意，在Android系统中，在系统帧缓冲区中分配的图形缓冲区是在SurfaceFlinger服务中使用的， 而在内存中分配的图形缓冲区既可以在SurfaceFlinger服务中使用，也可以在其它的应用程序中使用。 当其它的应用程序需要使用图形缓冲区的时候，它们就会请求SurfaceFlinger服务为它们分配。 因此，对于其它的应用程序来说，它们只需要将SurfaceFlinger服务返回来的图形缓冲区映射到自己的进程地址空间来使用就可以了。 下面是分配内存最核心的函数：
+static int gralloc_alloc(alloc_device_t* dev, int w, int h, int format, int usage, buffer_handle_t* pHandle, int* pStride) { if (!pHandle || !pStride) return -EINVAL; size_t size, stride; int align = 4; int bpp = 0; switch (format) { case HAL_PIXEL_FORMAT_RGBA_8888: case HAL_PIXEL_FORMAT_RGBX_8888: case HAL_PIXEL_FORMAT_BGRA_8888: bpp = 4; break; case HAL_PIXEL_FORMAT_RGB_888: bpp = 3; break; case HAL_PIXEL_FORMAT_RGB_565: case HAL_PIXEL_FORMAT_RAW_SENSOR: bpp = 2; break; default: return -EINVAL; } size_t bpr = (w*bpp &#43; (align-1)) &amp; ~(align-1); size = bpr * h; stride = bpr / bpp; int err; if (usage &amp; GRALLOC_USAGE_HW_FB) { err = gralloc_alloc_framebuffer(dev, size, usage, pHandle); //申请图形缓冲区，用来render } else { err = gralloc_alloc_buffer(dev, size, usage, pHandle); //申请帧缓冲区，用来显示 } if (err &lt; 0) { return err; } *pStride = stride; return 0; } 在申请gralloc的时候，下面的enum表示要申请的buffer的用途 { /* buffer is never read in software */ GRALLOC_USAGE_SW_READ_NEVER = 0x00000000, /* buffer is rarely read in software */ GRALLOC_USAGE_SW_READ_RARELY = 0x00000002, /* buffer is often read in software */ GRALLOC_USAGE_SW_READ_OFTEN = 0x00000003, /* mask for the software read values */ GRALLOC_USAGE_SW_READ_MASK = 0x0000000F, /* buffer is never written in software */ GRALLOC_USAGE_SW_WRITE_NEVER = 0x00000000, /* buffer is rarely written in software */ GRALLOC_USAGE_SW_WRITE_RARELY = 0x00000020, /* buffer is often written in software */ GRALLOC_USAGE_SW_WRITE_OFTEN = 0x00000030, /* mask for the software write values */ GRALLOC_USAGE_SW_WRITE_MASK = 0x000000F0, /* buffer will be used as an OpenGL ES texture */ GRALLOC_USAGE_HW_TEXTURE = 0x00000100, /* buffer will be used as an OpenGL ES render target */ GRALLOC_USAGE_HW_RENDER = 0x00000200, /* buffer will be used by the 2D hardware blitter */ GRALLOC_USAGE_HW_2D = 0x00000400, /* buffer will be used by the HWComposer HAL module */ GRALLOC_USAGE_HW_COMPOSER = 0x00000800, /* buffer will be used with the framebuffer device */ GRALLOC_USAGE_HW_FB = 0x00001000, /* buffer will be used with the HW video encoder */ GRALLOC_USAGE_HW_VIDEO_ENCODER = 0x00010000, /* buffer will be written by the HW camera pipeline */ GRALLOC_USAGE_HW_CAMERA_WRITE = 0x00020000, /* buffer will be read by the HW camera pipeline */ GRALLOC_USAGE_HW_CAMERA_READ = 0x00040000, /* buffer will be used as part of zero-shutter-lag queue */ GRALLOC_USAGE_HW_CAMERA_ZSL = 0x00060000, /* mask for the camera access values */ GRALLOC_USAGE_HW_CAMERA_MASK = 0x00060000, /* mask for the software usage bit-mask */ GRALLOC_USAGE_HW_MASK = 0x00071F00, /* buffer will be used as a RenderScript Allocation */ GRALLOC_USAGE_RENDERSCRIPT = 0x00100000, GRALLOC_USAGE_HW_FIMC1 = 0x01000000, GRALLOC_USAGE_HW_ION = 0x02000000, GRALLOC_USAGE_YUV_ADDR = 0x04000000, /* SEC Private usage , for Overlay path at HWC */ GRALLOC_USAGE_HWC_HWOVERLAY = 0x20000000, /* buffer should be displayed full-screen on an external display when * possible */ GRALLOC_USAGE_EXTERNAL_DISP = 0x00002000, /* Must have a hardware-protected path to external display sink for * this buffer." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/a363095d9d1ca9022ef41c7babfacb00/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2016-01-13T23:02:33+08:00" />
+<meta property="article:modified_time" content="2016-01-13T23:02:33+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">android gralloc 小结</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <br> 从字面就可以看出来Gralloc接口是为了显示内存分配与释放 – Graphics Allocation。 
+<br> 它的主要目的有三个： 
+<br> Ø  为应用分配显示用内存； 
+<br> Ø  可以把显示内存在不同进程间进行映射； 
+<br> Ø  同步 
+<br> 
+<br> 通过加载gralloc抽象层（gralloc.xxx.so），可以打开fb设备（/dev/fb0）和gpu设备(/dev/graphic/)， 
+<br> fb设备用于操作framebuffer，gpu设备负责图形缓冲区的分配和释放。 
+<br> 对于SurfaceFlinger服务端的本地窗口FramebufferNativeWindow将分别打开fb设备和gpu设备， 
+<br> FramebufferNativeWindow通过gpu设备从Framebuffer中分配图形缓冲区，可用来GPU render。 
+<br> 通过fb设备来分配framebuffer，可以显示经SurfaceFlinger混合后的图像。 
+<br> 是在FrameBufferNativeWindow的构造代码中，可以看到打开fb0设备获取Framebuffer Info，然后使用gralloc为该FrameBufferNativeWindow分配两个或者三个Framebuffer，即双缓冲或者三缓冲。 
+<br> 而对于应用程序端的SurfaceTextureClient本地窗口，其需要的图形缓冲区也是由SurfaceFlinger服务端来分配，应用程序进程只需要将服务端分配的图形缓冲区映射到应用程序的虚拟地址空间，图形缓冲区的映射过程也是由Gralloc模块完成。 
+<br> 
+<br> gpu设备 
+<br> Gpu打开过程就是创建并初始化一个gralloc_context_t对象，gpu负责图形buffer的分配和释放。 
+<br> fb设备 
+<br> Fb设备打开过程就是创建并初始化一个fb_context_t对象，关于屏幕大小、格式、刷新频率等信息都是通过Framebuffer驱动来获取，最后将Framebuffer映射到SurfaceFlinger进程地址空间，并将映射后的首地址保持到private_module_t的framebuffer-&gt;base变量中。 
+<br> 
+<br> 可以认为Gralloc module中有两个设备gpu_alloc_device和fb_device，前者用于分配GPU0使用的内存和FB内存，GPU0内存管理使用ION allocator；后者用于获取分配Framebuffer Info并操作fb。 
+<br> 注意，在Android系统中，在系统帧缓冲区中分配的图形缓冲区是在SurfaceFlinger服务中使用的， 
+<br> 而在内存中分配的图形缓冲区既可以在SurfaceFlinger服务中使用，也可以在其它的应用程序中使用。 
+<br> 当其它的应用程序需要使用图形缓冲区的时候，它们就会请求SurfaceFlinger服务为它们分配。 
+<br> 因此，对于其它的应用程序来说，它们只需要将SurfaceFlinger服务返回来的图形缓冲区映射到自己的进程地址空间来使用就可以了。 
+<br> 
+<br> 
+<p>下面是分配内存最核心的函数：</p> 
+<pre><code class="language-cpp"> static int gralloc_alloc(alloc_device_t* dev,
+        int w, int h, int format, int usage,
+        buffer_handle_t* pHandle, int* pStride)
+{
+    if (!pHandle || !pStride)
+        return -EINVAL;
+    size_t size, stride;
+    int align = 4;
+    int bpp = 0;
+    switch (format) {
+        case HAL_PIXEL_FORMAT_RGBA_8888:
+        case HAL_PIXEL_FORMAT_RGBX_8888:
+        case HAL_PIXEL_FORMAT_BGRA_8888:
+            bpp = 4;
+            break;
+        case HAL_PIXEL_FORMAT_RGB_888:
+            bpp = 3;
+            break;
+        case HAL_PIXEL_FORMAT_RGB_565:
+        case HAL_PIXEL_FORMAT_RAW_SENSOR:
+            bpp = 2;
+            break;
+        default:
+            return -EINVAL;
+    }
+    size_t bpr = (w*bpp + (align-1)) &amp; ~(align-1);
+    size = bpr * h;
+    stride = bpr / bpp;
+    int err;
+    if (usage &amp; GRALLOC_USAGE_HW_FB) {
+        err = gralloc_alloc_framebuffer(dev, size, usage, pHandle); //申请图形缓冲区，用来render
+    } else {
+        err = gralloc_alloc_buffer(dev, size, usage, pHandle);   //申请帧缓冲区，用来显示
+    }
+    if (err &lt; 0) {
+        return err;
+    }
+    *pStride = stride;
+    return 0;
+}
+</code></pre> 
+<br>  在申请gralloc的时候，下面的enum表示要申请的buffer的用途 
+<br> 
+<pre><code class="language-cpp">{
+    /* buffer is never read in software */
+    GRALLOC_USAGE_SW_READ_NEVER         = 0x00000000,
+    /* buffer is rarely read in software */
+    GRALLOC_USAGE_SW_READ_RARELY        = 0x00000002,
+    /* buffer is often read in software */
+    GRALLOC_USAGE_SW_READ_OFTEN         = 0x00000003,
+    /* mask for the software read values */
+    GRALLOC_USAGE_SW_READ_MASK          = 0x0000000F,
+    
+    /* buffer is never written in software */
+    GRALLOC_USAGE_SW_WRITE_NEVER        = 0x00000000,
+    /* buffer is rarely written in software */
+    GRALLOC_USAGE_SW_WRITE_RARELY       = 0x00000020,
+    /* buffer is often written in software */
+    GRALLOC_USAGE_SW_WRITE_OFTEN        = 0x00000030,
+    /* mask for the software write values */
+    GRALLOC_USAGE_SW_WRITE_MASK         = 0x000000F0,
+    /* buffer will be used as an OpenGL ES texture */
+    GRALLOC_USAGE_HW_TEXTURE            = 0x00000100,
+    /* buffer will be used as an OpenGL ES render target */
+    GRALLOC_USAGE_HW_RENDER             = 0x00000200,
+    /* buffer will be used by the 2D hardware blitter */
+    GRALLOC_USAGE_HW_2D                 = 0x00000400,
+    /* buffer will be used by the HWComposer HAL module */
+    GRALLOC_USAGE_HW_COMPOSER           = 0x00000800,
+    /* buffer will be used with the framebuffer device */
+    GRALLOC_USAGE_HW_FB                 = 0x00001000,
+    /* buffer will be used with the HW video encoder */
+    GRALLOC_USAGE_HW_VIDEO_ENCODER      = 0x00010000,
+    /* buffer will be written by the HW camera pipeline */
+    GRALLOC_USAGE_HW_CAMERA_WRITE       = 0x00020000,
+    /* buffer will be read by the HW camera pipeline */
+    GRALLOC_USAGE_HW_CAMERA_READ        = 0x00040000,
+    /* buffer will be used as part of zero-shutter-lag queue */
+    GRALLOC_USAGE_HW_CAMERA_ZSL         = 0x00060000,
+    /* mask for the camera access values */
+    GRALLOC_USAGE_HW_CAMERA_MASK        = 0x00060000,
+    /* mask for the software usage bit-mask */
+    GRALLOC_USAGE_HW_MASK               = 0x00071F00,
+    /* buffer will be used as a RenderScript Allocation */
+    GRALLOC_USAGE_RENDERSCRIPT          = 0x00100000,
+    GRALLOC_USAGE_HW_FIMC1        = 0x01000000,
+    GRALLOC_USAGE_HW_ION          = 0x02000000,
+    GRALLOC_USAGE_YUV_ADDR        = 0x04000000,
+    /* SEC Private usage , for Overlay path at HWC */
+    GRALLOC_USAGE_HWC_HWOVERLAY     = 0x20000000,
+    /* buffer should be displayed full-screen on an external display when
+     * possible
+     */
+    GRALLOC_USAGE_EXTERNAL_DISP         = 0x00002000,
+    /* Must have a hardware-protected path to external display sink for
+     * this buffer.  If a hardware-protected path is not available, then
+     * either don't composite only this buffer (preferred) to the
+     * external sink, or (less desirable) do not route the entire
+     * composition to the external sink.
+     */
+    GRALLOC_USAGE_PROTECTED             = 0x00004000,
+    /* implementation-specific private usage flags */
+    GRALLOC_USAGE_PRIVATE_0             = 0x10000000,
+    GRALLOC_USAGE_PRIVATE_1             = 0x20000000,
+    GRALLOC_USAGE_PRIVATE_2             = 0x40000000,
+    GRALLOC_USAGE_PRIVATE_3             = 0x80000000,
+    GRALLOC_USAGE_PRIVATE_MASK          = 0xF0000000,
+}
+</code></pre> 
+<br> 上面参数usage用来描述要分配的图形缓冲区的用途。 
+<br> 如果是用来在系统帧缓冲区中渲染的，GRALLOC_USAGE_HW_FB，那么就必须要系统帧缓冲区中分配，即framebuffer中。 
+<br> 否则的话，就在内存中分配。目前大多数采用android的ION机制分配共享的graphicbuffer。如果GPU为MALI，还可以采用MALI的UMP机制。 
+<br> 或者注意，在内存中分配的图形缓冲区，最终是需要渲染到系统帧缓冲区去的，以便可以将它所描述的图形显示出来。 
+<br>   
+<br> 申请好的图形缓冲区或者framebuffer，都是采用了bufferqueue的方式来管理的。  
+<br> 网上很多大牛写的很好。我就不赘述了。 
+<br>   
+<br>   
+<img src="https://images2.imgbox.com/9a/a6/vVl6t7SE_o.jpg" alt=""> 
+<br>   
+<br>  最后大体讲一下显示： 
+<br> 
+<p> 下面是framebuffer显示使用的函数</p> 
+<pre><code class="language-cpp">static int fb_post(struct framebuffer_device_t* dev, buffer_handle_t buffer)
+{
+    if (hnd-&gt;flags &amp; private_handle_t::PRIV_FLAGS_FRAMEBUFFER)
+    {
+        m-&gt;base.lock(&amp;m-&gt;base, buffer, private_module_t::PRIV_USAGE_LOCKED_FOR_POST, 
+                0, 0, m-&gt;info.xres, m-&gt;info.yres, NULL);
+        const size_t offset = hnd-&gt;base - m-&gt;framebuffer-&gt;base;
+        int interrupt;
+        m-&gt;info.activate = FB_ACTIVATE_VBL;
+        m-&gt;info.yoffset = offset / m-&gt;finfo.line_length;
+#ifdef STANDARD_LINUX_SCREEN
+#define FBIO_WAITFORVSYNC       _IOW('F', 0x20, __u32)
+#define S3CFB_SET_VSYNC_INT _IOW('F', 206, unsigned int)
+        if (ioctl(m-&gt;framebuffer-&gt;fd, FBIOPAN_DISPLAY, &amp;m-&gt;info) == -1) 
+        {
+            AERR( "FBIOPAN_DISPLAY failed for fd: %d", m-&gt;framebuffer-&gt;fd );
+            m-&gt;base.unlock(&amp;m-&gt;base, buffer); 
+            return 0;
+        }
+        {
+            // enable VSYNC
+            interrupt = 1;
+            if(ioctl(m-&gt;framebuffer-&gt;fd, S3CFB_SET_VSYNC_INT, &amp;interrupt) &lt; 0) 
+            {
+                AERR( "S3CFB_SET_VSYNC_INT enable failed for fd: %d", m-&gt;framebuffer-&gt;fd );
+                return 0;
+            }
+            // wait for VSYNC
+#ifdef MALI_VSYNC_EVENT_REPORT_ENABLE
+            gralloc_mali_vsync_report(MALI_VSYNC_EVENT_BEGIN_WAIT);
+#endif
+            int crtc = 0;
+            if(ioctl(m-&gt;framebuffer-&gt;fd, FBIO_WAITFORVSYNC, &amp;crtc) &lt; 0)
+            {
+                AERR( "FBIO_WAITFORVSYNC failed for fd: %d", m-&gt;framebuffer-&gt;fd );
+#ifdef MALI_VSYNC_EVENT_REPORT_ENABLE
+                gralloc_mali_vsync_report(MALI_VSYNC_EVENT_END_WAIT);
+#endif
+                return 0;
+            }
+#ifdef MALI_VSYNC_EVENT_REPORT_ENABLE
+            gralloc_mali_vsync_report(MALI_VSYNC_EVENT_END_WAIT);
+#endif
+            // disable VSYNC
+            interrupt = 0;
+            if(ioctl(m-&gt;framebuffer-&gt;fd, S3CFB_SET_VSYNC_INT, &amp;interrupt) &lt; 0) 
+            {
+                AERR( "S3CFB_SET_VSYNC_INT disable failed for fd: %d", m-&gt;framebuffer-&gt;fd );
+                return 0;
+            }
+        }
+#else 
+        /*Standard Android way*/
+#ifdef MALI_VSYNC_EVENT_REPORT_ENABLE
+        gralloc_mali_vsync_report(MALI_VSYNC_EVENT_BEGIN_WAIT);
+#endif
+        if (ioctl(m-&gt;framebuffer-&gt;fd, FBIOPUT_VSCREENINFO, &amp;m-&gt;info) == -1) 
+        {
+            AERR( "FBIOPUT_VSCREENINFO failed for fd: %d", m-&gt;framebuffer-&gt;fd );
+#ifdef MALI_VSYNC_EVENT_REPORT_ENABLE
+            gralloc_mali_vsync_report(MALI_VSYNC_EVENT_END_WAIT);
+#endif
+            m-&gt;base.unlock(&amp;m-&gt;base, buffer); 
+            return -errno;
+        }
+#ifdef MALI_VSYNC_EVENT_REPORT_ENABLE
+        gralloc_mali_vsync_report(MALI_VSYNC_EVENT_END_WAIT);
+#endif
+#endif
+        m-&gt;currentBuffer = buffer;
+    } 
+    return 0;
+}
+
+</code></pre> 
+<pre><code class="language-cpp">注意：</code></pre> 
+<p> 这个函数只有在离线合成的方式下，由openGL调用eglSwapbuffer,才会被调用到。</p> 
+<p>参考：</p> 
+<p>http://blog.csdn.net/wan8180192/article/details/50269405<br> </p> 
+<p>在线合成的方式下，会调用HWC-&gt;set 函数，即exynos4_set---&gt;exynos4_post_fimd ---&gt; window_pan_display最终显示</p> 
+<p>参考：</p> 
+<p>http://blog.csdn.net/wan8180192/article/details/50719123<br> </p> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<span style="white-space:pre"></span> 
+<br> 
+<br> 
+<br> 
+<span style="white-space:pre"></span> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<span style="white-space:pre"></span>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a466bc5b57147737d78bdd43e9f5318b/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">android hwcomposer 在视频播放中的应用</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/d522f249321e36682d83cae50aea3e24/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">nslookup命令查看域名解析出来的IP</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

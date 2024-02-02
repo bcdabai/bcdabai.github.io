@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>linux设备驱动——bus、device、driver加载顺序与匹配流程 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="linux设备驱动——bus、device、driver加载顺序与匹配流程" />
+<meta property="og:description" content="文章目录 1. 前言2. 概念2.1. 数据结构2.2. probe函数 3. bus、device、driver加载顺序3.1. 加载方式3.2. 加载顺序 4. device、driver匹配流程4.1. 加载driver4.2. 加载device 5. Reference 1. 前言 最近回看了下Linux设备驱动相关知识，做了个总结。有些话需要说在前面：
+文中有些内容为个人理解（上标H所标识内容），未必准确，有误请评论指正。4.2节的内容主要目的是为了搞清楚driver和device在加载的过程中是如何通过bus相互匹配。 本文源码源自4.10.17版本linux内核。
+2. 概念 Linux设备驱动有三个基本概念：总线、驱动以及设备。 三者之间关 系 H 三者之间关系^H 三者之间关系H简单描述如下：
+总线为外设或片内模组与核心处理器之间的通信总线，例如SPI、I2C、SDIO、USB等。每个驱动、设备都需要挂载到一种总线上；挂载到相同总线的驱动和设备可以通过该总线进行匹配，实现设备与对应的驱动之间的绑定。 2.1. 数据结构 以下为总线、驱动及设备在linux内核中对应的核心数据结构
+// 总线数据结构 -- include/linux/device.h struct bus_type { const char	*name; const char	*dev_name; struct device	*dev_root; struct device_attribute	*dev_attrs;	/* use dev_groups instead */ const struct attribute_group **bus_groups; const struct attribute_group **dev_groups; const struct attribute_group **drv_groups; int (*match)(struct device *dev, struct device_driver *drv); int (*uevent)(struct device *dev, struct kobj_uevent_env *env); int (*probe)(struct device *dev);	// 探测驱动与设备是否匹配，匹配则完成绑定 int (*remove)(struct device *dev); void (*shutdown)(struct device *dev); int (*online)(struct device *dev); int (*offline)(struct device *dev); int (*suspend)(struct device *dev, pm_message_t state); int (*resume)(struct device *dev); const struct dev_pm_ops *pm; const struct iommu_ops *iommu_ops; struct subsys_private *p;	// 如下 struct lock_class_key lock_key; }; // drivers/base/base." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/dd51c423a53de6db1a5a4574ac8acf12/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-01-09T15:10:48+08:00" />
+<meta property="article:modified_time" content="2023-01-09T15:10:48+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">linux设备驱动——bus、device、driver加载顺序与匹配流程</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#1__1" rel="nofollow">1. 前言</a></li><li><a href="#2__7" rel="nofollow">2. 概念</a></li><li><ul><li><a href="#21__13" rel="nofollow">2.1. 数据结构</a></li><li><a href="#22_probe_180" rel="nofollow">2.2. probe函数</a></li></ul> 
+  </li><li><a href="#3_busdevicedriver_267" rel="nofollow">3. bus、device、driver加载顺序</a></li><li><ul><li><a href="#31__268" rel="nofollow">3.1. 加载方式</a></li><li><a href="#32__323" rel="nofollow">3.2. 加载顺序</a></li></ul> 
+  </li><li><a href="#4_devicedriver_341" rel="nofollow">4. device、driver匹配流程</a></li><li><ul><li><a href="#41_driver_344" rel="nofollow">4.1. 加载driver</a></li><li><a href="#42_device_364" rel="nofollow">4.2. 加载device</a></li></ul> 
+  </li><li><a href="#5_Reference_417" rel="nofollow">5. Reference</a></li></ul> 
+</div> 
+<p></p> 
+<h2><a id="1__1"></a>1. 前言</h2> 
+<p>最近回看了下Linux设备驱动相关知识，做了个总结。<font color="#ff0000">有些话需要说在前面：</font></p> 
+<ul><li><font color="#ff0000">文中有些内容为个人理解（上标H所标识内容），未必准确，有误请评论指正。</font></li><li><font color="#ff0000">4.2节的内容主要目的是为了搞清楚driver和device在加载的过程中是如何通过bus相互匹配。</font></li></ul> 
+<p>本文源码源自<a href="https://elixir.bootlin.com/linux/v4.10.17/source" rel="nofollow">4.10.17版本linux内核</a>。</p> 
+<h2><a id="2__7"></a>2. 概念</h2> 
+<p>Linux设备驱动有三个基本概念：<strong>总线</strong>、<strong>驱动</strong>以及<strong>设备</strong>。<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         三者之间关 
+        
+        
+        
+          系 
+         
+        
+          H 
+         
+        
+       
+      
+        三者之间关系^H 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8413em;"></span><span class="mord cjk_fallback">三者之间关</span><span class="mord"><span class="mord cjk_fallback">系</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8413em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0813em;">H</span></span></span></span></span></span></span></span></span></span></span></span>简单描述如下：</p> 
+<ol><li>总线为外设或片内模组与核心处理器之间的通信总线，例如SPI、I2C、SDIO、USB等。</li><li>每个驱动、设备都需要挂载到一种总线上；</li><li>挂载到相同总线的驱动和设备可以通过该总线进行匹配，实现设备与对应的驱动之间的绑定。</li></ol> 
+<h3><a id="21__13"></a>2.1. 数据结构</h3> 
+<p>以下为总线、驱动及设备在linux内核中对应的核心数据结构</p> 
+<pre><code class="prism language-c"><span class="token comment">// 总线数据结构 -- include/linux/device.h</span>
+<span class="token keyword">struct</span> <span class="token class-name">bus_type</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">const</span> <span class="token keyword">char</span>		<span class="token operator">*</span>name<span class="token punctuation">;</span>
+	<span class="token keyword">const</span> <span class="token keyword">char</span>		<span class="token operator">*</span>dev_name<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">device</span>		<span class="token operator">*</span>dev_root<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">device_attribute</span>	<span class="token operator">*</span>dev_attrs<span class="token punctuation">;</span>	<span class="token comment">/* use dev_groups instead */</span>
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">attribute_group</span> <span class="token operator">*</span><span class="token operator">*</span>bus_groups<span class="token punctuation">;</span>
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">attribute_group</span> <span class="token operator">*</span><span class="token operator">*</span>dev_groups<span class="token punctuation">;</span>
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">attribute_group</span> <span class="token operator">*</span><span class="token operator">*</span>drv_groups<span class="token punctuation">;</span>
+
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>match<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">device_driver</span> <span class="token operator">*</span>drv<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>uevent<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">kobj_uevent_env</span> <span class="token operator">*</span>env<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>probe<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>	<span class="token comment">// 探测驱动与设备是否匹配，匹配则完成绑定</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>remove<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>shutdown<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>online<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>offline<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>suspend<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">,</span> <span class="token class-name">pm_message_t</span> state<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>resume<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">dev_pm_ops</span> <span class="token operator">*</span>pm<span class="token punctuation">;</span>
+
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">iommu_ops</span> <span class="token operator">*</span>iommu_ops<span class="token punctuation">;</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">subsys_private</span> <span class="token operator">*</span>p<span class="token punctuation">;</span>	<span class="token comment">// 如下</span>
+	<span class="token keyword">struct</span> <span class="token class-name">lock_class_key</span> lock_key<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+<span class="token comment">// drivers/base/base.h</span>
+<span class="token keyword">struct</span> <span class="token class-name">subsys_private</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">kset</span> subsys<span class="token punctuation">;</span>			<span class="token comment">// the struct kset that defines this subsystem</span>
+	<span class="token keyword">struct</span> <span class="token class-name">kset</span> <span class="token operator">*</span>devices_kset<span class="token punctuation">;</span>	<span class="token comment">// the subsystem's 'devices' directory</span>
+	<span class="token keyword">struct</span> <span class="token class-name">list_head</span> interfaces<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">mutex</span> mutex<span class="token punctuation">;</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">kset</span> <span class="token operator">*</span>drivers_kset<span class="token punctuation">;</span>	<span class="token comment">// the list of drivers associated</span>
+	<span class="token keyword">struct</span> <span class="token class-name">klist</span> klist_devices<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">klist</span> klist_drivers<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">blocking_notifier_head</span> bus_notifier<span class="token punctuation">;</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">int</span> drivers_autoprobe<span class="token operator">:</span><span class="token number">1</span><span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">bus_type</span> <span class="token operator">*</span>bus<span class="token punctuation">;</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">kset</span> glue_dirs<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">class</span> <span class="token operator">*</span>class<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<pre><code class="prism language-c"><span class="token comment">// 驱动数据结构 -- include/linux/device.h</span>
+<span class="token keyword">struct</span> <span class="token class-name">device_driver</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">const</span> <span class="token keyword">char</span>		<span class="token operator">*</span>name<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">bus_type</span>		<span class="token operator">*</span>bus<span class="token punctuation">;</span>	<span class="token comment">// 指向本驱动挂载的bus</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">module</span>		<span class="token operator">*</span>owner<span class="token punctuation">;</span>
+	<span class="token keyword">const</span> <span class="token keyword">char</span>		<span class="token operator">*</span>mod_name<span class="token punctuation">;</span>	<span class="token comment">/* used for built-in modules */</span>
+
+	bool suppress_bind_attrs<span class="token punctuation">;</span>	<span class="token comment">/* disables bind/unbind via sysfs */</span>
+	<span class="token keyword">enum</span> <span class="token class-name">probe_type</span> probe_type<span class="token punctuation">;</span>
+
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">of_device_id</span>	<span class="token operator">*</span>of_match_table<span class="token punctuation">;</span>
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">acpi_device_id</span>	<span class="token operator">*</span>acpi_match_table<span class="token punctuation">;</span>
+
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>probe<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>	<span class="token comment">// 探测驱动与设备是否匹配，匹配则完成绑定</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>remove<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>shutdown<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>suspend<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">,</span> <span class="token class-name">pm_message_t</span> state<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">int</span> <span class="token punctuation">(</span><span class="token operator">*</span>resume<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">attribute_group</span> <span class="token operator">*</span><span class="token operator">*</span>groups<span class="token punctuation">;</span>
+
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">dev_pm_ops</span> <span class="token operator">*</span>pm<span class="token punctuation">;</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">driver_private</span> <span class="token operator">*</span>p<span class="token punctuation">;</span>	<span class="token comment">// 如下</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+<span class="token comment">// drivers/base/base.h</span>
+<span class="token keyword">struct</span> <span class="token class-name">driver_private</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">kobject</span> kobj<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">klist</span> klist_devices<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">klist_node</span> knode_bus<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">module_kobject</span> <span class="token operator">*</span>mkobj<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">device_driver</span> <span class="token operator">*</span>driver<span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<pre><code class="prism language-c"><span class="token comment">// 设备数据结构 -- include/linux/device.h</span>
+<span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">struct</span> <span class="token class-name">device</span>		<span class="token operator">*</span>parent<span class="token punctuation">;</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">device_private</span>	<span class="token operator">*</span>p<span class="token punctuation">;</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">kobject</span> kobj<span class="token punctuation">;</span>
+	<span class="token keyword">const</span> <span class="token keyword">char</span>		<span class="token operator">*</span>init_name<span class="token punctuation">;</span> <span class="token comment">/* initial name of the device */</span>
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">device_type</span> <span class="token operator">*</span>type<span class="token punctuation">;</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">mutex</span>		mutex<span class="token punctuation">;</span>	<span class="token comment">/* mutex to synchronize calls to
+					 * its driver.
+					 */</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">bus_type</span>	<span class="token operator">*</span>bus<span class="token punctuation">;</span>		<span class="token comment">/* type of bus device is on */</span>
+	<span class="token keyword">struct</span> <span class="token class-name">device_driver</span> <span class="token operator">*</span>driver<span class="token punctuation">;</span>	<span class="token comment">/* which driver has allocated this
+					   device */</span>
+	<span class="token keyword">void</span>		<span class="token operator">*</span>platform_data<span class="token punctuation">;</span>	<span class="token comment">/* Platform specific data, device
+					   core doesn't touch it */</span>
+	<span class="token keyword">void</span>		<span class="token operator">*</span>driver_data<span class="token punctuation">;</span>	<span class="token comment">/* Driver data, set and get with
+					   dev_set/get_drvdata */</span>
+	<span class="token keyword">struct</span> <span class="token class-name">dev_links_info</span>	links<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">dev_pm_info</span>	power<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">dev_pm_domain</span>	<span class="token operator">*</span>pm_domain<span class="token punctuation">;</span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">CONFIG_GENERIC_MSI_IRQ_DOMAIN</span></span>
+	<span class="token keyword">struct</span> <span class="token class-name">irq_domain</span>	<span class="token operator">*</span>msi_domain<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">CONFIG_PINCTRL</span></span>
+	<span class="token keyword">struct</span> <span class="token class-name">dev_pin_info</span>	<span class="token operator">*</span>pins<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">CONFIG_GENERIC_MSI_IRQ</span></span>
+	<span class="token keyword">struct</span> <span class="token class-name">list_head</span>	msi_list<span class="token punctuation">;</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">CONFIG_NUMA</span></span>
+	<span class="token keyword">int</span>		numa_node<span class="token punctuation">;</span>	<span class="token comment">/* NUMA node this device is close to */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+	u64		<span class="token operator">*</span>dma_mask<span class="token punctuation">;</span>	<span class="token comment">/* dma mask (if dma'able device) */</span>
+	u64		coherent_dma_mask<span class="token punctuation">;</span><span class="token comment">/* Like dma_mask, but for
+					     alloc_coherent mappings as
+					     not all hardware supports
+					     64 bit addresses for consistent
+					     allocations such descriptors. */</span>
+	<span class="token keyword">unsigned</span> <span class="token keyword">long</span>	dma_pfn_offset<span class="token punctuation">;</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">device_dma_parameters</span> <span class="token operator">*</span>dma_parms<span class="token punctuation">;</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">list_head</span>	dma_pools<span class="token punctuation">;</span>	<span class="token comment">/* dma pools (if dma'ble) */</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">dma_coherent_mem</span>	<span class="token operator">*</span>dma_mem<span class="token punctuation">;</span> <span class="token comment">/* internal for coherent mem
+					     override */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">CONFIG_DMA_CMA</span></span>
+	<span class="token keyword">struct</span> <span class="token class-name">cma</span> <span class="token operator">*</span>cma_area<span class="token punctuation">;</span>		<span class="token comment">/* contiguous memory area for dma
+					   allocations */</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+	<span class="token comment">/* arch specific additions */</span>
+	<span class="token keyword">struct</span> <span class="token class-name">dev_archdata</span>	archdata<span class="token punctuation">;</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">device_node</span>	<span class="token operator">*</span>of_node<span class="token punctuation">;</span> <span class="token comment">/* associated device tree node */</span>
+	<span class="token keyword">struct</span> <span class="token class-name">fwnode_handle</span>	<span class="token operator">*</span>fwnode<span class="token punctuation">;</span> <span class="token comment">/* firmware device node */</span>
+
+	<span class="token class-name">dev_t</span>			devt<span class="token punctuation">;</span>	<span class="token comment">/* dev_t, creates the sysfs "dev" */</span>
+	u32			id<span class="token punctuation">;</span>	<span class="token comment">/* device instance */</span>
+
+	<span class="token class-name">spinlock_t</span>		devres_lock<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">list_head</span>	devres_head<span class="token punctuation">;</span>
+
+	<span class="token keyword">struct</span> <span class="token class-name">klist_node</span>	knode_class<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">class</span>		<span class="token operator">*</span>class<span class="token punctuation">;</span>
+	<span class="token keyword">const</span> <span class="token keyword">struct</span> <span class="token class-name">attribute_group</span> <span class="token operator">*</span><span class="token operator">*</span>groups<span class="token punctuation">;</span>	<span class="token comment">/* optional groups */</span>
+
+	<span class="token keyword">void</span>	<span class="token punctuation">(</span><span class="token operator">*</span>release<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">iommu_group</span>	<span class="token operator">*</span>iommu_group<span class="token punctuation">;</span>
+	<span class="token keyword">struct</span> <span class="token class-name">iommu_fwspec</span>	<span class="token operator">*</span>iommu_fwspec<span class="token punctuation">;</span>
+
+	bool			offline_disabled<span class="token operator">:</span><span class="token number">1</span><span class="token punctuation">;</span>
+	bool			offline<span class="token operator">:</span><span class="token number">1</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="22_probe_180"></a>2.2. probe函数</h3> 
+<p>bus_type和device_driver中都包含<code>probe()</code>函数，两者关系可追踪到函数<code>really_probe()</code>中（该函数在后续的调用加载流程中会描述具体执行的位置，可先跳过，后续查看加载流程时返回此处查看），如下：</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> <span class="token keyword">int</span> <span class="token function">really_probe</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">,</span> <span class="token keyword">struct</span> <span class="token class-name">device_driver</span> <span class="token operator">*</span>drv<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">int</span> ret <span class="token operator">=</span> <span class="token operator">-</span>EPROBE_DEFER<span class="token punctuation">;</span>
+	<span class="token keyword">int</span> local_trigger_count <span class="token operator">=</span> <span class="token function">atomic_read</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>deferred_trigger_count<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	bool test_remove <span class="token operator">=</span> <span class="token function">IS_ENABLED</span><span class="token punctuation">(</span>CONFIG_DEBUG_TEST_DRIVER_REMOVE<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span>
+			   <span class="token operator">!</span>drv<span class="token operator">-&gt;</span>suppress_bind_attrs<span class="token punctuation">;</span>
+
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+	<span class="token function">atomic_inc</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>probe_count<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">pr_debug</span><span class="token punctuation">(</span><span class="token string">"bus: '%s': %s: probing driver %s with device %s\n"</span><span class="token punctuation">,</span>
+		 drv<span class="token operator">-&gt;</span>bus<span class="token operator">-&gt;</span>name<span class="token punctuation">,</span> <span class="token constant">__func__</span><span class="token punctuation">,</span> drv<span class="token operator">-&gt;</span>name<span class="token punctuation">,</span> <span class="token function">dev_name</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">WARN_ON</span><span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">list_empty</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>dev<span class="token operator">-&gt;</span>devres_head<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+re_probe<span class="token operator">:</span>
+	dev<span class="token operator">-&gt;</span>driver <span class="token operator">=</span> drv<span class="token punctuation">;</span>
+
+	<span class="token comment">/* If using pinctrl, bind pins now before probing */</span>
+	ret <span class="token operator">=</span> <span class="token function">pinctrl_bind_pins</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>ret<span class="token punctuation">)</span>
+		<span class="token keyword">goto</span> pinctrl_bind_failed<span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">driver_sysfs_add</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token function">printk</span><span class="token punctuation">(</span>KERN_ERR <span class="token string">"%s: driver_sysfs_add(%s) failed\n"</span><span class="token punctuation">,</span>
+			<span class="token constant">__func__</span><span class="token punctuation">,</span> <span class="token function">dev_name</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">goto</span> probe_failed<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>dev<span class="token operator">-&gt;</span>pm_domain <span class="token operator">&amp;&amp;</span> dev<span class="token operator">-&gt;</span>pm_domain<span class="token operator">-&gt;</span>activate<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		ret <span class="token operator">=</span> dev<span class="token operator">-&gt;</span>pm_domain<span class="token operator">-&gt;</span><span class="token function">activate</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>ret<span class="token punctuation">)</span>
+			<span class="token keyword">goto</span> probe_failed<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token comment">/*
+	 * Ensure devices are listed in devices_kset in correct order
+	 * It's important to move Dev to the end of devices_kset before
+	 * calling .probe, because it could be recursive and parent Dev
+	 * should always go first
+	 */</span>
+	<span class="token function">devices_kset_move_last</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/*****  以下为重点  ****************/</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>dev<span class="token operator">-&gt;</span>bus<span class="token operator">-&gt;</span>probe<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>		<span class="token comment">// 若bus_type中定义了probe，则调用bus_type的probe</span>
+		ret <span class="token operator">=</span> dev<span class="token operator">-&gt;</span>bus<span class="token operator">-&gt;</span><span class="token function">probe</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>ret<span class="token punctuation">)</span>
+			<span class="token keyword">goto</span> probe_failed<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>drv<span class="token operator">-&gt;</span>probe<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>	<span class="token comment">// 若bus_type中未定义了probe，则调用bus_type的probe</span>
+		ret <span class="token operator">=</span> drv<span class="token operator">-&gt;</span><span class="token function">probe</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>ret<span class="token punctuation">)</span>
+			<span class="token keyword">goto</span> probe_failed<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">// 总结：在看过的有限几个总线源码里，bus_type.probe()最终依然会调用device_driver.probe()</span>
+	<span class="token comment">//      个人理解 —— device_driver.probe()是必然会调用的，</span>
+	<span class="token comment">//                 添加bus_type.probe()是因为有的总线需要在device_driver.probe()之前做些额外的处理</span>
+	<span class="token comment">/*****  重点已结束  ****************/</span>
+	
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+	<span class="token function">pinctrl_init_done</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>dev<span class="token operator">-&gt;</span>pm_domain <span class="token operator">&amp;&amp;</span> dev<span class="token operator">-&gt;</span>pm_domain<span class="token operator">-&gt;</span>sync<span class="token punctuation">)</span>
+		dev<span class="token operator">-&gt;</span>pm_domain<span class="token operator">-&gt;</span><span class="token function">sync</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token function">driver_bound</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	ret <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	<span class="token function">pr_debug</span><span class="token punctuation">(</span><span class="token string">"bus: '%s': %s: bound device %s to driver %s\n"</span><span class="token punctuation">,</span>
+		 drv<span class="token operator">-&gt;</span>bus<span class="token operator">-&gt;</span>name<span class="token punctuation">,</span> <span class="token constant">__func__</span><span class="token punctuation">,</span> <span class="token function">dev_name</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span><span class="token punctuation">,</span> drv<span class="token operator">-&gt;</span>name<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">goto</span> done<span class="token punctuation">;</span>
+
+probe_failed<span class="token operator">:</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span>dev<span class="token operator">-&gt;</span>bus<span class="token punctuation">)</span>
+		<span class="token function">blocking_notifier_call_chain</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>dev<span class="token operator">-&gt;</span>bus<span class="token operator">-&gt;</span>p<span class="token operator">-&gt;</span>bus_notifier<span class="token punctuation">,</span>
+					     BUS_NOTIFY_DRIVER_NOT_BOUND<span class="token punctuation">,</span> dev<span class="token punctuation">)</span><span class="token punctuation">;</span>
+pinctrl_bind_failed<span class="token operator">:</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	ret <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+done<span class="token operator">:</span>
+	<span class="token function">atomic_dec</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>probe_count<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token function">wake_up</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>probe_waitqueue<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">return</span> ret<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2><a id="3_busdevicedriver_267"></a>3. bus、device、driver加载顺序</h2> 
+<h3><a id="31__268"></a>3.1. 加载方式</h3> 
+<hr> 
+<p><strong>bus加载方式</strong></p> 
+<p>以SPI总线为例（drivers/spi/spi.c），初始化函数加载调用统一使用<code>postcore_initcall()</code>将总线的初始化接口<code>spi_init()</code>添加到内核的启动序列中，跟踪一下该函数：</p> 
+<pre><code class="prism language-c"><span class="token function">postcore_initcall</span><span class="token punctuation">(</span>spi_init<span class="token punctuation">)</span>	<span class="token comment">// drivers/spi/spi.c</span>
+<span class="token operator">-&gt;</span> #define <span class="token function">postcore_initcall</span><span class="token punctuation">(</span>fn<span class="token punctuation">)</span> <span class="token function">__define_initcall</span><span class="token punctuation">(</span>fn<span class="token punctuation">,</span> <span class="token number">2</span><span class="token punctuation">)</span>	<span class="token comment">// include/linux/init.h</span>
+</code></pre> 
+<hr> 
+<p><strong>driver加载方式——动态加载、静态加载</strong></p> 
+<p>驱动加载有两种方式：</p> 
+<ul><li>静态加载：驱动随着linux内核的启动自动加载</li><li>动态加载：linux系统启动后，使用insmod命令加载</li></ul> 
+<p>本节讨论的加载顺序为linux系统启动过程中的加载顺序，因此只考虑静态加载的情况。</p> 
+<p>驱动静态加载方式与总线类似，也是调用了统一的接口将驱动的初始化函数添加到内核的启动序列中。以基于SPI总线的驱动rtc-pcf2123（drivers/rtc/rtc-pcf2123.c）为例，驱动加载使用的统一接口为<code>module_init()</code>。下面代码可以示意驱动如何调用该函数，以及该函数如何将驱动初始化接口添加到内核启动序列中。</p> 
+<pre><code class="prism language-c"><span class="token function">module_spi_driver</span><span class="token punctuation">(</span>pcf2123_driver<span class="token punctuation">)</span>	<span class="token comment">// drivers/rtc/rtc-pcf2123.c</span>
+
+<span class="token operator">-&gt;</span> #define <span class="token function">module_spi_driver</span><span class="token punctuation">(</span>__spi_driver<span class="token punctuation">)</span> \	<span class="token comment">// include/linux/spi/spi.h</span>
+	       <span class="token function">module_driver</span><span class="token punctuation">(</span>__spi_driver<span class="token punctuation">,</span> spi_register_driver<span class="token punctuation">,</span> \
+			             spi_unregister_driver<span class="token punctuation">)</span>
+
+   <span class="token operator">-&gt;</span> #define <span class="token function">module_driver</span><span class="token punctuation">(</span>__driver<span class="token punctuation">,</span> __register<span class="token punctuation">,</span> __unregister<span class="token punctuation">,</span> <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">)</span> \	<span class="token comment">//include/linux/device.h</span>
+	  <span class="token keyword">static</span> <span class="token keyword">int</span> __init __driver##<span class="token function">_init</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span> \	<span class="token comment">// 对rtc-pcf2123驱动，这里定义了初始化函数pcf2123_driver_init()</span>
+	  <span class="token punctuation">{<!-- --></span> \
+		  <span class="token keyword">return</span> <span class="token function">__register</span><span class="token punctuation">(</span><span class="token operator">&amp;</span><span class="token punctuation">(</span>__driver<span class="token punctuation">)</span> <span class="token punctuation">,</span> ##__VA_ARGS__<span class="token punctuation">)</span><span class="token punctuation">;</span> \	<span class="token comment">// 对rtc-pcf2123驱动，这里调用了接口spi_register_driver(&amp;(pcf2123_driver))</span>
+	  <span class="token punctuation">}</span> \
+	  <span class="token function">module_init</span><span class="token punctuation">(</span>__driver##_init<span class="token punctuation">)</span><span class="token punctuation">;</span> \	
+	  <span class="token keyword">static</span> <span class="token keyword">void</span> __exit __driver##<span class="token function">_exit</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span> \
+	  <span class="token punctuation">{<!-- --></span> \
+		  <span class="token function">__unregister</span><span class="token punctuation">(</span><span class="token operator">&amp;</span><span class="token punctuation">(</span>__driver<span class="token punctuation">)</span> <span class="token punctuation">,</span> ##__VA_ARGS__<span class="token punctuation">)</span><span class="token punctuation">;</span> \
+	  <span class="token punctuation">}</span> \
+	  <span class="token function">module_exit</span><span class="token punctuation">(</span>__driver##_exit<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+      <span class="token operator">-&gt;</span> #define <span class="token function">module_init</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span>	<span class="token function">__initcall</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">;</span>	<span class="token comment">// include/linux/module.h</span>
+      
+         <span class="token operator">-&gt;</span> #define <span class="token function">__initcall</span><span class="token punctuation">(</span>fn<span class="token punctuation">)</span> <span class="token function">device_initcall</span><span class="token punctuation">(</span>fn<span class="token punctuation">)</span>	<span class="token comment">// include/linux/init.h</span>
+           
+            <span class="token operator">-&gt;</span> #define <span class="token function">device_initcall</span><span class="token punctuation">(</span>fn<span class="token punctuation">)</span> <span class="token function">__define_initcall</span><span class="token punctuation">(</span>fn<span class="token punctuation">,</span> <span class="token number">6</span><span class="token punctuation">)</span>	<span class="token comment">// include/linux/init.h         </span>
+</code></pre> 
+<hr> 
+<p><strong>device加载方式——platform</strong></p> 
+<p>linux内核使用devicetree描述具体硬件平台的设备参数，platform平台通过调用接口<code>of_platform_default_populate_init()</code>，将devicetree中的设备节点转换为内核可识别的platform设备数据结构platform_device，该结构中包含device结构。<br> linux内核启动后，调用<code>arch_initcall_sync()</code>接口将<code>of_platform_default_populate_init()</code>添加到启动序列中。跟踪该函数：</p> 
+<pre><code class="prism language-c"><span class="token function">arch_initcall_sync</span><span class="token punctuation">(</span>of_platform_default_populate_init<span class="token punctuation">)</span>	<span class="token comment">// drivers/of/platform.c</span>
+<span class="token operator">-&gt;</span> #define <span class="token function">arch_initcall_sync</span><span class="token punctuation">(</span>fn<span class="token punctuation">)</span> <span class="token function">__define_initcall</span><span class="token punctuation">(</span>fn<span class="token punctuation">,</span> <span class="token number">3</span>s<span class="token punctuation">)</span>	<span class="token comment">// include/linux/init.h</span>
+</code></pre> 
+<h3><a id="32__323"></a>3.2. 加载顺序</h3> 
+<p>从bus、device、driver的加载方式可以看到，三者的初始化都调用了相同的接口<code>__define_initcall(fn, id)</code>，函数定义及功能说明如下：</p> 
+<pre><code class="prism language-c"><span class="token comment">//	include/linux/init.h</span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name function">__define_initcall</span><span class="token expression"><span class="token punctuation">(</span>fn<span class="token punctuation">,</span> id<span class="token punctuation">)</span> \	</span></span>
+        <span class="token keyword">static</span> <span class="token class-name">initcall_t</span> __initcall_##fn##id __used \	
+		<span class="token keyword">__attribute__</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token function">__section__</span><span class="token punctuation">(</span><span class="token string">".initcall"</span> #id <span class="token string">".init"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">=</span> fn<span class="token punctuation">;</span>	
+<span class="token comment">/*************************/</span>
+<span class="token comment">// 功能说明</span>
+<span class="token comment">// 1. 定义名为__initcall_##fn##id的函数指针，指向fn函数</span>
+<span class="token comment">// 2. 将该函数指针存放在.initcall#id.init段中</span>
+<span class="token comment">// 3. .initcall#id.init段在内核初始化的过程中会被调用。</span>
+<span class="token comment">//    其中，id越小的.initcall#id.init段内的接口越早被调用</span>
+</code></pre> 
+<p>对该接口有兴趣，可以参照<strong>Reference2</strong>的详细说明。</p> 
+<p>由于bus、device、driver的id分别为2、3s、6，因此，<strong>初始化的顺序依次为：bus、device、driver</strong>。</p> 
+<h2><a id="4_devicedriver_341"></a>4. device、driver匹配流程</h2> 
+<p>此节主要想讨论device和driver是如何找到可以匹配的彼此。因此，分别从driver和device两个方向，简述从初始化到调用<code>probe()</code>完成driver与device的匹配的过程。<br> 首先做个说明，从后续描述将会看到，<strong>driver和device都挂载在总线上，因此二者向找到相互匹配的彼此，都需要通过bus这一媒介</strong>。</p> 
+<h3><a id="41_driver_344"></a>4.1. 加载driver</h3> 
+<p>driver还是以rtc-pcf2123驱动为例，从驱动的初始化函数<code>pcf2123_driver_init()</code>开始，调用流程如下：</p> 
+<pre><code class="prism language-c"><span class="token function">pcf2123_driver_init</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	
+<span class="token operator">-&gt;</span> <span class="token function">spi_register_driver</span><span class="token punctuation">(</span><span class="token operator">&amp;</span><span class="token punctuation">(</span>pcf2123_driver<span class="token punctuation">)</span><span class="token punctuation">)</span>	<span class="token comment">// 前两步参照3.2节的代码说明吧</span>
+   <span class="token operator">-&gt;</span> <span class="token function">__spi_register_driver</span><span class="token punctuation">(</span>THIS_MODULE<span class="token punctuation">,</span> <span class="token operator">&amp;</span><span class="token punctuation">(</span>pcf2123_driver<span class="token punctuation">)</span><span class="token punctuation">)</span>	<span class="token comment">// include/linux/spi/spi.h</span>
+      <span class="token operator">-&gt;</span> <span class="token function">driver_register</span><span class="token punctuation">(</span><span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pcf2123_driver<span class="token punctuation">)</span><span class="token operator">-&gt;</span>driver<span class="token punctuation">)</span>	<span class="token comment">// include/linux/spi/spi.c</span>
+         <span class="token operator">-&gt;</span> <span class="token function">bus_add_driver</span><span class="token punctuation">(</span><span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pcf2123_driver<span class="token punctuation">)</span><span class="token operator">-&gt;</span>driver<span class="token punctuation">)</span>	<span class="token comment">// drivers/base/driver.c</span>
+         												<span class="token comment">// 重要地bus媒介在这里</span>
+            <span class="token operator">-&gt;</span> <span class="token function">driver_attach</span><span class="token punctuation">(</span><span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pcf2123_driver<span class="token punctuation">)</span><span class="token operator">-&gt;</span>driver<span class="token punctuation">)</span>	<span class="token comment">// drivers/base/bus.c</span>
+               <span class="token operator">-&gt;</span>  <span class="token function">__driver_attach</span><span class="token punctuation">(</span>dev<span class="token punctuation">,</span> <span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pcf2123_driver<span class="token punctuation">)</span><span class="token operator">-&gt;</span>driver<span class="token punctuation">)</span>	<span class="token comment">// drivers/base/dd.c</span>
+                                                                    <span class="token comment">// 该函数被循环调用，将&amp;(&amp;pcf2123_driver)-&gt;driver驱动</span>
+                                                                    <span class="token comment">// 依次与spi总线上已挂载的每个设备dev进行匹配</span>
+                  <span class="token operator">-&gt;</span> <span class="token function">driver_probe_device</span><span class="token punctuation">(</span><span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pcf2123_driver<span class="token punctuation">)</span><span class="token operator">-&gt;</span>driver<span class="token punctuation">,</span> dev<span class="token punctuation">)</span>	<span class="token comment">// drivers/base/dd.c</span>
+                     <span class="token operator">-&gt;</span> <span class="token function">really_probe</span><span class="token punctuation">(</span>dev<span class="token punctuation">,</span> <span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pcf2123_driver<span class="token punctuation">)</span><span class="token operator">-&gt;</span>driver<span class="token punctuation">)</span>	<span class="token comment">// drivers/base/dd.c</span>
+                     													<span class="token comment">// 可以参照2.2节中的接口说明</span>
+<span class="token comment">/***************************/</span>
+<span class="token comment">// 到此，该驱动完成初始化；且若总线上已经挂在了可匹配的设备，则完成匹配</span>
+</code></pre> 
+<h3><a id="42_device_364"></a>4.2. 加载device</h3> 
+<p>由于积累有限，还无法完全理解platform平台。因此，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         草率地将 
+        
+       
+         l 
+        
+       
+         i 
+        
+       
+         n 
+        
+       
+         u 
+        
+       
+         x 
+        
+       
+         设备分为两 
+        
+        
+        
+          种 
+         
+        
+          H 
+         
+        
+       
+      
+        草率地将linux设备分为两种^H 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8413em;"></span><span class="mord cjk_fallback">草率地将</span><span class="mord mathnormal" style="margin-right: 0.0197em;">l</span><span class="mord mathnormal">in</span><span class="mord mathnormal">ux</span><span class="mord cjk_fallback">设备分为两</span><span class="mord"><span class="mord cjk_fallback">种</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8413em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0813em;">H</span></span></span></span></span></span></span></span></span></span></span></span><font color="#0000ff">（命名只是为了区分我的这两种分类，非官方命名）</font>：</p> 
+<ul><li><strong>总线设备</strong>：挂载与SPI、I2C等总线的设备</li><li><strong>platform设备</strong>：挂载与platform总线的设备</li></ul> 
+<p>两种设备初始化使用不同的处理流程，但是最终都会调用同一个接口<code>device_add()</code>，下面先介绍两种设备从初始化到<code>device_add()</code>接口的调用流程。</p> 
+<hr> 
+<p><strong>总线设备<code>device_add()</code>前流程</strong></p> 
+<p>以I2C设备为例，设备初始化从接口<code>i2c_new_device()</code>开始，接口调用流程如下：</p> 
+<pre><code class="prism language-c"><span class="token function">i2c_new_device</span><span class="token punctuation">(</span>i2c_adapter <span class="token operator">*</span>adap<span class="token punctuation">)</span>	<span class="token comment">// drivers/i2c/i2c-core.c</span>
+<span class="token operator">-&gt;</span> <span class="token function">device_register</span><span class="token punctuation">(</span><span class="token keyword">struct</span> <span class="token class-name">device</span> <span class="token operator">*</span>dev<span class="token punctuation">)</span>	<span class="token comment">// drivers/base/core.c</span>
+   <span class="token operator">-&gt;</span> <span class="token function">device_add</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span>	<span class="token comment">// drivers/base/core.c</span>
+</code></pre> 
+<hr> 
+<p><strong>platform设备<code>device_add()</code>前流程</strong></p> 
+<p>platform设备就从初始化设备树节点的<code>of_platform_default_populate_init()</code>开始，接口调用流程如下：</p> 
+<pre><code class="prism language-c"><span class="token function">of_platform_default_populate_init</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment">// drivers/of/platform.c</span>
+<span class="token operator">-&gt;</span> <span class="token function">of_platform_default_populate</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment">// drivers/of/platform.c</span>
+   <span class="token operator">-&gt;</span> <span class="token function">of_platform_populate</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment">// drivers/of/platform.c</span>
+      <span class="token operator">-&gt;</span> <span class="token function">of_platform_bus_create</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment">// drivers/of/platform.c</span>
+                                    <span class="token comment">// 遍历devicetree的设备节点，每个节点调用一次该函数</span>
+                                    <span class="token comment">// 函数为自己及其children创建platform设备</span>
+         <span class="token operator">-&gt;</span> <span class="token function">of_platform_device_create_pdata</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment">// drivers/of/platform.c</span>
+            <span class="token operator">-&gt;</span> <span class="token function">of_device_add</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment">// drivers/of/device.c</span>
+               <span class="token operator">-&gt;</span> <span class="token function">device_add</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment">// drivers/base/core.c</span>
+                  <span class="token operator">-&gt;</span> <span class="token function">bus_add_device</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token comment">// drivers/base/bus.c</span>
+                                      <span class="token comment">// 完成设备向bus的添加</span>
+</code></pre> 
+<hr> 
+<p><strong>device与driver的匹配</strong></p> 
+<p>上节<code>device_add()</code>调用<code>bus_add_device()</code>将设备添加到了bus的设备列表中。继续调用<code>bus_probe_device()</code>,已完成deice与driver的绑定。具体流程如下，设备从调用<code>device_add()</code>到<code>probe()</code>接口完成device与driver的匹配。</p> 
+<pre><code class="prism language-c"><span class="token function">device_add</span><span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment">// drivers/base/core.c</span>
+<span class="token operator">-&gt;</span> <span class="token function">bus_probe_device</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span>	<span class="token comment">// drivers/base/bus.c</span>
+      						<span class="token comment">// 重要的bus媒介出现了</span>
+   <span class="token operator">-&gt;</span> <span class="token function">device_initial_probe</span><span class="token punctuation">(</span>dev<span class="token punctuation">)</span>	<span class="token comment">// drivers/base/bus.c</span>
+                                <span class="token comment">// 说句实话，这里没有经过运行验证，感觉应该走这个函数对应的分支</span>
+      <span class="token operator">-&gt;</span> <span class="token function">__device_attach</span><span class="token punctuation">(</span>dev<span class="token punctuation">,</span> true<span class="token punctuation">)</span>	<span class="token comment">// drivers/base/dd.c</span>
+          <span class="token operator">-&gt;</span> <span class="token function">driver_probe_device</span><span class="token punctuation">(</span>drv<span class="token punctuation">,</span> dev<span class="token punctuation">)</span>	<span class="token comment">// drivers/base/dd.c</span>
+             <span class="token operator">-&gt;</span> <span class="token function">really_probe</span><span class="token punctuation">(</span>dev<span class="token punctuation">,</span> drv<span class="token punctuation">)</span>	<span class="token comment">// drivers/base/dd.c</span>
+                     					<span class="token comment">// 可以参照2.2节中的接口说明</span>
+<span class="token comment">/***************************/</span>
+<span class="token comment">// 到此，该设备完成初始化；且若总线上已经挂载了可匹配的驱动，则完成匹配</span>
+</code></pre> 
+<h2><a id="5_Reference_417"></a>5. Reference</h2> 
+<ol><li><a href="https://blog.csdn.net/heli200482128/article/details/126956166?csdn_share_tail=%7B%22type%22:%22blog%22,%22rType%22:%22article%22,%22rId%22:%22126956166%22,%22source%22:%22heli200482128%22%7D">《学习笔记——《LINUX设备驱动程序（第三版）》Linux设备模型：内核添加、删除设备、驱动程序》</a></li><li><a href="https://blog.csdn.net/weixin_37571125/article/details/78665184">module_init机制的理解</a></li><li><a href="https://blog.csdn.net/huanting_123/article/details/90342535">内核对设备树的处理（四）__device_node转换为platform_device</a></li></ol>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/b80ea5b205d605050e963d6a81506659/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Java—动态规划之背包问题DP</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/41e69a792a3335f883da7c95bc704cde/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">SQL获取查询结果的总条数，记录以后用到的SQL函数</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

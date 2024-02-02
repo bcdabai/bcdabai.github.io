@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>nodejs&#43;wasm&#43;rust debug及性能分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="nodejs&#43;wasm&#43;rust debug及性能分析" />
+<meta property="og:description" content="文章目录 背景v8引擎自带的profilelinux的perf采集wasm三方库性能分析编译debug版本wasmrust程序debug调试异常模型正常模型结论优化 参考
+Node使用火焰图优化CPU爆涨 - 掘金
+【Node.js丨主题周】理解perf 与火焰图-腾讯云开发者社区-腾讯云
+Easy profiling for Node.js Applications | Node.js
+Diagnostics - Flame Graphs | Node.js
+perf性能分析工具使用分享
+背景 一个node服务在处理模型的时候，发现超时了，并且超过了3分钟的上限触发了报警。行吧，一般来说十几秒足够处理了，初步定位是mikktspace-wasm库的性能问题。
+wasm正逐渐走进我们的程序生活，不少计算库都在用高性能语言重写，并通过wasm作为第三方包提供能力。例如博主最近用到的渲染相关的计算包，基本都是用c&#43;&#43;和rust实现的，然后web端直接调用wasm即可。
+写这篇博客呢，是因为博主一开始只是定位到三方库有问题就暂停了，毕竟是做后端的，也是存在一定的认知障碍吧，对不熟的东西也存在敬畏之心。然而根因不找到实在是难受，一路debug和性能分析下来，回头看看也没那么难。希望以后遇到类似的问题也可以乘风破浪，一路追下去，技术都是相通的，不应该存在壁垒。
+v8引擎自带的profile 1、运行程序并采集 node --prof index.js xxx v8会自动采集，并生成isolate-xxx文件 2、生成txt node --prof-process isolate-xxx &gt; processed.txt vim直接打开，就可以查看采集的结果。采集结果分析参考以上链接。 3、查看火焰图 npm install -g flamebearer node --prof-process --preprocess -j isolate-xxx | flamebearer 安装flamebearer，并执行上面的命令，会自动打开浏览器，查看生成的火焰图。 注意
+运行node程序需要带两个参数：
+–perf-basic-prof
+通过--perf-basic-prof或 --perf-basic-prof-only-functions我们都可以启动支持 perf_events 的Node.js 应用程序。 --perf-basic-prof-only-functions产生较少的输出，因此它是开销最小的选项。 生成的文件在/tmp/perf-PID.map –interpreted-frames-native-stack
+Node.js 8.x 及更高版本对 V8 引擎中的 JavaScript 编译管道进行了新的优化，这有时会导致 性能无法访问函数名称/引用。使用以上参数可以解决。 linux的perf采集 1、perf采集 perf record -F 99 -g -- node --perf-basic-prof-only-functions index." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/b7293fd64a6e1903cea2d8826789387d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-10-23T22:44:59+08:00" />
+<meta property="article:modified_time" content="2023-10-23T22:44:59+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">nodejs&#43;wasm&#43;rust debug及性能分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><ul><li><a href="#_9" rel="nofollow">背景</a></li><li><a href="#v8profile_17" rel="nofollow">v8引擎自带的profile</a></li><li><a href="#linuxperf_54" rel="nofollow">linux的perf采集</a></li><li><a href="#wasm_92" rel="nofollow">wasm三方库性能分析</a></li><li><ul><li><a href="#debugwasm_95" rel="nofollow">编译debug版本wasm</a></li><li><a href="#rustdebug_168" rel="nofollow">rust程序debug调试</a></li><li><ul><li><a href="#_192" rel="nofollow">异常模型</a></li><li><a href="#_203" rel="nofollow">正常模型</a></li><li><a href="#_215" rel="nofollow">结论</a></li><li><a href="#_223" rel="nofollow">优化</a></li></ul> 
+   </li></ul> 
+  </li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<p><strong>参考</strong><br> <a href="https://juejin.cn/post/6844903904728236045" rel="nofollow">Node使用火焰图优化CPU爆涨 - 掘金</a><br> <a href="https://cloud.tencent.com/developer/article/1643705" rel="nofollow">【Node.js丨主题周】理解perf 与火焰图-腾讯云开发者社区-腾讯云</a><br> <a href="https://nodejs.org/en/docs/guides/simple-profiling" rel="nofollow">Easy profiling for Node.js Applications | Node.js</a><br> <a href="https://nodejs.org/en/docs/guides/diagnostics-flamegraph" rel="nofollow">Diagnostics - Flame Graphs | Node.js</a><br> <a href="https://zhuanlan.zhihu.com/p/498100484" rel="nofollow">perf性能分析工具使用分享</a></p> 
+<h3><a id="_9"></a>背景</h3> 
+<p>一个node服务在处理模型的时候，发现超时了，并且超过了3分钟的上限触发了报警。行吧，一般来说十几秒足够处理了，初步定位是mikktspace-wasm库的性能问题。</p> 
+<p>wasm正逐渐走进我们的程序生活，不少计算库都在用高性能语言重写，并通过wasm作为第三方包提供能力。例如博主最近用到的渲染相关的计算包，基本都是用c++和rust实现的，然后web端直接调用wasm即可。</p> 
+<p>写这篇博客呢，是因为博主一开始只是定位到三方库有问题就暂停了，毕竟是做后端的，也是存在一定的认知障碍吧，对不熟的东西也存在敬畏之心。然而根因不找到实在是难受，一路debug和性能分析下来，回头看看也没那么难。希望以后遇到类似的问题也可以乘风破浪，一路追下去，技术都是相通的，不应该存在壁垒。</p> 
+<h3><a id="v8profile_17"></a>v8引擎自带的profile</h3> 
+<pre><code>1、运行程序并采集
+node --prof index.js xxx
+v8会自动采集，并生成isolate-xxx文件
+2、生成txt
+node --prof-process isolate-xxx &gt; processed.txt
+vim直接打开，就可以查看采集的结果。采集结果分析参考以上链接。
+3、查看火焰图
+
+npm install -g flamebearer
+node --prof-process --preprocess -j isolate-xxx | flamebearer
+
+安装flamebearer，并执行上面的命令，会自动打开浏览器，查看生成的火焰图。
+
+</code></pre> 
+<p><img src="https://images2.imgbox.com/01/2f/XmDsaQdH_o.png" alt="image.png"></p> 
+<p>注意<br> 运行node程序需要带两个参数：<br> –perf-basic-prof</p> 
+<pre><code>
+通过--perf-basic-prof或 --perf-basic-prof-only-functions我们都可以启动支持
+perf_events 的Node.js 应用程序。
+--perf-basic-prof-only-functions产生较少的输出，因此它是开销最小的选项。
+生成的文件在/tmp/perf-PID.map
+</code></pre> 
+<p>–interpreted-frames-native-stack</p> 
+<pre><code>Node.js 8.x 及更高版本对 V8 引擎中的 JavaScript 编译管道进行了新的优化，这有时会导致
+性能无法访问函数名称/引用。使用以上参数可以解决。
+</code></pre> 
+<h3><a id="linuxperf_54"></a>linux的perf采集</h3> 
+<pre><code>1、perf采集
+perf record -F 99 -g -- node --perf-basic-prof-only-functions index.js
+
+会在本地目录生成perf.data文件。
+
+2、生成火焰图
+perf script | /home/xxx/FlameGraph/stackcollapse-perf.pl | /home/xxx/FlameGraph/flamegraph.pl &gt; perf.svg
+
+下载FlameGraph项目，然后使用该项目提供的脚本生成火焰图即可。
+
+3、浏览器打开
+python -m http.server 8000
+浏览器访问ip:8000/perf.svg即可
+
+4、运行的时候查看cpu占用
+perf top -p pid
+</code></pre> 
+<p>使用js的三方库生成火焰图</p> 
+<pre><code>1、采集perf （同上）
+2、安装stackvis库
+npm install -g stackvis
+
+3、script解析perf.data
+perf script &gt; perf.out
+
+4、生成火焰图的html
+stackvis perf &lt; perfs.out &gt; flamegrap.htm
+
+5、浏览器查看（同上）
+</code></pre> 
+<p><img src="https://images2.imgbox.com/e3/4d/1wkHYulX_o.png" alt="image.png"></p> 
+<h3><a id="wasm_92"></a>wasm三方库性能分析</h3> 
+<p>如上所示，有些库使用wasm，导致只能看到库函数占用了97%的cpu，但是却看不到细节。针对这种情况可以考虑编译对应第三方库版本的debug版wasm文件，替换一下，重新采样。</p> 
+<h4><a id="debugwasm_95"></a>编译debug版本wasm</h4> 
+<p>例如：<a href="https://github.com/donmccurdy/mikktspace-wasm">https://github.com/donmccurdy/mikktspace-wasm</a> 这个库，是用rust编译成wasm的<br> （1）安装rust环境<br> <a href="https://developer.mozilla.org/zh-CN/docs/WebAssembly/Rust_to_Wasm" rel="nofollow">https://developer.mozilla.org/zh-CN/docs/WebAssembly/Rust_to_Wasm</a><br> （2）编译debug版本</p> 
+<pre><code>1、编译target为nodejs，对应commonjs标准
+~/.cargo/bin/wasm-pack build --dev --target nodejs -d ./pkg/main --out-name mikktspace_main
+
+解释：
+	--dev: 编译debug版本
+	-d : 指定输入结果目录，设置为pkg/main
+	--out-name: 指定生成的文件名前缀，wasm文件会自动加上_bg.wasm后缀
+
+2、编译target为bundler，对应打包工具的导入标准
+~/.cargo/bin/wasm-pack build --dev -d ./pkg/bundler --out-name mikktspace_module
+
+3、查看编译的wasm是否是debug的
+	（1）安装wabt
+  	sudo pacman -Si wabt
+  	wabt自带的有wasm-objdump，可以查看wasm的头信息
+   (2)wasm-objdump -h mikktspace_main_bg.wasm
+
+mikktspace_main_bg.wasm:        file format wasm 0x1
+
+Sections:
+
+     Type start=0x0000000e end=0x000000fa (size=0x000000ec) count: 35
+   Import start=0x00000100 end=0x00000268 (size=0x00000168) count: 7
+ Function start=0x0000026e end=0x00000542 (size=0x000002d4) count: 722
+    Table start=0x00000548 end=0x0000054d (size=0x00000005) count: 1
+   Memory start=0x00000553 end=0x00000556 (size=0x00000003) count: 1
+   Global start=0x0000055c end=0x00000565 (size=0x00000009) count: 1
+   Export start=0x0000056b end=0x000005fb (size=0x00000090) count: 7
+     Elem start=0x00000601 end=0x00000663 (size=0x00000062) count: 1
+     Code start=0x00000669 end=0x00048a07 (size=0x0004839e) count: 722
+     Data start=0x00048a0d end=0x0004d858 (size=0x00004e4b) count: 1
+   Custom start=0x0004d85e end=0x0005b3f4 (size=0x0000db96) "name"
+   Custom start=0x0005b3fa end=0x0005b475 (size=0x0000007b) "producers"
+   Custom start=0x0005b47b end=0x0005b4a7 (size=0x0000002c) "target_features"
+
+可以看到没有debuginfo信息。
+
+4、配置cargo.toml
+参考：https://rustwasm.github.io/docs/wasm-pack/cargo-toml-configuration.html
+
+[package.metadata.wasm-pack.profile.dev.wasm-bindgen]
+dwarf-debug-info = false
+
+5、重新编译并查看
+Custom start=0x00062694 end=0x0014bc2d (size=0x000e9599) ".debug_info"
+
+多了一些debuginfo信息。
+
+</code></pre> 
+<p>（3）替换node_moudles中的mikktspace/dist下的main和module目录<br> （4）重新perf采集数据，生成svg<br> <img src="https://images2.imgbox.com/5f/93/hZOK6cwr_o.png" alt="image.png"><br> 成功采集到mikktspace这个库的调用栈以及cpu耗时。</p> 
+<p>（5）对比正常和异常情况下的火焰图</p> 
+<p>正常<br> <img src="https://images2.imgbox.com/44/4d/G1BhmyqB_o.png" alt="image.png"><br> 相比上面的火焰图，可以发现正常的火焰图：</p> 
+<ol><li>cpu耗时分布较合理</li><li>无长时间耗时函数分布</li><li>异常火焰图耗时较久的函数DegenEpilogue在正常火焰图中并没有。</li></ol> 
+<p>因此重点看下DegenEpilogue函数即可。</p> 
+<h4><a id="rustdebug_168"></a>rust程序debug调试</h4> 
+<p>参考：<a href="https://github.com/fucking-translation/blog/blob/main/src/lang/rust/14-%E4%BD%BF%E7%94%A8GDB%E8%B0%83%E8%AF%95Rust%E5%BA%94%E7%94%A8.md">https://github.com/fucking-translation/blog/blob/main/src/lang/rust/14-%E4%BD%BF%E7%94%A8GDB%E8%B0%83%E8%AF%95Rust%E5%BA%94%E7%94%A8.md</a></p> 
+<pre><code>1、编译debug版本
+cargo默认编译出来的就是debug版本。指定编程生成的程序名为debug
+cargo build --example debug
+
+2、rust-gdb调试
+rust-gdb调试指令和gdb一样。
+(1) 进入gdb
+rust-gdb debug
+(2) 设置断点
+b xxx.rs:10
+
+(3) 开启可视化
+layout src
+如果页面乱了，ctrl+l 可以恢复代码页面
+
+(4) 调试
+n : 下一步
+s : 进入函数内部
+c: 运行到下一个断点
+</code></pre> 
+<h5><a id="_192"></a>异常模型</h5> 
+<p>1、generateTspace部分，iNrActiveGroup = 19w,循环19w次，速度较快，10s执行完整个函数。<br> 2、运行到DegenEpilogue， iNrTrianglesIn = 24w，<br> while t &lt; iTotTris {} 这个循环耗时90s</p> 
+<pre><code>// iDegenTriangles = 32412
+// iDegenTriangles代表不合法的三角形面
+iNrTrianglesIn = iTotTris - iDegenTriangles;
+</code></pre> 
+<p>while t &lt; iNrTrianglesIn {} 不耗时</p> 
+<h5><a id="_203"></a>正常模型</h5> 
+<p>1、generateTspace部分，iNrActiveGroup = 172w,16s运行完整个函数<br> 2、运行到DegenEpilogue， iNrTrianglesIn = 58w<br> while t &lt; iTotTris {} 这个循环没走<br> 原因是不符合whilet条件，t= iTotTris ,关键就在上一步传过来的iNrTrianglesIn和iTotTris</p> 
+<pre><code>// iDegenTriangles = 0
+// iDegenTriangles代表不合法的三角形面
+iNrTrianglesIn = iTotTris - iDegenTriangles;
+</code></pre> 
+<p>while t &lt; iNrTrianglesIn {} 不耗时</p> 
+<h5><a id="_215"></a>结论</h5> 
+<p>异常的模型中，不合法三角形的数量较多，需要通过DegenEpilogue函数进行辅助处理。正常的模型因为不合法三角形面数量较少，因此不需要进行DegenEpilogue函数处理。</p> 
+<p>mikktspace计算切面算法有多种语言实现，其中rust程序和c++程序对比来说，c++使用了二分来提升性能，rust和c程序均采用遍历的方式。可以考虑使用hash表减少循环层数或者二分提升查询性能。</p> 
+<p>mikktspace的c++库：<a href="https://github.com/naetherm/mikktspace">https://github.com/naetherm/mikktspace</a><br> mikktspace的c库：<a href="https://github.com/mmikk/MikkTSpace/blob/master/mikktspace.c">https://github.com/mmikk/MikkTSpace</a></p> 
+<h5><a id="_223"></a>优化</h5> 
+<p>rust程序中，存在双层循环如下：</p> 
+<pre><code>// iTotTris - t = 3w
+while t &lt; iTotTris {
+  // iNrTrianglesIn * 3 = 72w
+	while bNotFound &amp;&amp; j &lt; 3i32 * iNrTrianglesIn {
+
+  }
+}
+
+双层循环情况下，性能较差。内部的循环使用hash表代替，直接通过key去获取。优化后单次循环耗时从ms级
+优化到ns级。
+
+优化前耗时：90s
+优化后耗时：27ms
+</code></pre> 
+<p><strong>end</strong></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ca5cffb4584e012e2eb25b8a9b434742/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">学习笔记——在IDEA中如何上传git以及git分支的拉取和提交</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/16d020797f597d32ced13c50acfa9d5e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">APP个人隐私与漏洞检测系统：千里眼APPcheck</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

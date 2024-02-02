@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>YOLOv5网络结构模块（YOLOv5 5.0版本） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="YOLOv5网络结构模块（YOLOv5 5.0版本）" />
+<meta property="og:description" content="出于学习的目的，总结一下关于YOLOv5的一些知识点，也是我第一次写文章，如有错误，希望能够得到指导出来。
+先是YOLOv5的整体网络结构
+引用了(1条消息) yolov5网络结构学习_「已注销」的博客-CSDN博客_yolov5结构博客中的图片
+YOLOv5的网络结构主要分为三个部分：Backbone，Neck，Prediction。
+输入端：使用了马赛克数据增强的方法，在源码中的主要步骤有：首先YOLOv5是按照一个批次一个批次的送入网络模型进行训练，然后通过超参数可以选择是否打开马赛克数据增强。首先随机取一个生成后的马赛克增强图片的中心点，然后随机选择其他三张需要增强的图片的索引；通过一个for循环遍历图片的索引，然后在需要生成的马赛克大图上进行图片的“存放”，源码中从上到下的顺序是左上角，右上角，左下角，右下角（当前索引到的图片具体放在大图中的那个位置是通过计算得出的不是乱放的，并且还要通过计算得到小图中哪一部分放到大图中，因为有可能会出现越界的情况，此时就会截取小图的一部分放进去）；然后有一个重新计算标签位置的操作，因为现在重新生成了一个增强的大图，所以目标框标签的位置也要重新计算了，计算完成后就要进行标签位置的调整；接着还有一种情况，那就是增强后的大图中，有的小图目标框可能在大图外面，此时就需要重新调整这一部分的目标框，让它们重新放到大图中来；此时就得到了mosaic增强后的大图了；最后，还要对得到的这个大图进行随机旋转，平移，缩放，裁剪等传统的数据增强操作，此时就是最后得到的马赛克增强大图了。（源码中有mosaic和mosaic9两种增强方法）。在mosaic数据增强的代码下方，还有一个if not mosaic分支，这是为了当我们选择不使用马赛克增强的时候，模型会自动帮我们选择自带的数据增强操作（例如有：随即改变图片的色调，饱和度，亮度等）。这些大致就是输入端对图片主要进行的预处理操作了。注：马赛克数据增强是在输入一个批次一个批次的时候进行的，不是整体输入的时候进行的，它针对的是一个batch_size。马赛克数据增强对于小目标的检测有一定的帮助。
+backbone：backbone的主要作用就是用来提取目标的网络特征的（有一种说法是如果要修改网络结构尽量在neck特征融合层和输出头改，因为backbone训练的挺好的了）。下面分别记录backbone的主要网络模块。
+首先是Focus结构，这个模块不涉及深度学习的相关操作，就是简单的把图片分片了，并且是在原始图片上跳跃地进行分片（我认为这么做的好处是：卷积核进行卷积是按照一定的步长进行的，因此原图上相隔较远的地方就不能通过一个卷积核卷积到，通过这种跳跃式的分片连接，相当于在一定程度上增加了感受野），这个模块的作用：主要是为了提升模型的训练速度，对AP没有提高的作用。
+随后是CBL结构，通过图可以看出来，这个模块由三个模块组成，分别是Conv卷积，BN层，激活函数，图中采用的是leacky relu激活函数，v5 6.0版本采用了Silu激活函数。Conv目的是学习目标特征，BN层目的是防止过拟合，便于模型训练，激活函数是为了引入非线性因素，便于模型更好的进行目标对象的拟合。
+随后是CSP1_X结构（neck层中采用的是CSP2_X结构，6.0版本中全部统一替换成为了C3结构），其实CSP1_X和CSP2_X结构很类似，无非就是其中是否包含要给ResUnit结构罢了，ResUnit结果通过观察可以发现，它大致就是进行了前几层的特征和后几层特征的一个融合，这样可以防止一些特征在卷积过程中丢失。
+backbone中最后就是SPP结构了，通过图中可以看出，SPP结构就是把输入特征图分为了四个方向（三个方向使用了不同大小的池化核进行最大池化操作，另外一条路直接连接最终结果）。
+Neck：YOLOv5的Neck采用了FPN &#43; PAN的结构，如下图所示（同样是引用了上面的博主的图片）
+作用：FPN结构的走向是自顶向下进行的，PAN结构的走向是自底向上进行的。因此，FPN可以从上往下传递强语义特征，而PAN可以自底向上传递强定位信息，因此，这两个结构的结合，让模型在不同的层得到的参数进行聚合，得到了强语义信息和强定位信息。（注意在不同层的聚合过程中，要保证他们之间的特征大小一致）
+Prediction：YOLOv5采用的损失函数分为三个部分：
+（1）Bounding Box损失函数(box_loss)，YOLOv5在这一块采用的是CIOU|_LOSS作为目标框的回归损失，box loss用来表示目标框的大小和精确的位置。
+（2）分类损失(cls_loss)：计算预测框和对应的类别是否正确。这里采用的损失函数是BCEWithLogistsLoss损失。
+（3）置信度损失(obj_loss)：用来计算目标的置信度，这里采用的损失函数也是BCEWithLogistsLoss损失。置信度的作用：用来表示预测框的可信程度，取值范围0-1，值越大说明预测框中越可能存在目标。
+每一次训练输入网络一个batch_size大小的图片数据，通过64/batch_size次的前向传播训练累计得到的损失，利用这个得到的损失进行一次反向传播，进行梯度的更新。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/43f3ef03e5f9e251bd4b7ecbe55fbd03/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-11-01T00:10:35+08:00" />
+<meta property="article:modified_time" content="2022-11-01T00:10:35+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">YOLOv5网络结构模块（YOLOv5 5.0版本）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>出于学习的目的，总结一下关于YOLOv5的一些知识点，也是我第一次写文章，如有错误，希望能够得到指导出来。</p> 
+<p>先是YOLOv5的整体网络结构</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/a1/0f/R9YnGIEJ_o.png"></p> 
+<p>引用了<a href="https://blog.csdn.net/Sept_Oct/article/details/115863842" title="(1条消息) yolov5网络结构学习_「已注销」的博客-CSDN博客_yolov5结构">(1条消息) yolov5网络结构学习_「已注销」的博客-CSDN博客_yolov5结构</a>博客中的图片</p> 
+<p>       YOLOv5的网络结构主要分为三个部分：Backbone，Neck，Prediction。</p> 
+<p>       <strong>输入端：</strong>使用了马赛克数据增强的方法，在源码中的主要步骤有：首先YOLOv5是按照一个批次一个批次的送入网络模型进行训练，然后通过超参数可以选择是否打开马赛克数据增强。首先随机取一个生成后的马赛克增强图片的中心点，然后随机选择其他三张需要增强的图片的索引；通过一个for循环遍历图片的索引，然后在需要生成的马赛克大图上进行图片的“存放”，源码中从上到下的顺序是左上角，右上角，左下角，右下角（当前索引到的图片具体放在大图中的那个位置是通过计算得出的不是乱放的，并且还要通过计算得到小图中哪一部分放到大图中，因为有可能会出现越界的情况，此时就会截取小图的一部分放进去）；然后有一个重新计算标签位置的操作，因为现在重新生成了一个增强的大图，所以目标框标签的位置也要重新计算了，计算完成后就要进行标签位置的调整；接着还有一种情况，那就是增强后的大图中，有的小图目标框可能在大图外面，此时就需要重新调整这一部分的目标框，让它们重新放到大图中来；此时就得到了mosaic增强后的大图了；最后，还要对得到的这个大图进行随机旋转，平移，缩放，裁剪等传统的数据增强操作，此时就是最后得到的马赛克增强大图了。（源码中有mosaic和mosaic9两种增强方法）。在mosaic数据增强的代码下方，还有一个if not mosaic分支，这是为了当我们选择不使用马赛克增强的时候，模型会自动帮我们选择自带的数据增强操作（例如有：随即改变图片的色调，饱和度，亮度等）。这些大致就是输入端对图片主要进行的预处理操作了。注：马赛克数据增强是在输入一个批次一个批次的时候进行的，不是整体输入的时候进行的，它针对的是一个batch_size。马赛克数据增强对于小目标的检测有一定的帮助。</p> 
+<p>       <strong>backbone：</strong>backbone的主要作用就是用来提取目标的网络特征的（有一种说法是如果要修改网络结构尽量在neck特征融合层和输出头改，因为backbone训练的挺好的了）。下面分别记录backbone的主要网络模块。</p> 
+<p>       首先是<strong>Focus</strong>结构，这个模块不涉及深度学习的相关操作，就是简单的把图片分片了，并且是在原始图片上跳跃地进行分片（我认为这么做的好处是：卷积核进行卷积是按照一定的步长进行的，因此原图上相隔较远的地方就不能通过一个卷积核卷积到，通过这种跳跃式的分片连接，相当于在一定程度上增加了感受野），这个模块的作用：主要是为了提升模型的训练速度，对AP没有提高的作用。</p> 
+<p>        随后是<strong>CBL</strong>结构，通过图可以看出来，这个模块由三个模块组成，分别是Conv卷积，BN层，激活函数，图中采用的是leacky relu激活函数，v5 6.0版本采用了Silu激活函数。Conv目的是学习目标特征，BN层目的是防止过拟合，便于模型训练，激活函数是为了引入非线性因素，便于模型更好的进行目标对象的拟合。</p> 
+<p>        随后是<strong>CSP1_X</strong>结构（neck层中采用的是<strong>CSP2_X</strong>结构，6.0版本中全部统一替换成为了C3结构），其实<strong>CSP1_X</strong>和<strong>CSP2_X</strong>结构很类似，无非就是其中是否包含要给ResUnit结构罢了，ResUnit结果通过观察可以发现，它大致就是进行了前几层的特征和后几层特征的一个融合，这样可以防止一些特征在卷积过程中丢失。</p> 
+<p>        backbone中最后就是<strong>SPP</strong>结构了，通过图中可以看出，SPP结构就是把输入特征图分为了四个方向（三个方向使用了不同大小的池化核进行最大池化操作，另外一条路直接连接最终结果）。</p> 
+<p>       <strong> Neck</strong>：YOLOv5的Neck采用了FPN + PAN的结构，如下图所示（同样是引用了上面的博主的图片）</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/7e/97/Ml41mPuq_o.png"></p> 
+<p>         作用：FPN结构的走向是自顶向下进行的，PAN结构的走向是自底向上进行的。因此，FPN可以从上往下传递强语义特征，而PAN可以自底向上传递强定位信息，因此，这两个结构的结合，让模型在不同的层得到的参数进行聚合，得到了强语义信息和强定位信息。（注意在不同层的聚合过程中，要保证他们之间的特征大小一致）</p> 
+<p>        <strong>Prediction</strong>：YOLOv5采用的损失函数分为三个部分：</p> 
+<p>        （1）Bounding Box损失函数(box_loss)，YOLOv5在这一块采用的是CIOU|_LOSS作为目标框的回归损失，box loss用来表示目标框的大小和精确的位置。</p> 
+<p>        （2）分类损失(cls_loss)：计算预测框和对应的类别是否正确。这里采用的损失函数是BCEWithLogistsLoss损失。</p> 
+<p>        （3）置信度损失(obj_loss)：用来计算目标的置信度，这里采用的损失函数也是BCEWithLogistsLoss损失。置信度的作用：用来表示预测框的可信程度，取值范围0-1，值越大说明预测框中越可能存在目标。</p> 
+<p></p> 
+<p>每一次训练输入网络一个batch_size大小的图片数据，通过64/batch_size次的前向传播训练累计得到的损失，利用这个得到的损失进行一次反向传播，进行梯度的更新。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/c0cb5bc26fa35a2cda02ba4af9df495f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">day3.python基础中下</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b2f5eab0f500f4151789bc6c95586255/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">-bash: vim: command not found(快速解决)</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>ThreadLocal从变量副本的角度解决多线程并发安全问题 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="ThreadLocal从变量副本的角度解决多线程并发安全问题" />
+<meta property="og:description" content="ThreadLocal从变量副本的角度解决多线程并发安全问题 之前我们讲的高并发场景下的线程安全问题，可以使用Synchronized同步关键字、Lock手动加锁的方式去解决，什么轻量级锁、偏向锁、重量级锁、可重入锁等等，实际上本质都是控制线程，使得多个线程同步的去访问共享资源。之所以多线程存在线程安全问题，就是因为多个线程访问同一个共享资源导致的，多个线程之间属于竞争关系，很容易就会导致数据的不安全。
+我们说了加锁实际上保证了各个线程之间同步、有序的去访问共享资源，难道不加锁就没有办法解决多线程安全问题了吗？我们要抓主要矛盾，之所以存在并发安全问题，是因为共享资源只有一个，多线程会竞争获取共享资源，如果同一类共享资源有多个，或者说有多个副本给每一个线程使用呢？这样不就不用加锁了，每一个线程只需要存在自己的那个数据的副本即可，因此也就不存在资源竞争问题，也就保证了多线程下数据的安全。而ThreadLocal类就是给每个线程绑定了变量的本地副本，从而避免线程安全。
+接下来我们从源码来看看ThreadLocal类是如何给每一个线程保存变量的本地副本的。
+首先我们看看Thread线程类，线程类里面有一个ThreadLocalMap类型的成员变量threadLocals，用来存放当前线程的本地变量
+实际上ThreadLocal类有一个ThreadLocalMap内部类，这个内部类你可以认为是一个专门用来维护线程本地变量HashMap集合。
+ThreadLocalMap这个类的数据结构是一个Entry类型的数组，用来保存一个个的Entry节点，Entry节点封装了以ThreadLocal实例对象为key，Object对象为value的键值对，保存在ThreadLocalMap中。
+ThreadLocal类实际上是对ThreadLocalMap这个内部类的封装，本地变量值最终是存放在ThreadLocalMap中的，ThreadLocal类提供了set()、get()等其他方法，来操作ThreadLocalMap中保存的数据。
+ThreadLocal调用set()方法保存本地变量时，首先获取到当前线程，然后调用getMap()方法得到当前线程的ThreadLocalMap，底层实际上是调用ThreadLocalMap的set()方法向这个Map集合中保存数据的
+当第一次调用set()方法时，会先调用createMap()方法创建出ThreadLocalMap对象，因此是懒加载的
+接着会使用构造方法创建出ThreadLocalMap对象
+我们之前说过ThreadLocalMap是一个HashMap集合，因此也有初始容量、加载因子、阈值、散列函数、hashcode值。
+ThreadLocalMap的初始容量默认为16，阈值为容量的2/3，利用ThreadLocal的hashcode值，对容量进行取模运算，计算出Entry数组中对应的索引位置。
+如果ThreadLocalMap之前已经创建出来了，就会调用set()方法向ThreadLocalMap中添加元素。根据hashcode值计算出数组中对应的索引位置，然后遍历这个map所有的Entry，如果key存在了就进行替换，没有的话就将键值对保存到ThreadLocalMap中。同时在遍历的过程中发现key为null，就会清除掉这个数据，并将新的数据存放到这个索引位置。这主要是释放了内存空间，防止内存泄漏。
+如果既没有发生替换，也没有发生可以清除掉的key，那么就会创建一个Entry，保存到计算出的对应的索引位置。
+我们说过ThreadLocalMap初始容量默认为16，阈值默认为容量的2/3。在向map中添加完数据时，最后还会进行一次清理工作，如果清理后发现当前map的大小还是大于等于阈值，就会触发扩容机制
+ThreadLocalMap扩容机制和HashMap差不多，也是扩容为原来的2倍，然后进行扩容后在再散列，并设置新的阈值。
+讲完了set()方法再来讲一讲get()方法。
+get()方法首先获取到当前线程，然后调用getMap()方法得到当前线程对应的ThreadLocalMap。如果这个map不为null，就根据key得到对应Entry，并返回对应的value值。
+如果map为null，比如在第一次调用get()方法，这个map可能还没创建出来。此时会调用setInitialValue()方法来设置初始值，
+并返回这个value，value的默认初始值为null。
+我们讲完了ThreadLocal类的set()、get()方法，实际上都是一直在操作ThreadLocalMap这个map集合。而ThreadLocalMap中存放的都是一个个的Entry，Entry的key为ThreadLocal对象，value为对应的本地变量。实际上这个Entry是WeakReference弱引用的子类，这是为了在JVM进行垃圾回收时，能够自动进行回收，防止内存溢出。真正存储数据备份其实就是这个Entry。
+ThreadLocal类本质实际上是以线程作为key，通过数据备份的方式，实现了线程间的数据隔离！
+既然进行的数据备份，那么肯定就会造成数据冗余，并且随着线程的存活时间增长，存储的备份数据也会越来越多，即使线程结束了生命周期，这些备份数据也很有可能仍然存在。这样就可能造成内存泄漏，进而导致OOM！
+ThreadLocal为了解决内存泄漏的问题，也进行了一些相应的处理，比如将存储备份数据的Entry类设置为弱引用类型，这是为了方便在GC时自动回收。而且在set()、get()方法中增加了数据检查，及时清除掉那些key为null的没用的备份数据。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/816181835736028b693ec29598da4712/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-10-03T18:56:39+08:00" />
+<meta property="article:modified_time" content="2021-10-03T18:56:39+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">ThreadLocal从变量副本的角度解决多线程并发安全问题</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="ThreadLocal_0"></a>ThreadLocal从变量副本的角度解决多线程并发安全问题</h2> 
+<p>之前我们讲的高并发场景下的线程安全问题，可以使用Synchronized同步关键字、Lock手动加锁的方式去解决，什么轻量级锁、偏向锁、重量级锁、可重入锁等等，实际上本质都是控制线程，使得多个线程同步的去访问共享资源。之所以多线程存在线程安全问题，就是因为多个线程访问同一个共享资源导致的，多个线程之间属于竞争关系，很容易就会导致数据的不安全。</p> 
+<p><img src="https://images2.imgbox.com/d8/01/HF8KC7On_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-Nh9HtNqq-1633258255949)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20211003044313949.png)]"></p> 
+<p>我们说了加锁实际上保证了各个线程之间同步、有序的去访问共享资源，难道不加锁就没有办法解决多线程安全问题了吗？我们要抓主要矛盾，之所以存在并发安全问题，是因为共享资源只有一个，多线程会竞争获取共享资源，如果同一类共享资源有多个，或者说有多个副本给每一个线程使用呢？这样不就不用加锁了，每一个线程只需要存在自己的那个数据的副本即可，因此也就不存在资源竞争问题，也就保证了多线程下数据的安全。而<code>ThreadLocal</code>类就是<strong>给每个线程绑定了变量的本地副本，从而避免线程安全。</strong></p> 
+<p><img src="https://images2.imgbox.com/5f/6c/NbiVG20X_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-EKDJz1YS-1633258255952)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20211003044351993.png)]"></p> 
+<p>接下来我们从源码来看看<code>ThreadLocal</code>类是如何给每一个线程保存变量的本地副本的。</p> 
+<p>首先我们看看Thread线程类，线程类里面有一个<code>ThreadLocalMap</code>类型的成员变量<code>threadLocals</code>，用来存放当前线程的本地变量</p> 
+<p><img src="https://images2.imgbox.com/93/c7/OliNFHeV_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-9paSKNhs-1633258255955)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20211003044849554.png)]"></p> 
+<p>实际上<code>ThreadLocal</code>类有一个<code>ThreadLocalMap</code>内部类，这个内部类你可以认为是一个<strong>专门用来维护线程本地变量HashMap集合</strong>。</p> 
+<p><code>ThreadLocalMap</code>这个类的数据结构是一个<code>Entry</code>类型的数组，用来保存一个个的<code>Entry</code>节点，<code>Entry</code>节点<strong>封装了以<code>ThreadLocal</code>实例对象为<code>key</code>，<code>Object</code>对象为<code>value</code>的键值对，保存在<code>ThreadLocalMap</code>中</strong>。</p> 
+<p><img src="https://images2.imgbox.com/b3/9e/EC6sRfJb_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-hXN7z5v5-1633258255957)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20211003041216097.png)]"></p> 
+<p><code>ThreadLocal</code>类实际上是对<code>ThreadLocalMap</code>这个内部类的<strong>封装</strong>，<strong>本地变量值最终是存放在<code>ThreadLocalMap</code>中的</strong>，<code>ThreadLocal</code>类提供了<code>set()</code>、<code>get()</code>等其他方法，来操作<code>ThreadLocalMap</code>中保存的数据。</p> 
+<p><code>ThreadLocal</code>调用<code>set()</code>方法保存本地变量时，首先获取到<strong>当前线程</strong>，然后调用<code>getMap()</code>方法得到当前线程的<code>ThreadLocalMap</code>，底层实际上是调用<code>ThreadLocalMap</code>的<code>set()</code>方法向这个Map集合中保存数据的<img src="https://images2.imgbox.com/20/71/tActsQLt_o.png" alt="在这里插入图片描述"></p> 
+<p>当第一次调用<code>set()</code>方法时，会先调用<code>createMap()</code>方法创建出<code>ThreadLocalMap</code>对象，因此是<strong>懒加载的</strong><br> <img src="https://images2.imgbox.com/22/fa/sJULOA5J_o.png" alt="在这里插入图片描述"></p> 
+<p>接着会使用构造方法创建出<code>ThreadLocalMap</code>对象</p> 
+<p><img src="https://images2.imgbox.com/d4/51/k8RmR6qi_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-kiX42MxN-1633258255966)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20211003045634766.png)]"></p> 
+<p>我们之前说过<code>ThreadLocalMap</code>是一个<code>HashMap</code>集合，因此也有初始容量、加载因子、阈值、散列函数、hashcode值。</p> 
+<p><code>ThreadLocalMap</code>的初始容量默认为<code>16</code>，阈值为容量的<code>2/3</code>，利用<code>ThreadLocal</code>的<code>hashcode</code>值，对容量进行取模运算，计算出Entry数组中对应的<strong>索引位置</strong>。</p> 
+<p><img src="https://images2.imgbox.com/ee/82/C3IOkefQ_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-5EVlC2k2-1633258255968)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20211003050738848.png)]"><br> <img src="https://images2.imgbox.com/dd/7d/4UHEYPJ6_o.png" alt="在这里插入图片描述"></p> 
+<p>如果<code>ThreadLocalMap</code>之前已经创建出来了，就会调用<code>set()</code>方法向<code>ThreadLocalMap</code>中添加元素。根据hashcode值计算出数组中对应的索引位置，然后遍历这个map所有的Entry，如果key存在了就进行<strong>替换</strong>，没有的话就将键值对保存到ThreadLocalMap中。同时在遍历的过程中发现key为null，就会<strong>清除掉</strong>这个数据，并将新的数据存放到这个索引位置。这主要是<strong>释放了内存空间，防止内存泄漏</strong>。</p> 
+<p>如果既没有发生替换，也没有发生可以清除掉的key，那么就会创建一个Entry，保存到计算出的对应的索引位置。</p> 
+<p><img src="https://images2.imgbox.com/be/78/JMGXqiG3_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-BcCDm9C9-1633258255973)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20211003174955938.png)]"></p> 
+<p>我们说过ThreadLocalMap初始容量默认为16，阈值默认为容量的2/3。在向map中添加完数据时，<strong>最后还会进行一次清理工作</strong>，如果清理后发现当前map的大小还是<strong>大于等于阈值</strong>，就会触发<strong>扩容机制</strong></p> 
+<p><img src="https://images2.imgbox.com/8a/ce/vZEYrsF1_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-CH22bhiQ-1633258255974)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20211003173537503.png)]"><br> <img src="https://images2.imgbox.com/9e/73/dPCkqLij_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-9oRcu5y4-1633258255976)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20211003175513153.png)]"></p> 
+<p>ThreadLocalMap扩容机制和HashMap差不多，也是扩容为原来的2倍，然后进行扩容后在再散列，并设置新的阈值。<br> <img src="https://images2.imgbox.com/88/4e/46DNk8li_o.png" alt="在这里插入图片描述"></p> 
+<p>讲完了<code>set()</code>方法再来讲一讲<code>get()</code>方法。</p> 
+<p><code>get()</code>方法首先获取到<strong>当前线程</strong>，然后调用<code>getMap()</code>方法得到当前线程对应的<code>ThreadLocalMap</code>。如果这个map<strong>不为null</strong>，就根据key得到对应Entry，并返回对应的value值。</p> 
+<p><img src="https://images2.imgbox.com/6b/d4/QHUJ3zJi_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-TnwBbfVj-1633258255979)(C:\Users\Jian\AppData\Roaming\Typora\typora-user-images\image-20211003180603028.png)]"></p> 
+<p>如果<strong>map为null</strong>，比如在第一次调用<code>get()</code>方法，这个map可能还没创建出来。此时会调用<code>setInitialValue()</code>方法来设置初始值，</p> 
+<p><strong>并返回这个value，value的默认初始值为null。</strong><br> <img src="https://images2.imgbox.com/a8/0d/2v28RKlS_o.png" alt="在这里插入图片描述"></p> 
+<p>我们讲完了<code>ThreadLocal</code>类的<code>set()</code>、<code>get()</code>方法，实际上都是一直在操作<code>ThreadLocalMap</code>这个map集合。而ThreadLocalMap中存放的都是一个个的Entry，<strong>Entry的key为ThreadLocal对象，value为对应的本地变量。<strong>实际上这个Entry</strong>是<code>WeakReference</code>弱引用的子类</strong>，这是为了在JVM进行垃圾回收时，能够自动进行回收，防止内存溢出。<strong>真正存储数据备份其实就是这个<code>Entry</code></strong>。<br> <img src="https://images2.imgbox.com/1d/46/LRKqZ6vc_o.png" alt="在这里插入图片描述"></p> 
+<p><strong><code>ThreadLocal</code>类本质实际上是以线程作为key，通过数据备份的方式，实现了线程间的数据隔离！</strong></p> 
+<p>既然进行的数据备份，那么肯定就会造成数据冗余，并且随着线程的存活时间增长，存储的备份数据也会越来越多，即使线程结束了生命周期，这些备份数据也很有可能仍然存在。这样就可能造成<strong>内存泄漏</strong>，进而导致OOM！</p> 
+<p>ThreadLocal为了解决内存泄漏的问题，也进行了一些相应的处理，比如将存储备份数据的Entry类设置为<strong>弱引用类型</strong>，这是为了方便在GC时自动回收。而且在<code>set()</code>、<code>get()</code>方法中增加了<strong>数据检查</strong>，及时清除掉那些<strong>key为null</strong>的没用的备份数据。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3df85eac5939728238724d8b65aa813f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">练习4-7 求e的近似值 (15 分)自然常数 e 可以用级数 1&#43;1/1!&#43;1/2!&#43;⋯&#43;1/n!&#43;⋯ 来近似计算。本题要求对给定的非负整数 n，求该级数的前 n&#43;1 项和。</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/dda94d0848cbc24114a7809673021700/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">IOC概念和原理</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

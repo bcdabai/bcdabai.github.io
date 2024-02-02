@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Redis Cluster 实现原理 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Redis Cluster 实现原理" />
+<meta property="og:description" content="本文基本上是 redis cluster 规范 的翻译（意译），希望能对您理解 redis cluster 的原理有所帮助。若发现哪里说的不明白，或者有错误，希望能够在评论里指出，不胜感激。
+主要特性和设计原则 设计目标Redis Cluster 支持的操作Redis Cluster 协议中 Client 和 Server 的作用写安全可用性性能为什么没有 merge 操作 Redis Cluster 的主要组成部分 keys distribution model哈希标签 hash tags集群节点属性集群总线集群拓扑结构节点间的握手 重定向和重新分片 MOVED 重定向运行时集群配置变更ASK 重定向集群 client多键操作用 slave 节点扩展读请求 容错 心跳和 gossip 消息心跳包内容错误检测 PFAIL flagFAIL flag 配置处理，传播和失败转移 集群 current epochconfiguration epochSlave 选举和提升Slave Rankmaster 回应 slave 的选举请求在分隔（partition）情况下 configEpoch 的实际作用哈希槽配置的传播节点重新加入集群备份迁移备份迁移算法configEpoch 冲突解决算法节点重置从集群删除节点 发布-订阅附录 附录A： CRC16 算法的 C 语言实现 主要特性和设计原则 设计目标 Redis Cluster 是 Redis 的一个分布式实现。它具有以下设计重点：
+高性能，可水平扩展到1000个节点。没有代理；异步备份；冲突时没有 merge 操作。可接受的写安全。系统尽最大可能保证连接到大部分 master 节点的 client 的写操作的完整性。不过数据仍然有一个丢失窗口，在这个窗口内写操作有可能成功返回但不保证完整性。如果 client 只连接到小部分的 master 节点，这个丢失窗口更大。可用性。只要满足这两个条件可用性就能保证：a." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/0002580fd34a022e8411823e385d3b6d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-08-29T17:15:46+08:00" />
+<meta property="article:modified_time" content="2018-08-29T17:15:46+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis Cluster 实现原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>本文基本上是 <a href="https://redis.io/topics/cluster-spec" rel="nofollow">redis cluster 规范</a> 的翻译（意译），希望能对您理解 redis cluster 的原理有所帮助。若发现哪里说的不明白，或者有错误，希望能够在评论里指出，不胜感激。</p> 
+<p></p> 
+<div class="toc"> 
+ <div class="toc"> 
+  <ul><li> 
+    <ul><li><a href="#%E4%B8%BB%E8%A6%81%E7%89%B9%E6%80%A7%E5%92%8C%E8%AE%BE%E8%AE%A1%E5%8E%9F%E5%88%99" rel="nofollow">主要特性和设计原则</a> 
+      <ul><li><a href="#%E8%AE%BE%E8%AE%A1%E7%9B%AE%E6%A0%87" rel="nofollow">设计目标</a></li><li><a href="#redis-cluster-%E6%94%AF%E6%8C%81%E7%9A%84%E6%93%8D%E4%BD%9C" rel="nofollow">Redis Cluster 支持的操作</a></li><li><a href="#redis-cluster-%E5%8D%8F%E8%AE%AE%E4%B8%AD-client-%E5%92%8C-server-%E7%9A%84%E4%BD%9C%E7%94%A8" rel="nofollow">Redis Cluster 协议中 Client 和 Server 的作用</a></li><li><a href="#%E5%86%99%E5%AE%89%E5%85%A8" rel="nofollow">写安全</a></li><li><a href="#%E5%8F%AF%E7%94%A8%E6%80%A7" rel="nofollow">可用性</a></li><li><a href="#%E6%80%A7%E8%83%BD" rel="nofollow">性能</a></li><li><a href="#%E4%B8%BA%E4%BB%80%E4%B9%88%E6%B2%A1%E6%9C%89-merge-%E6%93%8D%E4%BD%9C" rel="nofollow">为什么没有 merge 操作</a></li></ul> </li><li><a href="#redis-cluster-%E7%9A%84%E4%B8%BB%E8%A6%81%E7%BB%84%E6%88%90%E9%83%A8%E5%88%86" rel="nofollow">Redis Cluster 的主要组成部分</a> 
+      <ul><li><a href="#keys-distribution-model" rel="nofollow">keys distribution model</a></li><li><a href="#%E5%93%88%E5%B8%8C%E6%A0%87%E7%AD%BE-hash-tags" rel="nofollow">哈希标签 hash tags</a></li><li><a href="#%E9%9B%86%E7%BE%A4%E8%8A%82%E7%82%B9%E5%B1%9E%E6%80%A7" rel="nofollow">集群节点属性</a></li><li><a href="#%E9%9B%86%E7%BE%A4%E6%80%BB%E7%BA%BF" rel="nofollow">集群总线</a></li><li><a href="#%E9%9B%86%E7%BE%A4%E6%8B%93%E6%89%91%E7%BB%93%E6%9E%84" rel="nofollow">集群拓扑结构</a></li><li><a href="#%E8%8A%82%E7%82%B9%E9%97%B4%E7%9A%84%E6%8F%A1%E6%89%8B" rel="nofollow">节点间的握手</a></li></ul> </li><li><a href="#%E9%87%8D%E5%AE%9A%E5%90%91%E5%92%8C%E9%87%8D%E6%96%B0%E5%88%86%E7%89%87" rel="nofollow">重定向和重新分片</a> 
+      <ul><li><a href="#moved-%E9%87%8D%E5%AE%9A%E5%90%91" rel="nofollow">MOVED 重定向</a></li><li><a href="#%E8%BF%90%E8%A1%8C%E6%97%B6%E9%9B%86%E7%BE%A4%E9%85%8D%E7%BD%AE%E5%8F%98%E6%9B%B4" rel="nofollow">运行时集群配置变更</a></li><li><a href="#ask-%E9%87%8D%E5%AE%9A%E5%90%91" rel="nofollow">ASK 重定向</a></li><li><a href="#%E9%9B%86%E7%BE%A4-client" rel="nofollow">集群 client</a></li><li><a href="#%E5%A4%9A%E9%94%AE%E6%93%8D%E4%BD%9C" rel="nofollow">多键操作</a></li><li><a href="#%E7%94%A8-slave-%E8%8A%82%E7%82%B9%E6%89%A9%E5%B1%95%E8%AF%BB%E8%AF%B7%E6%B1%82" rel="nofollow">用 slave 节点扩展读请求</a></li></ul> </li><li><a href="#%E5%AE%B9%E9%94%99" rel="nofollow">容错</a> 
+      <ul><li><a href="#%E5%BF%83%E8%B7%B3%E5%92%8C-gossip-%E6%B6%88%E6%81%AF" rel="nofollow">心跳和 gossip 消息</a></li><li><a href="#%E5%BF%83%E8%B7%B3%E5%8C%85%E5%86%85%E5%AE%B9" rel="nofollow">心跳包内容</a></li><li><a href="#%E9%94%99%E8%AF%AF%E6%A3%80%E6%B5%8B" rel="nofollow">错误检测</a> 
+        <ul><li><a href="#pfail-flag" rel="nofollow">PFAIL flag</a></li><li><a href="#fail-flag" rel="nofollow">FAIL flag</a></li></ul> </li></ul> </li><li><a href="#%E9%85%8D%E7%BD%AE%E5%A4%84%E7%90%86%E4%BC%A0%E6%92%AD%E5%92%8C%E5%A4%B1%E8%B4%A5%E8%BD%AC%E7%A7%BB" rel="nofollow">配置处理，传播和失败转移</a> 
+      <ul><li><a href="#%E9%9B%86%E7%BE%A4-current-epoch" rel="nofollow">集群 current epoch</a></li><li><a href="#configuration-epoch" rel="nofollow">configuration epoch</a></li><li><a href="#slave-%E9%80%89%E4%B8%BE%E5%92%8C%E6%8F%90%E5%8D%87" rel="nofollow">Slave 选举和提升</a></li><li><a href="#slave-rank" rel="nofollow">Slave Rank</a></li><li><a href="#master-%E5%9B%9E%E5%BA%94-slave-%E7%9A%84%E9%80%89%E4%B8%BE%E8%AF%B7%E6%B1%82" rel="nofollow">master 回应 slave 的选举请求</a></li><li><a href="#%E5%9C%A8%E5%88%86%E9%9A%94partition%E6%83%85%E5%86%B5%E4%B8%8B-configepoch-%E7%9A%84%E5%AE%9E%E9%99%85%E4%BD%9C%E7%94%A8" rel="nofollow">在分隔（partition）情况下 configEpoch 的实际作用</a></li><li><a href="#%E5%93%88%E5%B8%8C%E6%A7%BD%E9%85%8D%E7%BD%AE%E7%9A%84%E4%BC%A0%E6%92%AD" rel="nofollow">哈希槽配置的传播</a></li><li><a href="#%E8%8A%82%E7%82%B9%E9%87%8D%E6%96%B0%E5%8A%A0%E5%85%A5%E9%9B%86%E7%BE%A4" rel="nofollow">节点重新加入集群</a></li><li><a href="#%E5%A4%87%E4%BB%BD%E8%BF%81%E7%A7%BB" rel="nofollow">备份迁移</a></li><li><a href="#%E5%A4%87%E4%BB%BD%E8%BF%81%E7%A7%BB%E7%AE%97%E6%B3%95" rel="nofollow">备份迁移算法</a></li><li><a href="#configepoch-%E5%86%B2%E7%AA%81%E8%A7%A3%E5%86%B3%E7%AE%97%E6%B3%95" rel="nofollow">configEpoch 冲突解决算法</a></li><li><a href="#%E8%8A%82%E7%82%B9%E9%87%8D%E7%BD%AE" rel="nofollow">节点重置</a></li><li><a href="#%E4%BB%8E%E9%9B%86%E7%BE%A4%E5%88%A0%E9%99%A4%E8%8A%82%E7%82%B9" rel="nofollow">从集群删除节点</a></li></ul> </li><li><a href="#%E5%8F%91%E5%B8%83-%E8%AE%A2%E9%98%85" rel="nofollow">发布-订阅</a></li><li><a href="#%E9%99%84%E5%BD%95" rel="nofollow">附录</a> 
+      <ul><li><a href="#%E9%99%84%E5%BD%95a-crc16-%E7%AE%97%E6%B3%95%E7%9A%84-c-%E8%AF%AD%E8%A8%80%E5%AE%9E%E7%8E%B0" rel="nofollow">附录A： CRC16 算法的 C 语言实现</a></li></ul> </li></ul> </li></ul> 
+ </div> 
+</div> 
+<p></p> 
+<h3 id="主要特性和设计原则">主要特性和设计原则</h3> 
+<h4 id="设计目标">设计目标</h4> 
+<p>Redis Cluster 是 Redis 的一个分布式实现。它具有以下设计重点：</p> 
+<ul><li>高性能，可水平扩展到1000个节点。没有代理；异步备份；冲突时没有 merge 操作。</li><li>可接受的写安全。系统尽最大可能保证连接到大部分 master 节点的 client 的写操作的完整性。不过数据仍然有一个丢失窗口，在这个窗口内写操作有可能成功返回但不保证完整性。如果 client 只连接到小部分的 master 节点，这个丢失窗口更大。</li><li>可用性。只要满足这两个条件可用性就能保证：a. 大部分 master 节点可达；b. 每个 master 不可达的节点都有至少一个可达的 slave。</li></ul> 
+<h4 id="redis-cluster-支持的操作">Redis Cluster 支持的操作</h4> 
+<ul><li>实现单机版 redis 的所有单 key 命令</li><li>多 key 操作，只要 key 在同一节点上就支持</li><li>支持 hash tags. 保证特定的 key 映射到同一机器. </li><li>多 key 操作在人工 resharding 的时候可能某些时候会不可用</li></ul> 
+<h4 id="redis-cluster-协议中-client-和-server-的作用">Redis Cluster 协议中 Client 和 Server 的作用</h4> 
+<p>集群的节点作用：</p> 
+<ul><li>存储数据</li><li>维护集群状态. 包含从 key 到具体节点的映射</li><li>自动发现其他节点</li><li>检测不工作的节点</li><li>错误发生时，必要情况下将 slave 节点提升到 master</li></ul> 
+<p>集群内通过 Redis Cluster Bus 协议来交互。每一个节点都维护同其他所有节点的 TCP 连接，而节点之间通过 gossip 协议来交互集群的信息。</p> 
+<p>集群节点不能代理请求，而是通过向 client 返回重定向信息来告知 client 重定向到其他节点，client 再向其他节点发送请求. client 可以维护自身的 key -&gt; node 映射来提升性能. </p> 
+<h4 id="写安全">写安全</h4> 
+<p>异步备份；last failover wins - 最后一个成为 master 的机器上的数据生效。</p> 
+<p>Redis Cluster 不保证 100% 的写安全。在 partition （可以认为集群被切割成互不相连的几部分） 发生时，会有一个短暂的时间窗口会丢失 write 请求写入的数据。而按照 client 连接的 partition 的情况，又分为两种情况。</p> 
+<p>第一种情况，client 连接到具有多数 master 节点的部分：</p> 
+<ul><li>write 写入到 master</li><li>master 返回确认 给 client</li><li>master 挂了（master 尚未同步数据到 slave）</li><li>一段时间后，slave 被提升为新的master</li></ul> 
+<p>在这种情况下尚未同步到 slave 的数据丢失了：</p> 
+<p>第二种情况，client 连接到具有少数 master 节点的部分。</p> 
+<ul><li>write 写入到 master</li><li>master 被替换</li><li>master 连不上大多数 master，开始拒绝请求</li></ul> 
+<p>在这种情况下，master 拒绝之前的写操作的内容都丢失了。因此丢失窗口更大。</p> 
+<p>除此之外，还有一种理论上可能有的情况：</p> 
+<ul><li>master 丢失</li><li>master 被 failover</li><li>master 重新可达</li><li>client 写入到该 master</li></ul> 
+<p>这种情况一般不会发生，因为 master 被 failover，意味着已经过了一定时间，它也已经开始拒绝写请求了。同时这种情况也要求 client 维护的信息是旧的才可能发生。</p> 
+<h4 id="可用性">可用性</h4> 
+<p>分隔的少部分是不会达到可用状态的。</p> 
+<p>如果集群大部分 master 都可达，并且每个不可达的 master 都至少有一个可达的 slave。则在 NODE_TIMEOUT 时间段后，会开始 slave failover master 的操作。操作完成之后集群达到可用状态。</p> 
+<p>比如，若一个集群有 N 个 master 节点，每个 master 节点都有唯一一个 slave 节点。则任意一个节点失败都不会使集群达到不可用状态。若有两个节点失败，则集群有 1/(2*N - 1) 的可能性集群达到不可用状态。</p> 
+<p>Redis Cluster 一个名为 replica migration 的新 feature 会迁移没有备份的 master 的备份，因此在一定程度上可以提高可用性。</p> 
+<h4 id="性能">性能</h4> 
+<p>Redis Cluster 为提升性能做了一些事情：</p> 
+<ul><li>不用 proxy，而用 redirect，让 client 自己去联系相应的节点</li><li>client 保留集群状态的副本，一般可以直接触达要联系的节点</li><li>异步备份机制，不需要等待备份完成即返回</li><li>多 key 操作只操作本机的 key，数据无需在节点之间移动（ resharding 时候除外）</li></ul> 
+<p>Redis Cluster 设计的时候，将高性能、扩展性放在首位；提供弱但合理的数据安全和可用性。</p> 
+<h4 id="为什么没有-merge-操作">为什么没有 merge 操作</h4> 
+<p>merge 操作用于解决冲突，如 git 中的 merge。</p> 
+<p>Redis Cluster 不提供 merge 操作，主要是因为 redis 的应用场景通常没有这个需求。而实现 merge 操作又会比较繁琐~。</p> 
+<h3 id="redis-cluster-的主要组成部分">Redis Cluster 的主要组成部分</h3> 
+<h4 id="keys-distribution-model">keys distribution model</h4> 
+<p>将键空间划分为 16384 （2^14）个 slot，这也就意味着 redis cluster 最多支持 16384 个 master。</p> 
+<p>每个主节点处理若干个 slot；在稳定状态，每个 slot 由唯一 master 节点提供服务。</p> 
+<p><strong>稳定状态</strong> - cluster 不处于重新配置过程中。</p> 
+<p>哈希 slot 计算方法如下（hash tag 是个例外）：</p> 
+<pre class="prettyprint"><code class=" hljs vbnet">HASH_SLOT = CRC16(<span class="hljs-keyword">key</span>) <span class="hljs-keyword">mod</span> <span class="hljs-number">16384</span></code></pre> 
+<p>CRC16 实际上是循环冗余校验算法，是数据通讯中常用的一种校验算法。这里用它来计算哈希槽。</p> 
+<h4 id="哈希标签-hash-tags">哈希标签 hash tags</h4> 
+<p>多键操作时，需要多个键位于同一 slot 中。这是通过 hash tags 来实现。</p> 
+<p>如果key 包含 “{…}” 这样的模式，则只有 “{” 和 “}” 之间的内容会用来计算 hash slot。由于key 里面可能包含多个 “{” 或 “}”，因此计算规则如下：</p> 
+<ul><li>key 包含 “{“</li><li>key 中在 “{” 之后有 “}”</li><li>key 中第一个 “{” 和 第一个 “}” 之间有至少一个字符</li></ul> 
+<p>看几个例子</p> 
+<ul><li>两个 key：{user1000}.following 和 {user1000}.followers 都使用 user1000 来计算hash slot，因此位于同一个 slot 中</li><li>键 foo{}{bar} 作为正常的键来计算 hash slot，即整个字符串. 因为第一个大括号之内没有内容</li><li>键 foo{<!-- -->{bar}}zap中，”{bar” 用于计算 hash slot</li><li>键 foo{bar}{zap} 中，用 “bar” 来计算</li><li>若键以 “{}” 开头，则一定会被作为整体计算 hash slot。二进制数据作为键名的时候比较有用</li></ul> 
+<h4 id="集群节点属性">集群节点属性</h4> 
+<p>node ID ： 一个 160 位随机数的16进制表示，显示出来是40个字符. node ID 保存在节点的配置文件中，并会永久使用. </p> 
+<p>node ID 是集群用来区分不同节点的依据。IP 和端口可能变化，但只要 node ID不变，集群就会识别为同一个节点。</p> 
+<p>node ID 是节点的唯一全局一致的信息。</p> 
+<p>每个节点还会维护其知道的集群中<strong>其他节点</strong>的如下信息：</p> 
+<ul><li>node ID</li><li>节点的 IP 和 port</li><li>一些 flags</li><li>对应的 master 节点（若是 slave）</li><li>上次 ping 该节点的时间</li><li>上次收到该节点 pong 的时间</li><li>节点的当前的 configEpoch （后文解释）</li><li>连接状态</li><li>该节点服务的 hash slots</li></ul> 
+<p>cluster nodes 命令可以获取呢集群节点的状态:</p> 
+<pre class="prettyprint"><code class=" hljs css">$ <span class="hljs-tag">redis-cli</span> <span class="hljs-tag">cluster</span> <span class="hljs-tag">nodes</span>
+<span class="hljs-tag">d1861060fe6a534d42d8a19aeb36600e18785e04</span> 127<span class="hljs-class">.0</span><span class="hljs-class">.0</span><span class="hljs-class">.1</span><span class="hljs-pseudo">:6379</span> <span class="hljs-tag">myself</span> <span class="hljs-tag">-</span> 0 1318428930 1 <span class="hljs-tag">connected</span> 0<span class="hljs-tag">-1364</span>
+3886<span class="hljs-tag">e65cc906bfd9b1f7e7bde468726a052d1dae</span> 127<span class="hljs-class">.0</span><span class="hljs-class">.0</span><span class="hljs-class">.1</span><span class="hljs-pseudo">:6380</span> <span class="hljs-tag">master</span> <span class="hljs-tag">-</span> 1318428930 1318428931 2 <span class="hljs-tag">connected</span> 1365<span class="hljs-tag">-2729</span>
+<span class="hljs-tag">d289c575dcbc4bdd2931585fd4339089e461a27d</span> 127<span class="hljs-class">.0</span><span class="hljs-class">.0</span><span class="hljs-class">.1</span><span class="hljs-pseudo">:6381</span> <span class="hljs-tag">master</span> <span class="hljs-tag">-</span> 1318428931 1318428931 3 <span class="hljs-tag">connected</span> 2730<span class="hljs-tag">-4095</span></code></pre> 
+<p>上面显示顺序为： node id, address:port, flags, last ping sent, last pong received, configuration epoch, link state, slots</p> 
+<h4 id="集群总线">集群总线</h4> 
+<p>集群的节点使用一个额外的 TCP 端口进行集群节点之间的内部通讯。端口号同接受 client 连接所使用的端口号关联。比如，若 redis 使用 6379 端口接受 client 连接，则 6379 + 10000，即 16379 端口就是节点用于集群内通讯的端口。</p> 
+<p>集群之间的通讯使用集群总线和集群总线协议。这是一个内部协议，目前没有开放文档。不过可以通过源码来看。</p> 
+<h4 id="集群拓扑结构">集群拓扑结构</h4> 
+<p>redis cluster 是一个全连接的网状结构，每个节点同其他所有节点之间都有 TCP 连接。</p> 
+<p>比如，若集群有 N 个节点，则每个节点都有 N-1 个外向的TCP 连接，同时还有 N-1个内向的TCP连接。</p> 
+<p>集群的节点间通过 <strong>gossip 协议</strong>和一个<strong>配置更新策略</strong>来保证正常状态下节点交换的数据不随着节点数指数增加。</p> 
+<h4 id="节点间的握手">节点间的握手</h4> 
+<p>集群中节点对消息的处理：</p> 
+<ul><li>节点接受所有集群总线上的连接请求</li><li>节点接收到 ping 请求后会回复，无论请求来源是否可信</li><li>对其他类型的请求，仅当请求来源同属同一集群的时候才处理</li></ul> 
+<p>节点仅在两种情况下接受另一节点为本集群节点：</p> 
+<ul><li>收到 MEET 消息. 这种消息只能由系统管理员通过命令触发</li><li>信任的节点通过 gossip 消息告知本节点它信任的某个节点的信息. A 信任 B，B 信任 C，则 A 也 信任 C.</li></ul> 
+<p>因此，只要向集群中添加节点，他们之间最终都会自动形成一个全连接图。</p> 
+<h3 id="重定向和重新分片">重定向和重新分片</h3> 
+<h4 id="moved-重定向">MOVED 重定向</h4> 
+<p>client 可以向集群中的所有节点发送 query 请求. 节点收到请求后，首先分析请求并解析哪个机器为相应的 slots 提供服务。若是本节点提供服务，则直接返回结果给 client；否则，则会返回一个 MOVED 错误，并将相应的 slot 和对应机器返回给 client。如下：</p> 
+<pre class="prettyprint"><code class=" hljs diff">GET x
+<span class="hljs-deletion">-MOVED 3999 127.0.0.1:6381</span></code></pre> 
+<p>集群内部节点之间是通过 node ID 标识的，但为了方便，对 client 的接口仍然使用 IP+port.</p> 
+<p>client 收到 MOVED 请求后，应该讲 SLOT 跟 IP+port 的对应关系存储起来，以便下次使用。</p> 
+<p>client 收到 MOVED 请求后，也可以通过 CLUSTER NODES 命令或 CLUSTER SLOTS 命令更新整个集群的分布信息。这主要是由于重新配置的时候，经常会有多个 slot 的配置同时发生变更。</p> 
+<p>完整的集群 client 实现还应该实现 <strong>ASK 重定向</strong>。我们后文会具体讲到。</p> 
+<h4 id="运行时集群配置变更">运行时集群配置变更</h4> 
+<p>新增、删除节点，以及集群的再平衡都使用了一个操作：将 slot 从一个节点移动到另一个节点。</p> 
+<ul><li>新增节点. 将一些 slots 从已存在节点移动到新节点</li><li>删除节点. 将当前节点的 slots 移动到其他节点</li><li>再平衡. 将一些 slots 从一个节点移动到另一个节点</li></ul> 
+<p>集群中的 slots 迁移可能用到以下命令：</p> 
+<ul><li>CLUSTER ADDSLOTS slot1 [slot2] … [slotN]</li><li>CLUSTER DELSLOTS slot1 [slot2] … [slotN]</li><li>CLUSTER SETSLOT slot NODE node</li><li>CLUSTER SETSLOT slot MIGRATING node</li><li>CLUSTER SETSLOT slot IMPORTING node</li></ul> 
+<p>ADDSLOTS 命令经常在集群创建时使用，指定某个节点服务哪些 slots。 <br> DELSLOTS 常用语手动修改集群配置，或用语调试任务。实际中很少使用。 <br> SETSLOT 将某个 slot 分配给某个 master 节点。</p> 
+<p>我们下面详细说一下 slot 迁移，这个过程使用了 MIGRATING 和 IMPORTING 命令。如将 slot 从节点 A 迁移到 B：</p> 
+<ul><li>向A 发送 CLUSTER SETSLOT 8 MIGRATING B</li><li>向B 发送 CLUSTER SETSLOT 8 IMPORTING A</li><li>节点 A 上的 slot 8 处于 MIGRATING 状态。因此对 slot 8 的请求，A 只接受 key 存在于 A 的 slot 8 上的请求；若 key 在 A 上不存在，则返回 ASK 重定向到 B</li><li>节点 B 上的 slot 8 处于 IMPORTING 状态。因此对 slot 8 的请求，B 只接受 ASKING 命令之后的请求。若没有 ASKING 命令，则会通过 MOVED 重定向到 A</li></ul> 
+<p>slot 的迁移一般是通过 redis-trib 程序来执行的。该程序首先执行 CLUSTER GETKEYSINSLOT slot count 来获取若干个 key，然后遍历向 A 发送 MIGRATE 命令：</p> 
+<pre class="prettyprint"><code class=" hljs applescript">MIGRATE target_host target_port key target_database <span class="hljs-property">id</span> <span class="hljs-keyword">timeout</span></code></pre> 
+<p>MIGRATE 时 A 会连接到目标主机，发送相应 key 的信息，一旦收到 OK code 返回值，则从本地库中将该 key 删除。从外部 client 的视角来看，一个key 只能存在 A 或者 B 其中之一上。</p> 
+<p>迁移过程完成之后，SETSLOT NODE 命令会被发送到这两个节点上。一般来说也会发送到集群上所有节点上，从而使集群的新配置尽快生效，而不必等待自然传播来将配置同步到整个集群。</p> 
+<h4 id="ask-重定向">ASK 重定向</h4> 
+<p>已经有了 MOVED 重定向，为什么还需要 ASK 重定向呢？MOVED 意味着我们认为请求的 hash slot 会<strong>永久</strong>的由另一个节点提供服务；而 ASK 则仅仅意味着<strong>下一个请求</strong>需要发送给指定的节点。</p> 
+<p>由于下一个到该 slot 的请求数据可能仍在 A 上，因此每次对该 slot 的请求都要先访问 A，若A 上没有则通过 ASK 重定向到 B。由于只有一个 slot 会发生这种情况，因此性能不成问题。</p> 
+<p>B 节点需要保证只接受尝试访问过 A 之后的针对该 slot 的请求。因此访问 B 节点该 slot 数据前，需要先发送 ASKING 命令。若一个 client 有bug，没有先发送 ASKING，则 B 会拒绝服务并 MOVED 重定向到 A，而集群本身不会出问题。</p> 
+<p>迁移完成之后，再次请求 A 数据的该 slot 将会使用 MOVED 重定向到 B。</p> 
+<h4 id="集群-client">集群 client</h4> 
+<p>集群 client 的实现是可以不储存 slot 配置信息的，但是这样做会非常低效。</p> 
+<p>一般来讲 client 都需要保存 slot 的配置信息，但不要求实时性。如果配置过期，client 请求的时候会受到 MOVED 重定向信息，触发更新本地的 slot 配置信息。</p> 
+<p>CLUSTER SLOTS 命令可以获取 slot 配置信息。</p> 
+<pre class="prettyprint"><code class=" hljs livecodeserver"><span class="hljs-number">127.0</span><span class="hljs-number">.0</span><span class="hljs-number">.1</span>:<span class="hljs-number">7000</span>&gt; cluster slots
+<span class="hljs-number">1</span>) <span class="hljs-number">1</span>) (<span class="hljs-keyword">integer</span>) <span class="hljs-number">5461</span>
+   <span class="hljs-number">2</span>) (<span class="hljs-keyword">integer</span>) <span class="hljs-number">10922</span>
+   <span class="hljs-number">3</span>) <span class="hljs-number">1</span>) <span class="hljs-string">"127.0.0.1"</span>
+      <span class="hljs-number">2</span>) (<span class="hljs-keyword">integer</span>) <span class="hljs-number">7001</span>
+   <span class="hljs-number">4</span>) <span class="hljs-number">1</span>) <span class="hljs-string">"127.0.0.1"</span>
+      <span class="hljs-number">2</span>) (<span class="hljs-keyword">integer</span>) <span class="hljs-number">7004</span></code></pre> 
+<p>第一行 5461 表示起始的 slot，第二行代表结束 slot（包含）。第三部分代表 master 节点信息。第四部分代表 slave，可以用来做 readonly。</p> 
+<h4 id="多键操作">多键操作</h4> 
+<p>若使用 hash tag，则可以自由使用多键操作。</p> 
+<p>需要注意多键操作在 resharding 的时候可能不可用。更进一步讲，若 resharding 的时候造成部分迁移，则多键操作当前不可用，访问时会返回 TRYAGAIN 错误，客户端可以过一会儿再访问。若resharding 的时候所有key 都在同一个节点，则多键操作也还是可用的。</p> 
+<h4 id="用-slave-节点扩展读请求">用 slave 节点扩展读请求</h4> 
+<p>正常情况下， slave 若收到请求则会重定向到相应的 master。但是可以通过 READONLY 命令指定 slave 提供读请求服务。</p> 
+<p>READONLY 意味着可能读到过期数据，并且不会操作写。若业务不敏感，可以开启 READONLY 模式。</p> 
+<h3 id="容错">容错</h3> 
+<h4 id="心跳和-gossip-消息">心跳和 gossip 消息</h4> 
+<p>集群内的节点会连续交换 ping pong 包。这两种包具有相同的结构，都包含重要的配置信息。本质上只是消息类型不同。ping pong 包合在一起也叫做心跳包。</p> 
+<p>正常情况下，节点向另外一个节点发送 ping 包，触发相应节点返回 pong 包。不过这也不是绝对的，节点也可以只发送 pong 包。这在广播新配置变更的时候比较有用。</p> 
+<p>节点会在几种情况下发送ping 包：</p> 
+<ul><li>节点每秒随机向几个节点发送 ping</li><li>若超过 NODE_TIMEOUT/2 没有收到过来自某节点的 ping 或 pong，则在 NODE_TIMEOUT 之前一定会向该节点发送 ping。NODE_TIMEOUT 超时之前，节点会尝试重连 TCP 连接，防止将 TCP 连接的问题误认为是机器不可达。</li></ul> 
+<p>若 NODE_TIMEOUT 设置的太小而集群中节点数量太多，则交互的消息数量是可调的，从而保证在半个 NODE_TIMEOUT 时间之内所有节点都有一次交互以防止过期。</p> 
+<p>举个例子，若 NODE_TIMEOUT 设置为 60秒，集群大小为 100。这就要求在 30秒内每个节点都要同其他99个节点进行一次交互，即平均 3.3 ping/s。整个集群就有 330 ping/s。</p> 
+<p>消息数量还有其他方式进一步降低。不过一般不会遇到集群带宽问题，因此使用了这个直接的方案。</p> 
+<h4 id="心跳包内容">心跳包内容</h4> 
+<p>ping 包和 pong 包包含两个部分： 所有消息类型共有的 header 部分；心跳包独有的 gossip 部分。</p> 
+<p>header 部分包含以下信息：</p> 
+<ul><li>NODE ID. </li><li>currentEpoch 和 configEpoch </li><li>节点 flag. 表示节点是 master 还是 slave，还有一些其他 flag 信息</li><li>节点提供服务的 hash slot 的 bitmap，若节点是 slave，则是其 master 的bitmap</li><li>发送者的基础 TCP 端口. 加10000 才是集群总线端口</li><li>发送者认为的集群状态</li><li>如果是 slave，则包含 master 的 NODE ID</li></ul> 
+<p>ping pong包还包含 gossip 部分。这部分内容包含了该节点认为的集群中其他节点的状态，不过不是全部，而是随机选择的一部分。对于包含的每个节点，都有以下信息：</p> 
+<ul><li>NODE ID</li><li>节点的 IP 和 端口</li><li>NODE flags</li></ul> 
+<p>gossip 部分的内容对于<strong>错误检测</strong>和<strong>节点发现</strong>很有用。</p> 
+<h4 id="错误检测">错误检测</h4> 
+<p>当集群中的某个 master 或者 slave 不能被集群中的大部分 master 触达时，需要通过错误检测来识别。识别出之后将一个 slave 提升为 master。若不能提升，则集群进入错误状态，不再对外提供服务。</p> 
+<p>如上文所述，每个节点都维护其他节点的 flag 状态，其中 PFAIL 和 FAIL 状态对于错误检测很有用。PFAIL 表示“可能失败”，FAIL 表示节点的 FAIL 状态经过集群中大部分 master 确认过。</p> 
+<h5 id="pfail-flag">PFAIL flag</h5> 
+<p>若某个节点 NODE_TIMEOUT 超时仍不可达，则将其标记为 PFAIL 状态。</p> 
+<p>节点不可达，意味着我们发了一个 ping，但是到 NODE_TIMEOUT 超时也没有收到回复。这也意味着 NODE_TIMEOUT 要比 round trip time 要大得多。</p> 
+<h5 id="fail-flag">FAIL flag</h5> 
+<p>PFAIL 信息仅仅是一个局部的信息，代表本机认为目标机器不可达。但是仅有 PFAIL 状态不足以触发 slave 提升为 master 的操作。需要将 PFAIL 提升为 FAIL。</p> 
+<p>当满足下面条件时 PFAIL 提升到 FAIL：</p> 
+<ul><li>节点 A 将 B 标记为 PFAIL</li><li>A 通过 gossip message 了解到大部分 master 认为的 B 的状态</li><li>大部分 master 在 NODE_TIMEOUT * FAIL_REPORT_VALIDITY_MULT 时间内通知 B 为 PFAIL 或FAIL 状态</li></ul> 
+<p>若这些条件满足，则 A：</p> 
+<ul><li>标记 B 为FAIL</li><li>向所有节点发送 FAIL 消息</li></ul> 
+<p>收到 FAIL 消息的节点也会强制将 B 标记为 FAIL 状态。</p> 
+<p>FAIL 状态基本是单向的，只能由 PFAIL 提升到 FAIL 。但在下列情况下 FAIL 标记可以被清除：</p> 
+<ul><li>节点重新可达且是 slave. 清除 FAIL 状态</li><li>节点重新可达且是不提供 slot 服务的 master. 可以被清除</li><li>节点重新可达且是 master，并且在较长时间内没有 slave 被提升为 master</li></ul> 
+<p>PFAIL 到 FAIL 的状态提升使用了一个弱协议：</p> 
+<ul><li>节点状态数据是在不同时间点的. 即使大部分 master 达成一致，也是在所收集数据上，无法保证某个时间点大部分master 达成一致。不过我们会丢弃过早时间的检测数据，因此是在一个时间段内达成的一致。</li><li>检测到 FAIL 后，会强制其他节点提升到 FAIL。但若一个节点检测到 FAIL，但由于网络 partition 造成无法将信息同步出去。</li></ul> 
+<p>但是集群的错误检测有一个要求： 最终所有节点都要在某个给定节点的状态上达成一致。若发生 split brain 问题，会发生两种情况：</p> 
+<ul><li>Case 1： 大部分 master 将某节点标记为 FAIL，这最终种情况下所有节点都会将该 master 标记为 FAIL</li><li>Case 2： 少部分 master 将节点标记为 FAIL，由于长时间没有节点被提升为 master，则节点的 FAIL 标记被清除</li></ul> 
+<p>FAIL 标记仅仅作为运行算法安全部分的触发器。理论上讲，每个 slave 在发现 master 不可达之后都可以自行将自身提升为 master，若master 仍被多数可达则等待其他 master 的拒绝消息。但是新增的 PFAIL-&gt;FAIL，错误传播机制也有其作用：</p> 
+<ul><li>保证了一旦集群处于错误状态，则所有节点都拒绝写操作。</li><li>避免了 slave 由于局部网络异常不能脸上master 而发起错误的选举尝试</li></ul> 
+<h3 id="配置处理传播和失败转移">配置处理，传播和失败转移</h3> 
+<h4 id="集群-current-epoch">集群 current epoch</h4> 
+<p>redis 集群使用了类似 Raft 算法中 “term” 的概念，只不过在 redis 集群中叫 epoch。</p> 
+<p>currentEpoch 是一个 64 位无符号数字。</p> 
+<p>集群节点创建时， currentEpoch 设置为 0.</p> 
+<p>每次节点收到一个包，若发送者的 epoch 比当前节点的大，则 currentEpoch 更新为发送者的 epoch。</p> 
+<p>最终，集群在节点的最大 configEpoch 上达成一致。</p> 
+<h4 id="configuration-epoch">configuration epoch</h4> 
+<p>master 会在 ping 或 pong 包里包含其 configEpoch 信息。</p> 
+<p>节点新创建时， configEpoch 为0.</p> 
+<p>在 slave selection 过程中，获得授权的 slave 会创建新的 configEpoch 并用其转变为 master。</p> 
+<p>configEpoch 可用于解决分支问题。</p> 
+<p>configEpoch 发生变化时，会永久保存在所有节点的 nodes.conf 文件上。</p> 
+<h4 id="slave-选举和提升">Slave 选举和提升</h4> 
+<p>Slave 选举由 slave 节点在投票给 slave 节点的 master 节点的帮助下完成。</p> 
+<p>Slave 若想提升为 master，需要发起选举并赢得选举。 slave 发起选举的条件如下：</p> 
+<ul><li>该 Slave 的 master 处于 FAIL 状态</li><li>slave 的 master 服务的 slot 数量大于0</li><li>slave 同master 之间备份数据的链接断开时间在一定时间之内，以保证 slave 上数据相对比较新</li></ul> 
+<p>选举操作过程如下：</p> 
+<ul><li>增加 currentEpoch</li><li>向所有 master 发送 FAILOVER_AUTH_REQUEST 授权请求，等待最多 2 * NODE_TIMEOUT 时间</li><li>master 若同意 slave 的授权请求，将返回 FAILOVER_AUTH_ACK。并在 2 * NODE_TIMEOUT 时间内不再同意其他授权请求。这个策略对于安全性保证来讲不是必须的，因为 configEpoch 最大的才能作为 master。不过该策略可以防止多个 slave 在同一时间被选举为 master</li><li>slave 丢弃所有 epoch 比 currentEpoch 小的 ACK，以防止误将上次选举的 ACK 当做本次的</li><li>若 slave 从大部分 master 获取到 ACK，则执行提升。否则本次选举失败，需要间隔 NODE_TIMEOUT * 4 时间段后重试</li></ul> 
+<h4 id="slave-rank">Slave Rank</h4> 
+<p>slave 发现 master 进入 FAIL状态后，要等一段时间才发起选举。等待时间 delay 为</p> 
+<pre class="prettyprint"><code class=" hljs applescript">DELAY = <span class="hljs-number">500</span> ms + random <span class="hljs-command">delay</span> <span class="hljs-keyword">between</span> <span class="hljs-number">0</span>-<span class="hljs-number">500</span> ms + SLAVE_RANK * <span class="hljs-number">1000</span> ms</code></pre> 
+<p>delay 分为几部分：</p> 
+<ul><li>固定的 500 毫秒，让 FAIL 状态尽可能在网络内传播，防止 master 收到选举请求的时候还未发现master 已经FAIL，不返回确认</li><li>随机部分. 防止多个 slave 同时开启选举</li><li>SLAVE_RANK 部分，master fail 的时候，slave 之间会交互信息，从而将slave 排序。具有最新信息的 slave 的 SLAVE_RANK 为0，次之为1，等等. 这部分保证数据最全的 slave 最先发起选举.</li></ul> 
+<p>slave 一旦被选中，它就获得一个新的当前最大的 configEpoch。它立马会使用该 configEpoch 发送 pong 包广播给集群中所有节点。后续ping 和 pong 包中也会携带该 configEpoch 信息。</p> 
+<p>其他节点收到通知后，会用较大 configEpoch 的节点作为处理 slot 的master。而原来的 master 若收到，还会建立到新 master 的备份，将自己转变为新 master 的一个 slave。</p> 
+<h4 id="master-回应-slave-的选举请求">master 回应 slave 的选举请求</h4> 
+<p>master 若收到 slave 发起的 FAILOVER_AUTH_REQUEST 请求，在下列条件满足的情况下将会返回 ACK确认：</p> 
+<ul><li>master 对每个 epoch 只投一次票，并且不对较老的 epoch 投票. master 维护 lastVoteEpoch，若收到的 currentEpoch 比 lastVoteEpoch 小则不投票.</li><li>仅当发起投票的 slave 的 master 进入 FAIL状态，本 master 才投票</li><li>所有 currentEpoch 比 master 的 currentEpoch 小的请求都会被忽略. </li></ul> 
+<p>master 执行选举由以下策略：</p> 
+<ul><li>若 master 已经投票给某个 slave，则在 NODE_TIMEOUT * 2 时间内不会再投票给同一 master 的 slave。这条策略从安全性来讲不是必须的，但是会防止额外的 failover 操作发生。</li><li>master 不对 slave 做区分. 只要 slave 的 master 处于 FAIL 状态且当前周期还未投票，就投票给发起请求的 slave</li><li>若 master 不投票给 slave，则不会返回数据。仅仅是忽略请求。</li><li>若 slave 的 slot 的 configEpoch 大于当前 slave 发送请求的 configEpoch，则 master 不投票给该 slave</li></ul> 
+<h4 id="在分隔partition情况下-configepoch-的实际作用">在分隔（partition）情况下 configEpoch 的实际作用</h4> 
+<p>举个列子：</p> 
+<ul><li>一个 master 挂了，该 master 有 A、B、C 三个 slave</li><li>A 赢得选举并将自身提升为 master</li><li>出现网络 partition，A 对大部分 master 不可达</li><li>B 赢得选举并将自身提升为 master</li><li>出现 partition，B 对大部分 master 不可达</li><li>第一个partition 修复，A 对大部分 master 可达</li></ul> 
+<p>此时 A 作为master，同时 C 试图选举并提升为 master。那么 C 可以赢得选举提升为 master 吗？</p> 
+<ul><li>C 发起选举，并会获得成功。因为 master 是 FAIL 状态</li><li>A 尝试发起通知自身提升为 master，但是大部分 master 不会接受。因为 B 已经赢得过选举，因此大部分 master 会认同 B 的 configEpoch，而A 的 configEpoch 比较旧了。</li><li>最终，C 发起提升通知并成功。因为 C 的 configEpoch 更新。</li></ul> 
+<p>假设另一种情况，没有 B 的存在。在这种情况下 A 断开一小段时间重新恢复，A 有可能可以提升成功。A 提升成功的情况下 C 就不能选举成功；反之亦然。</p> 
+<h4 id="哈希槽配置的传播">哈希槽配置的传播</h4> 
+<p>主要有两种方式：</p> 
+<ul><li>心跳消息</li><li>UPDATE 消息。心跳消息携带了 configEpoch，若接收方发现发送方的信息比较陈旧（configEpoch 比较旧），旧发送一个消息强制更新发送节点的信息</li></ul> 
+<p>hash slot的更新有两个规则：</p> 
+<ul><li>规则1： 若 hash slot 未分配（当前为NULL），则更改关联的 hash slot table </li><li>规则2： 若广播的 configEpoch 币本地 hash slot table 关联的 configEpoch 大，则重新绑定到新节点</li></ul> 
+<h4 id="节点重新加入集群">节点重新加入集群</h4> 
+<p>在重新配置过程中，某个 master 的所有节点都会由原来的 slave 提供服务。如之前的例子。master 的多个 slot 可能由 A 或 B 提供服务。</p> 
+<p>因此当 master 重新加入集群后，它需要将自身变为某个节点的一个 slave。那它要变为 A 的slave 还是 B 的slave 呢？切换规则为： <strong>master 节点重新加入后会变为从它拿走最后一个 slot 的那个节点的 slave</strong>.</p> 
+<h4 id="备份迁移">备份迁移</h4> 
+<p>备份迁移用于提升系统可用性。</p> 
+<p>我们先看没有备份迁移的情况：</p> 
+<ul><li>master A 有唯一 slave A1</li><li>A 挂了，A1 提升为 master</li><li>过一段时间，A1 也挂了。这时候系统可用性收到伤害，系统不再可用。</li></ul> 
+<p>备份迁移方案下的例子。A、B、C 为master，A1 和 B1 分别是 A、B 的 slave；C1 和 C2 是 C 的slave：</p> 
+<ul><li>A 挂了，A1 提升为 master</li><li>C2 迁移为 A1 的 slave（A1此时没有其他 slave）</li><li>过一段时间，A1 挂了</li><li>C2 替换 A1 成为 master</li><li>集群仍然可用</li></ul> 
+<h4 id="备份迁移算法">备份迁移算法</h4> 
+<p>备份迁移算法主要用于决定哪个 slave 来做迁移操作。</p> 
+<p>acting slave： 具有最多关联 slave 的 master 的 slave，并且取 id 最小的那一个。</p> 
+<p>需要注意，当配置不稳定的时候，可能会有多个 slave 认为自己是 acting slave，都去执行迁移操作。这不是大问题，因为当配置稳定之后，若原来的 master 下没有 slave，则slave 还是会迁移回来的。最终每个 master 都会有 slave。而且绝大部分情况下不会发生这种事情。</p> 
+<h4 id="configepoch-冲突解决算法">configEpoch 冲突解决算法</h4> 
+<p>slave 自己生成的 configEpoch 是可以保证唯一的。但是管理员可以触发一些操作，从而使集群内产生同样的 configEpoch。但集群希望任何情况下每个 master 都有唯一的 configEpoch，因此需要 configEpoch 冲突解决算法来强制保证这一点。具体算法为：</p> 
+<ul><li>一个 master 发现其他 master 节点广播的 configEpoch 跟自身的相同</li><li>本 master 的 Node ID 相对比较小（字典序）</li><li>本 master 将 currentEpoch 赠1，并用它作为新的 configEpoch</li></ul> 
+<h4 id="节点重置">节点重置</h4> 
+<p>可以在不重启节点的情况下对其 reset，从而另做他用。重置命令为：</p> 
+<ul><li>CLUSTER RESET SOFT</li><li>CLUSTER RESET HARD</li></ul> 
+<p>命令直接发给要重置的节点。重置将执行以下操作：</p> 
+<ul><li>若节点是 slave，将其设置为 master，并丢弃所有数据。若节点是 master，则放弃重置操作。</li><li>释放所有 slot，重置手动 failover 状态</li><li>将节点表中所有数据删除。因此不再知道其他节点信息</li><li>设置 currentEpoch，configEpoch 和 lastVoteEpoch 为0 （只对 HARD reset 生效）</li><li>重新生成 Node ID（只对 HARD reset 生效）</li></ul> 
+<h4 id="从集群删除节点">从集群删除节点</h4> 
+<p>删除节点只需要将其所有 slot 迁移到其他 master ，并关机即可。不过其他节点仍然记得它的 Node ID 并会尝试重连。</p> 
+<p>因此希望将该节点的记录从其他节点的节点表删除。这通过 CLUSTER FORGET 命令完成。这条命令主要做下面工作：</p> 
+<ul><li>从 node table 移除相应节点信息</li><li>60 秒内阻止同样名字的节点重新添加到节点表。这是为了防止通过 gossip 协议重新加回来。</li></ul> 
+<h3 id="发布-订阅">发布-订阅</h3> 
+<p>客户端可以从任意节点订阅内容，也可以发布信息到任意节点。redis 集群会保证相应信息被转发。</p> 
+<p>当前的实现仅仅是将每个发布的消息广播到其他所有节点。以后会通过 Bloom Filter 或其他算法优化。</p> 
+<h3 id="附录">附录</h3> 
+<h4 id="附录a-crc16-算法的-c-语言实现">附录A： CRC16 算法的 C 语言实现</h4> 
+<pre class="prettyprint"><code class=" hljs vbscript">/*
+ * Copyright <span class="hljs-number">2001</span>-<span class="hljs-number">2010</span> Georges Menie (www.menie.org)
+ * Copyright <span class="hljs-number">2010</span> Salvatore Sanfilippo (adapted <span class="hljs-keyword">to</span> Redis coding style)
+ * All rights reserved.
+ * Redistribution <span class="hljs-keyword">and</span> use <span class="hljs-keyword">in</span> source <span class="hljs-keyword">and</span> binary forms, <span class="hljs-keyword">with</span> <span class="hljs-keyword">or</span> without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions <span class="hljs-keyword">and</span> the following disclaimer.
+ *     * Redistributions <span class="hljs-keyword">in</span> binary form must reproduce the above copyright
+ *       notice, this list of conditions <span class="hljs-keyword">and</span> the following disclaimer <span class="hljs-keyword">in</span> the
+ *       documentation <span class="hljs-keyword">and</span>/<span class="hljs-keyword">or</span> other materials provided <span class="hljs-keyword">with</span> the distribution.
+ *     * Neither the name of the University of California, Berkeley nor the
+ *       names of its contributors may be used <span class="hljs-keyword">to</span> endorse <span class="hljs-keyword">or</span> promote products
+ *       <span class="hljs-built_in">derived</span> from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE <span class="hljs-keyword">IS</span> PROVIDED BY THE REGENTS <span class="hljs-keyword">AND</span> CONTRIBUTORS ``AS <span class="hljs-keyword">IS</span><span class="hljs-comment">'' AND ANY</span>
+ * EXPRESS <span class="hljs-keyword">OR</span> IMPLIED WARRANTIES, INCLUDING, BUT <span class="hljs-keyword">NOT</span> LIMITED <span class="hljs-keyword">TO</span>, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY <span class="hljs-keyword">AND</span> FITNESS <span class="hljs-keyword">FOR</span> A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. <span class="hljs-keyword">IN</span> NO EVENT SHALL THE REGENTS <span class="hljs-keyword">AND</span> CONTRIBUTORS BE LIABLE <span class="hljs-keyword">FOR</span> ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, <span class="hljs-keyword">OR</span> CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT <span class="hljs-keyword">NOT</span> LIMITED <span class="hljs-keyword">TO</span>, PROCUREMENT OF SUBSTITUTE GOODS <span class="hljs-keyword">OR</span> SERVICES;
+ * LOSS OF USE, DATA, <span class="hljs-keyword">OR</span> PROFITS; <span class="hljs-keyword">OR</span> BUSINESS INTERRUPTION) HOWEVER CAUSED <span class="hljs-keyword">AND</span>
+ * <span class="hljs-keyword">ON</span> ANY THEORY OF LIABILITY, WHETHER <span class="hljs-keyword">IN</span> CONTRACT, STRICT LIABILITY, <span class="hljs-keyword">OR</span> TORT
+ * (INCLUDING NEGLIGENCE <span class="hljs-keyword">OR</span> OTHERWISE) ARISING <span class="hljs-keyword">IN</span> ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN <span class="hljs-keyword">IF</span> ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+/* CRC16 implementation according <span class="hljs-keyword">to</span> CCITT standards.
+ *
+ * Note by @antirez: this <span class="hljs-keyword">is</span> actually the XMODEM CRC <span class="hljs-number">16</span> algorithm, using the
+ * following parameters:
+ *
+ * Name                       : <span class="hljs-string">"XMODEM"</span>, also known as <span class="hljs-string">"ZMODEM"</span>, <span class="hljs-string">"CRC-16/ACORN"</span>
+ * Width                      : <span class="hljs-number">16</span> bit
+ * Poly                       : <span class="hljs-number">1021</span> (That <span class="hljs-keyword">is</span> actually x^<span class="hljs-number">16</span> + x^<span class="hljs-number">12</span> + x^<span class="hljs-number">5</span> + <span class="hljs-number">1</span>)
+ * Initialization             : <span class="hljs-number">0000</span>
+ * Reflect Input byte         : <span class="hljs-literal">False</span>
+ * Reflect Output CRC         : <span class="hljs-literal">False</span>
+ * <span class="hljs-keyword">Xor</span> constant <span class="hljs-keyword">to</span> output CRC : <span class="hljs-number">0000</span>
+ * Output <span class="hljs-keyword">for</span> <span class="hljs-string">"123456789"</span>     : <span class="hljs-number">31</span>C3
+ */
+
+static <span class="hljs-keyword">const</span> uint16_t crc16tab[<span class="hljs-number">256</span>]= {
+    <span class="hljs-number">0x0000</span>,<span class="hljs-number">0x1021</span>,<span class="hljs-number">0x2042</span>,<span class="hljs-number">0x3063</span>,<span class="hljs-number">0x4084</span>,<span class="hljs-number">0x50a5</span>,<span class="hljs-number">0x60c6</span>,<span class="hljs-number">0x70e7</span>,
+    <span class="hljs-number">0x8108</span>,<span class="hljs-number">0x9129</span>,<span class="hljs-number">0xa14a</span>,<span class="hljs-number">0xb16b</span>,<span class="hljs-number">0xc18c</span>,<span class="hljs-number">0xd1ad</span>,<span class="hljs-number">0xe1ce</span>,<span class="hljs-number">0xf1ef</span>,
+    <span class="hljs-number">0x1231</span>,<span class="hljs-number">0x0210</span>,<span class="hljs-number">0x3273</span>,<span class="hljs-number">0x2252</span>,<span class="hljs-number">0x52b5</span>,<span class="hljs-number">0x4294</span>,<span class="hljs-number">0x72f7</span>,<span class="hljs-number">0x62d6</span>,
+    <span class="hljs-number">0x9339</span>,<span class="hljs-number">0x8318</span>,<span class="hljs-number">0xb37b</span>,<span class="hljs-number">0xa35a</span>,<span class="hljs-number">0xd3bd</span>,<span class="hljs-number">0xc39c</span>,<span class="hljs-number">0xf3ff</span>,<span class="hljs-number">0xe3de</span>,
+    <span class="hljs-number">0x2462</span>,<span class="hljs-number">0x3443</span>,<span class="hljs-number">0x0420</span>,<span class="hljs-number">0x1401</span>,<span class="hljs-number">0x64e6</span>,<span class="hljs-number">0x74c7</span>,<span class="hljs-number">0x44a4</span>,<span class="hljs-number">0x5485</span>,
+    <span class="hljs-number">0xa56a</span>,<span class="hljs-number">0xb54b</span>,<span class="hljs-number">0x8528</span>,<span class="hljs-number">0x9509</span>,<span class="hljs-number">0xe5ee</span>,<span class="hljs-number">0xf5cf</span>,<span class="hljs-number">0xc5ac</span>,<span class="hljs-number">0xd58d</span>,
+    <span class="hljs-number">0x3653</span>,<span class="hljs-number">0x2672</span>,<span class="hljs-number">0x1611</span>,<span class="hljs-number">0x0630</span>,<span class="hljs-number">0x76d7</span>,<span class="hljs-number">0x66f6</span>,<span class="hljs-number">0x5695</span>,<span class="hljs-number">0x46b4</span>,
+    <span class="hljs-number">0xb75b</span>,<span class="hljs-number">0xa77a</span>,<span class="hljs-number">0x9719</span>,<span class="hljs-number">0x8738</span>,<span class="hljs-number">0xf7df</span>,<span class="hljs-number">0xe7fe</span>,<span class="hljs-number">0xd79d</span>,<span class="hljs-number">0xc7bc</span>,
+    <span class="hljs-number">0x48c4</span>,<span class="hljs-number">0x58e5</span>,<span class="hljs-number">0x6886</span>,<span class="hljs-number">0x78a7</span>,<span class="hljs-number">0x0840</span>,<span class="hljs-number">0x1861</span>,<span class="hljs-number">0x2802</span>,<span class="hljs-number">0x3823</span>,
+    <span class="hljs-number">0xc9cc</span>,<span class="hljs-number">0xd9ed</span>,<span class="hljs-number">0xe98e</span>,<span class="hljs-number">0xf9af</span>,<span class="hljs-number">0x8948</span>,<span class="hljs-number">0x9969</span>,<span class="hljs-number">0xa90a</span>,<span class="hljs-number">0xb92b</span>,
+    <span class="hljs-number">0x5af5</span>,<span class="hljs-number">0x4ad4</span>,<span class="hljs-number">0x7ab7</span>,<span class="hljs-number">0x6a96</span>,<span class="hljs-number">0x1a71</span>,<span class="hljs-number">0x0a50</span>,<span class="hljs-number">0x3a33</span>,<span class="hljs-number">0x2a12</span>,
+    <span class="hljs-number">0xdbfd</span>,<span class="hljs-number">0xcbdc</span>,<span class="hljs-number">0xfbbf</span>,<span class="hljs-number">0xeb9e</span>,<span class="hljs-number">0x9b79</span>,<span class="hljs-number">0x8b58</span>,<span class="hljs-number">0xbb3b</span>,<span class="hljs-number">0xab1a</span>,
+    <span class="hljs-number">0x6ca6</span>,<span class="hljs-number">0x7c87</span>,<span class="hljs-number">0x4ce4</span>,<span class="hljs-number">0x5cc5</span>,<span class="hljs-number">0x2c22</span>,<span class="hljs-number">0x3c03</span>,<span class="hljs-number">0x0c60</span>,<span class="hljs-number">0x1c41</span>,
+    <span class="hljs-number">0xedae</span>,<span class="hljs-number">0xfd8f</span>,<span class="hljs-number">0xcdec</span>,<span class="hljs-number">0xddcd</span>,<span class="hljs-number">0xad2a</span>,<span class="hljs-number">0xbd0b</span>,<span class="hljs-number">0x8d68</span>,<span class="hljs-number">0x9d49</span>,
+    <span class="hljs-number">0x7e97</span>,<span class="hljs-number">0x6eb6</span>,<span class="hljs-number">0x5ed5</span>,<span class="hljs-number">0x4ef4</span>,<span class="hljs-number">0x3e13</span>,<span class="hljs-number">0x2e32</span>,<span class="hljs-number">0x1e51</span>,<span class="hljs-number">0x0e70</span>,
+    <span class="hljs-number">0xff9f</span>,<span class="hljs-number">0xefbe</span>,<span class="hljs-number">0xdfdd</span>,<span class="hljs-number">0xcffc</span>,<span class="hljs-number">0xbf1b</span>,<span class="hljs-number">0xaf3a</span>,<span class="hljs-number">0x9f59</span>,<span class="hljs-number">0x8f78</span>,
+    <span class="hljs-number">0x9188</span>,<span class="hljs-number">0x81a9</span>,<span class="hljs-number">0xb1ca</span>,<span class="hljs-number">0xa1eb</span>,<span class="hljs-number">0xd10c</span>,<span class="hljs-number">0xc12d</span>,<span class="hljs-number">0xf14e</span>,<span class="hljs-number">0xe16f</span>,
+    <span class="hljs-number">0x1080</span>,<span class="hljs-number">0x00a1</span>,<span class="hljs-number">0x30c2</span>,<span class="hljs-number">0x20e3</span>,<span class="hljs-number">0x5004</span>,<span class="hljs-number">0x4025</span>,<span class="hljs-number">0x7046</span>,<span class="hljs-number">0x6067</span>,
+    <span class="hljs-number">0x83b9</span>,<span class="hljs-number">0x9398</span>,<span class="hljs-number">0xa3fb</span>,<span class="hljs-number">0xb3da</span>,<span class="hljs-number">0xc33d</span>,<span class="hljs-number">0xd31c</span>,<span class="hljs-number">0xe37f</span>,<span class="hljs-number">0xf35e</span>,
+    <span class="hljs-number">0x02b1</span>,<span class="hljs-number">0x1290</span>,<span class="hljs-number">0x22f3</span>,<span class="hljs-number">0x32d2</span>,<span class="hljs-number">0x4235</span>,<span class="hljs-number">0x5214</span>,<span class="hljs-number">0x6277</span>,<span class="hljs-number">0x7256</span>,
+    <span class="hljs-number">0xb5ea</span>,<span class="hljs-number">0xa5cb</span>,<span class="hljs-number">0x95a8</span>,<span class="hljs-number">0x8589</span>,<span class="hljs-number">0xf56e</span>,<span class="hljs-number">0xe54f</span>,<span class="hljs-number">0xd52c</span>,<span class="hljs-number">0xc50d</span>,
+    <span class="hljs-number">0x34e2</span>,<span class="hljs-number">0x24c3</span>,<span class="hljs-number">0x14a0</span>,<span class="hljs-number">0x0481</span>,<span class="hljs-number">0x7466</span>,<span class="hljs-number">0x6447</span>,<span class="hljs-number">0x5424</span>,<span class="hljs-number">0x4405</span>,
+    <span class="hljs-number">0xa7db</span>,<span class="hljs-number">0xb7fa</span>,<span class="hljs-number">0x8799</span>,<span class="hljs-number">0x97b8</span>,<span class="hljs-number">0xe75f</span>,<span class="hljs-number">0xf77e</span>,<span class="hljs-number">0xc71d</span>,<span class="hljs-number">0xd73c</span>,
+    <span class="hljs-number">0x26d3</span>,<span class="hljs-number">0x36f2</span>,<span class="hljs-number">0x0691</span>,<span class="hljs-number">0x16b0</span>,<span class="hljs-number">0x6657</span>,<span class="hljs-number">0x7676</span>,<span class="hljs-number">0x4615</span>,<span class="hljs-number">0x5634</span>,
+    <span class="hljs-number">0xd94c</span>,<span class="hljs-number">0xc96d</span>,<span class="hljs-number">0xf90e</span>,<span class="hljs-number">0xe92f</span>,<span class="hljs-number">0x99c8</span>,<span class="hljs-number">0x89e9</span>,<span class="hljs-number">0xb98a</span>,<span class="hljs-number">0xa9ab</span>,
+    <span class="hljs-number">0x5844</span>,<span class="hljs-number">0x4865</span>,<span class="hljs-number">0x7806</span>,<span class="hljs-number">0x6827</span>,<span class="hljs-number">0x18c0</span>,<span class="hljs-number">0x08e1</span>,<span class="hljs-number">0x3882</span>,<span class="hljs-number">0x28a3</span>,
+    <span class="hljs-number">0xcb7d</span>,<span class="hljs-number">0xdb5c</span>,<span class="hljs-number">0xeb3f</span>,<span class="hljs-number">0xfb1e</span>,<span class="hljs-number">0x8bf9</span>,<span class="hljs-number">0x9bd8</span>,<span class="hljs-number">0xabbb</span>,<span class="hljs-number">0xbb9a</span>,
+    <span class="hljs-number">0x4a75</span>,<span class="hljs-number">0x5a54</span>,<span class="hljs-number">0x6a37</span>,<span class="hljs-number">0x7a16</span>,<span class="hljs-number">0x0af1</span>,<span class="hljs-number">0x1ad0</span>,<span class="hljs-number">0x2ab3</span>,<span class="hljs-number">0x3a92</span>,
+    <span class="hljs-number">0xfd2e</span>,<span class="hljs-number">0xed0f</span>,<span class="hljs-number">0xdd6c</span>,<span class="hljs-number">0xcd4d</span>,<span class="hljs-number">0xbdaa</span>,<span class="hljs-number">0xad8b</span>,<span class="hljs-number">0x9de8</span>,<span class="hljs-number">0x8dc9</span>,
+    <span class="hljs-number">0x7c26</span>,<span class="hljs-number">0x6c07</span>,<span class="hljs-number">0x5c64</span>,<span class="hljs-number">0x4c45</span>,<span class="hljs-number">0x3ca2</span>,<span class="hljs-number">0x2c83</span>,<span class="hljs-number">0x1ce0</span>,<span class="hljs-number">0x0cc1</span>,
+    <span class="hljs-number">0xef1f</span>,<span class="hljs-number">0xff3e</span>,<span class="hljs-number">0xcf5d</span>,<span class="hljs-number">0xdf7c</span>,<span class="hljs-number">0xaf9b</span>,<span class="hljs-number">0xbfba</span>,<span class="hljs-number">0x8fd9</span>,<span class="hljs-number">0x9ff8</span>,
+    <span class="hljs-number">0x6e17</span>,<span class="hljs-number">0x7e36</span>,<span class="hljs-number">0x4e55</span>,<span class="hljs-number">0x5e74</span>,<span class="hljs-number">0x2e93</span>,<span class="hljs-number">0x3eb2</span>,<span class="hljs-number">0x0ed1</span>,<span class="hljs-number">0x1ef0</span>
+};
+
+uint16_t crc16(<span class="hljs-keyword">const</span> char *buf, <span class="hljs-built_in">int</span> <span class="hljs-built_in">len</span>) {
+    <span class="hljs-built_in">int</span> counter;
+    uint16_t crc = <span class="hljs-number">0</span>;
+    <span class="hljs-keyword">for</span> (counter = <span class="hljs-number">0</span>; counter &lt; <span class="hljs-built_in">len</span>; counter++)
+            crc = (crc&lt;&lt;<span class="hljs-number">8</span>) ^ crc16tab[((crc&gt;&gt;<span class="hljs-number">8</span>) ^ *buf++)&amp;<span class="hljs-number">0x00FF</span>];
+    return crc;
+}</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3219fd1f6c25e59f8585652098372d5c/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">MySQL8.0  大小写敏感修改的问题</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/9e4b4409939f72328cc4647f79d9ebd1/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">[EMWIN] Dialog 中Framewin句柄 记录</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

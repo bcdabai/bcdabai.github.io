@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>深入剖析Socket---TCP通信底层队列填满的死锁问题 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="深入剖析Socket---TCP通信底层队列填满的死锁问题" />
+<meta property="og:description" content="基础准备 首先需要明白数据传输的底层实现机制，在http://blog.csdn.net/ns_code/article/details/15813809这篇博客中有详细的介绍，在上面的博客中，我们提到了SendQ和RecvQ缓冲队列，这两个缓冲区的容量在具体实现时会受一定的限制，虽然它们使用的实际内存大小会动态地增长和收缩，但还是需要一个硬性的限制，以防止行为异常的程序所控制的单一TCP连接将系统的内存全部消耗。正式由于缓冲区的容量有限，它们可能会被填满，事实也正是如此，如果与TCP的流量控制机制结合使用，则可能导致一种形式的死锁。
+一旦RecvQ已满，TCP流控制机制就会产生作用（使用流控制机制的目的是为了保证发送者不会传输太多数据，从而超出了接收系统的处理能力），它将阻止传输发送端主机的SendQ中的任何数据，直到接收者调用输入流的read（）方法将RecvQ中的数据移除一部分到Delivered中，从而腾出了空间。发送端可以持续地写出数据，直到SendQ队列被填满，如果SendQ队列已满时调用输出流的write（）方法，则会阻塞等待，直到有一些字节被传输到RecvQ队列中，如果此时RecvQ队列也被填满了，所有的操作都将停止，直到接收端调用了输入流的read（）方法将一些字节传输到了Delivered队列中。
+引出问题 我们假设SendQ队列和RecvQ队列的大小分别为SQS和RQS。将一个大小为n的字节数组传递给发送端write（）方法调用，其中n &gt; SQS，直到有至少n-SQS字节的数据传递到接收端主机的RecvQ队列后，该方法才返回。如果n的大小超过了SQS&#43;RQS，write（）方法将在接收端从输入流读取了至少n-(SQS&#43;RQS)字节后才会返回。如果接收端没有调用read（）方法，大数据量的发送是无法成功的。特别是连接的两端同时分别调用它的输出流的write（）方法，而他们的缓冲区大小又大于SQS&#43;RQS时，将会发生死锁：两个write操作都不能完成，两个程序都将永远保持阻塞状态。
+下面考虑一个具体的例子，即主机A上的程序和主机B上的程序之间的TCP连接。假设A和B上的SQS和RQS都是500字节，下图展示了两个程序试图同时发送1500字节时的情况。主机A上的程序中的前500字节已经传输到另一端，另外500字节已经复制到了主机A的SendQ队列中，余下的500字节则无法发送，write（）方法将无法返回，直到主机B上程序的RecvQ队列有空间空出来，然而不幸的是B上的程序也遇到了同样的情况，而二者都没有及时调用read（）方法从自己的RecvQ队列中读取数据到Delivered队列中。因此，两个程序的write（）方法调用都永远无法返回，产生死锁。因此，在写程序时，要仔细设计协议，以避免在两个方向上传输大量数据时产生死锁。
+示例分析 回顾前面几篇博客中的TCP通信的示例代码，基本都是只调用一次write（）方法将所有的数据写出，而且我们测试的数据量也不大。考虑一个压缩字节的Demo，客户端从文件中读取字节，发送到服务端，服务端将受到的文件压缩后反馈给客户端。 这里先给出代码，客户端代码如下：
+[java] view plain copy print ? import java.io.FileInputStream; import java.io.FileOutputStream; import java.io.IOException; import java.io.InputStream; import java.io.OutputStream; import java.net.Socket; public class CompressClientNoDeadlock { public static final int BUFSIZE = 256; // Size of read buffer public static void main(String[] args) throws IOException { if (args.length != 3) // Test for correct # of args throw new IllegalArgumentException(&#34;Parameter(s): &lt;Server&gt; &lt;Port&gt; &lt;File&gt;&#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/a8bafb376e419679af1dd944c93ede04/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2013-12-03T16:21:07+08:00" />
+<meta property="article:modified_time" content="2013-12-03T16:21:07+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">深入剖析Socket---TCP通信底层队列填满的死锁问题</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <span style="color:rgb(255,0,0)"><span style="font-family:Comic Sans MS; font-size:18px">基础准备</span></span> 
+<p><span style="font-family:'Comic Sans MS'"><span style="font-size:18px"><span style="color:rgb(255,0,0)">    </span>首先需要明白数据传输的底层实现机制，在<a target="_blank" href="http://blog.csdn.net/ns_code/article/details/15813809" rel="noopener noreferrer"><span style="color:#6600cc">http://blog.csdn.net/ns_code/article/details/15813809</span></a>这篇博客中有详细的介绍，在上面的博客中，我们提到了SendQ和RecvQ缓冲队列，这两个缓冲区的容量在具体实现时会受一定的限制，虽然它们使用的实际内存大小会动态地增长和收缩，但还是需要一个硬性的限制，以防止行为异常的程序所控制的单一TCP连接将系统的内存全部消耗。正式由于缓冲区的容量有限，它们可能会被填满，事实也正是如此，如果与TCP的流量控制机制结合使用，则可能导致一种形式的死锁。</span></span></p> 
+<p><span style="font-family:'Comic Sans MS'"><span style="font-size:18px">      一旦RecvQ已满，TCP流控制机制就会产生作用（使用流控制机制的目的是为了保证发送者不会传输太多数据，从而超出了接收系统的处理能力），它将阻止传输发送端主机的SendQ中的任何数据，直到接收者调用输入流的read（）方法将RecvQ中的数据移除一部分到Delivered中，从而腾出了空间。发送端可以持续地写出数据，直到SendQ队列被填满，如果SendQ队列已满时调用输出流的write（）方法，则会阻塞等待，直到有一些字节被传输到RecvQ队列中，如果此时RecvQ队列也被填满了，所有的操作都将停止，直到接收端调用了输入流的read（）方法将一些字节传输到了Delivered队列中。</span></span></p> 
+<p><span style="font-size:18px"><span style="font-family:'Comic Sans MS'"></span></span></p> 
+<h2><a target="_blank" name="t1"></a><span style="font-weight:bold"><span style="color:#ff0000"><span style="font-family:'Comic Sans MS'"><span style="font-size:18px">   引出问题</span></span></span></span></h2> 
+<p><span style="font-family:'Comic Sans MS'"><span style="font-size:18px">       我们假设SendQ队列和RecvQ队列的大小分别为SQS和RQS。将一个大小为n的字节数组传递给发送端write（）方法调用，其中n &gt; SQS，直到有至少n-SQS字节的数据传递到接收端主机的RecvQ队列后，该方法才返回。如果n的大小超过了SQS+RQS，write（）方法将在接收端从输入流读取了至少n-(SQS+RQS)字节后才会返回。如果接收端没有调用read（）方法，大数据量的发送是无法成功的。特别是连接的两端同时分别调用它的输出流的write（）方法，而他们的缓冲区大小又大于SQS+RQS时，将会发生死锁：两个write操作都不能完成，两个程序都将永远保持阻塞状态。</span></span></p> 
+<p><span style="font-family:'Comic Sans MS'"><span style="font-size:18px">     下面考虑一个具体的例子，即主机A上的程序和主机B上的程序之间的TCP连接。假设A和B上的SQS和RQS都是500字节，下图展示了两个程序试图同时发送1500字节时的情况。主机A上的程序中的前500字节已经传输到另一端，另外500字节已经复制到了主机A的SendQ队列中，余下的500字节则无法发送，write（）方法将无法返回，直到主机B上程序的RecvQ队列有空间空出来，然而不幸的是B上的程序也遇到了同样的情况，而二者都没有及时调用read（）方法从自己的RecvQ队列中读取数据到Delivered队列中。因此，两个程序的write（）方法调用都永远无法返回，产生死锁。<span style="color:#000099"><strong>因此，在写程序时，要仔细设计协议，以避免在两个方向上传输大量数据时产生死锁。</strong></span></span></span></p> 
+<p><span style="font-size:18px"><span style="font-family:'Comic Sans MS'"></span></span></p> 
+<h2><a target="_blank" name="t2"></a><span style="color:rgb(255,0,0)"><span style="font-family:'Comic Sans MS'"><span style="font-size:18px">   示例分析</span></span></span></h2> 
+<span style="font-family:'Comic Sans MS'"><span style="font-size:18px">     回顾前面几篇博客中的TCP通信的示例代码，基本都是只调用一次write（）方法将所有的数据写出，而且我们测试的数据量也不大。考虑一个压缩字节的Demo，客户端从文件中读取字节，发送到服务端，服务端将受到的文件压缩后反馈给客户端。</span></span> 
+<p></p> 
+<p><span style="font-family:'Comic Sans MS'"><span style="font-size:18px">     这里先给出代码，客户端代码如下：</span></span></p> 
+<p><span style="font-size:14px; font-family:SimSun"></span></p> 
+<div class="dp-highlighter bg_java"> 
+ <div class="bar"> 
+  <div class="tools"> 
+   <strong>[java]</strong> 
+   <a target="_blank" class="ViewSource" title="view plain" href="http://blog.csdn.net/ns_code/article/details/15939993#" rel="noopener noreferrer"> view plain</a> 
+   <a target="_blank" class="CopyToClipboard" title="copy" href="http://blog.csdn.net/ns_code/article/details/15939993#" rel="noopener noreferrer">copy</a> 
+   <a target="_blank" class="PrintSource" title="print" href="http://blog.csdn.net/ns_code/article/details/15939993#" rel="noopener noreferrer">print</a> 
+   <a target="_blank" class="About" title="?" href="http://blog.csdn.net/ns_code/article/details/15939993#" rel="noopener noreferrer">?</a> 
+  </div> 
+ </div> 
+ <ol class="dp-j"><li class="alt"><span class="keyword"><strong><span style="color:#006699">import</span></strong></span> java.io.FileInputStream;  </li><li><span class="keyword"><strong><span style="color:#006699">import</span></strong></span> java.io.FileOutputStream;  </li><li class="alt"><span class="keyword"><strong><span style="color:#006699">import</span></strong></span> java.io.IOException;  </li><li><span class="keyword"><strong><span style="color:#006699">import</span></strong></span> java.io.InputStream;  </li><li class="alt"><span class="keyword"><strong><span style="color:#006699">import</span></strong></span> java.io.OutputStream;  </li><li><span class="keyword"><strong><span style="color:#006699">import</span></strong></span> java.net.Socket;  </li><li class="alt">  </li><li><span class="keyword"><strong><span style="color:#006699">public</span></strong></span> <span class="keyword"><strong><span style="color:#006699">class</span></strong></span> CompressClientNoDeadlock {  </li><li class="alt">  </li><li>  <span class="keyword"><strong><span style="color:#006699">public</span></strong></span> <span class="keyword"><strong><span style="color:#006699">static</span></strong></span> <span class="keyword"><strong><span style="color:#006699">final</span></strong></span> <span class="keyword"><strong><span style="color:#006699">int</span></strong></span> BUFSIZE = <span class="number"><span style="color:#c00000">256</span></span>;  <span class="comment"><span style="color:#008200">// Size of read buffer </span></span>  </li><li class="alt">  </li><li>  <span class="keyword"><strong><span style="color:#006699">public</span></strong></span> <span class="keyword"><strong><span style="color:#006699">static</span></strong></span> <span class="keyword"><strong><span style="color:#006699">void</span></strong></span> main(String[] args) <span class="keyword"><strong><span style="color:#006699">throws</span></strong></span> IOException {  </li><li class="alt">  </li><li>    <span class="keyword"><strong><span style="color:#006699">if</span></strong></span> (args.length != <span class="number"><span style="color:#c00000">3</span></span>)  <span class="comment"><span style="color:#008200">// Test for correct #  of args </span></span>  </li><li class="alt">      <span class="keyword"><strong><span style="color:#006699">throw</span></strong></span> <span class="keyword"><strong><span style="color:#006699">new</span></strong></span> IllegalArgumentException(<span class="string"><span style="color:#0000ff">"Parameter(s): &lt;Server&gt; &lt;Port&gt; &lt;File&gt;"</span></span>);  </li><li>  </li><li class="alt">    String server = args[<span class="number"><span style="color:#c00000">0</span></span>];               <span class="comment"><span style="color:#008200">// Server name or IP address </span></span>  </li><li>    <span class="keyword"><strong><span style="color:#006699">int</span></strong></span> port = Integer.parseInt(args[<span class="number"><span style="color:#c00000">1</span></span>]);  <span class="comment"><span style="color:#008200">// Server port </span></span>  </li><li class="alt">    String filename = args[<span class="number"><span style="color:#c00000">2</span></span>];             <span class="comment"><span style="color:#008200">// File to read data from </span></span>  </li><li>  </li><li class="alt">    <span class="comment"><span style="color:#008200">// Open input and output file (named input.gz) </span></span>  </li><li>    <span class="keyword"><strong><span style="color:#006699">final</span></strong></span> FileInputStream fileIn = <span class="keyword"><strong><span style="color:#006699">new</span></strong></span> FileInputStream(filename);  </li><li class="alt">    FileOutputStream fileOut = <span class="keyword"><strong><span style="color:#006699">new</span></strong></span> FileOutputStream(filename + <span class="string"><span style="color:#0000ff">".gz"</span></span>);  </li><li>    </li><li class="alt">    <span class="comment"><span style="color:#008200">// Create socket connected to server on specified port </span></span>  </li><li>    <span class="keyword"><strong><span style="color:#006699">final</span></strong></span> Socket sock = <span class="keyword"><strong><span style="color:#006699">new</span></strong></span> Socket(server, port);  </li><li class="alt">  </li><li>    <span class="comment"><span style="color:#008200">// Send uncompressed byte stream to server </span></span>  </li><li class="alt">    Thread thread = <span class="keyword"><strong><span style="color:#006699">new</span></strong></span> Thread() {  </li><li>      <span class="keyword"><strong><span style="color:#006699">public</span></strong></span> <span class="keyword"><strong><span style="color:#006699">void</span></strong></span> run() {  </li><li class="alt">        <span class="keyword"><strong><span style="color:#006699">try</span></strong></span> {  </li><li>          SendBytes(sock, fileIn);  </li><li class="alt">        } <span class="keyword"><strong><span style="color:#006699">catch</span></strong></span> (Exception ignored) {}  </li><li>      }  </li><li class="alt">    };  </li><li>    thread.start();  </li><li class="alt">  </li><li>    <span class="comment"><span style="color:#008200">// Receive compressed byte stream from server </span></span>  </li><li class="alt">    InputStream sockIn = sock.getInputStream();  </li><li>    <span class="keyword"><strong><span style="color:#006699">int</span></strong></span> bytesRead;                      <span class="comment"><span style="color:#008200">// Number of bytes read </span></span>  </li><li class="alt">    <span class="keyword"><strong><span style="color:#006699">byte</span></strong></span>[] buffer = <span class="keyword"><strong><span style="color:#006699">new</span></strong></span> <span class="keyword"><strong><span style="color:#006699">byte</span></strong></span>[BUFSIZE];  <span class="comment"><span style="color:#008200">// Byte buffer </span></span>  </li><li>    <span class="keyword"><strong><span style="color:#006699">while</span></strong></span> ((bytesRead = sockIn.read(buffer)) != -<span class="number"><span style="color:#c00000">1</span></span>) {  </li><li class="alt">      fileOut.write(buffer, <span class="number"><span style="color:#c00000">0</span></span>, bytesRead);  </li><li>      System.out.print(<span class="string"><span style="color:#0000ff">"R"</span></span>);   <span class="comment"><span style="color:#008200">// Reading progress indicator </span></span>  </li><li class="alt">    }  </li><li>    System.out.println();      <span class="comment"><span style="color:#008200">// End progress indicator line </span></span>  </li><li class="alt">  </li><li>    sock.close();     <span class="comment"><span style="color:#008200">// Close the socket and its streams </span></span>  </li><li class="alt">    fileIn.close();   <span class="comment"><span style="color:#008200">// Close file streams </span></span>  </li><li>    fileOut.close();  </li><li class="alt">  }  </li><li>  </li><li class="alt">  <span class="keyword"><strong><span style="color:#006699">public</span></strong></span> <span class="keyword"><strong><span style="color:#006699">static</span></strong></span> <span class="keyword"><strong><span style="color:#006699">void</span></strong></span> SendBytes(Socket sock, InputStream fileIn)  </li><li>      <span class="keyword"><strong><span style="color:#006699">throws</span></strong></span> IOException {  </li><li class="alt">  </li><li>    OutputStream sockOut = sock.getOutputStream();  </li><li class="alt">    <span class="keyword"><strong><span style="color:#006699">int</span></strong></span> bytesRead;                      <span class="comment"><span style="color:#008200">// Number of bytes read </span></span>  </li><li>    <span class="keyword"><strong><span style="color:#006699">byte</span></strong></span>[] buffer = <span class="keyword"><strong><span style="color:#006699">new</span></strong></span> <span class="keyword"><strong><span style="color:#006699">byte</span></strong></span>[BUFSIZE];  <span class="comment"><span style="color:#008200">// Byte buffer </span></span>  </li><li class="alt">    <span class="keyword"><strong><span style="color:#006699">while</span></strong></span> ((bytesRead = fileIn.read(buffer)) != -<span class="number"><span style="color:#c00000">1</span></span>) {  </li><li>      sockOut.write(buffer, <span class="number"><span style="color:#c00000">0</span></span>, bytesRead);  </li><li class="alt">      System.out.print(<span class="string"><span style="color:#0000ff">"W"</span></span>);   <span class="comment"><span style="color:#008200">// Writing progress indicator </span></span>  </li><li>    }  </li><li class="alt">    sock.shutdownOutput();     <span class="comment"><span style="color:#008200">// Done sending </span></span>  </li><li>  }  </li><li class="alt">}  </li></ol> 
+</div> 
+<pre><code class="language-java">import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.Socket;
+
+public class CompressClientNoDeadlock {
+
+  public static final int BUFSIZE = 256;  // Size of read buffer
+
+  public static void main(String[] args) throws IOException {
+
+    if (args.length != 3)  // Test for correct #  of args
+      throw new IllegalArgumentException("Parameter(s): &lt;Server&gt; &lt;Port&gt; &lt;File&gt;");
+
+    String server = args[0];               // Server name or IP address
+    int port = Integer.parseInt(args[1]);  // Server port
+    String filename = args[2];             // File to read data from
+
+    // Open input and output file (named input.gz)
+    final FileInputStream fileIn = new FileInputStream(filename);
+    FileOutputStream fileOut = new FileOutputStream(filename + ".gz");
+  
+    // Create socket connected to server on specified port
+    final Socket sock = new Socket(server, port);
+
+    // Send uncompressed byte stream to server
+    Thread thread = new Thread() {
+      public void run() {
+        try {
+          SendBytes(sock, fileIn);
+        } catch (Exception ignored) {}
+      }
+    };
+    thread.start();
+
+    // Receive compressed byte stream from server
+    InputStream sockIn = sock.getInputStream();
+    int bytesRead;                      // Number of bytes read
+    byte[] buffer = new byte[BUFSIZE];  // Byte buffer
+    while ((bytesRead = sockIn.read(buffer)) != -1) {
+      fileOut.write(buffer, 0, bytesRead);
+      System.out.print("R");   // Reading progress indicator
+    }
+    System.out.println();      // End progress indicator line
+
+    sock.close();     // Close the socket and its streams
+    fileIn.close();   // Close file streams
+    fileOut.close();
+  }
+
+  public static void SendBytes(Socket sock, InputStream fileIn)
+      throws IOException {
+
+    OutputStream sockOut = sock.getOutputStream();
+    int bytesRead;                      // Number of bytes read
+    byte[] buffer = new byte[BUFSIZE];  // Byte buffer
+    while ((bytesRead = fileIn.read(buffer)) != -1) {
+      sockOut.write(buffer, 0, bytesRead);
+      System.out.print("W");   // Writing progress indicator
+    }
+    sock.shutdownOutput();     // Done sending
+  }
+}
+</code></pre> 
+<br>   
+<span style="font-size:14px; font-family:'Comic Sans MS'">  </span> 
+<p></p> 
+<span style="font-size:14px; font-family:Comic Sans MS">   </span> 
+<span style="font-family:'Comic Sans MS'"><span style="font-size:18px">  死锁问题的产生原因在客户端上，因此，服务端的具体代码我们不再给出，服务端采取边读边写的策略。<br> </span></span> 
+<p></p> 
+<p><span style="font-family:'Comic Sans MS'"><span style="font-size:18px">     下面我们边对上面可能产生的问题进行分析。对该示例而言，当需要传递的文件容量不是很大时，程序运行正常，也能得到预期的结果，但如果尝试运行该客户端并传递给它一个大文件，改文件压缩后仍然很大（在此，大的精确定义取决于程序运行的系统，不过压缩后依然超过2MB的文件应该就可以使改程序产生死锁问题），那么客户端将打印出一堆W后停止，而且不会打印出任何R，程序也不会终止。</span></span></p> 
+<p><span style="font-family:'Comic Sans MS'"><span style="font-size:18px">     为什么会产生这种情况呢？我们来看程序，客户端很明显是一边读取本地文件中的数据，一边调用输出流的write（）方法，将数据送入客户端主机的SendQ队列，直到文件中的数据被读取完，客户端才调用输入流的read（）方法，读取服务端发送回来的数据。</span></span></p> 
+<p><span style="font-family:'Comic Sans MS'"><span style="font-size:18px">     考虑这种情况：客户端和服务端的SendQ队列和RecvQ队列中都有500字节的数据空间，而客户端发送了一个10000字节的文件，同时假设对于这个文件，服务端读取1000字节并返回500字节，即压缩比为2:1，当客户端发送了2000字节后，服务端将最终全部读取这些字节，并发回1000字节，由于客户端此时并没有调用输入流的read（）方法从客户端主机的RecvQ队列中移出数据到Delivered，因此，此时客户端的RecvQ队列和服务端的SendQ队列都被填满了，此时客户端还在继续发送数据，又发送了1000字节的数据，并且被服务端全部读取，但此时服务端的write操作尝试都已被阻塞，不能继续发送数据给客户端，当客户端再发送了另外的1000字节数据后，客户端的SendQ队列和服务端的RecvQ队列都将被填满，后续的客户端write操作也将阻塞，从而形成死锁。</span></span></p> 
+<p><span style="font-family:'Comic Sans MS'"><span style="font-size:18px"><br> </span></span></p> 
+<p></p> 
+<h2><a target="_blank" name="t3"></a><span style="color:rgb(255,0,0)"><span style="font-family:'Comic Sans MS'"><span style="font-size:18px">   解决方案</span></span></span></h2> 
+<p></p> 
+<p><span style="font-family:'Comic Sans MS'"><span style="font-size:18px"><span style="color:#ff0000">     </span>如何解决这个问题呢？<strong><span style="color:#000099">造成死锁产生的原因是因为客户端在发送数据的同时，没有及时读取反馈回来的数据，从而使数据都阻塞在了底层的传输队列中。</span></strong></span></span></p> 
+<p><span style="font-family:'Comic Sans MS'"><span style="font-size:18px">     方案一是在编写客户端程序时，使客户端一边循环调用输出流的read（）方法向服务端发送数据，一边循环调用输入流的read（）方法读取从服务端反馈回来的数据，但这也不能完全保证不会产生死锁。</span></span></p> 
+<p><span style="font-family:'Comic Sans MS'"><span style="font-size:18px">     <span style="background-color:rgb(255,255,255)"><span style="color:#000099"><strong>更好的解决方案是在不同的线程中执行客户端的write循环和read循环</strong>。</span></span>一个线程从文件中反复读取未压缩的字节并将其发送给服务器，直到文件的结尾，然后调用该套接字的shutdownOutput（）方法。另一个线程从服务端的输入流中不断读取压缩后的字节，并将其写入输出文件，直到到达了输入流的结尾（服务器关闭了套接字）。这样，便可以实现一边发送，一边读取，而且如果一个线程阻塞了，另一个线程仍然可以独立执行。这样我们可以对客户端代码进行简单的修改，将SendByes（）方法调用放到一个线程中：</span></span></p> 
+<p></p> 
+<div class="dp-highlighter bg_java"> 
+ <div class="bar"> 
+  <div class="tools"> 
+   <strong>[java]</strong> 
+   <a target="_blank" class="ViewSource" title="view plain" href="http://blog.csdn.net/ns_code/article/details/15939993#" rel="noopener noreferrer"> view plain</a> 
+   <a target="_blank" class="CopyToClipboard" title="copy" href="http://blog.csdn.net/ns_code/article/details/15939993#" rel="noopener noreferrer">copy</a> 
+   <a target="_blank" class="PrintSource" title="print" href="http://blog.csdn.net/ns_code/article/details/15939993#" rel="noopener noreferrer">print</a> 
+   <a target="_blank" class="About" title="?" href="http://blog.csdn.net/ns_code/article/details/15939993#" rel="noopener noreferrer">?</a> 
+  </div> 
+ </div> 
+ <ol class="dp-j"><li class="alt">Thread thread = <span class="keyword"><strong><span style="color:#006699">new</span></strong></span> Thread() {  </li><li>  <span class="keyword"><strong><span style="color:#006699">public</span></strong></span> <span class="keyword"><strong><span style="color:#006699">void</span></strong></span> run() {  </li><li class="alt">    <span class="keyword"><strong><span style="color:#006699">try</span></strong></span> {  </li><li>      SendBytes(sock, fileIn);  </li><li class="alt">    } <span class="keyword"><strong><span style="color:#006699">catch</span></strong></span> (Exception ignored) {}  </li><li>  }  </li><li class="alt">};  </li><li>thread.start();  </li></ol> 
+</div> 
+<pre><code class="language-java">    Thread thread = new Thread() {
+      public void run() {
+        try {
+          SendBytes(sock, fileIn);
+        } catch (Exception ignored) {}
+      }
+    };
+    thread.start();
+</code></pre> 
+<br> 
+<p></p> 
+<p></p> 
+<p><span style="font-size:14px; font-family:SimSun">    </span><span style="font-size:18px"><span style="font-family:SimSun"> </span><span style="background-color:rgb(255,255,255)"><strong><span style="color:rgb(0,0,153)"><span style="font-family:'Comic Sans MS'">当然，解决这个问题也可以不使用多线程，而是使用NIO机制（Channel和Selector）。</span></span></strong></span></span></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/9eb3125863f55d48f649491b348f6da4/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">CSS文字或图片悬浮于另一张图片上，大小宽度适配手机的！</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/bd4645a8c8d264bb5f145688edfdc5eb/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">yum 命令 update 与 upgrade 的区别</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

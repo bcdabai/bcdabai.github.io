@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Windows堆内存调试利器Gflags(pageheap)及高级用法 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Windows堆内存调试利器Gflags(pageheap)及高级用法" />
+<meta property="og:description" content="/******************************************************************************************
+* 版权声明
+* 本文为本人原创，本人拥有此文的版权。鉴于本人持续受益于开源软件社区，
+* 本人声明：任何个人及团体均可不受限制的转载和复制本文，无论是否用于盈利
+* 之目的，但不得修改文章内容，并必须在转载及复制时同时保留本版权声明，否
+* 则为侵权行为，本人保留追究相应主体法律责任之权利。
+* speng2005@gmail.com
+* 2019-6
+******************************************************************************************/
+Gflags是微软为windows平台调试应用程序堆内存错误(主要是内存溢出)的利器。
+Gflags 官方参考：https://docs.microsoft.com/en-us/windows-hardware/drivers/debugger/gflags-commands
+Gflags基本用法：
+假设目标程序是testProject1.exe
+cmd中执行命令：gflags.exe /p /enable testProject1.exe /full
+可实现下次启动testProject1.exe时打开windows的堆内存跟踪器，只要应用程序内部出现堆缓冲区溢出操作，就会出现异常。但这个异常无法显示出来，程序员也不知道溢出操作发生时的调用栈。因此，需要在调试器中启动testProject1.exe才能捕获到错误的第1现场，找到调用栈从而定位代码错误源头。这有两种方法。
+一种是待testProject1.exe启动后用调试器(例如vs2015)进行attach debug。
+另一种是程序启动时自动打开调试器来运行testProject1.exe，可通过如下命令实现：
+gflags.exe /p /enable testProject1.exe /full /debug vsjitdebugger.exe
+Gflags运行原理
+Gflags实际是继承了旧版windows的page heap功能，其实际作用是设置一些调试运行参数到系统注册表的如下路径(默认路径)：
+计算机\HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\testproject1.exe
+对于某些32位程序，则会设置到如下路径：
+计算机\HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\testproject1.exe
+这其实是利用了windows的IFEO技术，也就是在启动exe执行前进行特殊的运行参数设置。当Gflags将用于heap跟踪的启动参数设置到注册表后，当用户要启动执行目标程序testproject1.exe时，操作系统自动设定相关运行参数，该参数将在ntdll.dll模块中被识别执行，如果ntdll.dll发现需要page heap功能，则会自动加载verifier.dll，该模块将正真执行page heap的实际处理逻辑。verifier.dll最重要的功能有两个：一是，在testproject1.exe调用free释放某块heap内存时，执行heap健康检查，如果testproject1.exe在之前使用该内存时发生了写溢出操作，哪怕是一个字节，则此时verifier.dll就可以检查出来，该模块会自动产生异常，由调试器捕获该异常供开发人员分析处理。但通常此时的调用栈只代表释放内存的代码，往往并不是产生错误溢出操作的根源代码。这时就需要verifier.dll的第二个重要功能，就是分配heap内存时进行特殊处理，让返回给用户的内存块的结尾处(也可以是开头处，参考Gflags的/backwards参数)对齐到一个os内存页的边界处，然后紧邻该内存的下一个(或前一个)内存页叫做full page。full page设置了特殊的页保护属性，其内存地址实际上并未commit给操作系统，当应用程序试图读或写该页上的内存地址时，哪怕是一个字节，将立刻触发os的内存访问异常，该异常会被调试器捕获，从而立刻显示试图对heap内存进行越界访问的第1现场的调用栈，供开发人员分析并修正代码问题。
+Gflags使用中存在的问题
+理论上Gflags用于排查heap内存越界访问问题非常有效，但在实际使用中存在很多问题。
+一是，heap返回给用户的内存地址一般是按8字节对齐的，也就是说最少有8个字节的空闲内存区会返给用户。如果用户代码的内存溢出未超过8字节，则有可能无法触发full page的内存操作异常。虽然Gflags提供了/unaligned参数用于解决该问题，但实际使用发现在某些平台上无效。在win10上对testproject1.exe使用/unaligned参数时，会导致兼容性问题，进程直接就启动失败，根本无法跟踪调试。对于win7平台，/unaligned参数则是可用的。这应该是微软ntdll.dll和verifier.dll在win10上存在bug。如果不使用/unaligned参数，则可以启动程序。因为windows不开源，也没有资料描述该问题，故用户只能放弃该功能。
+二是，对于某些稍复杂的第三方应用，在启用full page但不使用/unaligned参数时，仍然出现第三方应用启动失败的问题，原因未知，这导致full page实际上不可用。据猜测，这问题可能跟开启full page的条件下加载第三方应用的动态库，或者启动多线程有关。
+三是，开启full page跟踪后会降低目标程序的运行性能，并会显著增加目标程序内存占用，因为即使只申请1个字节的内存，也要单独占用一个内存页，同时还要占用一个full page的地址空间，这可能会造成目标程序出现诡异现象。
+Gflags高级用法
+由于Gflags存在复杂应用无法正常启动问题，一个解决思路是：在应用启动阶段，暂时不要触发page heap的full page功能，这样应用就能按照普通方式正常启动起来，然后在需要的时候打开full page功能，用于跟踪可能存在的heap内存溢出问题。Gflags的官方资料中提供了/random，/size，/address，/dlls等参数，这些参数的作用都是条件启用full page功能，也就是在目标程序运行过程中，并不是所有的heap内存分配都启用full page功能，而是符合一定条件下才启用。观察这几个参数，都需要一定的线索，才知道用哪个合适。但实际上，第一次出现heap内存溢出问题时，往往没有线索。另外，这些参数也可能不好用，笔者试验了/dlls就发现有问题，目标程序启动失败。最要紧的是，这些参数都是在目标程序启动前设定，无法在目标程序启动后进行动态开关。对于前面应对复杂应用无法正常启动问题的解决思路，就是要让Gflags具有条件启用full page并且能动态开关的能力。仔细研究发现，在/random参数的基础上进行hacker，最符合目标方向，具体做法是(以testproject1." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/a3bb6080f02c62c6bc422e9bf1e5b608/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-06-11T18:58:28+08:00" />
+<meta property="article:modified_time" content="2019-06-11T18:58:28+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Windows堆内存调试利器Gflags(pageheap)及高级用法</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>/******************************************************************************************<br> *                                                    版权声明<br> *        本文为本人原创，本人拥有此文的版权。鉴于本人持续受益于开源软件社区，<br> * 本人声明：任何个人及团体均可不受限制的转载和复制本文，无论是否用于盈利<br> * 之目的，但不得修改文章内容，并必须在转载及复制时同时保留本版权声明，否<br> *  则为侵权行为，本人保留追究相应主体法律责任之权利。<br> *                                                                       speng2005@gmail.com<br> *                                                                                   2019-6<br> ******************************************************************************************/</p> 
+<p>Gflags是微软为windows平台调试应用程序堆内存错误(主要是内存溢出)的利器。</p> 
+<p>Gflags 官方参考：<a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/debugger/gflags-commands" rel="nofollow">https://docs.microsoft.com/en-us/windows-hardware/drivers/debugger/gflags-commands</a></p> 
+<p>Gflags基本用法：<br> 假设目标程序是testProject1.exe<br> cmd中执行命令：gflags.exe /p /enable testProject1.exe /full<br> 可实现下次启动testProject1.exe时打开windows的堆内存跟踪器，只要应用程序内部出现堆缓冲区溢出操作，就会出现异常。但这个异常无法显示出来，程序员也不知道溢出操作发生时的调用栈。因此，需要在调试器中启动testProject1.exe才能捕获到错误的第1现场，找到调用栈从而定位代码错误源头。这有两种方法。<br> 一种是待testProject1.exe启动后用调试器(例如vs2015)进行attach debug。<br> 另一种是程序启动时自动打开调试器来运行testProject1.exe，可通过如下命令实现：<br> gflags.exe /p /enable testProject1.exe /full /debug vsjitdebugger.exe</p> 
+<p> </p> 
+<p>Gflags运行原理<br> Gflags实际是继承了旧版windows的page heap功能，其实际作用是设置一些调试运行参数到系统注册表的如下路径(默认路径)：<br> 计算机\HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\testproject1.exe<br> 对于某些32位程序，则会设置到如下路径：<br> 计算机\HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\testproject1.exe<br> 这其实是利用了windows的IFEO技术，也就是在启动exe执行前进行特殊的运行参数设置。当Gflags将用于heap跟踪的启动参数设置到注册表后，当用户要启动执行目标程序testproject1.exe时，操作系统自动设定相关运行参数，该参数将在ntdll.dll模块中被识别执行，如果ntdll.dll发现需要page heap功能，则会自动加载verifier.dll，该模块将正真执行page heap的实际处理逻辑。verifier.dll最重要的功能有两个：一是，在testproject1.exe调用free释放某块heap内存时，执行heap健康检查，如果testproject1.exe在之前使用该内存时发生了写溢出操作，哪怕是一个字节，则此时verifier.dll就可以检查出来，该模块会自动产生异常，由调试器捕获该异常供开发人员分析处理。但通常此时的调用栈只代表释放内存的代码，往往并不是产生错误溢出操作的根源代码。这时就需要verifier.dll的第二个重要功能，就是分配heap内存时进行特殊处理，让返回给用户的内存块的结尾处(也可以是开头处，参考Gflags的/backwards参数)对齐到一个os内存页的边界处，然后紧邻该内存的下一个(或前一个)内存页叫做full page。full page设置了特殊的页保护属性，其内存地址实际上并未commit给操作系统，当应用程序试图读或写该页上的内存地址时，哪怕是一个字节，将立刻触发os的内存访问异常，该异常会被调试器捕获，从而立刻显示试图对heap内存进行越界访问的第1现场的调用栈，供开发人员分析并修正代码问题。</p> 
+<p> </p> 
+<p>Gflags使用中存在的问题<br> 理论上Gflags用于排查heap内存越界访问问题非常有效，但在实际使用中存在很多问题。<br> 一是，heap返回给用户的内存地址一般是按8字节对齐的，也就是说最少有8个字节的空闲内存区会返给用户。如果用户代码的内存溢出未超过8字节，则有可能无法触发full page的内存操作异常。虽然Gflags提供了/unaligned参数用于解决该问题，但实际使用发现在某些平台上无效。在win10上对testproject1.exe使用/unaligned参数时，会导致兼容性问题，进程直接就启动失败，根本无法跟踪调试。对于win7平台，/unaligned参数则是可用的。这应该是微软ntdll.dll和verifier.dll在win10上存在bug。如果不使用/unaligned参数，则可以启动程序。因为windows不开源，也没有资料描述该问题，故用户只能放弃该功能。<br> 二是，对于某些稍复杂的第三方应用，在启用full page但不使用/unaligned参数时，仍然出现第三方应用启动失败的问题，原因未知，这导致full page实际上不可用。据猜测，这问题可能跟开启full page的条件下加载第三方应用的动态库，或者启动多线程有关。<br> 三是，开启full page跟踪后会降低目标程序的运行性能，并会显著增加目标程序内存占用，因为即使只申请1个字节的内存，也要单独占用一个内存页，同时还要占用一个full page的地址空间，这可能会造成目标程序出现诡异现象。</p> 
+<p> </p> 
+<p>Gflags高级用法<br> 由于Gflags存在复杂应用无法正常启动问题，一个解决思路是：在应用启动阶段，暂时不要触发page heap的full page功能，这样应用就能按照普通方式正常启动起来，然后在需要的时候打开full page功能，用于跟踪可能存在的heap内存溢出问题。Gflags的官方资料中提供了/random，/size，/address，/dlls等参数，这些参数的作用都是条件启用full page功能，也就是在目标程序运行过程中，并不是所有的heap内存分配都启用full page功能，而是符合一定条件下才启用。观察这几个参数，都需要一定的线索，才知道用哪个合适。但实际上，第一次出现heap内存溢出问题时，往往没有线索。另外，这些参数也可能不好用，笔者试验了/dlls就发现有问题，目标程序启动失败。最要紧的是，这些参数都是在目标程序启动前设定，无法在目标程序启动后进行动态开关。对于前面应对复杂应用无法正常启动问题的解决思路，就是要让Gflags具有条件启用full page并且能动态开关的能力。仔细研究发现，在/random参数的基础上进行hacker，最符合目标方向，具体做法是(以testproject1.exe为例)：<br> 先使用如下命令启用条件full page功能：gflags.exe /p /enable testProject1.exe /random 0<br> 这是说在启动testProject1.exe后使用0概率对heap分配的内存开启full page功能，其实就是不开启full page功能。<br> 然后对verifier.dll进行逆向工程，分析发现在verifier.dll偏移0x9D30处是一个重要函数：verifier._AVrfpDphShouldAllocateInPageHeap@8。该函数偏移0x17E开始处是一段重要代码：</p> 
+<pre class="has"><code>68369EAE           | FF15 10E03968            | call dword ptr ds:[&lt;&amp;RtlRandomEx&gt;] 
+68369EB4           | 8985 6CFFFFFF            | mov dword ptr ss:[ebp-94],eax 
+68369EBA           | 8B85 6CFFFFFF            | mov eax,dword ptr ss:[ebp-94]
+68369EC0           | 33D2                     | xor edx,edx           
+68369EC2           | B9 64000000              | mov ecx,64           
+68369EC7           | F7F1                     | div ecx              
+68369EC9           | 3B15 747C3968            | cmp edx,dword ptr ds:[&lt;_AVrfpDphRandomProbability&gt;] 
+68369ECF           | 72 09                    | jb verifier.68369EDA  </code></pre> 
+<p>该代码的意思是先调用RtlRandomEx()，产生一个随机数，除以100取余后，将该值与_AVrfpDphRandomProbability变量的值进行比较，如果余数小于_AVrfpDphRandomProbability则跳转执行一段代码，这段目标代码的功能就是执行full page功能的heap内存分配；否则不进行跳转，则后续执行代码的功能是执行不带full page功能的普通heap内存分配。_AVrfpDphRandomProbability变量位于verifier.dll模块中，是一个全局变量，其初始值就是Gflags命令的/random参数后面的具体数值，其取值范围是0~100的整数。<br> 因此，动态开关full page的关键就在于在需要的时候设置_AVrfpDphRandomProbability变量为合适的值。比如将其设置为0，就表示全局关闭full page功能；将其设置为100，就表示全局打开所有heap内存分配的full page功能。进一步逆向分析_AVrfpDphRandomProbability变量的地址相对于verifier.dll模块基地址的偏移是0x37C74。<br> (注：笔者的上述分析是在win10平台上，ntdll.dll版本10.0.17134.1 (WinBuild.160101.0800)，verifier.dll版本10.0.17134.1 (WinBuild.160101.0800)。其他平台或版本，上述逻辑，地址，偏移均可能发生变化，读者需要自行分析)<br> 有了以上基础，动态开关条件full page功能就简单多了。<br> 首先，启动testProject1.exe(前提是已设置Gflags，但不必在调试器中启动)，令其正常启动执行，此时full page功能处于关闭状态，当开发人员的某些测试条件满足后，用调试器(以vs2015为例)attach连接testProject1.exe，点break中断程序执行，打开“模块窗口”，找到verifier.dll的模块信息，最主要的是模块基地址信息，例如：</p> 
+<pre class="has"><code class="language-cpp">verifier.dll	C:\Windows\SysWOW64\verifier.dll	N/A	否	“包括”/“排除”设置禁用了加载功能。		3	10.0.17134.1 (WinBuild.160101.0800)	2006/2/9 星期四 15:43	68170000-681D4000	[0x1B0C] testProject1.exe</code></pre> 
+<p>上例中verifier.dll的模块基地址就是0x68170000，该地址加上偏移0x37C74就是0x681A7C74，然后打开"内存"窗口，输入0x681A7C74，定位到该内存区后，将第1个字节值修改为"64", 然后让testProject1.exe继续运行(f5)，就全局打开了full page功能。当过一段时间想关闭full page功能时，就直接在调试器中点break中断程序执行，然后直接将之前在内存窗口中修改的那个字节值改为"00", 然后让testProject1.exe继续运行(f5)就可以了。</p> 
+<p> </p> 
+<p>后记<br> 很多人认为调试必须要在debug版中进行的，其实release版照样可以调试。一些有经验的程序员知道，某些诡异bug只出现在release版中。因此，对release版程序进行调试，有时是不可避免的。如果是在windows平台上，对release版程序进行调试就需要借助pdb文件，所以要注意在编译时生成对应的pdb文件。据说，Gflags只在跟踪release版目标程序时工作正常，如果跟踪debug版，Gflags可能会与vs自带的内存调试模块发生冲突导致意想不到的错误。</p> 
+<p> </p> 
+<p>附录：</p> 
+<p>testProject1.exe源代码：</p> 
+<pre class="has"><code class="language-cpp">#include "stdafx.h"
+#include &lt;stdio.h&gt;
+#include &lt;Windows.h&gt;
+
+static char * strPool[100000];
+static int curIndex = 0;
+
+void Test()
+{
+	for (int i = 0; i &lt; 100000000; i++)
+	{
+		char * p = new char[4];
+		if (curIndex &gt;= 100000)
+		{
+			for (int j = 0; j &lt; 100000; j++)
+				delete[] strPool[j];
+			curIndex = 0;
+		}
+		strPool[curIndex] = p;
+		curIndex++;
+		strcpy(p, "12345678");
+		printf("callCount = %d, p: %s\n", i, p);
+		Sleep(10);
+	}
+}
+
+int main()
+{
+	Test();
+	return 0;
+}</code></pre> 
+<p> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/cf35e7eced1f64ed21423b4cdaf5d0d9/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Mybatis插件generator 逆向生成后实体类和Mapper遵循java驼峰命名法</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/89477a76b21afdee531fae75ef7296ba/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Leetcode题解——算法思想之二分查找</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

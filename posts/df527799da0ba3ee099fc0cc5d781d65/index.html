@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>AUTOSAR OS任务调度的底层逻辑 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="AUTOSAR OS任务调度的底层逻辑" />
+<meta property="og:description" content="先参考 :
+RTOS的任务触发底层逻辑
+FreeRTOS的并行与并发思考-CSDN博客
+AUTOSAR-OS的调度机制-调度表（没理解透，继续更新）
+OSEK-任务调度机制-CSDN博客
+OSEK与FreeRTOS在任务调度上最大的区别在于，FreeRTOS是基于全抢占任务调度和时间片轮转调度机制，具有并发和并行的能力。而OSEK主要以调度表机制和Alarm机制触发任务，不具备并行的能力。最大的相同点是都是根据优先级高低的全抢占调度机制（OSEK可选非全抢占）。
+调度表： 调度表被称为任务控制块表（Task Control Block Table，TCB Table），它是一个静态定义的数组，用于存储系统中所有任务的信息。一个调度表被划分成多个到期点Expiry Points，每个到期点对应一个时间片，每张调度表中所有要执行的任务都放在一个静态数组里。当一个到期点到达时，调度器会检查该到期点对应数组里的就绪任务，之后根据任务的优先级进行全抢占任务调度。
+每个任务在调度表中都有一个对应的任务控制块（TCB），包含了任务的相关信息，如任务的优先级、堆栈指针、状态等。调度表中的任务按照其优先级从高到低的顺序进行排列。优先级较高的任务的任务控制块位于调度表数组的较低索引位置，优先级较低的任务位于较高索引位置。 OSEK 中，任务切换不像 FreeRTOS 的就绪列表那样使用双向链表，而是通过遍历数组来选择下一个任务进行执行。OSEK中任务的优先级数值越小，优先级越高。
+调度表中的任务按照任务的优先级放在一个静态数组里，要想区分在每个到期点执行什么任务，就要根据任务的状态信息来区分，每个到期点被执行的时候，会先将当前到期点将要执行的任务从原来的Suspended状态切换到Ready状态，这样一来，在调度器调度任务的时候，就只会执行Ready状态下的任务，之后再根据优先级高低进行任务的调度。
+在OSEK的调度表机制中，调度表是一个静态数据结构，可以将调度表理解为固定时间片轮转调度，和FreeRTOS的时间片轮转调度机制相似，但又不同。
+调度表中的到期点 Expiry Points 是通过调度表定义的系统时钟中断触发的，通过配置系统时钟中断的频率来控制到期点的触发频率。当系统时钟中断发生时，调度器会根据到期点的时间要求和任务的截止时间进行任务调度和切换。
+OSEK和FreeRTOS在时间片轮转调度最大区别在于，FreeRTOS的时间片轮转调度机制是就绪列表中相同优先级任务根据滴答时钟触发的中断轮番获取CPU的控制权，而OSEK的调度表是基于调度表定义的每个到期点实现任务的切换，之后在每个到期点的时间片中，又按照全抢占调度机制调度任务。
+除此之外，如果调度表中到期点前的任务没有执行完，到期点将要执行的任务优先级高于没有执行完的任务，则实施全抢占任务调度，没有执行完的任务会被堆栈保存上下文，在下一个任务周期执行完上次没有执行完的部分。
+如果调度表中到期点将要执行的任务优先级低于还未执行完的任务，那么调度器会继续执行当前正在执行的任务。所以，在开发过程中就要注意如果遇到调度表中到期点将要执行的任务优先级低于还未执行完的任务，要在未执行完的任务最后面加一个 TerminateTask 的函数，这个函数可以执行切换任务的动作。
+Alarm： 如果说调度表是基于时钟触发的中断，之后利用调度器执行和切换任务。Alarm是基于时钟触发的事件，之后利用调度器在特定的时间点触发与之关联的任务。
+Alarm是一种定时机制，也就是在特定的时间点触发与之关联的任务的执行，他与FreeRTOS的全抢占调度的区别在于，FreeRTOS的全抢占调度是没有时间概念的，只要有高优先级来，那就去抢，任务的触发不会遵循一种时间精度上的调度，而Alarm是可以精确时间周期的触发任务，虽然任务之间是全抢占，但当高优先级任务执行完，会切回到没有执行完的任务。
+而Alarm与调度表的区别在于，首先调度表是一种静态的任务调度方式，在调度表中，每个任务都被分配了一个固定的时间片来执行，如果你没有执行完，并且任务优先级低，很抱歉，等下一次轮到你再说吧。
+Alarm触发的任务是直接由外部事件驱动的，可以理解为FreeRTOS中全抢占调度任务，对任务的抢占能力极强，对于任务的优先级要求比较高。而调度表是由一个固定的时间片触发调度器控制的，类似于时间片轮转调度，抢占能力比较弱，要求的是你只要在固定的时间执行了这个功能就可以了，即便没有执行完，下一个周期执行也可以，对于任务的优先级要求不需要很高。
+在 Rte_Start 开启时，启用alarm，
+在Rte_Stop时，停止alarm
+调度表中如果时间没有到到期点，任务就执行完成，剩下的时间执行空闲任务，" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/df527799da0ba3ee099fc0cc5d781d65/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-12-01T21:44:54+08:00" />
+<meta property="article:modified_time" content="2023-12-01T21:44:54+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">AUTOSAR OS任务调度的底层逻辑</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div> 
+ <div style="margin-left:0in;"> 
+  <div style="margin-left:0in;"> 
+   <p style="margin-left:0;">先参考 :</p> 
+   <p style="margin-left:0;"><a href="https://blog.csdn.net/xiandang8023/article/details/134580834" title="RTOS的任务触发底层逻辑">RTOS的任务触发底层逻辑</a></p> 
+   <p style="margin-left:0;"><a href="https://blog.csdn.net/xiandang8023/article/details/134586062" title="FreeRTOS的并行与并发思考-CSDN博客">FreeRTOS的并行与并发思考-CSDN博客</a></p> 
+   <p style="margin-left:0;"> <a href="https://blog.csdn.net/xiandang8023/article/details/131090082" title="AUTOSAR-OS的调度机制-调度表（没理解透，继续更新）">AUTOSAR-OS的调度机制-调度表（没理解透，继续更新）</a></p> 
+   <p style="margin-left:0;"><a href="https://blog.csdn.net/xiandang8023/article/details/134126332" title="OSEK-任务调度机制-CSDN博客">OSEK-任务调度机制-CSDN博客</a></p> 
+   <p style="margin-left:0;">OSEK与FreeRTOS在任务调度上最大的区别在于，FreeRTOS是基于全抢占任务调度和时间片轮转调度机制，具有并发和并行的能力。而OSEK主要以调度表机制和Alarm机制触发任务，不具备并行的能力。最大的相同点是都是根据优先级高低的全抢占调度机制（OSEK可选非全抢占）。</p> 
+   <p style="margin-left:0;"><img alt="" height="146" src="https://images2.imgbox.com/9a/91/PoSihkbl_o.png" width="1107"></p> 
+   <p style="margin-left:0;"></p> 
+   <h3 style="margin-left:0px;">调度表：</h3> 
+   <p style="margin-left:0;">调度表被称为任务控制块表（Task Control Block Table，TCB Table），它是一个静态定义的数组，用于存储系统中所有任务的信息。一个调度表被划分成多个到期点Expiry Points，每个到期点对应一个时间片，每张调度表中所有要执行的任务都放在一个静态数组里。当一个到期点到达时，调度器会检查该到期点对应数组里的就绪任务，之后根据任务的优先级进行全抢占任务调度。</p> 
+   <p style="margin-left:0;">每个任务在调度表中都有一个对应的任务控制块（TCB），包含了任务的相关信息，如任务的优先级、堆栈指针、状态等。调度表中的任务按照其优先级从高到低的顺序进行排列。优先级较高的任务的任务控制块位于调度表数组的较低索引位置，优先级较低的任务位于较高索引位置。<span style="color:#00ff00;"> </span><span style="color:#fe2c24;">OSEK 中，任务切换不像 FreeRTOS 的就绪列表那样使用双向链表，而是通过遍历数组来选择下一个任务进行执行。OSEK中任务的优先级数值越小，优先级越高。</span></p> 
+   <p style="margin-left:0;"><span style="color:#d006aa;">调度表中的任务按照任务的优先级放在一个静态数组里，要想区分在每个到期点执行什么任务，就要根据任务的状态信息来区分，每个到期点被执行的时候，会先将当前到期点将要执行的任务从原来的Suspended状态切换到Ready状态，这样一来，在调度器调度任务的时候，就只会执行Ready状态下的任务，之后再根据优先级高低进行任务的调度。</span></p> 
+   <p style="margin-left:0;"><img alt="" height="646" src="https://images2.imgbox.com/da/dd/v7g4XrYq_o.png" width="928"></p> 
+   <p style="margin-left:0;"><img alt="" height="523" src="https://images2.imgbox.com/0b/e6/Q9woSBkP_o.png" width="1200"></p> 
+   <p style="margin-left:0;"><img alt="" height="667" src="https://images2.imgbox.com/c4/3c/QrneBe2W_o.png" width="866"></p> 
+   <p style="margin-left:0;">在OSEK的调度表机制中，调度表是一个静态数据结构，可以将调度表理解为固定时间片轮转调度，和FreeRTOS的时间片轮转调度机制相似，但又不同。</p> 
+   <p style="margin-left:0;">调度表中的到期点 Expiry Points 是通过调度表定义的系统时钟中断触发的，通过配置系统时钟中断的频率来控制到期点的触发频率。当系统时钟中断发生时，调度器会根据到期点的时间要求和任务的截止时间进行任务调度和切换。</p> 
+   <p style="margin-left:0;"><span style="color:#fe2c24;">OSEK和FreeRTOS在时间片轮转调度最大区别在于，FreeRTOS的时间片轮转调度机制是就绪列表中相同优先级任务根据滴答时钟触发的中断轮番获取CPU的控制权，而OSEK的调度表是基于调度表定义的每个到期点实现任务的切换，之后在每个到期点的时间片中，又按照全抢占调度机制调度任务。</span></p> 
+   <p style="margin-left:0;">除此之外，如果调度表中到期点前的任务没有执行完，到期点将要执行的任务优先级高于没有执行完的任务，则实施全抢占任务调度，没有执行完的任务会被堆栈保存上下文，在下一个任务周期执行完上次没有执行完的部分。</p> 
+   <p style="margin-left:0;">如果调度表中到期点将要执行的任务优先级低于还未执行完的任务，那么调度器会继续执行当前正在执行的任务。所以，在开发过程中就要注意如果遇到调度表中到期点将要执行的任务优先级低于还未执行完的任务，要在未执行完的任务最后面加一个 <span style="color:#fe2c24;">TerminateTask </span>的函<span style="color:#201f1e;">数，这个函数可以执行切换任务的动作。</span></p> 
+   <p style="margin-left:0;"></p> 
+   <h3 style="margin-left:0px;">Alarm：</h3> 
+   <p style="margin-left:0;">如果说调度表是基于时钟触发的中断，之后利用调度器执行和切换任务。Alarm是基于时钟触发的事件，之后利用调度器在特定的时间点触发与之关联的任务。</p> 
+   <p style="margin-left:0;">Alarm是一种定时机制，也就是在特定的时间点触发与之关联的任务的执行，他与FreeRTOS的全抢占调度的区别在于，FreeRTOS的全抢占调度是没有时间概念的，只要有高优先级来，那就去抢，任务的触发不会遵循一种时间精度上的调度，而Alarm是可以精确时间周期的触发任务，虽然任务之间是全抢占，但当高优先级任务执行完，会切回到没有执行完的任务。</p> 
+   <p style="margin-left:0;">而Alarm与调度表的区别在于，首先调度表是一种静态的任务调度方式，在调度表中，每个任务都被分配了一个固定的时间片来执行，如果你没有执行完，并且任务优先级低，很抱歉，等下一次轮到你再说吧。</p> 
+   <p style="margin-left:0;">Alarm触发的任务是直接由外部事件驱动的，可以理解为FreeRTOS中全抢占调度任务，<span style="color:#fe2c24;">对任务的抢占能力极强，对于任务的优先级要求比较高</span>。而调度表是由一个固定的时间片触发调度器控制的，类似于时间片轮转调度，<span style="color:#fe2c24;">抢占能力比较弱，要求的是你只要在固定的时间执行了这个功能就可以了，即便没有执行完，下一个周期执行也可以，对于任务的优先级要求不需要很高</span>。</p> 
+   <p style="margin-left:0;"></p> 
+   <p style="margin-left:0;">在 Rte_Start 开启时，启用alarm，</p> 
+   <p style="margin-left:0;"><img alt="" height="47" src="https://images2.imgbox.com/e3/61/kXy901gB_o.png" width="1048"></p> 
+   <p style="margin-left:0;"><img alt="" height="266" src="https://images2.imgbox.com/ff/bb/fhtiJkVO_o.png" width="822"></p> 
+   <p style="margin-left:0;"><img alt="" height="488" src="https://images2.imgbox.com/61/93/TkiYHbAO_o.png" width="1170"></p> 
+   <p style="margin-left:0;">在Rte_Stop时，停止alarm</p> 
+   <p style="margin-left:0;"><img alt="" height="42" src="https://images2.imgbox.com/3e/29/ab4W8prB_o.png" width="471"></p> 
+   <p style="margin-left:0;">调度表中如果时间没有到到期点，任务就执行完成，剩下的时间执行空闲任务，</p> 
+   <p style="margin-left:0;"><img alt="" height="527" src="https://images2.imgbox.com/5a/f8/zFSGPoQ9_o.png" width="1200"></p> 
+   <p style="margin-left:0;"><img alt="" height="442" src="https://images2.imgbox.com/4d/b3/00Ouyn8O_o.png" width="925"></p> 
+   <p style="margin-left:0;"><img alt="" height="228" src="https://images2.imgbox.com/0d/b6/GLJyzc2m_o.png" width="1200"></p> 
+   <p style="margin-left:0;"><img alt="" height="120" src="https://images2.imgbox.com/99/89/BR4jkHGM_o.png" width="303"></p> 
+  </div> 
+ </div> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3984fdc58c5c71a9e8f8a09d184c2a55/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">麒麟v10系统arm64架构openssh9.5p1安装</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/42a8bfd910549419eddb4a9f6ccc7ff0/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Python | 轻量ORM框架Peewee的基础使用（增删改查、自动创建模型类、事务装饰器）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

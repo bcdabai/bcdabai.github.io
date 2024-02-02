@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>TCP，sqlite3,IO，进程的运用实例（超详解注释超多） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="TCP，sqlite3,IO，进程的运用实例（超详解注释超多）" />
+<meta property="og:description" content="基于TCP的在线词典
+大致功能：注册账号，登录账号，查找单词，查询该账号的历史记录。
+单词和解释保存在文件中，单词和解释只占一行,
+一行最多300个字节，单词和解释之间至少有一个空格
+实现TCP并发 --多进程
+数据表在终端提前创建完成
+服务器源码：
+#include &lt;stdio.h&gt; #include &lt;stdlib.h&gt; #include &lt;unistd.h&gt; #include &lt;string.h&gt; #include &lt;sqlite3.h&gt; #include &lt;signal.h&gt; #include &lt;time.h&gt; #include &lt;sys/socket.h&gt; #include &lt;netinet/in.h&gt; #include &lt;arpa/inet.h&gt; #include &lt;sys/wait.h&gt; #define N 16 #define R 1 // 注册标识 #define L 2 // 登录标识 #define Q 3 //	查询单词标识 #define H 4 // 历史记录标识	#define DATABASE &#34;my.db&#34; //数据库名称 typedef struct //传输数据载体，这里用结构体类型	{ int type; //用于给服务器识别操作选项 char name[N];	//存放用户名.数据库主键 char data[256]; // 错误信息或单词解释或单词 } MSG; void my_register(int connectfd, MSG *msg, sqlite3 *db); void my_login(int connectfd, MSG *msg, sqlite3 *db); void my_query(int connectfd, MSG *msg, sqlite3 *db); void my_history(int connectfd, MSG *msg, sqlite3 *db); void my_client(int connectfd, sqlite3 *db);	//第一步." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/79cda8f6b0f85d453d0a4f737dc64328/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-10-07T20:54:25+08:00" />
+<meta property="article:modified_time" content="2022-10-07T20:54:25+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">TCP，sqlite3,IO，进程的运用实例（超详解注释超多）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>基于TCP的在线词典</p> 
+<p>大致功能：注册账号，登录账号，查找单词，查询该账号的历史记录。</p> 
+<p>单词和解释保存在文件中，单词和解释只占一行,</p> 
+<p>一行最多300个字节，单词和解释之间至少有一个空格</p> 
+<p>实现TCP并发 --多进程</p> 
+<p>数据表在终端提前创建完成</p> 
+<p>服务器源码：</p> 
+<pre><code class="language-cpp">#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;string.h&gt;
+#include &lt;sqlite3.h&gt;
+#include &lt;signal.h&gt;
+#include &lt;time.h&gt;
+#include &lt;sys/socket.h&gt;
+#include &lt;netinet/in.h&gt;
+#include &lt;arpa/inet.h&gt;
+#include &lt;sys/wait.h&gt;
+
+#define  N  16
+#define  R  1   // 注册标识
+#define  L  2   //  登录标识
+#define  Q  3   //	查询单词标识
+#define  H  4   //  历史记录标识	
+
+#define DATABASE "my.db" //数据库名称
+typedef struct 	//传输数据载体，这里用结构体类型	 
+{
+	int type; 	//用于给服务器识别操作选项
+	char name[N];	//存放用户名.数据库主键
+	char data[256];   // 错误信息或单词解释或单词
+} MSG;
+
+void my_register(int connectfd, MSG *msg, sqlite3 *db);
+void my_login(int connectfd, MSG *msg, sqlite3 *db);
+void my_query(int connectfd, MSG *msg, sqlite3 *db);
+void my_history(int connectfd, MSG *msg, sqlite3 *db);
+void my_client(int connectfd, sqlite3 *db);				//第一步.接收客户端信息并处理
+int  my_searchword(int connectfd, MSG *msg);
+void getdata(char data[]);
+int history_callback(void *arg, int f_num, char **f_value, char **f_name);
+
+void handler(int sig)	//回收子进程资源
+{
+    wait(NULL);
+}
+
+int main(int argc, char *argv[])
+{
+    //定义socket套接字和accept链接完成的返回值
+	int listenfd, connectfd;
+ 	//定义网络信息结构体
+	struct sockaddr_in server_addr;
+ 	//创建进程号
+	pid_t pid;
+ 	//创建数据库句柄
+	sqlite3 *db;
+	//验证命令行输入参数是否正确
+    if (argc &lt; 3)
+	{
+		printf("Usage : %s &lt;ip&gt; &lt;port&gt;\n", argv[0]);
+		exit(-1);
+	}
+    //打开数据库，已经提前创建完成
+	if (sqlite3_open(DATABASE, &amp;db) != SQLITE_OK)
+	{
+		printf("error : %s\n", sqlite3_errmsg(db));
+		exit(-1);
+	}
+ 	//创建套接字,IPV4,TCP,附加协议
+	if ((listenfd = socket(PF_INET, SOCK_STREAM, 0)) &lt; 0)
+	{
+		perror("fail to socket");
+		exit(-1);
+	}
+	//填充网络信息结构体
+    bzero(&amp;server_addr, sizeof(server_addr));
+	server_addr.sin_family = PF_INET;
+	server_addr.sin_addr.s_addr = inet_addr(argv[1]);
+	server_addr.sin_port = htons(atoi(argv[2]));
+	//绑定网络信息结构体和套接字
+    if (bind(listenfd, (struct sockaddr *)&amp;server_addr, sizeof(server_addr)) &lt; 0)
+	{
+		perror("fail to bind");
+		exit(-1);
+	}
+	//设置监听状态
+    if (listen(listenfd, 5) &lt; 0)
+	{
+		perror("fail to listen");
+		exit(-1);
+	}
+	//处理僵尸进程
+    signal(SIGCHLD, handler);
+	//循环接收客户端信息
+    while ( 1 )
+	{
+     //和客户端创建链接 ，TCP使用accept返回值通信
+		if ((connectfd = accept(listenfd, NULL, NULL)) &lt; 0)
+		{
+			perror("fail to accept");
+			exit(-1);
+		}
+		//创建父子进程
+        if ((pid = fork()) &lt; 0)
+		{
+			perror("fail to fork");
+			exit(-1);
+		}
+ 		 //子进程执行处理代码
+		else if(pid == 0) 
+		{
+      		//仅有的两个可用参数都传参给函数
+			my_client(connectfd, db);
+		}
+        else  //父进程负责连接
+        {
+		    close(connectfd);
+        }
+	}
+	return 0;
+}
+//此函数.接收一个客户端信息并处理
+void my_client(int connectfd, sqlite3 *db)
+{
+    //定义一个传递信息结构体
+	MSG msg;
+ 	//循环接收该客户端信息
+	while (recv(connectfd, &amp;msg, sizeof(MSG), 0) &gt; 0)  
+	{
+     	//先在终端打印结构体中信息
+		printf("type = %d\n", msg.type);
+		printf("data = %s\n", msg.data);
+		switch ( msg.type )
+		{
+		case R :
+      		//调用注册函数
+			my_register(connectfd, &amp;msg, db);
+			break;
+		case L :
+      		//调用登录函数
+			my_login(connectfd, &amp;msg, db);
+			break;
+		case Q :
+      		//调用查找单词函数
+			my_query(connectfd, &amp;msg, db);
+			break;
+		case H :
+      		//调用查询历史记录函数
+			my_history(connectfd, &amp;msg, db);
+			break;
+		}
+	}
+	printf("client quit\n");
+ 	//结束进程
+	exit(0);
+	return;
+}
+//注册函数
+void my_register(int connectfd, MSG *msg, sqlite3 *db)
+{
+	char sqlstr[512] = {0};
+ 	//查错指针
+	char *errmsg;
+    
+    //使用sqlite3_exec函数调用插入函数判断是否能够插入成功
+    //由于用户名设置为主键，所以如果用户名已经存在就会报错
+	sprintf(sqlstr, "insert into usr values('%s', '%s')", msg-&gt;name, msg-&gt;data);
+ 	//将结构体中的
+	if(sqlite3_exec(db, sqlstr, NULL, NULL, &amp;errmsg) != SQLITE_OK)
+	{
+     	 	//将返回信息写入结构体data
+		sprintf(msg-&gt;data, "user %s already exist!!!", msg-&gt;name);
+	}
+	else
+	{
+		strcpy(msg-&gt;data, "OK");
+	}
+    //将信息传回给客户端
+	send(connectfd, msg, sizeof(MSG), 0);
+
+	return;
+}
+//登录
+void my_login(int connectfd, MSG *msg, sqlite3 *db)
+{
+	char sqlstr[512] = {0};
+	char *errmsg, **result;
+	int nrow, ncolumn;
+
+    //通过sqlite3_get_table函数查询记录是否存在
+	sprintf(sqlstr, "select * from usr where name = '%s' and pass = '%s'", msg-&gt;name, msg-&gt;data);
+	if(sqlite3_get_table(db, sqlstr, &amp;result, &amp;nrow, &amp;ncolumn, &amp;errmsg) != SQLITE_OK)
+	{
+		printf("error : %s\n", errmsg);
+	}
+    //通过nrow参数判断是否能够查询到疾记录，如果值为0，则查询不到，如果值为非0，则查询到
+	if(nrow == 0)
+	{
+		strcpy(msg-&gt;data, "name or password is wrony!!!");
+	}
+	else
+	{
+		strncpy(msg-&gt;data, "OK", 256);
+	}
+
+	send(connectfd, msg, sizeof(MSG), 0);
+
+	return;
+}
+//注册
+void my_query(int connectfd, MSG *msg, sqlite3 *db)
+{
+	char sqlstr[128], *errmsg;
+	int found = 0;
+	char date[128], word[128];
+
+	strcpy(word, msg-&gt;data);
+
+	//通过found保存查询结果
+	found = my_searchword(connectfd, msg);
+
+	//如果执行成功，还需要保存历史记录
+	if(found == 1)
+	{
+		//获取时间
+		getdata(date);
+		//通过sqlite3_exec函数插入数据
+		sprintf(sqlstr, "insert into record values('%s', '%s', '%s')", msg-&gt;name, date, word);
+		if(sqlite3_exec(db, sqlstr, NULL, NULL, &amp;errmsg) != SQLITE_OK)
+		{
+			printf("error : %s\n", errmsg);
+		}
+	}
+
+	send(connectfd, msg, sizeof(MSG), 0);
+
+	return;
+}
+
+int my_searchword(int connectfd, MSG *msg)
+{
+	FILE *fp;
+	char temp[300];
+	char *p;
+	int len, result;
+	//保存单词的长度
+    len = strlen(msg-&gt;data);
+    //打开保存单词的文件
+	if((fp = fopen("dict.txt", "r")) == NULL)
+	{
+		strcpy(msg-&gt;data, "dict can not open");
+		send(connectfd, msg, sizeof(MSG), 0);
+	}
+	//printf("query word is %s len = %d\n", msg-&gt;data, len);
+    
+    //每次读取一行内容
+	int flags = 0;
+	while(fgets(temp, 300, fp) != NULL)
+	{
+		//比较单词
+		result = strncmp(msg-&gt;data, temp, len);
+		
+		if(result == 0 &amp;&amp; temp[len] == ' ')
+        {
+			//p保存单词后面第一个空格的首地址
+			p = temp + len;
+			
+			//移动p，让p保存解释的第一个字符的首地址
+			while(*p == ' ')
+			{
+				p++;
+			}
+
+			//将解释保存在data里面
+			strcpy(msg-&gt;data, p);
+			
+			fclose(fp);
+			return 1;
+        }
+	}
+
+	strcpy(msg-&gt;data, "not found");
+	fclose(fp);
+	return 0;
+}
+
+void getdata(char *data)
+{
+	time_t t;
+	struct tm *tp;
+	time(&amp;t);
+	tp = localtime(&amp;t);
+	sprintf(data, "%d-%02d-%02d %02d:%02d:%02d", \
+					1900+tp-&gt;tm_year,  1+tp-&gt;tm_mon,  tp-&gt;tm_mday, \
+					tp-&gt;tm_hour, tp-&gt;tm_min, tp-&gt;tm_sec);
+}
+
+void my_history(int connectfd, MSG *msg, sqlite3 *db)
+{
+	char sqlstr[128], *errmsg;
+
+	//查询历史表
+	sprintf(sqlstr, "select * from record where name = '%s'", msg-&gt;name);
+	if (sqlite3_exec(db, sqlstr, history_callback, (void *)&amp;connectfd, &amp;errmsg) != SQLITE_OK)
+	{
+		printf("error : %s\n", errmsg);
+		sqlite3_free(errmsg);
+	}
+
+	//发送结束标志
+	strcpy(msg-&gt;data, "**OVER**");
+	send(connectfd, msg, sizeof(MSG), 0);
+	
+	return;
+}
+
+//通过回调函数发送时间和单词
+int history_callback(void *arg, int f_num, char **f_value, char **f_name)
+{
+	int connectfd;
+	MSG msg;
+	connectfd = *(int *)arg;
+	sprintf(msg.data, "%s : %s", f_value[1], f_value[2]);
+	send(connectfd, &amp;msg, sizeof(msg), 0);
+	return 0;
+}</code></pre> 
+<p>客户端源码：</p> 
+<pre><code class="language-cpp">#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;string.h&gt;
+#include &lt;sqlite3.h&gt;
+#include &lt;sys/socket.h&gt;
+#include &lt;netinet/in.h&gt;
+#include &lt;arpa/inet.h&gt;
+
+#define  N  16
+#define  R  1   //  注册辨识
+#define  L  2   //  登录标识
+#define  Q  3   //  查找单词
+#define  H  4   //  历史记录
+//数据库名
+#define DATABASE "my.db"
+//传输数据结构体
+typedef struct 
+{
+	int type;
+	char name[N];
+ 	//存放除了功能标识和用户名的其他数据，包括错误信息，查询单词和解释
+	char data[256]; 
+} MSG;
+
+void my_register(int socketfd, MSG *msg);	//注册函数
+int my_login(int socketfd, MSG *msg);		//登录函数
+void my_query(int socketfd, MSG *msg);		//查询单词函数
+void my_history(int socketfd, MSG *msg);	//查询历史记录函数
+
+int main(int argc, char *argv[])
+{
+    //创建套接字
+	int socketfd ;
+ 	//创建网络信息结构体
+	struct sockaddr_in server_addr;
+ 	//创建传递数据结构体
+	MSG msg;
+ 	//查错
+	if(argc &lt; 3){
+		printf("Usage : %s &lt;serv_ip&gt; &lt;serv_port&gt;\n", argv[0]);
+		exit(-1);
+	}
+ //创建套接字
+	if(-1 == (socketfd = socket(PF_INET, SOCK_STREAM, 0))){
+		perror("fail to socket");
+		exit(-1);
+	}
+	//填充网络信息结构体
+	bzero(&amp;server_addr, sizeof(server_addr));
+	server_addr.sin_family = PF_INET;
+	server_addr.sin_addr.s_addr = inet_addr(argv[1]);
+	server_addr.sin_port = htons(atoi(argv[2]));
+	//与服务器建立链接
+	if(-1 == connect(socketfd, (struct sockaddr *)&amp;server_addr, sizeof(server_addr))){
+		perror("fail to connect");
+		exit(-1);
+	}
+	//记录用户想要执行的操作
+	int choose = 0;
+ 	//循环执行
+	while(1)
+	{
+		printf("************************************\n");
+		printf("* 1: register   2: login   3: quit *\n");
+		printf("************************************\n");
+		printf("please choose : ");
+
+		if(scanf("%d", &amp;choose) &lt;= 0){
+			perror("scanf");
+			exit(-1);
+		}
+
+		switch(choose){
+			case 1:
+				my_register(socketfd, &amp;msg);
+				break;
+			case 2:
+                //执行登录函数，执行完毕后通过返回值决定是否要跳转到下一个菜单
+				if(my_login(socketfd, &amp;msg) == 1){
+					goto next;
+				}
+				break;
+			case 3:
+				close(socketfd);
+				exit(0);
+		}
+	}
+next:
+	while(1){
+		printf("************************************\n");
+		printf("* 1: query   2: history   3: quit  *\n");
+		printf("************************************\n");
+		printf("please choose : ");
+
+		if(scanf("%d", &amp;choose) &lt;= 0){
+			perror("scanf");
+			exit(-1);
+		}
+		switch(choose){
+			case 1:
+				my_query(socketfd, &amp;msg);
+				break;
+			case 2:
+				my_history(socketfd, &amp;msg);
+				break;
+			case 3:
+				close(socketfd);
+				exit(0);
+		}
+	}
+	return 0;
+}
+
+void my_register(int socketfd, MSG *msg){
+    //指定操作码
+	msg-&gt;type = R;
+    //输入用户名
+	printf("input your name:");
+	scanf("%s", msg-&gt;name);
+	//输入密码
+    printf("input your password:");
+	scanf("%s", msg-&gt;data);
+	//发送数据
+    send(socketfd, msg, sizeof(MSG), 0);
+	//接收数据并输出
+    recv(socketfd, msg, sizeof(MSG), 0);
+	printf("register : %s\n", msg-&gt;data);
+	
+    return;
+}
+
+int my_login(int socketfd, MSG *msg){
+    //设置操作码
+	msg-&gt;type = L;
+	//输入用户名
+    printf("input your name:");
+	scanf("%s", msg-&gt;name);
+	//输入密码
+    printf("input your password:");
+	scanf("%s", msg-&gt;data);
+	//发送数据给服务器
+    send(socketfd, msg, sizeof(MSG), 0);
+	//接收服务器发送的数据
+    recv(socketfd, msg, sizeof(MSG), 0);
+	
+    //判断是否登录成功
+    if(strncmp(msg-&gt;data, "OK", 3) == 0){  //用3  可以防止  OK 和 OKkshdfkj
+        //登录成功返回1
+		printf("login : OK\n");
+		return 1;
+	}
+
+    //登录失败返回0
+	printf("login : %s\n", msg-&gt;data);
+	return 0;
+}
+
+void my_query(int socketfd, MSG *msg){
+	msg-&gt;type = Q;
+	puts("-----------------------------");
+
+	while(1){
+		printf("input word (if # is end): ");
+		scanf("%s", msg-&gt;data);
+
+        //如果输入的是#，返回上一级
+		if(strcmp(msg-&gt;data, "#") == 0){
+			break;
+		}
+
+		send(socketfd, msg, sizeof(MSG), 0);
+		
+		recv(socketfd, msg, sizeof(MSG), 0);
+		printf("&gt;&gt;&gt; %s\n", msg-&gt;data);
+	}
+	return;
+}
+
+void my_history(int socketfd, MSG *msg){
+	msg-&gt;type = H;
+	send(socketfd, msg, sizeof(MSG), 0);
+	//备份用户名
+	char name_temp[32] = {0};
+	strcpy(name_temp, msg-&gt;name);
+	while(1){
+		recv(socketfd, msg, sizeof(MSG), 0);
+
+		if(strcmp(msg-&gt;data, "**OVER**") == 0){
+            break;
+        }
+
+		printf("%s\n", msg-&gt;data);
+	}
+	
+	strcpy(msg-&gt;name, name_temp);
+	
+	return;
+}</code></pre> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/60118d7c2b604c7870c63cf07e25610d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">1.WPF 布局，样式</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ac6a786cabbf43ad15854d11bb2e046d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">计算机网络基础知识--网络层协议IP、ARP、ICMP、RIP、OSPF</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

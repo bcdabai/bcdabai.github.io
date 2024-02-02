@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>SPDK学习笔记----理解spdk的工作原理 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="SPDK学习笔记----理解spdk的工作原理" />
+<meta property="og:description" content="引言 前段时间，我将&lt;&lt;DPDK和SPDK开源社区&gt;&gt;公众号中收录的SPDK相关的文章学习了一遍，最近结合最新的代码v23.0.x，对example目录下的示例程序hello_word/hello_blob/hello_bdev，以及app目录下的应用程序vhost/nvmef的源码进行了走读分析：和大家熟悉的存储服务程序一样，可以将一个spdk程序分成管理面和数据面，管理面负责程序运行环境的初始化，各子系统及模块的初始化，rpc动态管理，数据面根据管理面中设置好的运行环境和数据结构完成具体的I/O操作。我将以vhost-blk为例，从管理面的初始化，数据面的I/O操作两个层面介绍spdk的实现原理。
+注：本文不适合初学者，您至少应该将公众号&lt;&lt;DPDK和SPDK开源社区&gt;&gt;中的文章阅读一遍，了解spdk的基本概念，实现思想，机制，最好在环境上运行，调试下example下面的示例程序，同时对qemu设备虚拟化（virtio）有所了解
+virtio 在进入正文前，我们一起来了解下virtio，virtio是当前虚拟化应用中的主要IO（半）虚拟化技术，包括前端驱动（front-end），传输队列（virt-queue）和后端设备（back-end）三部分，前端驱动运行在Guest虚拟机或者bare-metal裸金属应用中，后端设备位于Host主机的Hypervisor虚拟化进程或者独立的进程中，传输队列主要通过共享内存在前端驱动和后端设备间传递数据。后端设备的实现一直在变化，从完全在qemu进程中实现，到vhost， 再到vdpa。传统virtio及vhost-user的实现原理图如下（IO路径如黑色虚线，控制路径如绿色虚线）：
+从上图我们可以看到：传统virtio和vhost-user在guest侧的处理都是一样的， IO请求从用户程序下发，经过内核IO栈到达virtio驱动，然后通过virtqueue将请求传递给后端设备处理，后端设备处理完成后以中断（irqfd）方式通知虚拟机。
+上图左侧的传统virtio实现中，后端设备完全基于Qemu实现，（IO请求添加到virtqueue后，虚拟机会陷入内核，通过KVM通知后端设备有IO达到），qemu进程中的io线程通过virtio-backend从virtqueue中取出请求，将请求通过系统调用传递给内核IO栈，NVMe控制器完成请求后通过物理中断通知qemu的io线程，qemu的io线程通过virtio-backend将响应放入virtqueue并通过虚拟中断通知虚拟机。
+上图右侧是vhost-user的实现，控制面仍需qemu参与完成，而virtqueue的数据面从qemu中剥离由vhost程序实现，vhost程序以polling的方式从virtqueue中取出请求，然后将请求交给用户态的NVMe驱动处理，vhost程序以polling方式获取NVMe设备的请求响应，将响应请求添加到virtqueue并通过虚拟中断通知虚拟机。
+vhost-blk控制面 配置编译好spdk后，app目录下会生成一个vhost文件，这就是vhost-user服务的可执行文件，如下是本文使用的一个vhost服务示例：
+//-S参数指定socket路径， -c指定了json配置文件（内容如下），运行在core1 # sdpk/app/vhost -S /var/tmp -c vhost.json -m 0x1 # cat vhost.json { &#34;subsystems&#34;: [ { &#34;subsystem&#34;: &#34;bdev&#34;, //创建一个内存设备作为vhost-blk的磁盘 &#34;config&#34;: [ { &#34;method&#34;: &#34;bdev_malloc_create&#34;, &#34;params&#34;: { &#34;name&#34;: &#34;Malloc0&#34;, &#34;num_blocks&#34;: 32768, &#34;block_size&#34;: 512 } } ] }, { “subsystem”: &#34;vhost-blk&#34;, //创建vhost-blk设备，名称为VhostBlk.0，磁盘为内存设备Malloc0 &#34;config&#34;:[ { &#34;method&#34;: &#34;vhost_create_blk_controller&#34;, &#34;params&#34;:{ &#34;ctrlr&#34;:&#34;VhostBlk.0&#34; &#34;dev_name&#34;:&#34;Malloc0&#34;, &#34;transport&#34;:&#34;vhost_user_blk&#34; } } ] } ] } //guest挂载vhost-blk设备的参数，path指向vhost-blk设备的unix socket监听路径 -chardev socket,id=spdk_vhost_blk0,path=/var/tmp/VhostBlk." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/1b9f9d03ecec317a83542cad3aeeedf3/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-07T10:47:23+08:00" />
+<meta property="article:modified_time" content="2023-07-07T10:47:23+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">SPDK学习笔记----理解spdk的工作原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>引言</h2> 
+<p>前段时间，我将&lt;&lt;DPDK和SPDK开源社区&gt;&gt;公众号中收录的SPDK相关的文章学习了一遍，最近结合最新的代码v23.0.x，对example目录下的示例程序hello_word/hello_blob/hello_bdev，以及app目录下的应用程序vhost/nvmef的源码进行了走读分析：和大家熟悉的存储服务程序一样，可以将一个spdk程序分成管理面和数据面，管理面负责程序运行环境的初始化，各子系统及模块的初始化，rpc动态管理，数据面根据管理面中设置好的运行环境和数据结构完成具体的I/O操作。我将以vhost-blk为例，从管理面的初始化，数据面的I/O操作两个层面介绍spdk的实现原理。</p> 
+<blockquote> 
+ <p>注：本文不适合初学者，您至少应该将公众号&lt;&lt;DPDK和SPDK开源社区&gt;&gt;中的文章阅读一遍，了解spdk的基本概念，实现思想，机制，最好在环境上运行，调试下example下面的示例程序，同时对qemu设备虚拟化（virtio）有所了解</p> 
+</blockquote> 
+<h2><a id="virtio_4"></a>virtio</h2> 
+<p>在进入正文前，我们一起来了解下virtio，virtio是当前虚拟化应用中的主要IO（半）虚拟化技术，包括前端驱动（front-end），传输队列（virt-queue）和后端设备（back-end）三部分，前端驱动运行在Guest虚拟机或者bare-metal裸金属应用中，后端设备位于Host主机的Hypervisor虚拟化进程或者独立的进程中，传输队列主要通过共享内存在前端驱动和后端设备间传递数据。后端设备的实现一直在变化，从完全在qemu进程中实现，到vhost， 再到vdpa。传统virtio及vhost-user的实现原理图如下（IO路径如黑色虚线，控制路径如绿色虚线）：<br> <img src="https://images2.imgbox.com/64/23/D5TtnLIP_o.png" alt="传统virtio和vhost-user"><br> 从上图我们可以看到：传统virtio和vhost-user在guest侧的处理都是一样的， IO请求从用户程序下发，经过内核IO栈到达virtio驱动，然后通过virtqueue将请求传递给后端设备处理，后端设备处理完成后以中断（irqfd）方式通知虚拟机。</p> 
+<p>上图左侧的传统virtio实现中，后端设备完全基于Qemu实现，（IO请求添加到virtqueue后，虚拟机会陷入内核，通过KVM通知后端设备有IO达到），qemu进程中的io线程通过virtio-backend从virtqueue中取出请求，将请求通过系统调用传递给内核IO栈，NVMe控制器完成请求后通过物理中断通知qemu的io线程，qemu的io线程通过virtio-backend将响应放入virtqueue并通过虚拟中断通知虚拟机。</p> 
+<p>上图右侧是vhost-user的实现，控制面仍需qemu参与完成，而virtqueue的数据面从qemu中剥离由vhost程序实现，vhost程序以polling的方式从virtqueue中取出请求，然后将请求交给用户态的NVMe驱动处理，vhost程序以polling方式获取NVMe设备的请求响应，将响应请求添加到virtqueue并通过虚拟中断通知虚拟机。</p> 
+<h2><a id="vhostblk_12"></a>vhost-blk控制面</h2> 
+<p>配置编译好spdk后，app目录下会生成一个vhost文件，这就是vhost-user服务的可执行文件，如下是本文使用的一个vhost服务示例：</p> 
+<pre><code>//-S参数指定socket路径， -c指定了json配置文件（内容如下），运行在core1
+# sdpk/app/vhost -S /var/tmp -c vhost.json -m 0x1
+
+# cat vhost.json
+{
+	"subsystems": [
+	{
+		"subsystem": "bdev",      //创建一个内存设备作为vhost-blk的磁盘
+      	"config": [
+       	{
+          	"method": "bdev_malloc_create",
+          	"params": {
+            	"name": "Malloc0",
+           		"num_blocks": 32768,
+            	"block_size": 512
+          	}
+        }
+      	]
+    },
+    {
+		“subsystem”: 	"vhost-blk",  //创建vhost-blk设备，名称为VhostBlk.0，磁盘为内存设备Malloc0
+		"config":[
+		{
+			"method": "vhost_create_blk_controller",
+			"params":{
+			    "ctrlr":"VhostBlk.0"
+				"dev_name":"Malloc0",
+				"transport":"vhost_user_blk"
+			}
+		}
+		]
+    }
+    ]
+}
+
+//guest挂载vhost-blk设备的参数，path指向vhost-blk设备的unix socket监听路径
+ -chardev socket,id=spdk_vhost_blk0,path=/var/tmp/VhostBlk.0 -device vhost-user-blk-pci,chardev=spdk_vhost_blk0
+</code></pre> 
+<p>下图显示了Guest与vhost服务建立连接后的示意图（左侧是控制路径，右侧是io路径），后文逐层拆解控制面结构关系的建立过程及IO过程：<br> <img src="https://images2.imgbox.com/a4/71/kycfEGOq_o.png" alt="IO栈"><br> 执行vhost命令后，会启动一个常驻服务，该服务会依次进行spdk框架及自定义部分的初始化，spdk框架初始化包括：dpdk环境初始化，reactor初始化，bdev子系统初始化，vhost子系统初始化，启动unix socket的监听，等待客户端的链接；vhost的自定义初始化内容由上述的json文件指定。spdk框架初始化的核心调用如下，后文对各阶段的初始化进行简单介绍，逐步厘清各层及数据结构关系的建立：</p> 
+<pre><code>各spdk应用程序的spdk框架初始化过程基本相同，可以套用下面的过程
+-----------------------------------------------
+\spdk_app_start
+    \app_setup_env //dpdk环境初始化
+       \rte_eal_init
+          \rte_eal_memzone_init
+          \rte_eal_memory_init
+          \rte_eal_malloc_heap_init
+          \rte_bus_probe
+       \spdk_env_dpdk_post_init
+    \spdk_reactors_init    //reactor初始化：创建全局的event mempool和msg mempool，初始化reactor数组并给每个reactor创建event ring
+       \spdk_mempool_create
+       \spdk_ring_create
+    \spdk_thread_create    //创建app thread（初始化spdk_thread对象， 创建msg ring），添加到reactor的threads列表（先创建event添加到reactor的event ring，reactor启动后，reactor_run会先执行event ring中的event，然后将app thread添加到reactor的threads列表）
+       \spdk_ring_create
+    \spdk_reactor_start    //通过rte_eal_remote_launch启动各reactor，线程函数为reactor_run
+----------------------------------------------
+\bootstrap_fn   //bdev/vhost初始化：boostrap_fn在reactor启动前，通过msg添加到app thread的msg ring，reactor启动后轮询thread的msg ring执行，bdev子系统初始化，vhost子系统初始化
+   \spdk_subsystem_init_from_json_config
+   \app_start_rpc
+-----------------------------------------------
+</code></pre> 
+<h3><a id="reactor_82"></a>reactor初始化</h3> 
+<p>下图展示了初始化过程中建立的reactor和spdk_thread间的示意关系:<br> <img src="https://images2.imgbox.com/03/2c/BMYXA85b_o.png" alt="reactor与spdk_thread关系图"><br> spdk app程序启动时，根据设置的参数会在每个指定的运行核core上创建reactor实例，通过全局链表g_reactors来管理所有的实例。调用spdk_thread_create方法创建spdk_thread实例（如：“app_thread”），并初始化（ 每个spdk_thread实例，包含一个spdk_lw_thread扩展，并设置由g_thread_id维护的递增id）， 然后调用线程方法g_thread_op_fn（实例为：reactor_thread_op）将spdk_thread实例挂接到reactor的threads列表上，通过全局链表g_threads来管理所有的线程实例。</p> 
+<blockquote> 
+ <p>注：g_thread_op_fn从全局的event mempool创建一个event实例并初始化，event的方法设置为_schedule_thread，参数设置为spdk_thread的扩展对象spdk_lw_thread，接着将event添加到“下一个”reactor的event ring中（在没有指定spdk_thread的core id的情况下，会选择round-bin的下一个reactor）。</p> 
+</blockquote> 
+<p>在spdk app启动的最后调用spdk_reactors_start启动reactor，执行函数为reactor_run, 首先枚举event ring，逐个执行每个事件函数 ---- _schedule_thread函数将spdk_thread的扩展对象spdk_lw_thread添加到reactor的threads列表），然后轮询threads列表 ---- 对于每个thread，首先枚举执行msg ring中的消息，接着轮询active_pollers列表，最后轮询timed_pollers红黑树。这样整个polling机制就运行起来了。</p> 
+<blockquote> 
+ <p>注：app_setup_env 在进行环境初始化时，会将服务主线程绑定到main_lcore，在其他的运行核core上创建pthread工作线程，reactor（执行函数reactor_run）运行在各自运行核core的pthread上</p> 
+</blockquote> 
+<h3><a id="bdev_92"></a>bdev子系统</h3> 
+<p>spdk app程序启动时，通过SPDK_SUBSYSTEM_REGISTER注册各子系统到SPDK框架（通过g_subsystems列表管理所有的子系统），通过SPDK_SUBSYSTEM_DEPEND注册子系统的依赖（通过g_subsystems_deps列表管理所有的子系统依赖），当前有10多个子系统，它们的依赖关系如下：<br> <img src="https://images2.imgbox.com/a2/47/GXZrnhQZ_o.png" alt="子系统依赖关系"><br> 通过SPDK_BDEV_MODULE_REGISTER注册bdev模块（通过g_bdev_mgr.bdev_modules列表管理所有的bdev模块），bdev module提供不同模块类型的具体实现，当前有20+种，常用的有nvme，virtio_scsi，virto_blk等。</p> 
+<p>在spdk app启动的后期（启动reactor前），通过spdk_thread_send_msg向“app_thread”线程的msg ring添加一个消息（消息的执行函数是bootstrap_fn），在reactor启动后，reactor开始轮询threads列表（reactor会优先处理event ring中的event，将“app_thread”添加到reactor的threads列表），对于每个thread，先枚举执行msg ring中的消息，然后轮询active_pollers列表，最后是timed_pollers红黑树。</p> 
+<p>消息的bootstrap_fn方法被调用执行rpc的初始化，以及子系统和bdev module的初始化 ---- 过程中调用spdk_io_device_register注册设备对象io_device，指定创建和销毁io_channel的回调函数(spdk_io_channel_create_cb/spdk_io_channel_destroy_cb）, 通过全局红黑树g_io_devies来管理所有的io_device实例。io_channel是per-cpu/core的结构，是运行核操作设备的抽象，在首次调用spdk_get_io_channel时，会创建对应设备的io_channel结构并添加到对应spdk_thread的io_channels红黑树中，io_channel包含一个扩展结构可以指向任何数据，通常指向下一层子系统的channel结构，这样不同层次的设备抽象就关联起来了。下图显示了io_device，io_channel与spdk_thread的示意关系：</p> 
+<p><img src="https://images2.imgbox.com/03/b3/ouQbqTSl_o.png" alt="io_devices,io_channel,spdk_thread关系图"><br> 完成各子系统和bdev module的初始化后，初始化例程根据json文件进行app相关的初始化，本文中包括：Malloc0内存磁盘的初始化以及vhost-blk设备的初始化</p> 
+<h3><a id="Malloc0_103"></a>Malloc0磁盘初始化</h3> 
+<p>bdev子系统在层次上类似了Linux的通用块层，起着承上启下的作用，为上层的存储服务和存储协议提供统一的接口抽象，对下封装了各种设备实现，如：nvme, virtio-blk, virtio-scsi, malloc等。本文中创建Malloc0磁盘的json配置段如下：</p> 
+<pre><code>"subsystem": "bdev",      //创建一个内存设备作为vhost-blk的磁盘
+ "config": [
+   {
+          	"method": "bdev_malloc_create",
+          	"params": {
+            	"name": "Malloc0",
+           		"num_blocks": 32768,
+            	"block_size": 512
+          	}
+   }
+   ]
+</code></pre> 
+<p>rpc框架根据method名找到初始化方法（rpc_bdev_malloc_create），创建名为Malloc0，大小为32KB，扇区大小512B的内存磁盘， 过程中会调用spdk_io_device_register注册名为bdev_Malloc0的io_device并添加到g_io_devices列表，将磁盘和io_device关联起来，同时代表Malloc0磁盘的spdk_bdev对象被添加到g_bdev_mgr.bdev_names的名字红黑树，g_bdev_mgr.bdevs设备列表，最后将磁盘malloc_disk添加到g_malloc_disks全局列表。Malloc0磁盘与io_device及bdev的关系如下：</p> 
+<blockquote> 
+ <p>注：<br> g_bdev_mgr是bdev子系统初始化时实例化的bdev管理器，用来管理bdev子系统下的所有bdev实例，通过bdev_mgr名注册到io device全局列表<br> g_malloc_disks是malloc模块初始化时实例化的malloc设备列表，用来管理malloc内存磁盘，通过bdev_malloc名注册到io device全局列表<br> <img src="https://images2.imgbox.com/be/3b/NWksp7fH_o.png" alt="io_device和malloc"></p> 
+</blockquote> 
+<h3><a id="vhostblk_126"></a>vhost-blk初始化</h3> 
+<p>vhost子系统（vhost-blk和vhost-scsi）属于spdk的存储协议层，依赖于底层的bdev子系统，依赖关系参考上文。vhost的初始化属于spdk框架初始化的一部分，包括：vhost子系统的初始化以及vhost设备的初始化。</p> 
+<p>spdk app程序启动时，通过SPDK_VIRTIO_BLK_TRANSPORT_REGISTER注册transport ops，通过全局列表g_spdk_virtio_blk_transport_ops管理transport ops，vhost-blk子系统初始化时，创建名为"vhost_user_blk"的transport（从g_spdk_virtio_blk_transport_ops全局列表找到名为vhost_user_blk的transport ops，创建并初始化transport），初始化后添加到g_virtio_blk_transports的全局列表。</p> 
+<p>vhost-blk设备初始化使用的json配置段如下：</p> 
+<pre><code> {
+		“subsystem”: 	"vhost-blk",  //创建vhost-blk设备，名称为VhostBlk.0，磁盘为Malloc0
+		"config":[
+		{
+			"method": "vhost_create_blk_controller",
+			"params":{
+			    "ctrlr":"VhostBlk.0"
+				"dev_name":"Malloc0",
+				"transport":"vhost_user_blk"
+			}
+		}
+		]
+ }
+</code></pre> 
+<p>rpc框架根据method名找到初始化方法（rpc_vhost_create_blk_controller）开始vhost-blk的初始化，主要工作是：创建spdk_vhost_blk_dev实例，关联spdk_bdev设备（Malloc0磁盘），关联transport ops，调用ops中的create_ctrlr方法（vhost_user_blk_create_ctrlr）创建/初始化控制器 ---- 过程中会设置vhost后端操作集合（vhost_blk_device_backend和vhost_blk_user_device_backend），创建监听socket（设置通知回调g_spdk_vhost_ops），最后将设备添加到全局g_vhost_devices列表， 这样vhost监听就准备好了，等待客户端的连接。vhost-blk初始化核心调用如下：</p> 
+<pre><code>rpc_vhost_create_blk_controller
+	spdk_vhost_blk_construct    //初始化spdk_vhost_blk_dev设备，关联tranport ops，spdk_bdev
+		vhost_dev_register  // 设置后端操作集vhost_blk_device_backend， spdk_vhost_dev设备添加到全局列表g_vhost_devices
+			vhost_user_blk_create_ctrlr //调用transport ops操作集的create_ctrlr方法创建控制器
+				vhost_user_dev_register  //创建spdk_thread，添加到全局threads列表，并通过_scheduler_thread调度到reactor
+					vhost_register_unix_socket  //创建unix socket监听，设置通知回调g_spdk_vhost_ops，并启动监听回调为：vhost_user_server_new_connection
+</code></pre> 
+<p>vhost-blk与spdk_bdev，malloc_disk的关系示意如下：<br> <img src="https://images2.imgbox.com/f0/bb/pmMltQQa_o.png" alt="vhost_blk与spdk_bdev及malloc_disk的关系"></p> 
+<h3><a id="vhost_161"></a>vhost客户端连接</h3> 
+<p>当在qemu虚拟机的启动命令中带上如下参数，挂载vhost-blk设备，将向vhost服务程序发起建联请求：</p> 
+<pre><code>-chardev socket,id=spdk_vhost_blk0,path=/var/tmp/VhostBlk.0 -device vhost-user-blk-pci,chardev=spdk_vhost_blk0
+</code></pre> 
+<p>vhost服务程序根据vhost协议进行一系列的消息处理（比如：内存映射，virtqueue等），最后创建io_channel及IO处理线程开始接受客户端IO；</p> 
+<blockquote> 
+ <p>注：<br> vhost服务程序监听的回调函数为：vhost_user_server_new_connection，收到客户端的连接后，回调该函数处理<br> 客户端与vhost服务程序通讯的回调函数为：vhost_user_read_cb，读取客户端的消息，调用指定的消息处理函数，消息函数映射表：vhost_message_handlers<br> 监听的通知回调g_spdk_vhost_ops在vhost-blk服务初始化的时候设置，vsocket.notify_ops。</p> 
+</blockquote> 
+<p>本文主要关注vhost协议协商完成后，vhost device和spdk_bdev， spdk-thread的关联部分：首先在vhost服务收到客户端的连接请求后，在vhost_user_server_new_connection回调中会创建一个代表vhost device的对象virtio_net（<strong>并不是一个net设备，只是复用了dpdk中的实现</strong>），并添加到vhost_devices全局数组中，接着回调g_spdk_vhost_ops中的new_connection方法创建一个session（类型为：spdk_vhost_session），后续的IO都是在这个session进行；</p> 
+<p>在客户端和vhost服务间的vhost协议协商过程完成后，vhost服务回调g_spdk_vhost_ops中的new_service方法启动session ---- 向vhost_dev线程的msg ring投递一个启动session的消息，消息处理函数为vhost_user_session_start，该方法会调用vhost-blk后端集合中的start_session方法启动session ---- 在该方法中会调用spdk_get_io_channel创建io_channel链, 最后向线程中添加一个poller（方法为：vdev_worker），该poller负责从virtqueue中轮询取IO并处理，这样vhost-blk的挂载就完成了。建联的核心调用如下：</p> 
+<pre><code>vhost_user_server_new_connection  //和客户端建立连接后，创建vhost device对象virtio_net，创建新的会话，连接句柄fd添加到poll，回调为vhost_user_read_cb，准备接下来的vhost协议协商
+	new_connection //初始化spdk_vhost_session会话实例，与vhost_blk_dev关联
+
+vhost_user_read_cb  //根据消息调用vhost_message_handlers中的处理函数进行vhost协议协商处理，
+	vhost_user_msg_handler
+		start_device  //协商完成后，启动会话
+			spdk_thread_send_msg //向spdk_vhost_blk_dev所在的线程投递消息，处理函数为vhost_user_session_start，由reactor调度
+
+vhost_user_session_start  //调用后端的操作集vhost_blk_user_device_backend启动会话vhost_blk_start
+	vhost_blk_start
+		vhost_blk_get_io_channel   //创建io_channel链
+		SPDK_POLLER_REGISTER  //添加poller方法vdev_worker
+
+</code></pre> 
+<p>vhost device与spdk_thread,io_channel及poller的示意关系图：<br> <img src="https://images2.imgbox.com/67/25/rwjEVe4J_o.png" alt="vhost device与spdk_thread,io_channel及poller的关系"></p> 
+<h2><a id="vhostblk_197"></a>vhost-blk数据面</h2> 
+<p>vhost持续的polling注册的poller函数（vdev_worker）---- 逐个的处理每个virtqueue，对于每个从virtqueue的vring中取出的IO数据会被归集在spdk_vhost_blk_task数据结构中，由函数virtio_blk_process_request提交到vhost-blk关联的spdk bdev设备进行处理，IO数据归集到spdk_bdev_io结构中。依照上节&lt;vhost客户端连接&gt;中建立的io_channel链及io_device链，IO数据最后交由Malloc0设备完整数据落盘，然后沿着链条反向传回应答。IO处理的核心调用如下：</p> 
+<pre><code>process_blk_task     //将IO数据归集到spdk_vhost_blk_task结构
+  vhost_user_process_blk_request
+     virtio_blk_process_request   //提交请求到vhost_blk_dev层处理，根据请求type调用不同的例程，如写请求
+		spdk_bdev_writev
+			bdev_writev_blocks_with_md  //提交请求给关联的spdk_bdev设备处理，IO数据归集到spdk_bdev_io结构
+				bdev_submit_request   //提交请求给malloc_disk设备处理，IO数据归集到malloc_task结构
+					bdev_malloc_submit_request    //malloc_disk初始化时会给关联的spdk_bdev设置一个操作集malloc_fn_table其中有submit_request接口）
+ 						_bdev_malloc_submit_request  //根据不同的IO type调用不同的例程处理请求
+</code></pre> 
+<p>本文从宏观的角度，以vhost-blk为例，端到端的梳理了spdk控制面的初始化过程，着重介绍了各数据结构的关系及建立过程，希望通过本文各位读者能对spdk的工作原理有个较清晰的认识。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/fedc7201651ca9d759c0782444996c95/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Java String的创建声明及基本操作</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/cfba3b6cd116430ffe9ee1f9c41123aa/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">SpringBoot项目打成jar后加载外部配置文件</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

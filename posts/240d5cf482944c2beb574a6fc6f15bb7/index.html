@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>redis集群选举机制 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="redis集群选举机制" />
+<meta property="og:description" content="概要 当redis集群的主节点故障时，Sentinel集群将从剩余的从节点中选举一个新的主节点，有以下步骤：
+故障节点主观下线故障节点客观下线Sentinel集群选举LeaderSentinel Leader决定新主节点 选举过程 1、主观下线 Sentinel集群的每一个Sentinel节点会定时对redis集群的所有节点发心跳包检测节点是否正常。如果一个节点在down-after-milliseconds时间内没有回复Sentinel节点的心跳包，则该redis节点被该Sentinel节点主观下线。
+2、客观下线 当节点被一个Sentinel节点记为主观下线时，并不意味着该节点肯定故障了，还需要Sentinel集群的其他Sentinel节点共同判断为主观下线才行。
+该Sentinel节点会询问其他Sentinel节点，如果Sentinel集群中超过quorum数量的Sentinel节点认为该redis节点主观下线，则该redis客观下线。
+如果客观下线的redis节点是从节点或者是Sentinel节点，则操作到此为止，没有后续的操作了；如果客观下线的redis节点为主节点，则开始故障转移，从从节点中选举一个节点升级为主节点。
+3、Sentinel集群选举Leader 如果需要从redis集群选举一个节点为主节点，首先需要从Sentinel集群中选举一个Sentinel节点作为Leader。
+每一个Sentinel节点都可以成为Leader，当一个Sentinel节点确认redis集群的主节点主观下线后，会请求其他Sentinel节点要求将自己选举为Leader。被请求的Sentinel节点如果没有同意过其他Sentinel节点的选举请求，则同意该请求(选举票数&#43;1)，否则不同意。
+如果一个Sentinel节点获得的选举票数达到Leader最低票数(quorum和Sentinel节点数/2&#43;1的最大值)，则该Sentinel节点选举为Leader；否则重新进行选举。
+4、Sentinel Leader决定新主节点 当Sentinel集群选举出Sentinel Leader后，由Sentinel Leader从redis从节点中选择一个redis节点作为主节点：
+过滤故障的节点选择优先级slave-priority最大的从节点作为主节点，如不存在则继续选择复制偏移量（数据写入量的字节，记录写了多少数据。主服务器会把偏移量同步给从服务器，当主从的偏移量一致，则数据是完全同步）最大的从节点作为主节点，如不存在则继续选择runid（redis每次启动的时候生成随机的runid作为redis的标识）最小的从节点作为主节点 存在 不存在 存在 不存在 从节点列表 过滤故障节点 slave-priority最大的从节点 升级主节点 复制偏移量最大的从节点 升级主节点 runid最小的从节点升级主节点 为什么Sentinel集群至少3节点 一个Sentinel节选举成为Leader的最低票数为quorum和Sentinel节点数/2&#43;1的最大值，如果Sentinel集群只有2个Sentinel节点，则
+Sentinel节点数/2 &#43; 1 = 2/2 &#43; 1 = 2 即Leader最低票数至少为2，当该Sentinel集群中由一个Sentinel节点故障后，仅剩的一个Sentinel节点是永远无法成为Leader。
+也可以由此公式可以推导出，Sentinel集群允许1个Sentinel节点故障则需要3个节点的集群；允许2个节点故障则需要5个节点集群。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/240d5cf482944c2beb574a6fc6f15bb7/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-02-02T17:56:24+08:00" />
+<meta property="article:modified_time" content="2019-02-02T17:56:24+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">redis集群选举机制</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-github-gist">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="_0"></a>概要</h3> 
+<p>当redis集群的主节点故障时，Sentinel集群将从剩余的从节点中选举一个新的主节点，有以下步骤：</p> 
+<ol><li>故障节点主观下线</li><li>故障节点客观下线</li><li>Sentinel集群选举Leader</li><li>Sentinel Leader决定新主节点</li></ol> 
+<h3><a id="_7"></a>选举过程</h3> 
+<h4><a id="1_8"></a>1、主观下线</h4> 
+<p>Sentinel集群的每一个Sentinel节点会定时对redis集群的所有节点发心跳包检测节点是否正常。如果一个节点在<code>down-after-milliseconds</code>时间内没有回复Sentinel节点的心跳包，则该redis节点被该Sentinel节点主观下线。</p> 
+<h4><a id="2_11"></a>2、客观下线</h4> 
+<p>当节点被一个Sentinel节点记为主观下线时，并不意味着该节点肯定故障了，还需要Sentinel集群的其他Sentinel节点共同判断为主观下线才行。</p> 
+<p>该Sentinel节点会询问其他Sentinel节点，如果Sentinel集群中超过<code>quorum</code>数量的Sentinel节点认为该redis节点主观下线，则该redis客观下线。</p> 
+<p>如果客观下线的redis节点是从节点或者是Sentinel节点，则操作到此为止，没有后续的操作了；如果客观下线的redis节点为主节点，则开始故障转移，从从节点中选举一个节点升级为主节点。</p> 
+<h4><a id="3SentinelLeader_18"></a>3、Sentinel集群选举Leader</h4> 
+<p>如果需要从redis集群选举一个节点为主节点，首先需要从Sentinel集群中选举一个Sentinel节点作为Leader。</p> 
+<p>每一个Sentinel节点都可以成为Leader，当一个Sentinel节点确认redis集群的主节点主观下线后，会请求其他Sentinel节点要求将自己选举为Leader。被请求的Sentinel节点如果没有同意过其他Sentinel节点的选举请求，则同意该请求(选举票数+1)，否则不同意。</p> 
+<p>如果一个Sentinel节点获得的选举票数达到Leader最低票数(<code>quorum</code>和<code>Sentinel节点数/2+1</code>的最大值)，则该Sentinel节点选举为Leader；否则重新进行选举。</p> 
+<p><img src="https://images2.imgbox.com/ab/c6/ePioOmG9_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="4Sentinel_Leader_27"></a>4、Sentinel Leader决定新主节点</h4> 
+<p>当Sentinel集群选举出Sentinel Leader后，由Sentinel Leader从redis从节点中选择一个redis节点作为主节点：</p> 
+<ol><li>过滤故障的节点</li><li>选择优先级<code>slave-priority</code>最大的从节点作为主节点，如不存在则继续</li><li>选择复制偏移量（数据写入量的字节，记录写了多少数据。主服务器会把偏移量同步给从服务器，当主从的偏移量一致，则数据是完全同步）最大的从节点作为主节点，如不存在则继续</li><li>选择<code>runid</code>（redis每次启动的时候生成随机的<code>runid</code>作为redis的标识）最小的从节点作为主节点</li></ol> 
+<div class="mermaid"> 
+ <svg xmlns="http://www.w3.org/2000/svg" id="mermaid-svg-q3I1Vrs0MrXE78Xt" height="567.5" width="598.3515625" viewbox="0 0 618.3515625 587.5"> 
+  <g> 
+   <g class="output"> 
+    <g class="clusters"></g> 
+    <g class="edgePaths"> 
+     <g class="edgePath" style="opacity: 1;"> 
+      <path class="path" d="M195,72.5L195,97.5L195,122.5" marker-end="url(#arrowhead61)" style="fill:none"></path> 
+      <defs> 
+       <marker id="arrowhead61" viewbox="0 0 10 10" refx="9" refy="5" markerunits="strokeWidth" markerwidth="8" markerheight="6" orient="auto"> 
+        <path d="M 0 0 L 10 5 L 0 10 z" class="arrowheadPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path> 
+       </marker> 
+      </defs> 
+     </g> 
+     <g class="edgePath" style="opacity: 1;"> 
+      <path class="path" d="M195,175L195,200L195,225" marker-end="url(#arrowhead62)" style="fill:none"></path> 
+      <defs> 
+       <marker id="arrowhead62" viewbox="0 0 10 10" refx="9" refy="5" markerunits="strokeWidth" markerwidth="8" markerheight="6" orient="auto"> 
+        <path d="M 0 0 L 10 5 L 0 10 z" class="arrowheadPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path> 
+       </marker> 
+      </defs> 
+     </g> 
+     <g class="edgePath" style="opacity: 1;"> 
+      <path class="path" d="M150.27777777777777,277.5L80,318.75L80,360" marker-end="url(#arrowhead63)" style="fill:none"></path> 
+      <defs> 
+       <marker id="arrowhead63" viewbox="0 0 10 10" refx="9" refy="5" markerunits="strokeWidth" markerwidth="8" markerheight="6" orient="auto"> 
+        <path d="M 0 0 L 10 5 L 0 10 z" class="arrowheadPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path> 
+       </marker> 
+      </defs> 
+     </g> 
+     <g class="edgePath" style="opacity: 1;"> 
+      <path class="path" d="M239.72222222222223,277.5L310,318.75L310,360" marker-end="url(#arrowhead64)" style="fill:none"></path> 
+      <defs> 
+       <marker id="arrowhead64" viewbox="0 0 10 10" refx="9" refy="5" markerunits="strokeWidth" markerwidth="8" markerheight="6" orient="auto"> 
+        <path d="M 0 0 L 10 5 L 0 10 z" class="arrowheadPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path> 
+       </marker> 
+      </defs> 
+     </g> 
+     <g class="edgePath" style="opacity: 1;"> 
+      <path class="path" d="M260.9544270833333,412.5L183.8828125,453.75L183.8828125,495" marker-end="url(#arrowhead65)" style="fill:none"></path> 
+      <defs> 
+       <marker id="arrowhead65" viewbox="0 0 10 10" refx="9" refy="5" markerunits="strokeWidth" markerwidth="8" markerheight="6" orient="auto"> 
+        <path d="M 0 0 L 10 5 L 0 10 z" class="arrowheadPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path> 
+       </marker> 
+      </defs> 
+     </g> 
+     <g class="edgePath" style="opacity: 1;"> 
+      <path class="path" d="M359.0455729166667,412.5L436.1171875,453.75L436.1171875,495" marker-end="url(#arrowhead66)" style="fill:none"></path> 
+      <defs> 
+       <marker id="arrowhead66" viewbox="0 0 10 10" refx="9" refy="5" markerunits="strokeWidth" markerwidth="8" markerheight="6" orient="auto"> 
+        <path d="M 0 0 L 10 5 L 0 10 z" class="arrowheadPath" style="stroke-width: 1; stroke-dasharray: 1, 0;"></path> 
+       </marker> 
+      </defs> 
+     </g> 
+    </g> 
+    <g class="edgeLabels"> 
+     <g class="edgeLabel" style="opacity: 1;" transform=""> 
+      <g transform="translate(0,0)" class="label"> 
+       <foreignobject width="0" height="0"> 
+        <div style="display: inline-block; white-space: nowrap;"> 
+         <span class="edgeLabel"></span> 
+        </div> 
+       </foreignobject> 
+      </g> 
+     </g> 
+     <g class="edgeLabel" style="opacity: 1;" transform=""> 
+      <g transform="translate(0,0)" class="label"> 
+       <foreignobject width="0" height="0"> 
+        <div style="display: inline-block; white-space: nowrap;"> 
+         <span class="edgeLabel"></span> 
+        </div> 
+       </foreignobject> 
+      </g> 
+     </g> 
+     <g class="edgeLabel" style="opacity: 1;" transform="translate(80,318.75)"> 
+      <g transform="translate(-20,-16.25)" class="label"> 
+       <foreignobject width="40" height="32.5"> 
+        <div style="display: inline-block; white-space: nowrap;"> 
+         <span class="edgeLabel">存在</span> 
+        </div> 
+       </foreignobject> 
+      </g> 
+     </g> 
+     <g class="edgeLabel" style="opacity: 1;" transform="translate(310,318.75)"> 
+      <g transform="translate(-30,-16.25)" class="label"> 
+       <foreignobject width="60" height="32.5"> 
+        <div style="display: inline-block; white-space: nowrap;"> 
+         <span class="edgeLabel">不存在</span> 
+        </div> 
+       </foreignobject> 
+      </g> 
+     </g> 
+     <g class="edgeLabel" style="opacity: 1;" transform="translate(183.8828125,453.75)"> 
+      <g transform="translate(-20,-16.25)" class="label"> 
+       <foreignobject width="40" height="32.5"> 
+        <div style="display: inline-block; white-space: nowrap;"> 
+         <span class="edgeLabel">存在</span> 
+        </div> 
+       </foreignobject> 
+      </g> 
+     </g> 
+     <g class="edgeLabel" style="opacity: 1;" transform="translate(436.1171875,453.75)"> 
+      <g transform="translate(-30,-16.25)" class="label"> 
+       <foreignobject width="60" height="32.5"> 
+        <div style="display: inline-block; white-space: nowrap;"> 
+         <span class="edgeLabel">不存在</span> 
+        </div> 
+       </foreignobject> 
+      </g> 
+     </g> 
+    </g> 
+    <g class="nodes"> 
+     <g class="node" style="opacity: 1;" id="A" transform="translate(195,46.25)"> 
+      <rect rx="0" ry="0" x="-60" y="-26.25" width="120" height="52.5"></rect> 
+      <g class="label" transform="translate(0,0)"> 
+       <g transform="translate(-50,-16.25)"> 
+        <foreignobject width="100" height="32.5"> 
+         <div style="display: inline-block; white-space: nowrap;">
+           从节点列表 
+         </div> 
+        </foreignobject> 
+       </g> 
+      </g> 
+     </g> 
+     <g class="node" style="opacity: 1;" id="B" transform="translate(195,148.75)"> 
+      <rect rx="0" ry="0" x="-70" y="-26.25" width="140" height="52.5"></rect> 
+      <g class="label" transform="translate(0,0)"> 
+       <g transform="translate(-60,-16.25)"> 
+        <foreignobject width="120" height="32.5"> 
+         <div style="display: inline-block; white-space: nowrap;">
+           过滤故障节点 
+         </div> 
+        </foreignobject> 
+       </g> 
+      </g> 
+     </g> 
+     <g class="node" style="opacity: 1;" id="C" transform="translate(195,251.25)"> 
+      <rect rx="0" ry="0" x="-126.6796875" y="-26.25" width="253.359375" height="52.5"></rect> 
+      <g class="label" transform="translate(0,0)"> 
+       <g transform="translate(-116.6796875,-16.25)"> 
+        <foreignobject width="233.359375" height="32.5"> 
+         <div style="display: inline-block; white-space: nowrap;">
+           slave-priority最大的从节点 
+         </div> 
+        </foreignobject> 
+       </g> 
+      </g> 
+     </g> 
+     <g class="node" style="opacity: 1;" id="D" transform="translate(80,386.25)"> 
+      <rect rx="0" ry="0" x="-60" y="-26.25" width="120" height="52.5"></rect> 
+      <g class="label" transform="translate(0,0)"> 
+       <g transform="translate(-50,-16.25)"> 
+        <foreignobject width="100" height="32.5"> 
+         <div style="display: inline-block; white-space: nowrap;">
+           升级主节点 
+         </div> 
+        </foreignobject> 
+       </g> 
+      </g> 
+     </g> 
+     <g class="node" style="opacity: 1;" id="E" transform="translate(310,386.25)"> 
+      <rect rx="0" ry="0" x="-120" y="-26.25" width="240" height="52.5"></rect> 
+      <g class="label" transform="translate(0,0)"> 
+       <g transform="translate(-110,-16.25)"> 
+        <foreignobject width="220" height="32.5"> 
+         <div style="display: inline-block; white-space: nowrap;">
+           复制偏移量最大的从节点 
+         </div> 
+        </foreignobject> 
+       </g> 
+      </g> 
+     </g> 
+     <g class="node" style="opacity: 1;" id="F" transform="translate(183.8828125,521.25)"> 
+      <rect rx="0" ry="0" x="-60" y="-26.25" width="120" height="52.5"></rect> 
+      <g class="label" transform="translate(0,0)"> 
+       <g transform="translate(-50,-16.25)"> 
+        <foreignobject width="100" height="32.5"> 
+         <div style="display: inline-block; white-space: nowrap;">
+           升级主节点 
+         </div> 
+        </foreignobject> 
+       </g> 
+      </g> 
+     </g> 
+     <g class="node" style="opacity: 1;" id="G" transform="translate(436.1171875,521.25)"> 
+      <rect rx="0" ry="0" x="-142.234375" y="-26.25" width="284.46875" height="52.5"></rect> 
+      <g class="label" transform="translate(0,0)"> 
+       <g transform="translate(-132.234375,-16.25)"> 
+        <foreignobject width="264.47265625" height="32.5"> 
+         <div style="display: inline-block; white-space: nowrap;">
+           runid最小的从节点升级主节点 
+         </div> 
+        </foreignobject> 
+       </g> 
+      </g> 
+     </g> 
+    </g> 
+   </g> 
+  </g> 
+ </svg> 
+</div> 
+<h3><a id="Sentinel3_45"></a>为什么Sentinel集群至少3节点</h3> 
+<p>一个Sentinel节选举成为Leader的最低票数为<code>quorum</code>和<code>Sentinel节点数/2+1</code>的最大值，如果Sentinel集群只有2个Sentinel节点，则</p> 
+<pre><code>Sentinel节点数/2 + 1
+= 2/2 + 1
+= 2
+</code></pre> 
+<p>即Leader最低票数至少为2，当该Sentinel集群中由一个Sentinel节点故障后，仅剩的一个Sentinel节点是永远无法成为Leader。</p> 
+<p>也可以由此公式可以推导出，Sentinel集群允许1个Sentinel节点故障则需要3个节点的集群；允许2个节点故障则需要5个节点集群。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/9fd3071c153d233d4bfe1c6797c291ea/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Laravel 编程中，基于 Redis 多库设计，实现多种缓存仓配置</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/5f0c5688db725f4fb586c0e91dc84d3c/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Nginx开发环境配置指北</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

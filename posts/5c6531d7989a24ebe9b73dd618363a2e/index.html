@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MybatisPlus元数据处理器源码探究：自动写入创建时间、创建人等。(包含反射浅度探究) - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="MybatisPlus元数据处理器源码探究：自动写入创建时间、创建人等。(包含反射浅度探究)" />
+<meta property="og:description" content="前言：在绝大部分系统中，我们需要记录各种操作人、操作时间或者是这条记录的创建人、创建时间。那么在本次学习中，我们就有这么四个字段：createUser/createTime和updateUser/updateTime并且没有抽取出BaseModel基础对象来抽象这几个字段，如果我们在每个代码中都手动去设置，那么则会有很多重复代码和重复工作量。那么MybatisPlus给我们提供了解决方案：元数据处理器(MetaObjectHandler)。
+MybatisPlus版本：3.5.3.1
+为什么3.5.3后面会有个 “.1” ？这又不得不说另外一个故事了...
+之前使用MybatisPlus3.5.3的时候，由于我单表习惯性使用LambdaQueryChainWrapper对象来执行查询，某一天测试的时候，数据异常流转导致我想查的某条数据不存在，结果离奇的事情就来了：正常来说，查不到数据应该会返回null到Java中，但是3.5.3版本的LambdaQueryChainWrapper().one()查不到数据，则直接抛出了空指针异常，后来研究官方版本日志才发现这是3.5.3版本的问题，需要将版本更新至3.5.3.1，所以如果你经常使用LambdaQueryChainWrapper，一定要更新到3.5.3.1以避免这个问题，防止挨领导的批。
+接下来，我会展示我三个版本的代码，而最终版本则是最终可用版，当然你也可以自己修改一下代码以实现对自己的业务系统的性能优化。 Step1：新建一个元数据处理器类。 直接上代码：
+这里是一个我自己新建的插入更新字段处理器，需要继承MybatisPlus提供的MetaObjectHandler元数据处理器接口，这样就可以完成自定义元数据处理器的创建了。
+这边我们主要处理插入和更新字段，所以需要重写两个方法：
+1.insertFill(MetaObject metaObject)：插入填充方法，MybatisPlus会识别每一个执行的Insert语句，然后执行这个方法去填充属性。
+2.updateFill(MetaObject metaObject)：更新填充方法，和插入一样的原理。
+Step2：编写处理器代码逻辑。 首先，我们要明确我们的目标：在插入和更新时，填充相应字段。
+那么就有了接下来的第一版代码：
+第一版代码解析：
+1. 首先我们校验登录状态和用户。
+2. 通过接口提供的MetaObject对象获取源对象。
+3. 获得源对象的class字节码对象。
+4. 通过字节码对象获取属性对象数组Fields。
+5. 循环判断属性对象名是否为对应的属性名。
+6. 设置对应值。
+总的来说：就是通过反射的方法把对应的值设置进去。
+乍一看好像没毛病？
+确实，这个方法确实能将update和insert对应的字段设置进去。
+但是！我们知道反射是非常影响性能的！而且如果一个类有较多的属性，那会导致多次无用的循环，况且插入和更新属于热代码，在热代码路径上执行反射的操作，如果发生高并发情况，那造成的后果将会是灾难性的。
+下面，我们先简单说一下反射到底为什么会影响性能？
+反射是一种Java在运行时创建类、修改类、调用类方法、对对象属性读写的一种操作。
+简单剖析一下反射影响性能开销的几个点：
+1. 执行反射的第一步是对类的类型检查和解析：反射在运行时查找并调用方法或访问字段，此时需要进行动态解析，这会花费比常规方法调用或字段访问更多的时间。由于类型信息不是在编译期确定的，而是需要在运行期做许多额外的检查，包括类型检查，可能的动态分派等，这些都会增加处理的时间。
+2. 跳过JVM优化：目前我们使用到的绝大部分JVM都会对常规的方法调用和字段访问进行优化，例如内联，死码消除等。但是，当我们使用反射时，这些优化在很大程度上被绕过，因为JVM无法预测和优化动态解析的行为。
+3. 对象的创建：反射方法（如：Method.invoke()）通常需求参数以对象形式传入，这可能导致需求创建额外的对象，而正常的方法调用则不需要。例如，如果调用的方法接受原始类型，必须要先将这些原始类型装箱成对象。同样，如果方法有返回值，那么返回的结果也需要进行拆箱操作，这些操作都会消耗额外的CPU周期时间。
+以上这些开销对于单个接口单次调用来说可能开销不大，但是如上面所说，对于热代码高并发的接口，这些性能损耗将会是灾难性的。
+Step3：优化反射带来的性能损耗。 首先，我们还是要明确目标：减少反射代码，减少反射对接口的性能开销。
+思考：如何才能减少反射带来的性能开销呢？能不能不用反射就完成对类字段的读取和设值呢？
+带着上面的问题，我想到第一个解决方案：高级反射。
+什么是高级反射？高级反射是一个比较笼统的概念，例如使用Javassist库、CgLib、ReflectASM等库来实现一个ClassPool类池。这个学习成本较高，所以我们不选择这个方案。
+第二个解决方案：缓存装载所有关于更新和插入的set方法。
+这个方法就是通过缓存来实现快速查找值的setter方法。但是会造成内存开销。所以继续寻找更优解。
+最终解决方案：MybatisPlus官方提供的getFieldValByName()和setFieldValByName()方法实现值的获取和设置。
+Step4：应用解决方案。 应用了最终解决方案后，我们有了接下来的第二版代码：
+上面这个代码起始已经能用了，但是由于我的系统中参数类型参差不齐，有的用Date有的用LocalDateTime，所以我们可以继续优化。
+优化后的最终版代码：
+这里使用instanceof判断了属性的类型，用于判断设置什么值进去，那么这段代码就是需求的完整版了。
+接下来是源码深度思考和解析，可能会有点晦涩难懂，我自己在读源码时，也有很多迷茫不懂的地方，各位有兴趣的可以继续往下看。
+最后的思考：为什么使用MybatisPlus自带的方法能提升性能？难道他里面使用的不是反射的方法吗？ 带着这个问题，我们直接进入到源码中一探究竟。利用IDEA自带的debug模式，我们可以深度追踪源码调用链路。
+直接上源码：
+第一级(基础重点)：调用metaObject的hasGetter(fieldName)的方法，判断是否存在getter方法。其中metaObject是该对象的元数据，我们点进其对应的类中可以发现，里面包含了多个对象属性：
+1. 源对象(originalObject)：
+该对象是执行方法时的原始对象(可以是任何类型，比如你使用了OrderModel进行增和改操作，那么这个对象的类型就是OrderModel)
+2. (重点)原始对象的包装类(objectWrapper)：
+负责对原始对象的操作，如获取属性值，设置属性值等。objectWrapper 还有几个实现子类，例如beanWrapper，mapWrapper，collectionWrapper，分别对应Bean，Map和Collection的包装。根据 originalObject 的类型，Mybaits会创建对应的 ObjectWrapper 实例。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/5c6531d7989a24ebe9b73dd618363a2e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-05T09:51:10+08:00" />
+<meta property="article:modified_time" content="2023-07-05T09:51:10+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MybatisPlus元数据处理器源码探究：自动写入创建时间、创建人等。(包含反射浅度探究)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p><em>前言：在绝大部分系统中，我们需要记录各种<strong>操作人、操作时间</strong>或者是这条记录的<strong>创建人、创建时间。</strong>那么在本次学习中，我们就有这么四个字段：<strong>createUser/createTime和updateUser/updateTime并且没有抽取出BaseModel基础对象来抽象这几个字段</strong>，如果我们在每个代码中都手动去设置，那么则会有很多重复代码和重复工作量。那么MybatisPlus给我们提供了解决方案：<strong>元数据处理器(MetaObjectHandler)</strong>。</em></p> 
+<blockquote> 
+ <p><strong>MybatisPlus版本：3.5.3.1</strong></p> 
+ <p><strong>为什么3.5.3后面会有个 “.1” ？这又不得不说另外一个故事了...</strong></p> 
+ <p><strong>之前使用MybatisPlus3.5.3的时候，由于我单表习惯性使用LambdaQueryChainWrapper对象来执行查询，某一天测试的时候，数据异常流转导致我想查的某条数据不存在，结果离奇的事情就来了：正常来说，查不到数据应该会返回null到Java中，但是3.5.3版本的LambdaQueryChainWrapper().one()查不到数据，则直接抛出了空指针异常，后来研究官方版本日志才发现这是3.5.3版本的问题，需要将版本更新至3.5.3.1，所以如果你经常使用LambdaQueryChainWrapper，一定要更新到3.5.3.1以避免这个问题，防止挨领导的批。</strong></p> 
+</blockquote> 
+<h4><span style="color:#0d0016;"><span style="background-color:#d7d8d9;">接下来，我会展示我三个版本的代码，而最终版本则是最终可用版，当然你也可以自己修改一下代码以实现对自己的业务系统的性能优化。</span></span></h4> 
+<h2>Step1：新建一个元数据处理器类。</h2> 
+<p style="text-align:center;"><strong>直接上代码：</strong></p> 
+<p style="text-align:center;"><img alt="" height="461" src="https://images2.imgbox.com/b7/2b/OCaUYb4Q_o.png" width="593"></p> 
+<blockquote> 
+ <p>这里是一个我自己新建的<strong>插入更新字段处理器</strong>，需要<strong>继承MybatisPlus提供的MetaObjectHandler元数据处理器接口</strong>，这样就可以完成自定义元数据处理器的创建了。</p> 
+ <p>这边我们主要处理插入和更新字段，所以需要<strong>重写两个方法：</strong></p> 
+ <p><strong>1.insertFill(MetaObject metaObject)：插入填充方法，MybatisPlus会识别每一个执行的Insert语句，然后执行这个方法去填充属性。</strong></p> 
+ <p><strong>2.updateFill(MetaObject metaObject)：更新填充方法，和插入一样的原理。</strong></p> 
+</blockquote> 
+<hr> 
+<h2><strong>Step2：编写处理器代码逻辑。</strong></h2> 
+<blockquote> 
+ <p><strong>首先，我们要明确我们的目标：在插入和更新时，填充相应字段。</strong></p> 
+</blockquote> 
+<p style="text-align:center;"><strong>那么就有了接下来的第一版代码：</strong></p> 
+<p style="text-align:center;"><img alt="" height="725" src="https://images2.imgbox.com/1c/ed/NHe7rokL_o.png" width="647"></p> 
+<blockquote> 
+ <p><strong> 第一版代码解析：</strong></p> 
+ <p><strong>1. 首先我们校验登录状态和用户。</strong></p> 
+ <p><strong>2. 通过接口提供的MetaObject对象获取源对象。</strong></p> 
+ <p><strong>3. 获得源对象的class字节码对象。</strong></p> 
+ <p><strong>4. 通过字节码对象获取属性对象数组Fields。</strong></p> 
+ <p><strong>5. 循环判断属性对象名是否为对应的属性名。</strong></p> 
+ <p><strong>6. 设置对应值。</strong></p> 
+ <p><strong>总的来说：就是通过反射的方法把对应的值设置进去。</strong></p> 
+</blockquote> 
+<p>乍一看好像没毛病？</p> 
+<p><strong>确实，这个方法确实能将update和insert对应的字段设置进去。</strong></p> 
+<p><strong>但是！我们知道反射是非常影响性能的！而且如果一个类有较多的属性，那会导致多次无用的循环，况且插入和更新属于热代码，在热代码路径上执行反射的操作，如果发生高并发情况，那造成的后果将会是灾难性的。</strong></p> 
+<blockquote> 
+ <p><u><em>下面，我们先简单说一下反射到底为什么会影响性能？</em></u></p> 
+ <p><strong>反射是一种Java在运行时创建类、修改类、调用类方法、对对象属性读写的一种操作。</strong></p> 
+ <p></p> 
+ <p>简单剖析一下反射影响性能开销的几个点：</p> 
+ <p>1. 执行反射的第一步是<strong>对类的类型检查和解析：</strong>反射在运行时查找并调用方法或访问字段，此时需要进行动态解析，这会花费比常规方法调用或字段访问更多的时间。由于类型信息不是在编译期确定的，而是需要在运行期做许多额外的检查，包括类型检查，可能的动态分派等，这些都会增加处理的时间。</p> 
+ <p>2. <strong>跳过JVM优化：</strong>目前我们使用到的绝大部分JVM都会对常规的方法调用和字段访问进行优化，例如内联，死码消除等。但是，当我们使用反射时，这些优化在很大程度上被绕过，因为JVM无法预测和优化动态解析的行为。</p> 
+ <p>3. <strong>对象的创建：</strong>反射方法（如：Method.invoke()）通常需求参数以对象形式传入，这可能导致需求创建额外的对象，而正常的方法调用则不需要。例如，如果调用的方法接受原始类型，必须要先将这些原始类型装箱成对象。同样，如果方法有返回值，那么返回的结果也需要进行拆箱操作，这些操作都会消耗额外的CPU周期时间。</p> 
+ <p></p> 
+ <p>以上这些开销对于单个接口单次调用来说可能开销不大，但是如上面所说，对于热代码高并发的接口，这些性能损耗将会是灾难性的。</p> 
+</blockquote> 
+<hr> 
+<h2>Step3：优化反射带来的性能损耗。</h2> 
+<blockquote> 
+ <p><strong>首先，我们还是要明确目标：减少反射代码，减少反射对接口的性能开销。</strong></p> 
+ <p><strong>思考：如何才能减少反射带来的性能开销呢？能不能不用反射就完成对类字段的读取和设值呢？</strong></p> 
+</blockquote> 
+<p><span style="color:#fe2c24;">带着上面的问题，我想到第一个解决方案：<strong>高级反射。</strong></span></p> 
+<p>什么是高级反射？高级反射是一个比较笼统的概念，例如使用Javassist库、CgLib、ReflectASM等库来实现一个ClassPool类池。这个学习成本较高，所以我们不选择这个方案。</p> 
+<p><span style="color:#fe2c24;">第二个解决方案：<strong>缓存装载所有关于更新和插入的set方法。</strong></span></p> 
+<p>这个方法就是通过缓存来实现快速查找值的setter方法。但是会造成内存开销。所以继续寻找更优解。</p> 
+<blockquote> 
+ <p>最终解决方案：<strong>MybatisPlus官方提供的getFieldValByName()和setFieldValByName()方法实现值的获取和设置。</strong></p> 
+</blockquote> 
+<hr> 
+<h2><strong>Step4：应用解决方案。</strong></h2> 
+<p style="text-align:center;"><strong>应用了最终解决方案后，我们有了接下来的第二版代码：</strong></p> 
+<p style="text-align:center;"><img alt="" height="464" src="https://images2.imgbox.com/ba/cd/RpVtAyXp_o.png" width="815"></p> 
+<blockquote> 
+ <p>上面这个代码起始已经能用了，但是由于我的系统中参数类型参差不齐，<strong>有的用Date有的用LocalDateTime</strong>，所以我们可以继续优化。</p> 
+</blockquote> 
+<p style="text-align:center;"><strong>优化后的最终版代码：</strong></p> 
+<p style="text-align:center;"><img alt="" height="921" src="https://images2.imgbox.com/c4/e5/nXBbsxLw_o.png" width="857"></p> 
+<blockquote> 
+ <p><strong>这里使用instanceof判断了属性的类型，用于判断设置什么值进去，那么这段代码就是需求的完整版了。</strong></p> 
+</blockquote> 
+<hr> 
+<p><span style="color:#fe2c24;"><strong>接下来是源码深度思考和解析，可能会有点晦涩难懂，我自己在读源码时，也有很多迷茫不懂的地方，各位有兴趣的可以继续往下看。</strong></span></p> 
+<hr> 
+<h2>最后的思考：为什么使用MybatisPlus自带的方法能提升性能？难道他里面使用的不是反射的方法吗？</h2> 
+<blockquote> 
+ <p>带着这个问题，我们直接进入到源码中一探究竟。利用IDEA自带的debug模式，我们可以深度追踪源码调用链路。</p> 
+</blockquote> 
+<p style="text-align:center;"><strong>直接上源码：</strong></p> 
+<p><img alt="" height="494" src="https://images2.imgbox.com/26/11/eBvzDTqH_o.png" width="1200"></p> 
+<blockquote> 
+ <p><strong>第一级</strong><span style="color:#fe2c24;"><strong>(基础重点)</strong></span>：调用metaObject的hasGetter(fieldName)的方法，判断是否存在getter方法。其中metaObject是该对象的元数据，我们点进其对应的类中可以发现，里面包含了多个对象属性：</p> 
+ <p><strong>1. 源对象(originalObject)：</strong></p> 
+ <p>该对象是执行方法时的原始对象(可以是任何类型，比如你使用了OrderModel进行增和改操作，那么这个对象的类型就是OrderModel)</p> 
+ <p></p> 
+ <p><strong>2. <span style="color:#fe2c24;">(重点)</span>原始对象的包装类(objectWrapper)：</strong></p> 
+ <p><strong>负责对原始对象的操作，如获取属性值，设置属性值等。objectWrapper 还有几个实现子类，例如beanWrapper，mapWrapper，collectionWrapper，分别对应Bean，Map和Collection的包装。根据 originalObject 的类型，Mybaits会创建对应的 ObjectWrapper 实例。</strong></p> 
+ <p></p> 
+ <p><strong>3. 对象工厂(objectFactory)：</strong></p> 
+ <p>负责实例化需要包装的对象，比如通过无参构造器创建 Bean 实例。</p> 
+ <p></p> 
+ <p><strong>4. ObjectWrapper工厂对象(objectWrapperFactory)：</strong></p> 
+ <p>负责创建 ObjectWrapper对象。用户可以向其注册自定义的 ObjectWrapperFactory，以扩展对原始对象的操作。</p> 
+ <p></p> 
+ <p><strong>5. <span style="color:#fe2c24;">(重点)</span>反射器工厂(ReflectorFactory)：</strong></p> 
+ <p><strong>创建并且缓存反射相关的元数据，如Bean的get/set方法，构造方法等。Mybatis 在第一次反射对象时，会创建对应的 Reflector 并将其缓存起来以提升性能。</strong></p> 
+ <p><img alt="" height="222" src="https://images2.imgbox.com/96/c7/67iRfimu_o.png" width="512"></p> 
+ <p></p> 
+ <p><em>相信看到这里，大家都清楚各个对象的作用和分工了。</em></p> 
+ <p><em>那么第2点和第5点就是我们今天的重点对象。</em></p> 
+ <hr> 
+ <p><strong>第二级：</strong>调用objectWrapper.hasGetter(name)的方法。</p> 
+ <p>注意，这边我们传入的是单个对象，里面并没有二级对象或二级对象集合，所以，<strong>这里生成的ObjectWrapper对象是BeanWrapper的实例。</strong></p> 
+ <p></p> 
+ <p>紧接着进入类代码后，我们发现里面还有一个对象属性MetaClass(元信息类)。</p> 
+ <p></p> 
+ <p><strong><span style="color:#fe2c24;">(重点)</span>MetaClass：它的主要职责是负责解析类的元信息（如类中定义了哪些属性，这些属性的getter和setter方法等等）。</strong></p> 
+ <p></p> 
+ <p><strong><span style="color:#fe2c24;">(重点！！！)</span>每一个BeanWrapper对象都有一个与之相关联的MetaClass对象。这个 MetaClass 对象携带了该 BeanWrapper 对应的 Java Bean 对象的类信息，<span style="color:#ff9900;">包括 该对象对应的 Reflector反射器 对象，Reflector 中存储了类的 getter 和 setter 方法、属性</span>等信息。因此，当调用 BeanWrapper 对象的 hasGetter 或 hasSetter 方法时，<span style="color:#fe2c24;">实际上是 MetaClass 对象去查询所持有的 Reflector 对象是否有对应的 getter 或 setter 方法。</span></strong></p> 
+ <p></p> 
+ <p><strong>那么这个时候，结合第一级所讲的Reflector反射器，大家应该清楚了，在Mybatis第一次去执行某个对象的增删改操作时，Mybatis会将对象相应的类信息加入到Reflector反射器缓存中去，那么在我们第二次及以后使用该对象进行增删改操作时，则不会通过反射获取对应的类信息，而且去Reflector反射器的缓存中获取。</strong></p> 
+ <p></p> 
+ <p>接下来进行代码跟踪和解析：</p> 
+ <p><strong>1. BeanWrapper.hasGetter()函数解析：</strong></p> 
+ <pre><code class="language-java">public boolean hasGetter(String name) {
+
+    // 获取参数验证对象。
+    // 里面会检查传入的name是否是一个xxxx[x]或者xxxx.xxxx的形式
+    PropertyTokenizer prop = new PropertyTokenizer(name);
+
+    // 判断传入的name是否是一个子对象或者集合名+索引的形式，
+    // 里面会检查children != null, 如果存在则通过IndexedName去MetaClass中获取getter方法。里面会进行递归查找getter函数，这里暂不解释子对象的情况。
+    if (prop.hasNext()) { 
+        // 如果存在二级对象，则递归查找getter函数。
+        if (this.metaClass.hasGetter(prop.getIndexedName())) {
+            MetaObject metaValue = this.metaObject.metaObjectForProperty(prop.getIndexedName());
+            return metaValue == SystemMetaObject.NULL_META_OBJECT ? this.metaClass.hasGetter(name) : metaValue.hasGetter(prop.getChildren());
+        } else {
+            return false;
+        }
+    } else {
+        // 通过MetaClass.hasGetter()获取对应的getter方法。
+        // MetaClass.hasGetter()详见下一个代码块。
+        return this.metaClass.hasGetter(name);
+    }
+}</code></pre> 
+ <p><strong>2. MetaClass.hasGetter()函数解析：</strong></p> 
+ <pre><code class="language-java">public boolean hasGetter(String name) {
+    // 前面的步骤跟上一个函数如出一辙，都是判断是否存在二级对象等。
+    // 这里就不再过多解释。
+    PropertyTokenizer prop = new PropertyTokenizer(name);
+    if (prop.hasNext()) {
+        if (this.reflector.hasGetter(prop.getName())) {
+            MetaClass metaProp = this.metaClassForProperty(prop);
+            return metaProp.hasGetter(prop.getChildren());
+        } else {
+            return false;
+        }
+    } else {
+        // 重点在这里，这里使用了reflector反射器的hasGetter()去获取getter方法。
+        // reflector.hasGetter()详见下一个代码块。
+        return this.reflector.hasGetter(prop.getName());
+    }
+}</code></pre> 
+ <p><strong>3. Reflector.hasGetter()函数解析：</strong></p> 
+ <pre><code class="language-java">public boolean hasGetter(String propertyName) {
+    // 这里的getMethods是一个Map&lt;String, Invoker&gt;类型，
+    // 记录了对应属性名的Getter方法。这里则是用containsKey函数去判断是否存在该函数。
+    return this.getMethods.containsKey(propertyName);
+}</code></pre> 
+</blockquote> 
+<p style="text-align:center;"><strong>整体调用链路如下图：</strong></p> 
+<p style="text-align:center;"><img alt="" height="890" src="https://images2.imgbox.com/b7/1d/nWBpXwzb_o.png" width="1200"></p> 
+<hr> 
+<p></p> 
+<blockquote> 
+ <p>到这里，就结束了我们的源码分析，总结一下：</p> 
+ <p><span style="color:#fe2c24;"><strong>1. 问：为什么使用MetaObjectHandler自带的获取属性的方法会比自己直接使用反射获取属性的性能要好？</strong></span></p> 
+ <p><span style="color:#1c7331;"><strong>答：因为在MybatisPlus提供的方法中，里面采用了Reflector反射器 (实际上反射器是Mybatis提供的) 的缓存功能，里面采用了多层判断以及递归调用来实现多级对象的属性方法的查找。当一个对象第一次用于增删改查操作时，Reflector缓存中没有该对象的属性方法，Mybatis则会通过反射去获取相应的属性和对应的Getter/Setter方法，然后将其加入到Reflector反射器的缓存中去，这样一来，如果这个方法再次被用于增删改查操作，Mybatis就不会通过反射再去动态解析类，而是通过缓存的方式获取。所以这样就实现了比自己直接去做反射更高的性能。</strong></span></p> 
+ <p><span style="color:#fe2c24;"><strong>2. 问：是每一个对象都有其相应的Reflector反射器吗？</strong></span></p> 
+ <p><span style="color:#1c7331;"><strong>答：是的，每一个对象经过Mybatis后都有自己对应的MetaClass，而每个MetaClass中会有两个属性，一个是ReflectorFactory反射器工厂，一个是Reflector反射器。在某个类被用于Mybatis时，首先会创建MetaObject对象，该对象是Bean属性的操作入口，在MetaObject构造方法中，会创建BeanWrapper实例，其中传入的参数包括ReflectorFactory，然后在BeanWrapper的构造方法中会有一段函数</strong></span></p> 
+ <pre><code>this.metaClass = MetaClass.forClass(object.getClass(), metaObject.getReflectorFactory());</code></pre> 
+ <p><span style="color:#1c7331;"><strong>以此来创建MetaClass实例，而在MetaClass的构造方法中，会通过ReflectorFactory来创建相应的Reflector实例。</strong></span><span style="color:#1c7331;"><strong>而ReflectorFactory则有一个DefaultReflectorFactory的实现类，在里面则会有一个ConcurrentMap&lt;Class&lt;?&gt;, Reflector&gt;实现对所有的Reflector进行管理。</strong></span></p> 
+</blockquote> 
+<p><strong>至此，MybatisPlus元数据处理器为什么会比自己使用反射快的问题，已经得到了从源码角度的解释，如果有什么错误的地方，欢迎各位指出。</strong></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/5637d45f6f7de4ceac561b70c2135a09/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">杂记 | 使用idea构建SpringBoot项目并远程连接docker运行</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/f1e466aa0f47c870e64a923ec88dc809/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">第一章：Linux常用命令&#43;VIM&#43;SSH介绍&#43;SSH密钥登录</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

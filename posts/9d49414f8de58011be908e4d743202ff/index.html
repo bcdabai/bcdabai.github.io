@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>直连路由模式(LVS-DR)&#43;Keepalived - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="直连路由模式(LVS-DR)&#43;Keepalived" />
+<meta property="og:description" content="目录
+前言
+一、LVS-DR模式
+1.DR模式数据包流量分析
+2.LVS-DR中的ARP问题
+3.解决ARP的两个问题的设置方法
+4.DR处理问题后的流量分析
+5.DR特点
+二、Keepalived
+1.Keepalived
+2.Keepalived实现原理剖析
+三、LVS-DR-Keepalived部署
+1.配置主负载服务器
+2.部署web节点服务器
+3.配置keepalived
+总结
+前言 Keepalived起初是专门针对LVS设计的一款强大的辅助工具，主要用来提供故障切换和健康检查功能——判断LVS负载调度器、节点服务器的可用性，及时隔离替换为新的服务器，当故障主机恢复后将其重新加入群集。
+一、LVS-DR模式 1.DR模式数据包流量分析 客户端向目标VIP发送请求，负载均衡器接收负载均衡器根据负载均衡算法选择后端真实服务器，不修改也不封装IP报文，而是将数据帧的MAC地址改为后端真实服务器的MAC地址，然后在局域网上发送。后端真实服务器收到这个帧，解封装后发现目标IP与本机匹配（事先绑定了VIP），于是处理这个报文。随后重新封装报文，将响应报文通过lo接口传送给物理网卡然后向外发出，客户端将收到回复报文。客户端认为得到正常的服务，而不会知道是哪一台服务器处理的如果跨网段，则报文通过路由器经由 internet 返回给用户。
+2.LVS-DR中的ARP问题 1.在LVS-DR负载均衡集样中，负载均衡与节点服务器都要配置相同的VIP地址。
+2.在局域网中具有相同的IP地址，势必会造成各服务器ARP通信的紊乱。
+3.对节点服务器进行处理，使其不响应针对VIP的ARP请求。
+解决方法
+使用虚接口 lo:0 承载VIP地址设置内核参数 arp_ignore=1：系统只响应目的IP为本地 IP 的ARP请求
+4.RealServer返回报文(源IP是VIP)经路由器转发，重新封装报文时,需要先获取路由器的MAC地址。
+5.发送ARP请求时，Linux默认使用IP包的源IP地址(即VIP)作为ARP请求包中的源IP地址，而不使
+用发送接口的IP地址如：ens33
+6.路由器收到ARP请求后，将更新ARP表项
+7.原有的VIP对应Director的MAC地址会被更新为VIP对应RealServer的MAC地址
+8.路由器根据ARP表项，会将新来的请求报文转发给Realserver，导致Director的VIP失效
+解决方法：对节点服务器进行处理，设置内核参数arp_announce=2：系统不使用IP包的源地址来设置ARP请求的源地址，而选择发送接口的IP地址。
+3.解决ARP的两个问题的设置方法 修改 /etc/sysctl.conf 文件
+net.ipv4.conf.lo.arp_ignore = 1
+net.ipv4.conf.lo.arp_announce = 2
+net.ipv4.conf.all.arp_ignore = 1
+net.ipv4.conf.all.arp_announce = 2
+4.DR处理问题后的流量分析 客户端发送请求到Director server (负载均衡器)，请求的数据报文(源IP是CIP，目标IP是VIP)到达内核空间。
+Director Server和Real server在同一个网络中，数据通过二层数据链路层来传输。
+内核空间判断数据包的目标I是本机VIP，此时IPVS (IP虚拟服务器)比对数据包请求的服务是否是集群服务，是集群服务就重新封装数据包。修改源MAC地址为Director Server的MAC地址，修改目标MAC地址为Real Server的MAC地址，源IP地址与目标IP地址没有改变，然后将数据包发送给Real Server。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/9d49414f8de58011be908e4d743202ff/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-10-21T21:14:42+08:00" />
+<meta property="article:modified_time" content="2021-10-21T21:14:42+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">直连路由模式(LVS-DR)&#43;Keepalived</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="%E5%89%8D%E8%A8%80-toc" style="margin-left:0px;"><a href="#%E5%89%8D%E8%A8%80" rel="nofollow" title="前言">前言</a></p> 
+<p id="%E4%B8%80%E3%80%81LVS-DR%E6%A8%A1%E5%BC%8F-toc" style="margin-left:40px;"><a href="#%E4%B8%80%E3%80%81LVS-DR%E6%A8%A1%E5%BC%8F" rel="nofollow" title="一、LVS-DR模式">一、LVS-DR模式</a></p> 
+<p id="1%E3%80%81DR%E6%A8%A1%E5%BC%8F%E6%95%B0%E6%8D%AE%E5%8C%85%E6%B5%81%E9%87%8F%E5%88%86%E6%9E%90-toc" style="margin-left:80px;"><a href="#1%E3%80%81DR%E6%A8%A1%E5%BC%8F%E6%95%B0%E6%8D%AE%E5%8C%85%E6%B5%81%E9%87%8F%E5%88%86%E6%9E%90" rel="nofollow" title="1.DR模式数据包流量分析">1.DR模式数据包流量分析</a></p> 
+<p id="2.LVS-DR%E4%B8%AD%E7%9A%84ARP%E9%97%AE%E9%A2%98-toc" style="margin-left:80px;"><a href="#2.LVS-DR%E4%B8%AD%E7%9A%84ARP%E9%97%AE%E9%A2%98" rel="nofollow" title="2.LVS-DR中的ARP问题">2.LVS-DR中的ARP问题</a></p> 
+<p id="3.%E8%A7%A3%E5%86%B3ARP%E7%9A%84%E4%B8%A4%E4%B8%AA%E9%97%AE%E9%A2%98%E7%9A%84%E8%AE%BE%E7%BD%AE%E6%96%B9%E6%B3%95-toc" style="margin-left:80px;"><a href="#3.%E8%A7%A3%E5%86%B3ARP%E7%9A%84%E4%B8%A4%E4%B8%AA%E9%97%AE%E9%A2%98%E7%9A%84%E8%AE%BE%E7%BD%AE%E6%96%B9%E6%B3%95" rel="nofollow" title="3.解决ARP的两个问题的设置方法">3.解决ARP的两个问题的设置方法</a></p> 
+<p id="4%E3%80%81DR%E5%A4%84%E7%90%86%E9%97%AE%E9%A2%98%E5%90%8E%E7%9A%84%E6%B5%81%E9%87%8F%E5%88%86%E6%9E%90-toc" style="margin-left:80px;"><a href="#4%E3%80%81DR%E5%A4%84%E7%90%86%E9%97%AE%E9%A2%98%E5%90%8E%E7%9A%84%E6%B5%81%E9%87%8F%E5%88%86%E6%9E%90" rel="nofollow" title="4.DR处理问题后的流量分析">4.DR处理问题后的流量分析</a></p> 
+<p id="5.DR%E7%89%B9%E7%82%B9-toc" style="margin-left:80px;"><a href="#5.DR%E7%89%B9%E7%82%B9" rel="nofollow" title="5.DR特点">5.DR特点</a></p> 
+<p id="%E4%BA%8C%E3%80%81Keepalived-toc" style="margin-left:40px;"><a href="#%E4%BA%8C%E3%80%81Keepalived" rel="nofollow" title="二、Keepalived">二、Keepalived</a></p> 
+<p id="1.Keepalived-toc" style="margin-left:80px;"><a href="#1.Keepalived" rel="nofollow" title="1.Keepalived">1.Keepalived</a></p> 
+<p id="2.Keepalived%E5%AE%9E%E7%8E%B0%E5%8E%9F%E7%90%86%E5%89%96%E6%9E%90-toc" style="margin-left:80px;"><a href="#2.Keepalived%E5%AE%9E%E7%8E%B0%E5%8E%9F%E7%90%86%E5%89%96%E6%9E%90" rel="nofollow" title="2.Keepalived实现原理剖析">2.Keepalived实现原理剖析</a></p> 
+<p id="%E4%B8%89%E3%80%81LVS-DR-Keepalived%E9%83%A8%E7%BD%B2-toc" style="margin-left:40px;"><a href="#%E4%B8%89%E3%80%81LVS-DR-Keepalived%E9%83%A8%E7%BD%B2" rel="nofollow" title="三、LVS-DR-Keepalived部署">三、LVS-DR-Keepalived部署</a></p> 
+<p id="%C2%A01%E3%80%81%E9%85%8D%E7%BD%AE%E4%B8%BB%E8%B4%9F%E8%BD%BD%E6%9C%8D%E5%8A%A1%E5%99%A8-toc" style="margin-left:80px;"><a href="#%C2%A01%E3%80%81%E9%85%8D%E7%BD%AE%E4%B8%BB%E8%B4%9F%E8%BD%BD%E6%9C%8D%E5%8A%A1%E5%99%A8" rel="nofollow" title="1.配置主负载服务器">1.配置主负载服务器</a></p> 
+<p id="2.%E9%83%A8%E7%BD%B2web%E8%8A%82%E7%82%B9%E6%9C%8D%E5%8A%A1%E5%99%A8-toc" style="margin-left:80px;"><a href="#2.%E9%83%A8%E7%BD%B2web%E8%8A%82%E7%82%B9%E6%9C%8D%E5%8A%A1%E5%99%A8" rel="nofollow" title="2.部署web节点服务器">2.部署web节点服务器</a></p> 
+<p id="3.%E9%85%8D%E7%BD%AEkeepalived-toc" style="margin-left:80px;"><a href="#3.%E9%85%8D%E7%BD%AEkeepalived" rel="nofollow" title="3.配置keepalived">3.配置keepalived</a></p> 
+<p id="%E6%80%BB%E7%BB%93-toc" style="margin-left:0px;"><a href="#%E6%80%BB%E7%BB%93" rel="nofollow" title="总结">总结</a></p> 
+<hr id="hr-toc"> 
+<h2>前言</h2> 
+<p>Keepalived起初是专门针对LVS设计的一款强大的辅助工具，主要用来提供故障切换和健康检查功能——判断LVS负载调度器、节点服务器的可用性，及时隔离替换为新的服务器，当故障主机恢复后将其重新加入群集。</p> 
+<h3 id="%E4%B8%80%E3%80%81LVS-DR%E6%A8%A1%E5%BC%8F">一、LVS-DR模式</h3> 
+<h4 id="1%E3%80%81DR%E6%A8%A1%E5%BC%8F%E6%95%B0%E6%8D%AE%E5%8C%85%E6%B5%81%E9%87%8F%E5%88%86%E6%9E%90">1.DR模式数据包流量分析</h4> 
+<p>客户端向目标VIP发送请求，负载均衡器接收负载均衡器根据负载均衡算法选择后端真实服务器，不修改也不封装IP报文，而是将数据帧的MAC地址改为后端真实服务器的MAC地址，然后在局域网上发送。后端真实服务器收到这个帧，解封装后发现目标IP与本机匹配（事先绑定了VIP），于是处理这个报文。随后重新封装报文，将响应报文通过lo接口传送给物理网卡然后向外发出，客户端将收到回复报文。客户端认为得到正常的服务，而不会知道是哪一台服务器处理的如果跨网段，则报文通过路由器经由 internet 返回给用户。</p> 
+<h4 id="2.LVS-DR%E4%B8%AD%E7%9A%84ARP%E9%97%AE%E9%A2%98">2.LVS-DR中的ARP问题</h4> 
+<p>1.在LVS-DR负载均衡集样中，负载均衡与节点服务器都要配置相同的VIP地址。</p> 
+<p>2.在局域网中具有相同的IP地址，势必会造成各服务器ARP通信的紊乱。</p> 
+<p>3.对节点服务器进行处理，使其不响应针对VIP的ARP请求。<br> 解决方法<br> 使用虚接口 lo:0 承载VIP地址设置内核参数 arp_ignore=1：系统只响应目的IP为本地 IP 的ARP请求</p> 
+<p>4.RealServer返回报文(源IP是VIP)经路由器转发，重新封装报文时,需要先获取路由器的MAC地址。</p> 
+<p>5.发送ARP请求时，Linux默认使用IP包的源IP地址(即VIP)作为ARP请求包中的源IP地址，而不使<br> 用发送接口的IP地址如：ens33</p> 
+<p>6.路由器收到ARP请求后，将更新ARP表项</p> 
+<p>7.原有的VIP对应Director的MAC地址会被更新为VIP对应RealServer的MAC地址</p> 
+<p>8.路由器根据ARP表项，会将新来的请求报文转发给Realserver，导致Director的VIP失效<br> 解决方法：对节点服务器进行处理，设置内核参数arp_announce=2：系统不使用IP包的源地址来设置ARP请求的源地址，而选择发送接口的IP地址。</p> 
+<h4 id="3.%E8%A7%A3%E5%86%B3ARP%E7%9A%84%E4%B8%A4%E4%B8%AA%E9%97%AE%E9%A2%98%E7%9A%84%E8%AE%BE%E7%BD%AE%E6%96%B9%E6%B3%95">3.解决ARP的两个问题的设置方法</h4> 
+<p><strong>修改 /etc/sysctl.conf 文件</strong><br> net.ipv4.conf.lo.arp_ignore = 1<br> net.ipv4.conf.lo.arp_announce = 2<br> net.ipv4.conf.all.arp_ignore = 1<br> net.ipv4.conf.all.arp_announce = 2</p> 
+<h4 id="4%E3%80%81DR%E5%A4%84%E7%90%86%E9%97%AE%E9%A2%98%E5%90%8E%E7%9A%84%E6%B5%81%E9%87%8F%E5%88%86%E6%9E%90">4.DR处理问题后的流量分析</h4> 
+<p>客户端发送请求到Director server (负载均衡器)，请求的数据报文(源IP是CIP，目标IP是VIP)到达内核空间。</p> 
+<p>Director Server和Real server在同一个网络中，数据通过二层数据链路层来传输。</p> 
+<p>内核空间判断数据包的目标I是本机VIP，此时IPVS (IP虚拟服务器)比对数据包请求的服务是否是集群服务，是集群服务就重新封装数据包。修改源MAC地址为Director Server的MAC地址，修改目标MAC地址为Real Server的MAC地址，源IP地址与目标IP地址没有改变，然后将数据包发送给Real Server。</p> 
+<p>到达Real server的请求报文的MAC地址是自身的MAC地址，就接收此报文。数据包重新封装报文(源IP地址为VIP，目标IP为CIP)，将响应报文通过 lo 接口传送给物理网卡然后向外发出。</p> 
+<p>Real Server 直接将响应报文传送到客户端。</p> 
+<h4 id="5.DR%E7%89%B9%E7%82%B9">5.DR特点</h4> 
+<p>Director Server和Real Server必须在同一-个物理网络中。</p> 
+<p>Real Server可以使用私有地址，也可以使用公网地址。如果使用公网地址，可以通过互联网对RIP进行直接访问。</p> 
+<p>Director Server作为群集的访问入口，但不作为网关使用。</p> 
+<p>所有的请求报文经由Director Server，但回复响应报文不能经过Director Server</p> 
+<p>Real Server的网关不允许指向Director Server IP，即Real Server发送的数据包不允许经过Director Server。</p> 
+<p>Real Server上的10接口配置VIP的IP地址。</p> 
+<h3 id="%E4%BA%8C%E3%80%81Keepalived">二、Keepalived</h3> 
+<h4 id="1.Keepalived">1.Keepalived</h4> 
+<p>支持故障自动切换（Failover）<br> 支持节点健康状态检查（Health Checking）<br> 判断LVS负载调度器、节点服务器的可用性，当master主机出现故障及时切换到backup节点保证业务正常，当 master 故障主机恢复后将其重新加入群集并且业务重新切换回 master 节点（优先级）。</p> 
+<h4 id="2.Keepalived%E5%AE%9E%E7%8E%B0%E5%8E%9F%E7%90%86%E5%89%96%E6%9E%90">2.Keepalived实现原理剖析</h4> 
+<p>keepalived采用VRRP热备份协议实现Linux 服务器的多机热备功能<br> VRRP（虚拟路由冗余协议）是针对路由器的一种备份解决方案。<br> 由多台路由器组成一个热备份组，通过共用的虚拟IP地址对外提供服务<br> 每个热备组内同时只有一台主路由器提供服务，其他路由器处于冗余状态<br> 若当前在线的路由器失效，则其他路由器会根据设置的优先级自动接替虚拟IP地址，继续提供服务</p> 
+<h3 id="%E4%B8%89%E3%80%81LVS-DR-Keepalived%E9%83%A8%E7%BD%B2">三、LVS-DR-Keepalived部署</h3> 
+<h4 id="%C2%A01%E3%80%81%E9%85%8D%E7%BD%AE%E4%B8%BB%E8%B4%9F%E8%BD%BD%E6%9C%8D%E5%8A%A1%E5%99%A8">1.配置主负载服务器</h4> 
+<pre><code class="language-cs">[root@localhost ~]# systemctl stop firewalld.service
+[root@localhost ~]# systemctl disable firewalld.service
+[root@localhost ~]# setenforce 0</code></pre> 
+<pre><code class="language-css">[root@localhost ~]# yum -y install ipvsadm keepalived
+[root@localhost ~]# modprobe ip_vs     #加载ip_vs模块</code></pre> 
+<pre><code class="language-cs">[root@localhost ~]# cd /etc/sysconfig/network-scripts/
+[root@localhost network-scripts]# cp -p ifcfg-ens33 ifcfg-ens33:0
+vim ifcfg-ens33:0
+DEVICE=ens33:0
+ONBOOT=yes
+IPADDR=192.168.226.100
+NETMASK=255.255.255.255</code></pre> 
+<p><strong>调整proc响应参数</strong></p> 
+<pre><code class="language-cs">[root@localhost ~]# vim /etc/sysctl.conf
+...
+net.ipv4.ip_forward = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.ens33.send_redirects = 0
+
+[root@localhost ~]# sysctl -p</code></pre> 
+<p><strong>配置负载分配策略</strong></p> 
+<pre><code class="language-cpp">[root@localhost ~]# ipvsadm-save &gt; /etc/sysconfig/ipvsadm
+[root@localhost ~]# systemctl start ipvsadm
+
+[root@localhost ~]# cd /opt/
+[root@localhost opt]# vim.dr.sh
+#!/bin/bash
+ipvsadm -C
+ipvsadm -A -t 192.168.226.100:80 -s rr
+ipvsadm -a -t 192.168.226.100:80 -r 192.168.255.130:80 -g
+ipvsadm -a -t 192.168.226.100:80 -r 192.168.255.131:80 -g
+
+[root@localhost ~]# bash dr.sh
+[root@localhost ~]# ipvsadm</code></pre> 
+<h4 id="2.%E9%83%A8%E7%BD%B2web%E8%8A%82%E7%82%B9%E6%9C%8D%E5%8A%A1%E5%99%A8">2.部署web节点服务器</h4> 
+<pre><code class="language-cpp">[root@localhost ~]# cd /etc/sysconfig/network-scripts/
+[root@localhost ~]# cp -p ifcfg-lo ifcfg-lo:0
+[root@localhost ~]# vim ifcfg-lo:0
+DEVICE=lo:0
+ONBOOT=yes
+IPADDR=192.168.226.100
+NETMASK=255.255.255.255</code></pre> 
+<p style="text-align:center;"><img alt="" height="107" src="https://images2.imgbox.com/97/e9/YzdQ2mu0_o.png" width="1200"></p> 
+<pre><code class="language-css">[root@localhost ~]# route add -host 192.168.226.100 dev lo:0
+[root@localhost ~]# route -n</code></pre> 
+<pre><code class="language-cpp">[root@localhost ~]# vim /etc/sysctl.conf
+net.ipv4.conf.lo.arp_ignore = 1  
+net.ipv4.conf.lo.arp_announce = 2
+net.ipv4.conf.all.arp_ignore = 1
+net.ipv4.conf.all.arp_announce = 2
+
+[root@localhost ~]# sysctl -p</code></pre> 
+<h4 id="3.%E9%85%8D%E7%BD%AEkeepalived">3.配置keepalived</h4> 
+<pre><code class="language-css">[root@localhost ~]# systemctl stop firewalld.service
+[root@localhost ~]# systemctl disable firewalld.service
+[root@localhost ~]# setenforce 0</code></pre> 
+<pre><code class="language-cpp">[root@localhost ~]# yum install -y keepalived
+[root@localhost ~]# cd /etc/keepalived/
+[root@localhost keepalived]# vim keepalived.conf
+global_defs {
+          router_id lvs_01
+}
+        vrrp_instance vi_1 {
+          state MASTER
+         interface ens33
+          virtual_router_id 51
+                  priority 110
+          advert_int 1
+        authentication {
+           auth_type PASS
+           auth_pass 6666
+ }
+        virtual_ipaddress {
+      192.168.226.100
+}
+}
+        virtual_server 192.168.226.100 80 {
+      lb_algo rr
+      lb_kind DR
+      persistence_timeout 6
+      protocol TCP
+}
+real_server 192.168.226.131 80 {
+      weight 1
+      TCP_CHECK {
+          connect_port 80
+          connect_timeout 3
+          nb_get_retry 3
+          delay_before_retry 3
+   }
+}
+        real_server 192.168.226.130 80 {
+      weight 1
+      TCP_CHECK {
+          connect_port 80
+          connect_timeout 3
+          nb_get_retry 3
+          delay_before_retry 3
+   }
+}
+}
+</code></pre> 
+<h2 id="%E6%80%BB%E7%BB%93">总结</h2> 
+<p>NAT模式的群集采用单一出入口，一个公网IP地址；而DR模式的群集采用单一入口+多路出口，需要多个公网IP地址。</p> 
+<p>Keepalived主要针对LVS群集应用而设计，提供故障切换和健康检查功能。在非LVS群集环境中，也可用来实现多机热备功能。</p> 
+<p>Keepalived的配置文件位Keepalived.conf，主、备服务器的配置区别主要在于路由器名称、热备状态、优先级。</p> 
+<p>漂移地址（VIP）由Keepalived根据热备状态自动指定，不需要手动设置。LVS群集的服务器池在Keepalived.conf文件中预先配置，不需要手动执行ipvsadm工具。</p> 
+<p>通过LVS+Keepalived的结合使用，可以实现服务器的高可用负载均衡群集。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/5c5d63de11e5c91d946cac727c9566c1/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">JS DOM 编程复习笔记--appendChild、textContent、innerText、innerHTML（五）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c2520b56f6e717ad6a4c37aa9a7c2224/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">在scrapy爬取微博热评时出现MySQLdb._exceptions.ProgrammingError错误</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

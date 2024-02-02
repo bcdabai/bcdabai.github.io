@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【源码分析】一个flink job的sql到底是如何执行的（一）：flink sql底层是如何调用connector实现物理执行计划的 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【源码分析】一个flink job的sql到底是如何执行的（一）：flink sql底层是如何调用connector实现物理执行计划的" />
+<meta property="og:description" content="文章目录 一. 一条flink sql二. 源码流程图示1. flink connector的实现逻辑2. flink sql的转换逻辑 三、flink sql 调用connector源码分析1. tEnv.executeSql(stmt)1.1. 概述1.2. convertValidatedSqlNode1.2.1. create语句1.2.2. insert语句1.2.3. query语句a. 找到connector的DynamicTableSourceb. convertSourceToRel ing 2. statementSet.execute()2.1. translateToExecNodeGraph实现类1：StreamPhysicalTableSourceScan实现类2：StreamPhysicalLookupJoin实现类3：StreamPhysicalSink 2.2. translateToPlan 我们以一条sql为例分析下flink sql与connector是如何配合执行的，本文我们先分析
+sql-&gt;sqlnode-&gt;validate-&gt;operation：是如何找到对应的connector实例的relnode-&gt;execGraph：是如何组装node为Graph，在哪找到connector实例的 之后的文章将会继续分析：
+translateToPlanInternal是如何串联connector其他方法的runtime时是如何调用connector执行方法的 另外：对于connector的spi机制、connector并行度的设置后续也都可以分析。
+一. 一条flink sql CREATE TABLE tjy_test1_ss ( `id` int, `name` string, age string, `proc_time` AS `proctime`() ) WITH ( &#39;password&#39; = &#39;11111111&#39;, &#39;timestamp-format.standard&#39; = &#39;SQL&#39;, &#39;connector&#39; = &#39;binlog-x&#39;, &#39;port&#39; = &#39;3306&#39;, &#39;cat&#39; = &#39;insert&#39;, &#39;host&#39; = &#39;localhost&#39;, -- &#39;connection-charset&#39; = &#39;utf-8&#39;, &#39;url&#39; = &#39;jdbc:mysql://localhost:3306/360test&#39;, &#39;table&#39; = &#39;test003&#39;, &#39;username&#39; = &#39;root&#39;, &#39;timestamp&#39;=&#39;1702881040000&#39; ); CREATE TABLE tjy_fortest1 ( `id` int, `name` string, `face` string, PRIMARY KEY (id) NOT ENFORCED ) WITH ( &#39;password&#39; = &#39;123456&#39;, &#39;connector&#39; = &#39;mysql-x&#39;, &#39;sink." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/41334978e96620df0fdc6f95ec706602/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-11T23:12:46+08:00" />
+<meta property="article:modified_time" content="2024-01-11T23:12:46+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【源码分析】一个flink job的sql到底是如何执行的（一）：flink sql底层是如何调用connector实现物理执行计划的</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#_flink_sql_15" rel="nofollow">一. 一条flink sql</a></li><li><a href="#__68" rel="nofollow">二. 源码流程图示</a></li><li><ul><li><a href="#1_flink_connector_69" rel="nofollow">1. flink connector的实现逻辑</a></li><li><a href="#2_flink_sql_94" rel="nofollow">2. flink sql的转换逻辑</a></li></ul> 
+  </li><li><a href="#flink_sql_connector_110" rel="nofollow">三、flink sql 调用connector源码分析</a></li><li><ul><li><a href="#1_tEnvexecuteSqlstmt_111" rel="nofollow">1. tEnv.executeSql(stmt)</a></li><li><ul><li><a href="#11__113" rel="nofollow">1.1. 概述</a></li><li><a href="#12_convertValidatedSqlNode_148" rel="nofollow">1.2. convertValidatedSqlNode</a></li><li><ul><li><a href="#121_create_179" rel="nofollow">1.2.1. create语句</a></li><li><a href="#122_insert_218" rel="nofollow">1.2.2. insert语句</a></li><li><a href="#123_query_250" rel="nofollow">1.2.3. query语句</a></li><li><ul><li><a href="#a_connectorDynamicTableSource_385" rel="nofollow">a. 找到connector的DynamicTableSource</a></li><li><a href="#b_convertSourceToRel_ing_397" rel="nofollow">b. convertSourceToRel ing</a></li></ul> 
+    </li></ul> 
+   </li></ul> 
+   </li><li><a href="#2_statementSetexecute_489" rel="nofollow">2. statementSet.execute()</a></li><li><ul><li><a href="#21_translateToExecNodeGraph_525" rel="nofollow">2.1. translateToExecNodeGraph</a></li><li><ul><li><a href="#1StreamPhysicalTableSourceScan_583" rel="nofollow">实现类1：StreamPhysicalTableSourceScan</a></li><li><a href="#2StreamPhysicalLookupJoin_610" rel="nofollow">实现类2：StreamPhysicalLookupJoin</a></li><li><a href="#3StreamPhysicalSink_652" rel="nofollow">实现类3：StreamPhysicalSink</a></li></ul> 
+    </li><li><a href="#22_translateToPlan_688" rel="nofollow">2.2. translateToPlan</a></li></ul> 
+  </li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<p>我们以一条sql为例分析下flink sql与connector是如何配合执行的，本文我们先分析</p> 
+<blockquote> 
+ <ol><li>sql-&gt;sqlnode-&gt;validate-&gt;operation：是如何找到对应的connector实例的</li><li>relnode-&gt;execGraph：是如何组装node为Graph，在哪找到connector实例的</li></ol> 
+</blockquote> 
+<p>之后的文章将会继续分析：</p> 
+<ol><li>translateToPlanInternal是如何串联connector其他方法的</li><li>runtime时是如何调用connector执行方法的</li></ol> 
+<p>另外：对于connector的spi机制、connector并行度的设置后续也都可以分析。</p> 
+<h2><a id="_flink_sql_15"></a>一. 一条flink sql</h2> 
+<pre><code class="prism language-sql"><span class="token keyword">CREATE</span> <span class="token keyword">TABLE</span> tjy_test1_ss  
+<span class="token punctuation">(</span>  
+<span class="token identifier"><span class="token punctuation">`</span>id<span class="token punctuation">`</span></span> <span class="token keyword">int</span><span class="token punctuation">,</span>  
+<span class="token identifier"><span class="token punctuation">`</span>name<span class="token punctuation">`</span></span> string<span class="token punctuation">,</span>  
+age string<span class="token punctuation">,</span>  
+<span class="token identifier"><span class="token punctuation">`</span>proc_time<span class="token punctuation">`</span></span> <span class="token keyword">AS</span> <span class="token identifier"><span class="token punctuation">`</span>proctime<span class="token punctuation">`</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span>  
+<span class="token punctuation">)</span> <span class="token keyword">WITH</span> <span class="token punctuation">(</span>  
+<span class="token string">'password'</span> <span class="token operator">=</span> <span class="token string">'11111111'</span><span class="token punctuation">,</span>  
+<span class="token string">'timestamp-format.standard'</span> <span class="token operator">=</span> <span class="token string">'SQL'</span><span class="token punctuation">,</span>  
+<span class="token string">'connector'</span> <span class="token operator">=</span> <span class="token string">'binlog-x'</span><span class="token punctuation">,</span>  
+<span class="token string">'port'</span> <span class="token operator">=</span> <span class="token string">'3306'</span><span class="token punctuation">,</span>  
+<span class="token string">'cat'</span> <span class="token operator">=</span> <span class="token string">'insert'</span><span class="token punctuation">,</span>  
+<span class="token string">'host'</span> <span class="token operator">=</span> <span class="token string">'localhost'</span><span class="token punctuation">,</span>  
+<span class="token comment">-- 'connection-charset' = 'utf-8',  </span>
+<span class="token string">'url'</span> <span class="token operator">=</span> <span class="token string">'jdbc:mysql://localhost:3306/360test'</span><span class="token punctuation">,</span>  
+<span class="token string">'table'</span> <span class="token operator">=</span> <span class="token string">'test003'</span><span class="token punctuation">,</span>  
+<span class="token string">'username'</span> <span class="token operator">=</span> <span class="token string">'root'</span><span class="token punctuation">,</span>  
+<span class="token string">'timestamp'</span><span class="token operator">=</span><span class="token string">'1702881040000'</span>  
+<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">CREATE</span> <span class="token keyword">TABLE</span> tjy_fortest1  
+<span class="token punctuation">(</span>  
+<span class="token identifier"><span class="token punctuation">`</span>id<span class="token punctuation">`</span></span> <span class="token keyword">int</span><span class="token punctuation">,</span>  
+<span class="token identifier"><span class="token punctuation">`</span>name<span class="token punctuation">`</span></span> string<span class="token punctuation">,</span>  
+<span class="token identifier"><span class="token punctuation">`</span>face<span class="token punctuation">`</span></span> string<span class="token punctuation">,</span>  
+<span class="token keyword">PRIMARY</span> <span class="token keyword">KEY</span> <span class="token punctuation">(</span>id<span class="token punctuation">)</span> <span class="token operator">NOT</span> ENFORCED  
+<span class="token punctuation">)</span> <span class="token keyword">WITH</span> <span class="token punctuation">(</span>  
+<span class="token string">'password'</span> <span class="token operator">=</span> <span class="token string">'123456'</span><span class="token punctuation">,</span>  
+<span class="token string">'connector'</span> <span class="token operator">=</span> <span class="token string">'mysql-x'</span><span class="token punctuation">,</span>  
+<span class="token string">'sink.buffer-flush.interval'</span> <span class="token operator">=</span> <span class="token string">'10000'</span><span class="token punctuation">,</span>  
+<span class="token string">'sink.buffer-flush.max-rows'</span> <span class="token operator">=</span> <span class="token string">'1024'</span><span class="token punctuation">,</span>  
+<span class="token string">'sink.all-replace'</span> <span class="token operator">=</span> <span class="token string">'true'</span><span class="token punctuation">,</span>  
+<span class="token string">'table-name'</span> <span class="token operator">=</span> <span class="token string">'tjy_fortest1'</span><span class="token punctuation">,</span>  
+<span class="token string">'sink.parallelism'</span> <span class="token operator">=</span> <span class="token string">'1'</span><span class="token punctuation">,</span>  
+<span class="token string">'url'</span> <span class="token operator">=</span> <span class="token string">'jdbc:mysql://xxx:3306/middle_test?useunicode=true&amp;characterEncoding=utf8&amp;useSSL=false&amp;useCursorFetch=true'</span><span class="token punctuation">,</span>  
+<span class="token string">'username'</span> <span class="token operator">=</span> <span class="token string">'middle_test'</span>  
+<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token keyword">CREATE</span> <span class="token keyword">TABLE</span> zzzzz_star01  
+<span class="token punctuation">(</span>  
+<span class="token identifier"><span class="token punctuation">`</span>qq<span class="token punctuation">`</span></span> <span class="token keyword">int</span><span class="token punctuation">,</span>  
+<span class="token identifier"><span class="token punctuation">`</span>ww<span class="token punctuation">`</span></span> string  
+<span class="token punctuation">)</span> <span class="token keyword">WITH</span> <span class="token punctuation">(</span>  
+<span class="token string">'connector'</span> <span class="token operator">=</span> <span class="token string">'print'</span>  
+<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">insert</span> <span class="token keyword">into</span> zzzzz_star01 <span class="token keyword">select</span> t1<span class="token punctuation">.</span><span class="token identifier"><span class="token punctuation">`</span>id<span class="token punctuation">`</span></span> <span class="token keyword">as</span> <span class="token identifier"><span class="token punctuation">`</span>qq<span class="token punctuation">`</span></span> <span class="token punctuation">,</span>t2<span class="token punctuation">.</span><span class="token identifier"><span class="token punctuation">`</span>name<span class="token punctuation">`</span></span> <span class="token keyword">as</span> <span class="token identifier"><span class="token punctuation">`</span>ww<span class="token punctuation">`</span></span> <span class="token keyword">from</span> tjy_test1_ss t1 <span class="token keyword">left</span> <span class="token keyword">join</span> tjy_fortest1 <span class="token keyword">FOR</span> SYSTEM_TIME <span class="token keyword">AS</span> <span class="token keyword">OF</span> <span class="token identifier"><span class="token punctuation">`</span>t1<span class="token punctuation">`</span></span><span class="token punctuation">.</span><span class="token identifier"><span class="token punctuation">`</span>proc_time<span class="token punctuation">`</span></span> t2 <span class="token keyword">on</span> t1<span class="token punctuation">.</span>name<span class="token operator">=</span>t2<span class="token punctuation">.</span>name<span class="token punctuation">;</span>
+</code></pre> 
+<p> </p> 
+<h2><a id="__68"></a>二. 源码流程图示</h2> 
+<h3><a id="1_flink_connector_69"></a>1. flink connector的实现逻辑</h3> 
+<p>flink connector 在代码层面从一个阶段到其他阶段的翻译过程。<br> <img src="https://images2.imgbox.com/74/9a/UJqVxjZY_o.png" alt="在这里插入图片描述" height="400"></p> 
+<table><thead><tr><th>阶段</th><th>解释</th></tr></thead><tbody><tr><td>元数据管理</td><td> 
+    <div> 
+     <p align="left">执行CREATE TABLE时，会在目标catalog种更新元数据，比如上图黄色的create table语句。语句中with下的参数不会被校验和解释。DDL语句将会被解释成CatalogTable实例。</p> 
+    </div></td></tr><tr><td>生成逻辑计划</td><td><p align="left">接下来，当规划和优化一个job下的sql时，CatalogTable实例将会根据sql的语法具体解析为：当读select 语句时，会解析成DynamicTableSource；当读到insert into 语句时，解析成DynamicTableSink。</p><p align="left">DynamicTableSource\SinkFactory将会提供具体的解析方法将CatalogTable解析为DynamicTableSource\Sink。具体的，比如说with下的port，Factory会从CatalogTable中校验port是否是连接器支持的参数，然后获取值，并创建参数实例，以便往下个阶段传输。</p><p align="left">默认情况下，通过java的SPI机制发现工厂实例，工厂实例要定义一个能被校验的工厂标识符，例如上图：‘connector’ = ‘custom’。</p><p align="left">DynamicTableSource\Sink 在运行时将会实际的读写数据。</p></td></tr><tr><td>运行时</td><td><p align="left">当逻辑计划生成时，planner将会获取连接器的实现。运行时核心接口是，InputFormat和SourceFunction，按另一个抽象级别分组为ScanRuntimeProvider、 LookupRuntimeProvider和的子类SinkRuntimeProvider</p></td></tr></tbody></table> 
+<p>小结：</p> 
+<blockquote> 
+ <ol><li>对于一个create table语句会被更新到catalogTable实例中，语句中with下的参数不会被校验和解析。</li><li>create table不会生成DynamicTable，而是select语句会生成DynamicTableSource，代表从物理表中拉取数据，insert into语句生成DynamicTableSink，代表写入数据到物理表。</li><li>在Planning期间，通过with下的connector参数获取对应的工厂，然后通过工厂校验、解析（with下的）参数值（比如’port’=‘5022’）最后封装成参数实例，并传递给runtime的实例；</li><li>Runtime期间，根据参数实例定义的数据消费规则，开始真正的从物理表中处理（拉取\写入）数据。</li></ol> 
+</blockquote> 
+<p> </p> 
+<h3><a id="2_flink_sql_94"></a>2. flink sql的转换逻辑</h3> 
+<p>其次梳理下flink sql的整体源码流程<br> <img src="https://images2.imgbox.com/e6/2d/XZR20afy_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <ol><li>解析：通过calicite解析器生成AST即sqlnode</li><li>校验：校验sqlnode</li><li>生成逻辑计划：生成relroot封装成不同的operation（封装的算子细节）</li><li>优化逻辑计划：解析operation内部的relnode进行优化</li><li>生成物理执行计划</li><li>构建streamGraph异步执行</li></ol> 
+</blockquote> 
+<p> </p> 
+<h2><a id="flink_sql_connector_110"></a>三、flink sql 调用connector源码分析</h2> 
+<h3><a id="1_tEnvexecuteSqlstmt_111"></a>1. tEnv.executeSql(stmt)</h3> 
+<h4><a id="11__113"></a>1.1. 概述</h4> 
+<p>先回顾下<code>tEnv.executeSql(stmt)</code>执行时都发生了什么<br> <img src="https://images2.imgbox.com/86/a7/44WVL5jI_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>在paser阶段：sql会从sqlNode再到operation的转变</p> 
+ <ol><li> <p>create table 语句：<br> create table 语句会被维护到catalogTable实例中，以便insert 或 select 语句。注意语句中with下的参数不会被校验和解析。</p> </li><li> <p>insert into语句：<br> 找into后的表会生成DynamicTableSink实例，代表写入数据到物理表。</p> </li><li> <p>select语句：<br> select语句代表query，找from后的表生成DynamicTableSource实例，代表从物理表中拉取数据。</p> </li></ol> 
+</blockquote> 
+<p>ServiceLoader通过catalog元数据利用spi机制发现具体的实现类，然后加载具体的DynamicTable。</p> 
+<p>生成的DynamicTablexxx实例提供getScanRuntimeProvider、getLookupRuntimeProvider、getSinkRuntimeProvider等方法：用于后续translate阶段构建物理执行计划。</p> 
+<p> </p> 
+<p><strong>代码调用链概述</strong></p> 
+<pre><code class="prism language-c">tEnv<span class="token punctuation">.</span><span class="token function">executeSql</span><span class="token punctuation">(</span>stmt<span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token operator">-&gt;</span>List<span class="token operator">&lt;</span>Operation<span class="token operator">&gt;</span> operations <span class="token operator">=</span> <span class="token function">getParser</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">parse</span><span class="token punctuation">(</span>statement<span class="token punctuation">)</span><span class="token punctuation">;</span>
+   <span class="token operator">-&gt;</span> ParserImpl<span class="token punctuation">.</span>parse<span class="token operator">:</span>
+   创建paser，并执行parse：javacc将sql转换为代码<span class="token operator">:</span>SqlNodeList。这里略
+      <span class="token operator">-&gt;</span>SqlToOperationConverter<span class="token punctuation">.</span><span class="token function">convert</span><span class="token punctuation">(</span>planner<span class="token punctuation">,</span> catalogManager<span class="token punctuation">,</span>
+       parsed<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">)</span>：转换为operation：逻辑执行计划
+</code></pre> 
+<p>parse的大致流程是：sql到sqlnode再到operation。<br>  </p> 
+<h4><a id="12_convertValidatedSqlNode_148"></a>1.2. convertValidatedSqlNode</h4> 
+<p>这里我们忽略校验的过程，关注SqlToOperationConverter.convertValidatedSqlNode逻辑：即用于将sqlnode转换为operation。</p> 
+<p>如下代码主要是匹配不同的sqlnode进行operation的转换，这里我们集中关注，create、select、insert语句的converter逻辑。</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">Optional</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Operation</span><span class="token punctuation">&gt;</span></span> <span class="token function">convertValidatedSqlNode</span><span class="token punctuation">(</span>  
+        <span class="token class-name">FlinkPlannerImpl</span> flinkPlanner<span class="token punctuation">,</span> <span class="token class-name">CatalogManager</span> catalogManager<span class="token punctuation">,</span> <span class="token class-name">SqlNode</span> validated<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token class-name">SqlToOperationConverter</span> converter <span class="token operator">=</span>  
+            <span class="token keyword">new</span> <span class="token class-name">SqlToOperationConverter</span><span class="token punctuation">(</span>flinkPlanner<span class="token punctuation">,</span> catalogManager<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	 <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>validated <span class="token keyword">instanceof</span> <span class="token class-name">SqlCreateTable</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token keyword">return</span> <span class="token class-name">Optional</span><span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span>  
+            converter<span class="token punctuation">.</span>createTableConverter<span class="token punctuation">.</span><span class="token function">convertCreateTable</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">SqlCreateTable</span><span class="token punctuation">)</span> validated<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>validated <span class="token keyword">instanceof</span> <span class="token class-name">RichSqlInsert</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">return</span> <span class="token class-name">Optional</span><span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span>converter<span class="token punctuation">.</span><span class="token function">convertSqlInsert</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">RichSqlInsert</span><span class="token punctuation">)</span> validated<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>validated<span class="token punctuation">.</span><span class="token function">getKind</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">belongsTo</span><span class="token punctuation">(</span><span class="token class-name">SqlKind</span><span class="token punctuation">.</span><span class="token constant">QUERY</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">return</span> <span class="token class-name">Optional</span><span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span>converter<span class="token punctuation">.</span><span class="token function">convertSqlQuery</span><span class="token punctuation">(</span>validated<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<p> </p> 
+<h5><a id="121_create_179"></a>1.2.1. create语句</h5> 
+<p>代码分析</p> 
+<pre><code class="prism language-java"><span class="token class-name">SqlToOperationConverter</span><span class="token punctuation">.</span>convertValidatedSqlNode
+<span class="token keyword">return</span> <span class="token class-name">Optional</span><span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span>  
+        converter<span class="token punctuation">.</span>createTableConverter<span class="token punctuation">.</span><span class="token function">convertCreateTable</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">SqlCreateTable</span><span class="token punctuation">)</span> validated<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        
+<span class="token operator">-&gt;</span>
+
+<span class="token class-name">Operation</span> <span class="token function">convertCreateTable</span><span class="token punctuation">(</span><span class="token class-name">SqlCreateTable</span> sqlCreateTable<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    sqlCreateTable<span class="token punctuation">.</span><span class="token function">getTableConstraints</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">forEach</span><span class="token punctuation">(</span>validateTableConstraint<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token class-name">CatalogTable</span> catalogTable <span class="token operator">=</span> <span class="token function">createCatalogTable</span><span class="token punctuation">(</span>sqlCreateTable<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  
+    <span class="token class-name">UnresolvedIdentifier</span> unresolvedIdentifier <span class="token operator">=</span>  
+            <span class="token class-name">UnresolvedIdentifier</span><span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span>sqlCreateTable<span class="token punctuation">.</span><span class="token function">fullTableName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token class-name">ObjectIdentifier</span> identifier <span class="token operator">=</span> catalogManager<span class="token punctuation">.</span><span class="token function">qualifyIdentifier</span><span class="token punctuation">(</span>unresolvedIdentifier<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  <span class="token comment">//封装一些属性：</span>
+  <span class="token comment">//identifier：</span>
+  <span class="token comment">//catalogTable实例</span>
+    <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">CreateTableOperation</span><span class="token punctuation">(</span>  
+            identifier<span class="token punctuation">,</span>  <span class="token comment">//`default_catalog`.`default_database`.`tjy_test1_ss`</span>
+            catalogTable<span class="token punctuation">,</span>  <span class="token comment">// option</span>
+                           <span class="token comment">// partitionkey</span>
+                           <span class="token comment">// table schema:字段、主键、watermark</span>
+            sqlCreateTable<span class="token punctuation">.</span><span class="token function">isIfNotExists</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>  
+            sqlCreateTable<span class="token punctuation">.</span><span class="token function">isTemporary</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<p>create的sqlnode转换为operation：主要用于封装一些属性，如下：</p> 
+<blockquote> 
+ <ol><li>identifier：这里是：<code>default_catalog</code>.<code>default_database</code>.<code>tjy_test1_ss</code></li><li>catalogTable实例：option、 partitionkey、 table schema:字段、主键、watermark<br> <img src="https://images2.imgbox.com/78/e6/nKzTSBG4_o.png" alt="在这里插入图片描述" height="200"></li></ol> 
+</blockquote> 
+<p> </p> 
+<h5><a id="122_insert_218"></a>1.2.2. insert语句</h5> 
+<p>insert的sqlnode到Operation转换同样是封装了一些参数</p> 
+<pre><code class="prism language-c"> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>validated instanceof RichSqlInsert<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">return</span> Optional<span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span>converter<span class="token punctuation">.</span><span class="token function">convertSqlInsert</span><span class="token punctuation">(</span><span class="token punctuation">(</span>RichSqlInsert<span class="token punctuation">)</span> validated<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+private Operation <span class="token function">convertSqlInsert</span><span class="token punctuation">(</span>RichSqlInsert insert<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token comment">// Get sink table name.  </span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token comment">// Get sink table hints.  </span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    PlannerQueryOperation query <span class="token operator">=</span>  
+            <span class="token punctuation">(</span>PlannerQueryOperation<span class="token punctuation">)</span>  
+                    <span class="token function">convertValidatedSqlNodeOrFail</span><span class="token punctuation">(</span>  
+                            flinkPlanner<span class="token punctuation">,</span> catalogManager<span class="token punctuation">,</span> insert<span class="token punctuation">.</span><span class="token function">getSource</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  
+    <span class="token keyword">return</span> new <span class="token function">SinkModifyOperation</span><span class="token punctuation">(</span>  
+            contextResolvedTable<span class="token punctuation">,</span>   <span class="token comment">//表名</span>
+            query<span class="token punctuation">,</span>                  <span class="token comment">//query:PlannerQueryOperation</span>
+            insert<span class="token punctuation">.</span><span class="token function">getStaticPartitionKVs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>  
+            insert<span class="token punctuation">.</span><span class="token function">isOverwrite</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>  
+            dynamicOptions<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<p>ing<br> 此例子insert into 后的表源码并未找sinksource的实现，只是将insert 后的select语句进行了实现，debug后发现在translate附近进行的实例初始化。</p> 
+<p> </p> 
+<h5><a id="123_query_250"></a>1.2.3. query语句</h5> 
+<p>query的语句包含了join，operation操作时生成了join左右两个表的DynamicTableSource实例。</p> 
+<pre><code class="prism language-c"><span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>validated<span class="token punctuation">.</span><span class="token function">getKind</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">belongsTo</span><span class="token punctuation">(</span>SqlKind<span class="token punctuation">.</span>QUERY<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">return</span> Optional<span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span>converter<span class="token punctuation">.</span><span class="token function">convertSqlQuery</span><span class="token punctuation">(</span>validated<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+private PlannerQueryOperation <span class="token function">toQueryOperation</span><span class="token punctuation">(</span>FlinkPlannerImpl planner<span class="token punctuation">,</span> SqlNode validated<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token comment">// transform to a relational tree  </span>
+    RelRoot relational <span class="token operator">=</span> planner<span class="token punctuation">.</span><span class="token function">rel</span><span class="token punctuation">(</span>validated<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token keyword">return</span> new <span class="token function">PlannerQueryOperation</span><span class="token punctuation">(</span>relational<span class="token punctuation">.</span><span class="token function">project</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>toQueryOperation时会将query语句转换为关系表达式，而<code>RelRoot relational = planner.rel(validated); </code>的调用链是：<code>rel-&gt;sqlToRelConverter.convertQuery-&gt;convertQueryRecursive </code>。</p> 
+<p>接着调用链往下看</p> 
+<pre><code class="prism language-c"><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token keyword">switch</span> <span class="token punctuation">(</span>kind<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+<span class="token keyword">case</span> SELECT<span class="token operator">:</span>  
+  <span class="token keyword">return</span> RelRoot<span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span><span class="token function">convertSelect</span><span class="token punctuation">(</span><span class="token punctuation">(</span>SqlSelect<span class="token punctuation">)</span> query<span class="token punctuation">,</span> top<span class="token punctuation">)</span><span class="token punctuation">,</span> kind<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+</code></pre> 
+<p><code>-&gt;convertSelect-&gt;convertSelectImpl</code>实现了select语句中各个sqlNode的转换，如下代码：</p> 
+<pre><code class="prism language-c">
+protected <span class="token keyword">void</span> <span class="token function">convertSelectImpl</span><span class="token punctuation">(</span>final Blackboard bb<span class="token punctuation">,</span> SqlSelect select<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+	<span class="token comment">// 转换from</span>
+    <span class="token function">convertFrom</span><span class="token punctuation">(</span>bb<span class="token punctuation">,</span> select<span class="token punctuation">.</span><span class="token function">getFrom</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">//转换where  </span>
+    <span class="token function">convertWhere</span><span class="token punctuation">(</span>bb<span class="token punctuation">,</span> select<span class="token punctuation">.</span><span class="token function">getWhere</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  
+    final List<span class="token operator">&lt;</span>SqlNode<span class="token operator">&gt;</span> orderExprList <span class="token operator">=</span> new ArrayList<span class="token operator">&lt;</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    final List<span class="token operator">&lt;</span>RelFieldCollation<span class="token operator">&gt;</span> collationList <span class="token operator">=</span> new ArrayList<span class="token operator">&lt;</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token function">gatherOrderExprs</span><span class="token punctuation">(</span>bb<span class="token punctuation">,</span> select<span class="token punctuation">,</span> select<span class="token punctuation">.</span><span class="token function">getOrderList</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> orderExprList<span class="token punctuation">,</span> collationList<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    final RelCollation collation <span class="token operator">=</span> cluster<span class="token punctuation">.</span><span class="token function">traitSet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">canonize</span><span class="token punctuation">(</span>RelCollations<span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span>collationList<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">//转换聚合</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>validator<span class="token punctuation">.</span><span class="token function">isAggregate</span><span class="token punctuation">(</span>select<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token function">convertAgg</span><span class="token punctuation">(</span>bb<span class="token punctuation">,</span> select<span class="token punctuation">,</span> orderExprList<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token function">convertSelectList</span><span class="token punctuation">(</span>bb<span class="token punctuation">,</span> select<span class="token punctuation">,</span> orderExprList<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span>  
+    <span class="token comment">//转换：distinct</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>select<span class="token punctuation">.</span><span class="token function">isDistinct</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token function">distinctify</span><span class="token punctuation">(</span>bb<span class="token punctuation">,</span> true<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span>  
+    <span class="token comment">//转换：order</span>
+    <span class="token function">convertOrder</span><span class="token punctuation">(</span>select<span class="token punctuation">,</span> bb<span class="token punctuation">,</span> collation<span class="token punctuation">,</span> orderExprList<span class="token punctuation">,</span> select<span class="token punctuation">.</span><span class="token function">getOffset</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> select<span class="token punctuation">.</span><span class="token function">getFetch</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">//转换hint</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>select<span class="token punctuation">.</span><span class="token function">hasHints</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>  
+        bb<span class="token punctuation">.</span><span class="token function">setRoot</span><span class="token punctuation">(</span>bb<span class="token punctuation">.</span>root<span class="token punctuation">,</span> true<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span>  
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>SqlSelect进入<code>convertFrom</code>逻辑进行匹配、迭代，直到遇见IDENTIFIER类型，会创建左右表的数据源实例，如下代码调用过程：</p> 
+<pre><code class="prism language-java"><span class="token keyword">protected</span> <span class="token keyword">void</span> <span class="token function">convertFrom</span><span class="token punctuation">(</span><span class="token class-name">Blackboard</span> bb<span class="token punctuation">,</span> <span class="token class-name">SqlNode</span> from<span class="token punctuation">,</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> fieldNames<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	<span class="token keyword">switch</span> <span class="token punctuation">(</span>from<span class="token punctuation">.</span><span class="token function">getKind</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">case</span> <span class="token constant">JOIN</span><span class="token operator">:</span>  
+		    <span class="token function">convertJoin</span><span class="token punctuation">(</span>bb<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token class-name">SqlJoin</span><span class="token punctuation">)</span> from<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+		    <span class="token keyword">return</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+
+<span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">convertJoin</span><span class="token punctuation">(</span><span class="token class-name">Blackboard</span> bb<span class="token punctuation">,</span> <span class="token class-name">SqlJoin</span> join<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">final</span> <span class="token class-name">SqlValidatorScope</span> scope <span class="token operator">=</span> validator<span class="token punctuation">.</span><span class="token function">getJoinScope</span><span class="token punctuation">(</span>join<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">final</span> <span class="token class-name">Blackboard</span> fromBlackboard <span class="token operator">=</span> <span class="token function">createBlackboard</span><span class="token punctuation">(</span>scope<span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token class-name">SqlNode</span> left <span class="token operator">=</span> join<span class="token punctuation">.</span><span class="token function">getLeft</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token class-name">SqlNode</span> right <span class="token operator">=</span> join<span class="token punctuation">.</span><span class="token function">getRight</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+
+
+# <span class="token class-name">SqlToRelConverter</span>
+<span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">convertIdentifier</span><span class="token punctuation">(</span>。。。<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	tableRel <span class="token operator">=</span> <span class="token function">toRel</span><span class="token punctuation">(</span>table<span class="token punctuation">,</span> hints<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+
+<span class="token operator">==</span><span class="token operator">=</span><span class="token operator">&gt;</span>
+#<span class="token class-name">CatalogSourceTable</span><span class="token punctuation">.</span>
+<span class="token function">toRel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+	<span class="token comment">// create table source  </span>
+	<span class="token keyword">final</span> <span class="token class-name">DynamicTableSource</span> tableSource <span class="token operator">=</span>  
+	        <span class="token function">createDynamicTableSource</span><span class="token punctuation">(</span>context<span class="token punctuation">,</span> catalogTable<span class="token punctuation">.</span><span class="token function">getResolvedTable</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+	
+	<span class="token comment">// prepare table source and convert to RelNode  </span>
+	<span class="token keyword">return</span> <span class="token class-name">DynamicSourceUtils</span><span class="token punctuation">.</span><span class="token function">convertSourceToRel</span><span class="token punctuation">(</span>  
+	        <span class="token operator">!</span>schemaTable<span class="token punctuation">.</span><span class="token function">isStreamingMode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>  
+	        context<span class="token punctuation">.</span><span class="token function">getTableConfig</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>  
+	        relBuilder<span class="token punctuation">,</span>  
+	        schemaTable<span class="token punctuation">.</span><span class="token function">getContextResolvedTable</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>  
+	        schemaTable<span class="token punctuation">.</span><span class="token function">getStatistic</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>  
+	        hints<span class="token punctuation">,</span>  
+	        tableSource<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<p>其中，代码</p> 
+<pre><code class="prism language-c">final DynamicTableSource tableSource <span class="token operator">=</span>  
+	        <span class="token function">createDynamicTableSource</span><span class="token punctuation">(</span>context<span class="token punctuation">,</span> catalogTable<span class="token punctuation">.</span><span class="token function">getResolvedTable</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+</code></pre> 
+<p>通过spi机制（<strong>ing</strong>）发现具体连接器的实现:DynamicTableSource，创建DynamicTableSource实例，这里是binlog的，jdbc的就不列举了。</p> 
+<pre><code class="prism language-c"><span class="token macro property"><span class="token directive-hash">#</span> <span class="token expression">BinlogDynamicTableFactory<span class="token punctuation">.</span></span></span>
+@Override  
+public DynamicTableSource <span class="token function">createDynamicTableSource</span><span class="token punctuation">(</span>Context context<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    final FactoryUtil<span class="token punctuation">.</span>TableFactoryHelper helper <span class="token operator">=</span>  
+            FactoryUtil<span class="token punctuation">.</span><span class="token function">createTableFactoryHelper</span><span class="token punctuation">(</span>this<span class="token punctuation">,</span> context<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>此时观察createDynamicTableSource的context参数就知道context是在paser阶段传递的。</strong></p> 
+<p> </p> 
+<h6><a id="a_connectorDynamicTableSource_385"></a>a. 找到connector的DynamicTableSource</h6> 
+<p>找到数据源实现之后<br> <img src="https://images2.imgbox.com/0b/90/Qb7YUDq7_o.png" alt="在这里插入图片描述"></p> 
+<p>接着调用<code>DynamicSourceUtils.convertSourceToRel</code> 将 DynamicTableSource 转换成 RelNode。</p> 
+<p> </p> 
+<blockquote> 
+ <p><strong>当获取到DynamicTableSource时就有能力获取具体数据源的getScanRuntimeProvider、getLookupRuntimeProvider等方法。</strong></p> 
+</blockquote> 
+<p> </p> 
+<h6><a id="b_convertSourceToRel_ing_397"></a>b. convertSourceToRel ing</h6> 
+<p>继续看<code>DynamicSourceUtils.convertSourceToRel</code>的方法</p> 
+<pre><code class="prism language-c">public <span class="token keyword">static</span> RelNode <span class="token function">convertSourceToRel</span><span class="token punctuation">(</span>  
+        boolean isBatchMode<span class="token punctuation">,</span>  
+        ReadableConfig config<span class="token punctuation">,</span>  
+        FlinkRelBuilder relBuilder<span class="token punctuation">,</span>  
+        ContextResolvedTable contextResolvedTable<span class="token punctuation">,</span>  
+        FlinkStatistic statistic<span class="token punctuation">,</span>  
+        List<span class="token operator">&lt;</span>RelHint<span class="token operator">&gt;</span> hints<span class="token punctuation">,</span>  
+        DynamicTableSource tableSource<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    final String tableDebugName <span class="token operator">=</span> contextResolvedTable<span class="token punctuation">.</span><span class="token function">getIdentifier</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">asSummaryString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    final ResolvedCatalogTable resolvedCatalogTable <span class="token operator">=</span> contextResolvedTable<span class="token punctuation">.</span><span class="token function">getResolvedTable</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  
+    <span class="token comment">// 1. prepare table source  </span>
+    <span class="token function">prepareDynamicSource</span><span class="token punctuation">(</span>  
+            tableDebugName<span class="token punctuation">,</span> resolvedCatalogTable<span class="token punctuation">,</span> tableSource<span class="token punctuation">,</span> isBatchMode<span class="token punctuation">,</span> config<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  
+    <span class="token comment">// 2. push table scan  </span>
+    <span class="token function">pushTableScan</span><span class="token punctuation">(</span>isBatchMode<span class="token punctuation">,</span> relBuilder<span class="token punctuation">,</span> contextResolvedTable<span class="token punctuation">,</span> statistic<span class="token punctuation">,</span> hints<span class="token punctuation">,</span> tableSource<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  
+    <span class="token comment">// 3. push project for non-physical columns  </span>
+    final ResolvedSchema schema <span class="token operator">=</span> contextResolvedTable<span class="token punctuation">.</span><span class="token function">getResolvedSchema</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>schema<span class="token punctuation">.</span><span class="token function">getColumns</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">stream</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">allMatch</span><span class="token punctuation">(</span>Column<span class="token operator">::</span>isPhysical<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token function">pushMetadataProjection</span><span class="token punctuation">(</span>relBuilder<span class="token punctuation">,</span> schema<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+        <span class="token function">pushGeneratedProjection</span><span class="token punctuation">(</span>relBuilder<span class="token punctuation">,</span> schema<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span>  
+  
+    <span class="token comment">// 4. push watermark assigner  </span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>isBatchMode <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span>schema<span class="token punctuation">.</span><span class="token function">getWatermarkSpecs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token function">pushWatermarkAssigner</span><span class="token punctuation">(</span>relBuilder<span class="token punctuation">,</span> schema<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span>  
+  
+    <span class="token keyword">return</span> relBuilder<span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>创建DynamicSource之前的准备：<code>prepareDynamicSource</code></p> 
+<pre><code class="prism language-c"><span class="token comment">// 1. prepare table source  </span>
+<span class="token function">prepareDynamicSource</span><span class="token punctuation">(</span>  
+        tableDebugName<span class="token punctuation">,</span> resolvedCatalogTable<span class="token punctuation">,</span> tableSource<span class="token punctuation">,</span> isBatchMode<span class="token punctuation">,</span> config<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">//准备给定的DynamicTableSource 。它检查源是否与给定模式兼容并应用初始参数。</span>
+public <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">prepareDynamicSource</span><span class="token punctuation">(</span>  
+        String tableDebugName<span class="token punctuation">,</span>  
+        ResolvedCatalogTable table<span class="token punctuation">,</span>  
+        DynamicTableSource source<span class="token punctuation">,</span>  
+        boolean isBatchMode<span class="token punctuation">,</span>  
+        ReadableConfig config<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token comment">//获取数据源的schema</span>
+    final ResolvedSchema schema <span class="token operator">=</span> table<span class="token punctuation">.</span><span class="token function">getResolvedSchema</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  
+    <span class="token function">validateAndApplyMetadata</span><span class="token punctuation">(</span>tableDebugName<span class="token punctuation">,</span> schema<span class="token punctuation">,</span> source<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+  
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>source instanceof ScanTableSource<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token function">validateScanSource</span><span class="token punctuation">(</span>  
+                tableDebugName<span class="token punctuation">,</span> schema<span class="token punctuation">,</span> <span class="token punctuation">(</span>ScanTableSource<span class="token punctuation">)</span> source<span class="token punctuation">,</span> isBatchMode<span class="token punctuation">,</span> config<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span>  
+  
+    <span class="token comment">// lookup table source is validated in LookupJoin node  </span>
+<span class="token punctuation">}</span>
+
+
+
+private <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">validateScanSource</span><span class="token punctuation">(</span>  
+        String tableDebugName<span class="token punctuation">,</span>  
+        ResolvedSchema schema<span class="token punctuation">,</span>  
+        ScanTableSource scanSource<span class="token punctuation">,</span>  
+        boolean isBatchMode<span class="token punctuation">,</span>  
+        ReadableConfig config<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        
+    <span class="token comment">// getScanRuntimeProvider：用于离线任务时，provider的校验</span>
+    final ScanRuntimeProvider provider <span class="token operator">=</span>  
+            scanSource<span class="token punctuation">.</span><span class="token function">getScanRuntimeProvider</span><span class="token punctuation">(</span>ScanRuntimeProviderContext<span class="token punctuation">.</span>INSTANCE<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    final ChangelogMode changelogMode <span class="token operator">=</span> scanSource<span class="token punctuation">.</span><span class="token function">getChangelogMode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">//校验水印</span>
+    <span class="token function">validateWatermarks</span><span class="token punctuation">(</span>tableDebugName<span class="token punctuation">,</span> schema<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>isBatchMode<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token function">validateScanSourceForBatch</span><span class="token punctuation">(</span>tableDebugName<span class="token punctuation">,</span> changelogMode<span class="token punctuation">,</span> provider<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token function">validateScanSourceForStreaming</span><span class="token punctuation">(</span>  
+                tableDebugName<span class="token punctuation">,</span> schema<span class="token punctuation">,</span> scanSource<span class="token punctuation">,</span> changelogMode<span class="token punctuation">,</span> config<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span>  
+<span class="token punctuation">}</span>
+</code></pre> 
+<p> </p> 
+<h3><a id="2_statementSetexecute_489"></a>2. statementSet.execute()</h3> 
+<p>执行<code>statementSet.execute();</code> 时有如下三个阶段</p> 
+<blockquote> 
+ <ol><li>优化逻辑计划：解析operation内部的relnode进行优化</li><li>生成物理执行计划</li><li>构建streamGraph异步执行</li></ol> 
+</blockquote> 
+<p>如下代码：主要描述了flink优化逻辑计划、翻译成物理计划、转换为trans DAG的总体逻辑。</p> 
+<pre><code class="prism language-c"><span class="token comment">// PlannerBase.</span>
+
+override def <span class="token function">translate</span><span class="token punctuation">(</span>  
+    modifyOperations<span class="token operator">:</span> util<span class="token punctuation">.</span>List<span class="token punctuation">[</span>ModifyOperation<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token operator">:</span> util<span class="token punctuation">.</span>List<span class="token punctuation">[</span>Transformation<span class="token punctuation">[</span>_<span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token function">beforeTranslation</span><span class="token punctuation">(</span><span class="token punctuation">)</span>  
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>modifyOperations<span class="token punctuation">.</span>isEmpty<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">return</span> List<span class="token punctuation">.</span>empty<span class="token punctuation">[</span>Transformation<span class="token punctuation">[</span>_<span class="token punctuation">]</span><span class="token punctuation">]</span>  
+  <span class="token punctuation">}</span>  
+  
+  val relNodes <span class="token operator">=</span> modifyOperations<span class="token punctuation">.</span><span class="token function">map</span><span class="token punctuation">(</span>translateToRel<span class="token punctuation">)</span> 
+  <span class="token comment">//1.优化 </span>
+  val optimizedRelNodes <span class="token operator">=</span> <span class="token function">optimize</span><span class="token punctuation">(</span>relNodes<span class="token punctuation">)</span>  
+  <span class="token comment">//2. 生成物理计划</span>
+  val execGraph <span class="token operator">=</span> <span class="token function">translateToExecNodeGraph</span><span class="token punctuation">(</span>optimizedRelNodes<span class="token punctuation">,</span> isCompiled <span class="token operator">=</span> false<span class="token punctuation">)</span>  
+  <span class="token comment">//3. 翻译为transformations DAG。</span>
+  val transformations <span class="token operator">=</span> <span class="token function">translateToPlan</span><span class="token punctuation">(</span>execGraph<span class="token punctuation">)</span>  
+  <span class="token function">afterTranslation</span><span class="token punctuation">(</span><span class="token punctuation">)</span>  
+  transformations  
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>再来回顾下二.2的部分流程图<br> <img src="https://images2.imgbox.com/ef/55/McNs72AV_o.png" alt="在这里插入图片描述"></p> 
+<p>接下来我们重点关注<code>translateToExecNodeGraph</code>转换为物理执行计划的逻辑</p> 
+<p> </p> 
+<h4><a id="21_translateToExecNodeGraph_525"></a>2.1. translateToExecNodeGraph</h4> 
+<p>translateToExecNodeGraph用于生成物理执行计划，如下代码：</p> 
+<pre><code class="prism language-c">
+private<span class="token punctuation">[</span>flink<span class="token punctuation">]</span> def <span class="token function">translateToExecNodeGraph</span><span class="token punctuation">(</span>  
+    optimizedRelNodes<span class="token operator">:</span> Seq<span class="token punctuation">[</span>RelNode<span class="token punctuation">]</span><span class="token punctuation">,</span>  
+    isCompiled<span class="token operator">:</span> Boolean<span class="token punctuation">)</span><span class="token operator">:</span> ExecNodeGraph <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+  <span class="token comment">// convert FlinkPhysicalRel DAG to ExecNodeGraph  </span>
+  val generator <span class="token operator">=</span> new <span class="token function">ExecNodeGraphGenerator</span><span class="token punctuation">(</span><span class="token punctuation">)</span>  
+  <span class="token comment">//产生execGraph：物理执行计划</span>
+  val execGraph <span class="token operator">=</span>  
+generator<span class="token punctuation">.</span><span class="token function">generate</span><span class="token punctuation">(</span>optimizedRelNodes<span class="token punctuation">.</span><span class="token function">map</span><span class="token punctuation">(</span>_<span class="token punctuation">.</span>asInstanceOf<span class="token punctuation">[</span>FlinkPhysicalRel<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">,</span> isCompiled<span class="token punctuation">)</span>  
+  
+  <span class="token comment">// process the graph  ：处理graph</span>
+  val context <span class="token operator">=</span> new <span class="token function">ProcessorContext</span><span class="token punctuation">(</span>this<span class="token punctuation">)</span>  
+  val processors <span class="token operator">=</span> getExecNodeGraphProcessors  
+  processors<span class="token punctuation">.</span><span class="token function">foldLeft</span><span class="token punctuation">(</span>execGraph<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token punctuation">(</span>graph<span class="token punctuation">,</span> processor<span class="token punctuation">)</span> <span class="token operator">=</span><span class="token operator">&gt;</span> processor<span class="token punctuation">.</span><span class="token function">process</span><span class="token punctuation">(</span>graph<span class="token punctuation">,</span> context<span class="token punctuation">)</span><span class="token punctuation">)</span>  
+<span class="token punctuation">}</span>
+
+
+<span class="token comment">//产生execGraph：物理执行计划</span>
+private ExecNode<span class="token operator">&lt;</span><span class="token operator">?</span><span class="token operator">&gt;</span> <span class="token function">generate</span><span class="token punctuation">(</span>FlinkPhysicalRel rel<span class="token punctuation">,</span> boolean isCompiled<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+。。。
+    <span class="token comment">//获取所有的input数据源</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span>RelNode input <span class="token operator">:</span> rel<span class="token punctuation">.</span><span class="token function">getInputs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        inputNodes<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token function">generate</span><span class="token punctuation">(</span><span class="token punctuation">(</span>FlinkPhysicalRel<span class="token punctuation">)</span> input<span class="token punctuation">,</span> isCompiled<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span>  
+    <span class="token comment">// 找到各个逻辑执行计划节点的物理实现类</span>
+    execNode <span class="token operator">=</span> rel<span class="token punctuation">.</span><span class="token function">translateToExecNode</span><span class="token punctuation">(</span>isCompiled<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token comment">// connects the input nodes：链接所有的逻辑执行计划节点，形成DAG？ </span>
+    List<span class="token operator">&lt;</span>ExecEdge<span class="token operator">&gt;</span> inputEdges <span class="token operator">=</span> new ArrayList<span class="token operator">&lt;</span><span class="token operator">&gt;</span><span class="token punctuation">(</span>inputNodes<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token keyword">for</span> <span class="token punctuation">(</span>ExecNode<span class="token operator">&lt;</span><span class="token operator">?</span><span class="token operator">&gt;</span> inputNode <span class="token operator">:</span> inputNodes<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  inputEdges<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>ExecEdge<span class="token punctuation">.</span><span class="token function">builder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">source</span><span class="token punctuation">(</span>inputNode<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">target</span><span class="token punctuation">(</span>execNode<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+    <span class="token punctuation">}</span>  
+。。。  
+    <span class="token keyword">return</span> execNode<span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<p>上述代码，获取逻辑执行计划的所有节点，找到各个逻辑执行计划节点的物理实现类，然后串联成物理执行计划。<br>  </p> 
+<p>接下来我们看各个节点物理执行计划节点实现类：</p> 
+<p>如下是物理执行计划转化的基类</p> 
+<pre><code class="prism language-c">FlinkPhysicalRel<span class="token punctuation">.</span>
+def <span class="token function">translateToExecNode</span><span class="token punctuation">(</span>isCompiled<span class="token operator">:</span> Boolean<span class="token punctuation">)</span><span class="token operator">:</span> ExecNode<span class="token punctuation">[</span>_<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+  val execNode <span class="token operator">=</span> <span class="token function">translateToExecNode</span><span class="token punctuation">(</span><span class="token punctuation">)</span>  
+  execNode<span class="token punctuation">.</span><span class="token function">setCompiled</span><span class="token punctuation">(</span>isCompiled<span class="token punctuation">)</span>  
+  execNode  
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>接着看source、sink、lookup的实现类</p> 
+<h5><a id="1StreamPhysicalTableSourceScan_583"></a>实现类1：StreamPhysicalTableSourceScan</h5> 
+<p>org.apache.flink.table.planner.plan.nodes.physical.stream</p> 
+<pre><code class="prism language-c"><span class="token comment">//实现类：StreamPhysicalTableSourceScan</span>
+<span class="token comment">//Stream physical RelNode to read data from an external source defined by a org.apache.flink.table.connector.source.ScanTableSource.</span>
+
+override def <span class="token function">translateToExecNode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> ExecNode<span class="token punctuation">[</span>_<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+  val tableSourceSpec <span class="token operator">=</span> new <span class="token function">DynamicTableSourceSpec</span><span class="token punctuation">(</span>  
+    tableSourceTable<span class="token punctuation">.</span>contextResolvedTable<span class="token punctuation">,</span>  
+    util<span class="token punctuation">.</span>Arrays<span class="token punctuation">.</span><span class="token function">asList</span><span class="token punctuation">(</span>tableSourceTable<span class="token punctuation">.</span>abilitySpecs<span class="token operator">:</span> _<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">)</span>  
+<span class="token comment">// 这里的tableSource：是在parser阶段已经实现的</span>
+  tableSourceSpec<span class="token punctuation">.</span><span class="token function">setTableSource</span><span class="token punctuation">(</span>tableSource<span class="token punctuation">)</span>  
+  
+  new <span class="token function">StreamExecTableSourceScan</span><span class="token punctuation">(</span>  
+    <span class="token function">unwrapTableConfig</span><span class="token punctuation">(</span>this<span class="token punctuation">)</span><span class="token punctuation">,</span>  
+    tableSourceSpec<span class="token punctuation">,</span>  
+    FlinkTypeFactory<span class="token punctuation">.</span><span class="token function">toLogicalRowType</span><span class="token punctuation">(</span>getRowType<span class="token punctuation">)</span><span class="token punctuation">,</span>  
+    getRelDetailedDescription<span class="token punctuation">)</span>  
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>tableSource：是在parser阶段已经实现的实例，这里以BinlogDynamicTableSource为例<br> <img src="https://images2.imgbox.com/05/ba/b7jXmwk1_o.png" alt="在这里插入图片描述" height="200"></p> 
+<p> </p> 
+<h5><a id="2StreamPhysicalLookupJoin_610"></a>实现类2：StreamPhysicalLookupJoin</h5> 
+<pre><code class="prism language-scala">
+<span class="token keyword">override</span> <span class="token keyword">def</span> translateToExecNode<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> ExecNode<span class="token punctuation">[</span>_<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+  <span class="token keyword">val</span> <span class="token punctuation">(</span>projectionOnTemporalTable<span class="token punctuation">,</span> filterOnTemporalTable<span class="token punctuation">)</span> <span class="token operator">=</span> calcOnTemporalTable <span class="token keyword">match</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">case</span> Some<span class="token punctuation">(</span>program<span class="token punctuation">)</span> <span class="token keyword">=&gt;</span>  
+      <span class="token keyword">val</span> <span class="token punctuation">(</span>projection<span class="token punctuation">,</span> filter<span class="token punctuation">)</span> <span class="token operator">=</span> FlinkRexUtil<span class="token punctuation">.</span>expandRexProgram<span class="token punctuation">(</span>program<span class="token punctuation">)</span>  
+      <span class="token punctuation">(</span>JavaScalaConversionUtil<span class="token punctuation">.</span>toJava<span class="token punctuation">(</span>projection<span class="token punctuation">)</span><span class="token punctuation">,</span> filter<span class="token punctuation">.</span>orNull<span class="token punctuation">)</span>  
+    <span class="token keyword">case</span> _ <span class="token keyword">=&gt;</span>  
+      <span class="token punctuation">(</span><span class="token keyword">null</span><span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">)</span>  
+  <span class="token punctuation">}</span>  
+  
+  <span class="token keyword">new</span> StreamExecLookupJoin<span class="token punctuation">(</span>  
+    tableConfig<span class="token punctuation">,</span>  
+    JoinTypeUtil<span class="token punctuation">.</span>getFlinkJoinType<span class="token punctuation">(</span>joinType<span class="token punctuation">)</span><span class="token punctuation">,</span>  
+    remainingCondition<span class="token punctuation">.</span>orNull<span class="token punctuation">,</span>  
+    <span class="token keyword">new</span> TemporalTableSourceSpec<span class="token punctuation">(</span>temporalTable<span class="token punctuation">)</span><span class="token punctuation">,</span>  
+    allLookupKeys<span class="token punctuation">.</span>map<span class="token punctuation">(</span>item <span class="token keyword">=&gt;</span> <span class="token punctuation">(</span><span class="token builtin">Int</span><span class="token punctuation">.</span>box<span class="token punctuation">(</span>item<span class="token punctuation">.</span>_1<span class="token punctuation">)</span><span class="token punctuation">,</span> item<span class="token punctuation">.</span>_2<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span>asJava<span class="token punctuation">,</span>  
+    projectionOnTemporalTable<span class="token punctuation">,</span>  
+    filterOnTemporalTable<span class="token punctuation">,</span>  
+    lookupKeyContainsPrimaryKey<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>  
+    upsertMaterialize<span class="token punctuation">,</span>  
+    asyncOptions<span class="token punctuation">.</span>orNull<span class="token punctuation">,</span>  
+    retryOptions<span class="token punctuation">.</span>orNull<span class="token punctuation">,</span>  
+    inputChangelogMode<span class="token punctuation">,</span>  
+    InputProperty<span class="token punctuation">.</span>DEFAULT<span class="token punctuation">,</span>  
+    FlinkTypeFactory<span class="token punctuation">.</span>toLogicalRowType<span class="token punctuation">(</span>getRowType<span class="token punctuation">)</span><span class="token punctuation">,</span>  
+    getRelDetailedDescription<span class="token punctuation">)</span>  
+<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"> <span class="token comment">/** Stream physical RelNode for [[Calc]]. */</span> 
+
+<span class="token keyword">class</span> <span class="token class-name">StreamPhysicalCalc</span><span class="token punctuation">(</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<p> </p> 
+<h5><a id="3StreamPhysicalSink_652"></a>实现类3：StreamPhysicalSink</h5> 
+<pre><code class="prism language-c"><span class="token comment">/**  
+ * Stream physical RelNode to to write data into an external sink defined by a [[DynamicTableSink]].  
+ */</span>
+ class <span class="token function">StreamPhysicalSink</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+<span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>
+
+override def <span class="token function">translateToExecNode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token operator">:</span> ExecNode<span class="token punctuation">[</span>_<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+  val inputChangelogMode <span class="token operator">=</span>  
+    ChangelogPlanUtils<span class="token punctuation">.</span><span class="token function">getChangelogMode</span><span class="token punctuation">(</span>getInput<span class="token punctuation">.</span>asInstanceOf<span class="token punctuation">[</span>StreamPhysicalRel<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">.</span>get  
+    
+  val tableSinkSpec <span class="token operator">=</span>  
+    new <span class="token function">DynamicTableSinkSpec</span><span class="token punctuation">(</span>contextResolvedTable<span class="token punctuation">,</span> util<span class="token punctuation">.</span>Arrays<span class="token punctuation">.</span><span class="token function">asList</span><span class="token punctuation">(</span>abilitySpecs<span class="token operator">:</span> _<span class="token operator">*</span><span class="token punctuation">)</span><span class="token punctuation">)</span>  
+  tableSinkSpec<span class="token punctuation">.</span><span class="token function">setTableSink</span><span class="token punctuation">(</span>tableSink<span class="token punctuation">)</span>  
+  <span class="token comment">// no need to call getUpsertKeysInKeyGroupRange here because there's no exchange before sink,  </span>
+  <span class="token comment">// and only add exchange in exec sink node.  val inputUpsertKeys = FlinkRelMetadataQuery  </span>
+    <span class="token punctuation">.</span><span class="token function">reuseOrCreate</span><span class="token punctuation">(</span>cluster<span class="token punctuation">.</span>getMetadataQuery<span class="token punctuation">)</span>  
+    <span class="token punctuation">.</span><span class="token function">getUpsertKeys</span><span class="token punctuation">(</span>inputRel<span class="token punctuation">)</span>  
+  
+  new <span class="token function">StreamExecSink</span><span class="token punctuation">(</span>  
+    <span class="token function">unwrapTableConfig</span><span class="token punctuation">(</span>this<span class="token punctuation">)</span><span class="token punctuation">,</span>  
+    tableSinkSpec<span class="token punctuation">,</span>  
+    inputChangelogMode<span class="token punctuation">,</span>  
+    InputProperty<span class="token punctuation">.</span>DEFAULT<span class="token punctuation">,</span>  
+    FlinkTypeFactory<span class="token punctuation">.</span><span class="token function">toLogicalRowType</span><span class="token punctuation">(</span>getRowType<span class="token punctuation">)</span><span class="token punctuation">,</span>  
+    upsertMaterialize<span class="token punctuation">,</span>  
+    UpsertKeyUtil<span class="token punctuation">.</span><span class="token function">getSmallestKey</span><span class="token punctuation">(</span>inputUpsertKeys<span class="token punctuation">)</span><span class="token punctuation">,</span>  
+    getRelDetailedDescription<span class="token punctuation">)</span>  
+<span class="token punctuation">}</span>
+ 
+</code></pre> 
+<p>tableSinkSpec为具体sink实现类，为PrintTableSinkFactory。</p> 
+<p> </p> 
+<h4><a id="22_translateToPlan_688"></a>2.2. translateToPlan</h4> 
+<pre><code class="prism language-scala">org<span class="token punctuation">.</span>apache<span class="token punctuation">.</span>flink<span class="token punctuation">.</span>table<span class="token punctuation">.</span>planner<span class="token punctuation">.</span>delegation<span class="token punctuation">.</span>PlannerBase
+。。。
+<span class="token comment">//Translates an ExecNodeGraph into a Transformation DAG.</span>
+<span class="token keyword">val</span> transformations <span class="token operator">=</span> translateToPlan<span class="token punctuation">(</span>execGraph<span class="token punctuation">)</span>
+</code></pre> 
+<p>PlannerBase有两个实现类：BatchPlanner、StreamPlanner，我们这里是StreamPlanner，如下</p> 
+<pre><code class="prism language-scala"><span class="token comment">//StreamPlanner</span>
+<span class="token keyword">override</span> <span class="token keyword">protected</span> <span class="token keyword">def</span> translateToPlan<span class="token punctuation">(</span>execGraph<span class="token operator">:</span> ExecNodeGraph<span class="token punctuation">)</span><span class="token operator">:</span> util<span class="token punctuation">.</span>List<span class="token punctuation">[</span>Transformation<span class="token punctuation">[</span>_<span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span>  
+  beforeTranslation<span class="token punctuation">(</span><span class="token punctuation">)</span>  
+  <span class="token keyword">val</span> planner <span class="token operator">=</span> createDummyPlanner<span class="token punctuation">(</span><span class="token punctuation">)</span>  
+  <span class="token comment">//遍历每一个node转换为transformations</span>
+  <span class="token keyword">val</span> transformations <span class="token operator">=</span> execGraph<span class="token punctuation">.</span>getRootNodes<span class="token punctuation">.</span>map <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">case</span> node<span class="token operator">:</span> StreamExecNode<span class="token punctuation">[</span>_<span class="token punctuation">]</span> <span class="token keyword">=&gt;</span> node<span class="token punctuation">.</span>translateToPlan<span class="token punctuation">(</span>planner<span class="token punctuation">)</span>  
+    <span class="token keyword">case</span> _ <span class="token keyword">=&gt;</span>  
+      <span class="token keyword">throw</span> <span class="token keyword">new</span> TableException<span class="token punctuation">(</span>  
+        <span class="token string">"Cannot generate DataStream due to an invalid logical plan. "</span> <span class="token operator">+</span>  
+          <span class="token string">"This is a bug and should not happen. Please file an issue."</span><span class="token punctuation">)</span>  
+  <span class="token punctuation">}</span>  
+  <span class="token comment">//</span>
+  afterTranslation<span class="token punctuation">(</span><span class="token punctuation">)</span>  
+  transformations <span class="token operator">++</span> planner<span class="token punctuation">.</span>extraTransformations  
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>node.translateToPlan: 翻译node为 Transformation。其中node: 一个物理执行节点（FlinkPhysicalRel）</p> 
+<p>先跳到基类,然后找具体实现</p> 
+<pre><code class="prism language-java"><span class="token comment">//org.apache.flink.table.planner.plan.nodes.exec.ExecNodeBase</span>
+<span class="token keyword">public</span> <span class="token keyword">final</span> <span class="token class-name">Transformation</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token function">translateToPlan</span><span class="token punctuation">(</span><span class="token class-name">Planner</span> planner<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>transformation <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+        transformation <span class="token operator">=</span>  
+                <span class="token function">translateToPlanInternal</span><span class="token punctuation">(</span>  
+                        <span class="token punctuation">(</span><span class="token class-name">PlannerBase</span><span class="token punctuation">)</span> planner<span class="token punctuation">,</span>  
+                        <span class="token class-name">ExecNodeConfig</span><span class="token punctuation">.</span><span class="token function">of</span><span class="token punctuation">(</span>  
+                                <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token class-name">PlannerBase</span><span class="token punctuation">)</span> planner<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getTableConfig</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>  
+                                persistedConfig<span class="token punctuation">,</span>  
+                                isCompiled<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">this</span> <span class="token keyword">instanceof</span> <span class="token class-name">SingleTransformationTranslator</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">inputsContainSingleton</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  
+                transformation<span class="token punctuation">.</span><span class="token function">setParallelism</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+                transformation<span class="token punctuation">.</span><span class="token function">setMaxParallelism</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  
+            <span class="token punctuation">}</span>  
+        <span class="token punctuation">}</span>  
+    <span class="token punctuation">}</span>  
+    <span class="token keyword">return</span> transformation<span class="token punctuation">;</span>  
+<span class="token punctuation">}</span>
+
+<span class="token comment">//接口</span>
+<span class="token keyword">protected</span> <span class="token keyword">abstract</span> <span class="token class-name">Transformation</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token function">translateToPlanInternal</span><span class="token punctuation">(</span>  
+        <span class="token class-name">PlannerBase</span> planner<span class="token punctuation">,</span> <span class="token class-name">ExecNodeConfig</span> config<span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>这里较为复杂，篇幅问题，暂时不详细分析（ing）。</p> 
+<p>目前可以确定的是在<code>translateToPlanInternal</code>中source、sink、lookup等操作，都会找到对应连接器的实现。</p> 
+<p> </p> 
+<p>参考：<br> https://nightlies.apache.org/flink/flink-docs-release-1.18/docs/dev/table/sourcessinks/<br> flink 1.16.1的相关源码</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/5a31828149157215b31db473732d6a87/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">基于java的宿舍管理系统设计与实现</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ee99cd929670987ef492874ebb3a5d34/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">基于JavaWeb&#43;BS架构&#43;SpringBoot&#43;Vue&#43;Hadoop短视频流量数据分析与可视化系统的设计和实现</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

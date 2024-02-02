@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Swoole 源码分析——进程管理 Swoole_Process - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Swoole 源码分析——进程管理 Swoole_Process" />
+<meta property="og:description" content="前言 swoole-1.7.2 增加了一个进程管理模块，用来替代 PHP 的 pcntl 扩展。
+PHP自带的pcntl，存在很多不足，如
+pcntl 没有提供进程间通信的功能 pcntl 不支持重定向标准输入和输出 pcntl 只提供了 fork 这样原始的接口，容易使用错误 swoole_process 提供了比 pcntl 更强大的功能，更易用的 API，使 PHP 在多进程编程方面更加轻松。 swoole_process::__construct 创建子进程 在进程初始化的时候，首先要判断当前的环境：
+非 CLI 模式下不能使用在 server master 进程下并且已经启动了 server 后是不能创建进程的，因为此时 master 进程已经创建了 多个 reator 线程，fork 后会将多线程也复制下来。同样的道理，使用了异步的 AIO 的进程使用了线程池，fork 会出现非常复杂的带线程 fork 问题。 如果当前环境可以创建进程，那么需要初始化以下属性：
+process-&gt;id：如果是普通的客户端进程，或者是 master 进程未启动 server 的状态， php_swoole_worker_round_id 就是创建的 process 进程数量，此时只需要递增即可；如果 server 已启动，那么 php_swoole_worker_round_id 还要加上所有 worker 进程的数量。 php_swoole_worker_round_id 递增就是 process-&gt;id。设置重定向，让进程的输入输出与主进程管道相关联 swPipeUnsock_create 函数新建管道 static PHP_METHOD(swoole_process, __construct) { zend_bool redirect_stdin_and_stdout = 0; long pipe_type = 2; zval *callback; //only cli env if (!" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/012ac2927a4955c0796915e4fe0c88f1/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-09-24T17:33:17+08:00" />
+<meta property="article:modified_time" content="2018-09-24T17:33:17+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Swoole 源码分析——进程管理 Swoole_Process</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div class="article fmt article__content"> 
+ <h3>前言</h3> 
+ <p><code>swoole-1.7.2</code> 增加了一个进程管理模块，用来替代 <code>PHP</code> 的 <code>pcntl</code> 扩展。</p> 
+ <p>PHP自带的pcntl，存在很多不足，如</p> 
+ <ul><li> <code>pcntl</code> 没有提供进程间通信的功能</li><li> <code>pcntl</code> 不支持重定向标准输入和输出</li><li> <code>pcntl</code> 只提供了 <code>fork</code> 这样原始的接口，容易使用错误</li><li> <code>swoole_process</code> 提供了比 <code>pcntl</code> 更强大的功能，更易用的 <code>API</code>，使 <code>PHP</code> 在多进程编程方面更加轻松。</li></ul> 
+ <h3> <code>swoole_process::__construct</code> 创建子进程</h3> 
+ <p>在进程初始化的时候，首先要判断当前的环境：</p> 
+ <ul><li>非 <code>CLI</code> 模式下不能使用</li><li>在 <code>server master</code> 进程下并且已经启动了 <code>server</code> 后是不能创建进程的，因为此时 <code>master</code> 进程已经创建了 多个 <code>reator</code> 线程，<code>fork</code> 后会将多线程也复制下来。</li><li>同样的道理，使用了异步的 <code>AIO</code> 的进程使用了线程池，<code>fork</code> 会出现非常复杂的带线程 <code>fork</code> 问题。</li></ul> 
+ <p>如果当前环境可以创建进程，那么需要初始化以下属性：</p> 
+ <ul><li> <code>process-&gt;id</code>：如果是普通的客户端进程，或者是 <code>master</code> 进程未启动 <code>server</code> 的状态， <code>php_swoole_worker_round_id</code> 就是创建的 <code>process</code> 进程数量，此时只需要递增即可；如果 <code>server</code> 已启动，那么 <code>php_swoole_worker_round_id</code> 还要加上所有 <code>worker</code> 进程的数量。 <code>php_swoole_worker_round_id</code> 递增就是 <code>process-&gt;id</code>。</li><li>设置重定向，让进程的输入输出与主进程管道相关联</li><li> <code>swPipeUnsock_create</code> 函数新建管道</li></ul> 
+ <pre><code>static PHP_METHOD(swoole_process, __construct)
+{
+    zend_bool redirect_stdin_and_stdout = 0;
+    long pipe_type = 2;
+    zval *callback;
+
+    //only cli env
+    if (!SWOOLE_G(cli))
+    {
+        swoole_php_fatal_error(E_ERROR, "swoole_process only can be used in PHP CLI mode.");
+        RETURN_FALSE;
+    }
+
+    if (SwooleG.serv &amp;&amp; SwooleG.serv-&gt;gs-&gt;start == 1 &amp;&amp; swIsMaster())
+    {
+        swoole_php_fatal_error(E_ERROR, "swoole_process can't be used in master process.");
+        RETURN_FALSE;
+    }
+
+    if (SwooleAIO.init)
+    {
+        swoole_php_fatal_error(E_ERROR, "unable to create process with async-io threads.");
+        RETURN_FALSE;
+    }
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "z|bl", &amp;callback, &amp;redirect_stdin_and_stdout, &amp;pipe_type) == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+
+    char *func_name = NULL;
+    if (!sw_zend_is_callable(callback, 0, &amp;func_name TSRMLS_CC))
+    {
+        swoole_php_fatal_error(E_ERROR, "function '%s' is not callable", func_name);
+        efree(func_name);
+        RETURN_FALSE;
+    }
+    efree(func_name);
+
+    swWorker *process = emalloc(sizeof(swWorker));
+    bzero(process, sizeof(swWorker));
+
+    int base = 1;
+    if (SwooleG.serv &amp;&amp; SwooleG.serv-&gt;gs-&gt;start)
+    {
+        base = SwooleG.serv-&gt;worker_num + SwooleG.serv-&gt;task_worker_num + SwooleG.serv-&gt;user_worker_num;
+    }
+    if (php_swoole_worker_round_id == 0)
+    {
+        php_swoole_worker_round_id = base;
+    }
+    process-&gt;id = php_swoole_worker_round_id++;
+
+    if (redirect_stdin_and_stdout)
+    {
+        process-&gt;redirect_stdin = 1;
+        process-&gt;redirect_stdout = 1;
+        process-&gt;redirect_stderr = 1;
+        /**
+         * Forced to use stream pipe
+         */
+        pipe_type = 1;
+    }
+
+    if (pipe_type &gt; 0)
+    {
+        swPipe *_pipe = emalloc(sizeof(swPipe));
+        int socket_type = pipe_type == 1 ? SOCK_STREAM : SOCK_DGRAM;
+        if (swPipeUnsock_create(_pipe, 1, socket_type) &lt; 0)
+        {
+            RETURN_FALSE;
+        }
+
+        process-&gt;pipe_object = _pipe;
+        process-&gt;pipe_master = _pipe-&gt;getFd(_pipe, SW_PIPE_MASTER);
+        process-&gt;pipe_worker = _pipe-&gt;getFd(_pipe, SW_PIPE_WORKER);
+        process-&gt;pipe = process-&gt;pipe_master;
+
+        zend_update_property_long(swoole_process_class_entry_ptr, getThis(), ZEND_STRL("pipe"), process-&gt;pipe_master TSRMLS_CC);
+    }
+
+    swoole_set_object(getThis(), process);
+    zend_update_property(swoole_process_class_entry_ptr, getThis(), ZEND_STRL("callback"), callback TSRMLS_CC);
+}
+</code></pre> 
+ <h3> <code>swoole_process-&gt;start</code> 启动进程</h3> 
+ <p><code>swoole_process-&gt;start</code> 函数用于 <code>fork</code> 一个新进程，并且调用 <code>php_swoole_process_start</code></p> 
+ <pre><code>static PHP_METHOD(swoole_process, start)
+{
+    swWorker *process = swoole_get_object(getThis());
+
+    if (process-&gt;pid &gt; 0 &amp;&amp; kill(process-&gt;pid, 0) == 0)
+    {
+        swoole_php_fatal_error(E_WARNING, "process has already been started.");
+        RETURN_FALSE;
+    }
+
+    pid_t pid = fork();
+    if (pid &lt; 0)
+    {
+        swoole_php_fatal_error(E_WARNING, "fork() failed. Error: %s[%d]", strerror(errno), errno);
+        RETURN_FALSE;
+    }
+    else if (pid &gt; 0)
+    {
+        process-&gt;pid = pid;
+        process-&gt;child_process = 0;
+        zend_update_property_long(swoole_server_class_entry_ptr, getThis(), ZEND_STRL("pid"), process-&gt;pid TSRMLS_CC);
+        RETURN_LONG(pid);
+    }
+    else
+    {
+        process-&gt;child_process = 1;
+        SW_CHECK_RETURN(php_swoole_process_start(process, getThis() TSRMLS_CC));
+    }
+    RETURN_TRUE;
+}</code></pre> 
+ <p><code>php_swoole_process_start</code> 函数用于设定重定向和清理主进程残留的一些功能：</p> 
+ <ul><li>将 <code>STDIN_FILENO</code> 输入、<code>STDOUT_FILENO</code> 输出、<code>STDERR_FILENO</code> 错误输出与 <code>pipe_worker</code> 相绑定，实现重定向功能。</li><li>如果存在 <code>SwooleG.main_reactor</code>，删除并释放相关内存。</li><li>清空主进程残留的定时器与信号。</li><li>设定 <code>process_type</code> 为 0</li><li>执行 <code>_construct</code> 回调函数</li><li>如果在回调函数中调用了异步系统，启动 <code>php_swoole_event_wait</code> 函数进行事件循环。</li></ul> 
+ <pre><code>int php_swoole_process_start(swWorker *process, zval *object TSRMLS_DC)
+{
+    process-&gt;pipe = process-&gt;pipe_worker;
+    process-&gt;pid = getpid();
+
+    if (process-&gt;redirect_stdin)
+    {
+        if (dup2(process-&gt;pipe, STDIN_FILENO) &lt; 0)
+        {
+            swoole_php_fatal_error(E_WARNING, "dup2() failed. Error: %s[%d]", strerror(errno), errno);
+        }
+    }
+
+    if (process-&gt;redirect_stdout)
+    {
+        if (dup2(process-&gt;pipe, STDOUT_FILENO) &lt; 0)
+        {
+            swoole_php_fatal_error(E_WARNING, "dup2() failed. Error: %s[%d]", strerror(errno), errno);
+        }
+    }
+
+    if (process-&gt;redirect_stderr)
+    {
+        if (dup2(process-&gt;pipe, STDERR_FILENO) &lt; 0)
+        {
+            swoole_php_fatal_error(E_WARNING, "dup2() failed. Error: %s[%d]", strerror(errno), errno);
+        }
+    }
+
+    /**
+     * Close EventLoop
+     */
+    if (SwooleG.main_reactor)
+    {
+        SwooleG.main_reactor-&gt;free(SwooleG.main_reactor);
+        SwooleG.main_reactor = NULL;
+        swTraceLog(SW_TRACE_PHP, "destroy reactor");
+    }
+
+    bzero(&amp;SwooleWG, sizeof(SwooleWG));
+    SwooleG.pid = process-&gt;pid;
+    if (SwooleG.process_type != SW_PROCESS_USERWORKER)
+    {
+        SwooleG.process_type = 0;
+    }
+    SwooleWG.id = process-&gt;id;
+
+    if (SwooleG.timer.fd)
+    {
+        swTimer_free(&amp;SwooleG.timer);
+        bzero(&amp;SwooleG.timer, sizeof(SwooleG.timer));
+    }
+
+    swSignal_clear();
+
+    zend_update_property_long(swoole_process_class_entry_ptr, object, ZEND_STRL("pid"), process-&gt;pid TSRMLS_CC);
+    zend_update_property_long(swoole_process_class_entry_ptr, object, ZEND_STRL("pipe"), process-&gt;pipe_worker TSRMLS_CC);
+
+    zval *zcallback = sw_zend_read_property(swoole_process_class_entry_ptr, object, ZEND_STRL("callback"), 0 TSRMLS_CC);
+    zval **args[1];
+
+    if (zcallback == NULL || ZVAL_IS_NULL(zcallback))
+    {
+        swoole_php_fatal_error(E_ERROR, "no callback.");
+        return SW_ERR;
+    }
+
+    zval *retval = NULL;
+    args[0] = &amp;object;
+    sw_zval_add_ref(&amp;object);
+
+    if (sw_call_user_function_ex(EG(function_table), NULL, zcallback, &amp;retval, 1, args, 0, NULL TSRMLS_CC) == FAILURE)
+    {
+        swoole_php_fatal_error(E_ERROR, "callback function error");
+        return SW_ERR;
+    }
+    if (EG(exception))
+    {
+        zend_exception_error(EG(exception), E_ERROR TSRMLS_CC);
+    }
+    if (retval)
+    {
+        sw_zval_ptr_dtor(&amp;retval);
+    }
+
+    if (SwooleG.main_reactor)
+    {
+        php_swoole_event_wait();
+    }
+    SwooleG.running = 0;
+
+    zend_bailout();
+    return SW_OK;
+}
+</code></pre> 
+ <h3> <code>swoole_process-&gt;write</code>/ <code>swoole_process-&gt;read</code> </h3> 
+ <p>主进程与子进程之间进行通信可以使用 <code>write</code> 与 <code>read</code>，如果使用了 <code>swoole_event</code>，会自动将管道转为非阻塞模式，由 <code>reactor</code> 进行事件循环读写，否则就会采用阻塞式读写。</p> 
+ <pre><code>static PHP_METHOD(swoole_process, write)
+{
+    char *data = NULL;
+    zend_size_t data_len = 0;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &amp;data, &amp;data_len) == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+
+    if (data_len &lt; 1)
+    {
+        swoole_php_fatal_error(E_WARNING, "the data to send is empty.");
+        RETURN_FALSE;
+    }
+
+    swWorker *process = swoole_get_object(getThis());
+    if (process-&gt;pipe == 0)
+    {
+        swoole_php_fatal_error(E_WARNING, "no pipe, can not write into pipe.");
+        RETURN_FALSE;
+    }
+
+    int ret;
+
+    //async write
+    if (SwooleG.main_reactor)
+    {
+        swConnection *_socket = swReactor_get(SwooleG.main_reactor, process-&gt;pipe);
+        if (_socket &amp;&amp; _socket-&gt;nonblock)
+        {
+            ret = SwooleG.main_reactor-&gt;write(SwooleG.main_reactor, process-&gt;pipe, data, (size_t) data_len);
+        }
+        else
+        {
+            goto _blocking_read;
+        }
+    }
+    else
+    {
+        _blocking_read: ret = swSocket_write_blocking(process-&gt;pipe, data, data_len);
+    }
+
+    if (ret &lt; 0)
+    {
+        swoole_php_error(E_WARNING, "write() failed. Error: %s[%d]", strerror(errno), errno);
+        RETURN_FALSE;
+    }
+    ZVAL_LONG(return_value, ret);
+}
+
+static PHP_METHOD(swoole_process, read)
+{
+    long buf_size = 8192;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "|l", &amp;buf_size) == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+
+    if (buf_size &gt; 65536)
+    {
+        buf_size = 65536;
+    }
+
+    swWorker *process = swoole_get_object(getThis());
+
+    if (process-&gt;pipe == 0)
+    {
+        swoole_php_fatal_error(E_WARNING, "no pipe, can not read from pipe.");
+        RETURN_FALSE;
+    }
+
+    char *buf = emalloc(buf_size + 1);
+    int ret = read(process-&gt;pipe, buf, buf_size);;
+    if (ret &lt; 0)
+    {
+        efree(buf);
+        if (errno != EINTR)
+        {
+            swoole_php_error(E_WARNING, "read() failed. Error: %s[%d]", strerror(errno), errno);
+        }
+        RETURN_FALSE;
+    }
+    buf[ret] = 0;
+    SW_ZVAL_STRINGL(return_value, buf, ret, 0);
+    efree(buf);
+}</code></pre> 
+ <h3> <code>swoole_process::signal</code> 设置信号处理函数</h3> 
+ <p>为异步的程序添加信号处理函数。首先程序会检查当前的进程环境与注册的信号，不符合条件的直接返回，例如：<code>swoole_server</code> 中不能设置 <code>SIGTERM</code> 和 <code>SIGALAM</code> 信号，这两个信号是 <code>swoole</code> 需要保留的，用户不能进行修改。</p> 
+ <p>如果此前该信号已存在信号处理函数，该函数会覆盖以前的回调函数，之前的逻辑会再次执行一次，之后就会被销毁。</p> 
+ <pre><code>static PHP_METHOD(swoole_process, signal)
+{
+    zval *callback = NULL;
+    long signo = 0;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "lz", &amp;signo, &amp;callback) == FAILURE)
+    {
+        return;
+    }
+
+    if (!SWOOLE_G(cli))
+    {
+        swoole_php_fatal_error(E_ERROR, "cannot use swoole_process::signal here.");
+        RETURN_FALSE;
+    }
+
+    if (SwooleG.serv &amp;&amp; SwooleG.serv-&gt;gs-&gt;start)
+    {
+        if ((swIsWorker() || swIsTaskWorker()) &amp;&amp; signo == SIGTERM)
+        {
+            swoole_php_fatal_error(E_WARNING, "unable to register SIGTERM in worker/task process.");
+            RETURN_FALSE;
+        }
+        else if (swIsManager() &amp;&amp; (signo == SIGTERM || signo == SIGUSR1 || signo == SIGUSR2 || signo == SIGALRM))
+        {
+            swoole_php_fatal_error(E_WARNING, "unable to register SIGTERM/SIGUSR1/SIGUSR2/SIGALRM in manager process.");
+            RETURN_FALSE;
+        }
+        else if (swIsMaster() &amp;&amp; (signo == SIGTERM || signo == SIGUSR1 || signo == SIGUSR2 || signo == SIGALRM || signo == SIGCHLD))
+        {
+            swoole_php_fatal_error(E_WARNING, "unable to register SIGTERM/SIGUSR1/SIGUSR2/SIGALRM/SIGCHLD in manager process.");
+            RETURN_FALSE;
+        }
+    }
+
+    php_swoole_check_reactor();
+    swSignalHander handler;
+
+    if (callback == NULL || ZVAL_IS_NULL(callback))
+    {
+        callback = signal_callback[signo];
+        if (callback)
+        {
+            swSignal_add(signo, NULL);
+            SwooleG.main_reactor-&gt;defer(SwooleG.main_reactor, free_signal_callback, callback);
+            signal_callback[signo] = NULL;
+            RETURN_TRUE;
+        }
+        else
+        {
+            swoole_php_error(E_WARNING, "no callback.");
+            RETURN_FALSE;
+        }
+    }
+    else if (Z_TYPE_P(callback) == IS_LONG &amp;&amp; Z_LVAL_P(callback) == (long) SIG_IGN)
+    {
+        handler = NULL;
+    }
+    else
+    {
+        char *func_name;
+        if (!sw_zend_is_callable(callback, 0, &amp;func_name TSRMLS_CC))
+        {
+            swoole_php_error(E_WARNING, "function '%s' is not callable", func_name);
+            efree(func_name);
+            RETURN_FALSE;
+        }
+        efree(func_name);
+
+        callback = sw_zval_dup(callback);
+        sw_zval_add_ref(&amp;callback);
+
+        handler = php_swoole_onSignal;
+    }
+
+    /**
+     * for swSignalfd_setup
+     */
+    SwooleG.main_reactor-&gt;check_signalfd = 1;
+
+    //free the old callback
+    if (signal_callback[signo])
+    {
+        SwooleG.main_reactor-&gt;defer(SwooleG.main_reactor, free_signal_callback, signal_callback[signo]);
+    }
+    signal_callback[signo] = callback;
+
+    /**
+     * use user settings
+     */
+    SwooleG.use_signalfd = SwooleG.enable_signalfd;
+
+    swSignal_add(signo, handler);
+
+    RETURN_TRUE;
+}
+</code></pre> 
+ <h3> <code>swoole_process::alarm</code> 进程定时器</h3> 
+ <p>对比 <code>Swoole\Timer</code> 来说，<code>swoole_process::alarm</code> 并不是一个非常好的选择，<code>swoole_process::alarm</code> 更加类似于真是的进程 <code>alarm</code> 定时器，<code>alarm</code> 只允许设定一个 <code>alarm</code> 信号，而 <code>Swoole\Timer</code> 由于实现了一个定时任务最小堆，可以在不同的时间间隔执行不同的任务。因此为了区分两者，<code>swoole</code> 规定并不允许两者同时存在。</p> 
+ <p><code>swoole_process::alarm</code> 函数需要与 <code>swoole_process::signal</code> 相结合，因为其内部调用 <code>setitimer</code>，会周期发送 <code>alarm</code> 信号，需要在 <code>swoole_process::signal</code> 函数中设置 <code>alarm</code> 信号的回调函数。</p> 
+ <pre><code>static PHP_METHOD(swoole_process, alarm)
+{
+    long usec = 0;
+    long type = ITIMER_REAL;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "l|l", &amp;usec, &amp;type) == FAILURE)
+    {
+        return;
+    }
+
+    if (!SWOOLE_G(cli))
+    {
+        swoole_php_fatal_error(E_ERROR, "cannot use swoole_process::alarm here.");
+        RETURN_FALSE;
+    }
+
+    if (SwooleG.timer.fd != 0)
+    {
+        swoole_php_fatal_error(E_WARNING, "cannot use both 'timer' and 'alarm' at the same time.");
+        RETURN_FALSE;
+    }
+
+    struct timeval now;
+    if (gettimeofday(&amp;now, NULL) &lt; 0)
+    {
+        swoole_php_error(E_WARNING, "gettimeofday() failed. Error: %s[%d]", strerror(errno), errno);
+        RETURN_FALSE;
+    }
+
+    struct itimerval timer_set;
+    bzero(&amp;timer_set, sizeof(timer_set));
+
+    if (usec &gt; 0)
+    {
+        long _sec = usec / 1000000;
+        long _usec = usec - (_sec * 1000000);
+
+        timer_set.it_interval.tv_sec = _sec;
+        timer_set.it_interval.tv_usec = _usec;
+
+        timer_set.it_value.tv_sec = _sec;
+        timer_set.it_value.tv_usec = _usec;
+
+        if (timer_set.it_value.tv_usec &gt; 1e6)
+        {
+            timer_set.it_value.tv_usec = timer_set.it_value.tv_usec - 1e6;
+            timer_set.it_value.tv_sec += 1;
+        }
+    }
+
+    if (setitimer(type, &amp;timer_set, NULL) &lt; 0)
+    {
+        swoole_php_error(E_WARNING, "setitimer() failed. Error: %s[%d]", strerror(errno), errno);
+        RETURN_FALSE;
+    }
+
+    RETURN_TRUE;
+}
+</code></pre> 
+ <h3> <code>swoole_process-&gt;useQueue</code> 消息队列</h3> 
+ <p><code>useQueue</code> 会利用 <code>swMsgQueue_create</code> 创建 <code>process-&gt;queue</code>。</p> 
+ <pre><code>static PHP_METHOD(swoole_process, useQueue)
+{
+    long msgkey = 0;
+    long mode = 2;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "|ll", &amp;msgkey, &amp;mode) == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+
+    swWorker *process = swoole_get_object(getThis());
+
+    if (msgkey &lt;= 0)
+    {
+        msgkey = ftok(sw_zend_get_executed_filename(), 1);
+    }
+
+    swMsgQueue *queue = emalloc(sizeof(swMsgQueue));
+    if (swMsgQueue_create(queue, 1, msgkey, 0) &lt; 0)
+    {
+        RETURN_FALSE;
+    }
+    if (mode &amp; MSGQUEUE_NOWAIT)
+    {
+        swMsgQueue_set_blocking(queue, 0);
+        mode = mode &amp; (~MSGQUEUE_NOWAIT);
+    }
+    process-&gt;queue = queue;
+    process-&gt;ipc_mode = mode;
+    zend_update_property_long(swoole_process_class_entry_ptr, getThis(), ZEND_STRL("msgQueueId"), queue-&gt;msg_id TSRMLS_CC);
+    zend_update_property_long(swoole_process_class_entry_ptr, getThis(), ZEND_STRL("msgQueueKey"), msgkey TSRMLS_CC);
+    RETURN_TRUE;
+}</code></pre> 
+ <h3> <code>swoole_process-&gt;push</code>/<code>swoole_process-&gt;pop</code> 消息通信</h3> 
+ <p>推送和消费消息就是利用 <code>swMsgQueue_push/swMsgQueue_pop</code> 函数。</p> 
+ <pre><code>static PHP_METHOD(swoole_process, push)
+{
+    char *data;
+    zend_size_t length;
+
+    struct
+    {
+        long type;
+        char data[SW_MSGMAX];
+    } message;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &amp;data, &amp;length) == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+
+    if (length &lt;= 0)
+    {
+        swoole_php_fatal_error(E_WARNING, "the data to push is empty.");
+        RETURN_FALSE;
+    }
+    else if (length &gt;= sizeof(message.data))
+    {
+        swoole_php_fatal_error(E_WARNING, "the data to push is too big.");
+        RETURN_FALSE;
+    }
+
+    swWorker *process = swoole_get_object(getThis());
+
+    if (!process-&gt;queue)
+    {
+        swoole_php_fatal_error(E_WARNING, "no msgqueue, can not use push()");
+        RETURN_FALSE;
+    }
+
+    message.type = process-&gt;id;
+    memcpy(message.data, data, length);
+
+    if (swMsgQueue_push(process-&gt;queue, (swQueue_data *)&amp;message, length) &lt; 0)
+    {
+        RETURN_FALSE;
+    }
+    RETURN_TRUE;
+}
+
+static PHP_METHOD(swoole_process, pop)
+{
+    long maxsize = SW_MSGMAX;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "|l", &amp;maxsize) == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+
+    if (maxsize &gt; SW_MSGMAX || maxsize &lt;= 0)
+    {
+        maxsize = SW_MSGMAX;
+    }
+
+    swWorker *process = swoole_get_object(getThis());
+    if (!process-&gt;queue)
+    {
+        swoole_php_fatal_error(E_WARNING, "no msgqueue, can not use pop()");
+        RETURN_FALSE;
+    }
+
+    struct
+    {
+        long type;
+        char data[SW_MSGMAX];
+    } message;
+
+    if (process-&gt;ipc_mode == 2)
+    {
+        message.type = 0;
+    }
+    else
+    {
+        message.type = process-&gt;id;
+    }
+
+    int n = swMsgQueue_pop(process-&gt;queue, (swQueue_data *) &amp;message, maxsize);
+    if (n &lt; 0)
+    {
+        RETURN_FALSE;
+    }
+    SW_RETURN_STRINGL(message.data, n, 1);
+}</code></pre> 
+ <h3> <code>swoole_process::kill</code>/<code>swoole_process::wait</code> </h3> 
+ <p>向进程发送信号 <code>kill</code> 与回收子进程 <code>wait</code> 逻辑比较简单，就是调用对应的函数。值得注意的是 <code>kill</code> 之后的错误如果是 <code>ESRCH</code>，代表着相应的进程不存在。</p> 
+ <pre><code>static PHP_METHOD(swoole_process, kill)
+{
+    long pid;
+    long sig = SIGTERM;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "l|l", &amp;pid, &amp;sig) == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+
+    int ret = kill((int) pid, (int) sig);
+    if (ret &lt; 0)
+    {
+        if (!(sig == 0 &amp;&amp; errno == ESRCH))
+        {
+            swoole_php_error(E_WARNING, "kill(%d, %d) failed. Error: %s[%d]", (int) pid, (int) sig, strerror(errno), errno);
+        }
+        RETURN_FALSE;
+    }
+    RETURN_TRUE;
+}
+
+static PHP_METHOD(swoole_process, wait)
+{
+    int status;
+    zend_bool blocking = 1;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "|b", &amp;blocking) == FAILURE)
+    {
+        RETURN_FALSE;
+    }
+
+    int options = 0;
+    if (!blocking)
+    {
+        options |= WNOHANG;
+    }
+
+    pid_t pid = swWaitpid(-1, &amp;status, options);
+    if (pid &gt; 0)
+    {
+        array_init(return_value);
+        add_assoc_long(return_value, "pid", pid);
+        add_assoc_long(return_value, "code", WEXITSTATUS(status));
+        add_assoc_long(return_value, "signal", WTERMSIG(status));
+    }
+    else
+    {
+        RETURN_FALSE;
+    }
+}
+
+static sw_inline int swWaitpid(pid_t __pid, int *__stat_loc, int __options)
+{
+    int ret;
+    do
+    {
+        ret = waitpid(__pid, __stat_loc, __options);
+        if (ret &lt; 0 &amp;&amp; errno == EINTR)
+        {
+            continue;
+        }
+        break;
+    } while(1);
+    return ret;
+}</code></pre> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3fbfa1a1f7f2d6780423c6ce88396174/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">锚点定位的三种解决方法</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c944936082900ddb70be15b4cb734741/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">OCR如何读取皱巴巴的文件？深度学习在文档图像形变矫正的应用详解</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

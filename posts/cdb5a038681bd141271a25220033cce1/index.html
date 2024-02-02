@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>深入浅出Java线程池Worker类 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="深入浅出Java线程池Worker类" />
+<meta property="og:description" content="文章目录 1 重要参数1.1 七个构造参数1.2 重要成员变量 2 提交任务3 工作线程3.1 线程创建3.2 任务执行3.3 线程保活 4 总结ref 1 重要参数 1.1 七个构造参数 众所周知，Java 提供的线程池（ThreadPoolExecutor）构造函数中有几个重要的参数：
+public ThreadPoolExecutor(int corePoolSize, int maximumPoolSize, long keepAliveTime, TimeUnit unit, BlockingQueue&lt;Runnable&gt; workQueue, ThreadFactory threadFactory, RejectedExecutionHandler handler) { corePoolSize：核心线程数，线程池至死都要维护的活跃线程数量，除非设置了 allowCoreThreadTimeOut 参数maximumPoolSize：最大线程数，线程池允许同时活跃的最大线程数量keepAliveTime：当线程数大于核心数时，多余空闲线程在终止前等待新任务的最长时间unit：上述等待时间的时间单位workQueue：任务队列threadFactory：线程工厂handler：拒绝策略 Java 自带了四种拒绝策略，分别是：
+CallerRunsPolicy：让调用者直接在自己的线程里面执行，线程池不做处理AbortPolicy：线程池直接抛出异常（默认）DiscardPolicy：线程池直接把任务丢掉，当做什么也没发生DiscardOldestPolicy：把队列中最老的任务删除掉，把该任务放到队列中 1.2 重要成员变量 其实除了这几个构造参数以外，还有几个非常重要的参数需要我们理解。
+ctl：线程池的控制状态，是一个 32 位 的 AtomicInteger 类型，高 3 位为线程池的状态，低 29 位为线程池的工作线程数 private final AtomicInteger ctl = new AtomicInteger(ctlOf(RUNNING, 0)); 线程池的状态有五种，分别是 RUNNING（-1）、SHUTDOWN（0）、STOP（1）、TIDYING（2）和 TERMINATED（3），其关系如下图所示：
+workers：线程池中工作线程集合 private final HashSet&lt;Worker&gt; workers = new HashSet&lt;&gt;(); 通过 workers 参数可以发现线程池并未执行使用 Thread 去执行 Runable 任务，而是将二者封装成了一个 Worker 对象，方便对线程的复用以及状态控制：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/cdb5a038681bd141271a25220033cce1/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-03-29T22:51:28+08:00" />
+<meta property="article:modified_time" content="2023-03-29T22:51:28+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">深入浅出Java线程池Worker类</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><ul><li><a href="#1__1" rel="nofollow">1 重要参数</a></li><li><ul><li><a href="#11__2" rel="nofollow">1.1 七个构造参数</a></li><li><a href="#12__31" rel="nofollow">1.2 重要成员变量</a></li></ul> 
+   </li><li><a href="#2__78" rel="nofollow">2 提交任务</a></li><li><a href="#3__123" rel="nofollow">3 工作线程</a></li><li><ul><li><a href="#31__130" rel="nofollow">3.1 线程创建</a></li><li><a href="#32__169" rel="nofollow">3.2 任务执行</a></li><li><a href="#33__230" rel="nofollow">3.3 线程保活</a></li></ul> 
+   </li><li><a href="#4__313" rel="nofollow">4 总结</a></li><li><a href="#ref_319" rel="nofollow">ref</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h3><a id="1__1"></a>1 重要参数</h3> 
+<h4><a id="11__2"></a>1.1 七个构造参数</h4> 
+<p>众所周知，Java 提供的线程池（ThreadPoolExecutor）构造函数中有几个重要的参数：</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token class-name">ThreadPoolExecutor</span><span class="token punctuation">(</span><span class="token keyword">int</span> corePoolSize<span class="token punctuation">,</span>
+                              <span class="token keyword">int</span> maximumPoolSize<span class="token punctuation">,</span>
+                              <span class="token keyword">long</span> keepAliveTime<span class="token punctuation">,</span>
+                              <span class="token class-name">TimeUnit</span> unit<span class="token punctuation">,</span>
+                              <span class="token class-name">BlockingQueue</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Runnable</span><span class="token punctuation">&gt;</span></span> workQueue<span class="token punctuation">,</span>
+                              <span class="token class-name">ThreadFactory</span> threadFactory<span class="token punctuation">,</span>
+                              <span class="token class-name">RejectedExecutionHandler</span> handler<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+</code></pre> 
+<ul><li>corePoolSize：核心线程数，线程池至死都要维护的活跃线程数量，除非设置了 <code>allowCoreThreadTimeOut</code> 参数</li><li>maximumPoolSize：最大线程数，线程池允许同时活跃的最大线程数量</li><li>keepAliveTime：当线程数大于核心数时，多余空闲线程在终止前等待新任务的最长时间</li><li>unit：上述等待时间的时间单位</li><li>workQueue：任务队列</li><li>threadFactory：线程工厂</li><li>handler：拒绝策略</li></ul> 
+<p>Java 自带了四种拒绝策略，分别是：</p> 
+<ol><li><code>CallerRunsPolicy</code>：让调用者直接在自己的线程里面执行，线程池不做处理</li><li><code>AbortPolicy</code>：线程池直接抛出异常（默认）</li><li><code>DiscardPolicy</code>：线程池直接把任务丢掉，当做什么也没发生</li><li><code>DiscardOldestPolicy</code>：把队列中最老的任务删除掉，把该任务放到队列中</li></ol> 
+<h4><a id="12__31"></a>1.2 重要成员变量</h4> 
+<p>其实除了这几个构造参数以外，还有几个非常重要的参数需要我们理解。</p> 
+<ul><li>ctl：线程池的控制状态，是一个 32 位 的 AtomicInteger 类型，高 3 位为线程池的状态，低 29 位为线程池的工作线程数</li></ul> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">AtomicInteger</span> ctl <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">AtomicInteger</span><span class="token punctuation">(</span><span class="token function">ctlOf</span><span class="token punctuation">(</span>RUNNING<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>线程池的状态有五种，分别是 RUNNING（-1）、SHUTDOWN（0）、STOP（1）、TIDYING（2）和 TERMINATED（3），其关系如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/ea/ac/HLAa8WDv_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>workers：线程池中工作线程集合</li></ul> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token class-name">HashSet</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Worker</span><span class="token punctuation">&gt;</span></span> workers <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashSet</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>通过 workers 参数可以发现线程池并未执行使用 Thread 去执行 Runable 任务，而是将二者封装成了一个 Worker 对象，方便对线程的复用以及状态控制：</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">class</span> <span class="token class-name">Worker</span>
+        <span class="token keyword">extends</span> <span class="token class-name">AbstractQueuedSynchronizer</span>
+        <span class="token keyword">implements</span> <span class="token class-name">Runnable</span>
+    <span class="token punctuation">{<!-- --></span>
+       
+        <span class="token comment">// 通过线程工厂创建的线程</span>
+        <span class="token keyword">final</span> <span class="token class-name">Thread</span> thread<span class="token punctuation">;</span>
+        <span class="token comment">// 创建需要绑定一个任务，也是  worker 的第一个任务</span>
+        <span class="token class-name">Runnable</span> firstTask<span class="token punctuation">;</span>
+        
+        <span class="token keyword">volatile</span> <span class="token keyword">long</span> completedTasks<span class="token punctuation">;</span>
+
+        <span class="token class-name">Worker</span><span class="token punctuation">(</span><span class="token class-name">Runnable</span> firstTask<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">setState</span><span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// inhibit interrupts until runWorker</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>firstTask <span class="token operator">=</span> firstTask<span class="token punctuation">;</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>thread <span class="token operator">=</span> <span class="token function">getThreadFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">newThread</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">runWorker</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="2__78"></a>2 提交任务</h3> 
+<p>线程池有两个方法提交任务：</p> 
+<ul><li>execute：接收 <code>Runnable</code> 入参</li><li>submit：可以接收<code>Runnable</code> 和 <code>Callable</code> 作为入参，同时支持返回值 <code>Future</code></li></ul> 
+<pre><code class="prism language-java">executor<span class="token punctuation">.</span><span class="token function">execute</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+executor<span class="token punctuation">.</span><span class="token function">submit</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>二者实现功能一致，我们以 <code>execute()</code>方法实现为例，梳理线程池任务提交的流程：</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">execute</span><span class="token punctuation">(</span><span class="token class-name">Runnable</span> command<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>command <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span>
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">NullPointerException</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">int</span> c <span class="token operator">=</span> ctl<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">workerCountOf</span><span class="token punctuation">(</span>c<span class="token punctuation">)</span> <span class="token operator">&lt;</span> corePoolSize<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">addWorker</span><span class="token punctuation">(</span>command<span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+            c <span class="token operator">=</span> ctl<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">isRunning</span><span class="token punctuation">(</span>c<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> workQueue<span class="token punctuation">.</span><span class="token function">offer</span><span class="token punctuation">(</span>command<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">int</span> recheck <span class="token operator">=</span> ctl<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span> <span class="token function">isRunning</span><span class="token punctuation">(</span>recheck<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token function">remove</span><span class="token punctuation">(</span>command<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                <span class="token function">reject</span><span class="token punctuation">(</span>command<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">workerCountOf</span><span class="token punctuation">(</span>recheck<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span>
+                <span class="token function">addWorker</span><span class="token punctuation">(</span><span class="token keyword">null</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">addWorker</span><span class="token punctuation">(</span>command<span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+            <span class="token function">reject</span><span class="token punctuation">(</span>command<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<ol><li>首先检测线程池运行状态，如果不是running，则直接拒绝。</li><li>如果 workCount &lt; corePoolSize，则创建并启动一个线程线程来执行提交任务。</li><li>如果 workCount &gt;= corePoolSize，且线程池阻塞队列未满，则将任务添加到阻塞队列中。</li><li>如果 workCount &gt;= corePoolSize &amp;&amp; workCount &lt; maximumPoolSize，并且线程池内的阻塞队列已满，则创建并启动一个线程来执行新提交的任务。</li><li>如果 workCount &gt;= maximumPoolSize，并且阻塞队列已满，则根据拒绝策略来处理改任务，默认是直接抛出异常</li></ol> 
+<h3><a id="3__123"></a>3 工作线程</h3> 
+<p>通过对 Worker 生命周期的详细梳理，理解线程池中 Thread 和 Queue 的关系，队列中的任务是如何被执行，以及线程在池中如何保活和销毁的。先来看一下三者的关系：</p> 
+<p><img src="https://images2.imgbox.com/d1/cc/nz8th4zX_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="31__130"></a>3.1 线程创建</h4> 
+<p>既然是线程池，那么总要先创建线程。为了了解线程池中线程的创建过程，我们不得不再次看一下 Worker 类的定义，先是继承了 AQS，再实现 Runnable 接口，即本身是一把锁，又是一个可执行任务。</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">final</span> <span class="token keyword">class</span> <span class="token class-name">Worker</span> <span class="token keyword">extends</span> <span class="token class-name">AbstractQueuedSynchronizer</span>
+        <span class="token keyword">implements</span> <span class="token class-name">Runnable</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Worker</span><span class="token punctuation">(</span><span class="token class-name">Runnable</span> firstTask<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">setState</span><span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">// inhibit interrupts until runWorker</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>firstTask <span class="token operator">=</span> firstTask<span class="token punctuation">;</span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span>thread <span class="token operator">=</span> <span class="token function">getThreadFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">newThread</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">runWorker</span><span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+</code></pre> 
+<p>执行线程池 <code>execute()</code> 方法提交任务时，如果需要创建一个新的工作线程，则会调用 <code>addWorker()</code> 方法：</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token keyword">boolean</span> <span class="token function">addWorker</span><span class="token punctuation">(</span><span class="token class-name">Runnable</span> firstTask<span class="token punctuation">,</span> <span class="token keyword">boolean</span> core<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// ......</span>
+    <span class="token class-name">Worker</span> w <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+        w <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Worker</span><span class="token punctuation">(</span>firstTask<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">final</span> <span class="token class-name">Thread</span> t <span class="token operator">=</span> w<span class="token punctuation">.</span>thread<span class="token punctuation">;</span>
+        <span class="token comment">// ......</span>
+        t<span class="token punctuation">.</span><span class="token function">start</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// ......</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ol><li>创建 Worker 时，构造函数调用线程工厂创建一个新线程，同时将 Worker 对象本身作为新线程的执行任务。</li><li>创建完 Worker 后，调用 worker 中新线程 thread 的 <code>start()</code> 方法启动线程。</li><li>由于 thread 的任务就是 worker 本身，即最终调用到 worker 中的 <code>run()</code> 方法。</li></ol> 
+<h4><a id="32__169"></a>3.2 任务执行</h4> 
+<p>前面我们知道线程池提交任务创建工作线程后执行到 Worker 的 <code>run()</code> 方法，最终的任务执行逻辑在 <code>runWorker()</code> 方法中：</p> 
+<pre><code class="prism language-java"><span class="token keyword">final</span> <span class="token keyword">void</span> <span class="token function">runWorker</span><span class="token punctuation">(</span><span class="token class-name">Worker</span> w<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token class-name">Thread</span> wt <span class="token operator">=</span> <span class="token class-name">Thread</span><span class="token punctuation">.</span><span class="token function">currentThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token class-name">Runnable</span> task <span class="token operator">=</span> w<span class="token punctuation">.</span>firstTask<span class="token punctuation">;</span>
+	w<span class="token punctuation">.</span>firstTask <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+	<span class="token comment">//释放锁，将state设置为0,允许中断任务的执行</span>
+	w<span class="token punctuation">.</span><span class="token function">unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token keyword">boolean</span> completedAbruptly <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+	<span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//如果任务不为空，或者从任务队列中获取的任务不为空，则执行while循环</span>
+		<span class="token keyword">while</span> <span class="token punctuation">(</span>task <span class="token operator">!=</span> <span class="token keyword">null</span> <span class="token operator">||</span> <span class="token punctuation">(</span>task <span class="token operator">=</span> <span class="token function">getTask</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token comment">//如果任务不为空，则获取Worker工作线程的独占锁</span>
+			w<span class="token punctuation">.</span><span class="token function">lock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token comment">//如果线程已经停止，或者中断线程后线程终止并且没有成功中断线程</span>
+			<span class="token comment">//大家好好理解下这个逻辑</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token function">runStateAtLeast</span><span class="token punctuation">(</span>ctl<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> STOP<span class="token punctuation">)</span> <span class="token operator">||</span>
+				 <span class="token punctuation">(</span><span class="token class-name">Thread</span><span class="token punctuation">.</span><span class="token function">interrupted</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span>
+				  <span class="token function">runStateAtLeast</span><span class="token punctuation">(</span>ctl<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> STOP<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span>
+				<span class="token operator">!</span>wt<span class="token punctuation">.</span><span class="token function">isInterrupted</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+				<span class="token comment">//中断线程</span>
+				wt<span class="token punctuation">.</span><span class="token function">interrupt</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token comment">//执行任务前执行的逻辑</span>
+				<span class="token function">beforeExecute</span><span class="token punctuation">(</span>wt<span class="token punctuation">,</span> task<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token class-name">Throwable</span> thrown <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+				<span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+					<span class="token comment">//调用Runable接口的run方法执行任务</span>
+					task<span class="token punctuation">.</span><span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">RuntimeException</span> x<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+					thrown <span class="token operator">=</span> x<span class="token punctuation">;</span> <span class="token keyword">throw</span> x<span class="token punctuation">;</span>
+				<span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Error</span> x<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+					thrown <span class="token operator">=</span> x<span class="token punctuation">;</span> <span class="token keyword">throw</span> x<span class="token punctuation">;</span>
+				<span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Throwable</span> x<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+					thrown <span class="token operator">=</span> x<span class="token punctuation">;</span> <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">Error</span><span class="token punctuation">(</span>x<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+					<span class="token comment">//执行任务后执行的逻辑</span>
+					<span class="token function">afterExecute</span><span class="token punctuation">(</span>task<span class="token punctuation">,</span> thrown<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span>
+			<span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token comment">//任务执行完成后，将其设置为空</span>
+				task <span class="token operator">=</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+				<span class="token comment">//完成的任务数量加1</span>
+				w<span class="token punctuation">.</span>completedTasks<span class="token operator">++</span><span class="token punctuation">;</span>
+				<span class="token comment">//释放工作线程获得的锁</span>
+				w<span class="token punctuation">.</span><span class="token function">unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+		completedAbruptly <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//执行退出Worker线程的逻辑</span>
+		<span class="token function">processWorkerExit</span><span class="token punctuation">(</span>w<span class="token punctuation">,</span> completedAbruptly<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>其核心逻辑非常简单，执行创建时添加的 <code>firstTask</code> 任务或不断调用 <code>getTask()</code> 方法从队列拉取任务执行，如果没有可执行的任务，则退出并销毁线程。</p> 
+<h4><a id="33__230"></a>3.3 线程保活</h4> 
+<p>我们知道线程池中为了工作效率，非核心工作线程即使没有任务时也需要等待一段存活时间才会最终销毁，但前面的 <code>runWorker()</code> 方法显然没有这段逻辑，想必另有乾坤。</p> 
+<p>不卖关子，答案就藏在获取任务的 <code>getTask()</code> 方法中：</p> 
+<pre><code class="prism language-java"><span class="token keyword">private</span> <span class="token class-name">Runnable</span> <span class="token function">getTask</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">//轮询是否超时的标识</span>
+	<span class="token keyword">boolean</span> timedOut <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+	<span class="token comment">//自旋for循环</span>
+	<span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span><span class="token punctuation">;</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//获取ctl</span>
+		<span class="token keyword">int</span> c <span class="token operator">=</span> ctl<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token comment">//获取线程池的状态</span>
+		<span class="token keyword">int</span> rs <span class="token operator">=</span> <span class="token function">runStateOf</span><span class="token punctuation">(</span>c<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ 
+		<span class="token comment">//检测任务队列是否在线程池停止或关闭的时候为空</span>
+		<span class="token comment">//也就是说任务队列是否在线程池未正常运行时为空</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>rs <span class="token operator">&gt;=</span> SHUTDOWN <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span>rs <span class="token operator">&gt;=</span> STOP <span class="token operator">||</span> workQueue<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token comment">//减少Worker线程的数量</span>
+			<span class="token function">decrementWorkerCount</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token comment">//获取线程池中线程的数量</span>
+		<span class="token keyword">int</span> wc <span class="token operator">=</span> <span class="token function">workerCountOf</span><span class="token punctuation">(</span>c<span class="token punctuation">)</span><span class="token punctuation">;</span>
+ 
+		<span class="token comment">//检测当前线程池中的线程数量是否大于corePoolSize的值或者是否正在等待执行任务</span>
+		<span class="token keyword">boolean</span> timed <span class="token operator">=</span> allowCoreThreadTimeOut <span class="token operator">||</span> wc <span class="token operator">&gt;</span> corePoolSize<span class="token punctuation">;</span>
+ 
+		<span class="token comment">//如果线程池中的线程数量大于corePoolSize</span>
+		<span class="token comment">//获取大于corePoolSize或者是否正在等待执行任务并且轮询超时</span>
+		<span class="token comment">//并且当前线程池中的线程数量大于1或者任务队列为空</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>wc <span class="token operator">&gt;</span> maximumPoolSize <span class="token operator">||</span> <span class="token punctuation">(</span>timed <span class="token operator">&amp;&amp;</span> timedOut<span class="token punctuation">)</span><span class="token punctuation">)</span>
+			<span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span>wc <span class="token operator">&gt;</span> <span class="token number">1</span> <span class="token operator">||</span> workQueue<span class="token punctuation">.</span><span class="token function">isEmpty</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token comment">//成功减少线程池中的工作线程数量</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">compareAndDecrementWorkerCount</span><span class="token punctuation">(</span>c<span class="token punctuation">)</span><span class="token punctuation">)</span>
+				<span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+			<span class="token keyword">continue</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+ 
+		<span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token comment">//从任务队列中获取任务</span>
+			<span class="token class-name">Runnable</span> r <span class="token operator">=</span> timed <span class="token operator">?</span>
+				workQueue<span class="token punctuation">.</span><span class="token function">poll</span><span class="token punctuation">(</span>keepAliveTime<span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span>NANOSECONDS<span class="token punctuation">)</span> <span class="token operator">:</span>
+				workQueue<span class="token punctuation">.</span><span class="token function">take</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token comment">//任务不为空直接返回任务</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>r <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span>
+				<span class="token keyword">return</span> r<span class="token punctuation">;</span>
+			timedOut <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">InterruptedException</span> retry<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			timedOut <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>函数前面是一大堆标志位校验，以校验线程池和线程状态，之间看最后 try 代码块中获取任务的方法：当需要超时等待时调用了 <code>BlockingQueue</code> 的 <code>poll()</code> 方法，该方法支持获取队列元素时如果队列为空，则阻塞等待相应时间，如果还是没有数据则返回空。</p> 
+<p>而在阻塞队列中，通过 ReentrantLock 和 Condition 实现队列的阻塞。</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token class-name">E</span> <span class="token function">poll</span><span class="token punctuation">(</span><span class="token keyword">long</span> timeout<span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span> unit<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">InterruptedException</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">long</span> nanos <span class="token operator">=</span> unit<span class="token punctuation">.</span><span class="token function">toNanos</span><span class="token punctuation">(</span>timeout<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">final</span> <span class="token class-name">ReentrantLock</span> lock <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>lock<span class="token punctuation">;</span>
+        lock<span class="token punctuation">.</span><span class="token function">lockInterruptibly</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">while</span> <span class="token punctuation">(</span>count <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>nanos <span class="token operator">&lt;=</span> <span class="token number">0L</span><span class="token punctuation">)</span>
+                    <span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+                nanos <span class="token operator">=</span> notEmpty<span class="token punctuation">.</span><span class="token function">awaitNanos</span><span class="token punctuation">(</span>nanos<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">return</span> <span class="token function">dequeue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            lock<span class="token punctuation">.</span><span class="token function">unlock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<p>总结起来就是线程池的 Worker 工作线程在创建并启动后，会通过不断自旋和 BlockingQueue 的阻塞实现不停地作业和一段时间的存活。</p> 
+<p>并且还可以看出核心线程和非核心线程并无区分，只是维护一定数量的工作线程存活即可，并非先创建的就是核心线程。</p> 
+<h3><a id="4__313"></a>4 总结</h3> 
+<p>通过对线程池 ThreadPoolExecutor 中成员变量的分析，我们了解到了 Runnable、Worker、Thread 以及 BlockingQueue 在线程池中的关系。</p> 
+<p>然后以任务提交 <code>sumbit()</code> 函数作为入口，探究了线程池中线程的创建、执行以及保活的实现，对线程池的工作流程和原理也有了很好的理解。</p> 
+<h3><a id="ref_319"></a>ref</h3> 
+<p><a href="https://blog.csdn.net/JavaMonsterr/article/details/125992719">https://blog.csdn.net/JavaMonsterr/article/details/125992719</a></p> 
+<p><a href="https://www.cnblogs.com/steven158/p/15023458.html#_label0" rel="nofollow">https://www.cnblogs.com/steven158/p/15023458.html#_label0</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/73c4911783aeaa9cbe78b69c1aea5ba8/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">墨尘 - UE4 入门教程笔记 —— 三</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/6a64c93292f5beea5f5c04a5436fc9b1/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Java类的继承</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

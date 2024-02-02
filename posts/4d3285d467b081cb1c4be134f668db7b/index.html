@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>13.4-“制作一款私有IAP串口下载小工具”之STM32的Bootloader设计说明 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="13.4-“制作一款私有IAP串口下载小工具”之STM32的Bootloader设计说明" />
+<meta property="og:description" content="一、原理简要说明 从上一章可知，IAP更新程序的原理，就是在单片机flash中的划分出两个区域，分别叫做Bootloader区域和一个App区域。芯片上电启动的时候，会默认运行Bootloader，然后bootloader来做逻辑判断，bootloader会等待5s左右，如果在5s之内收到需要更新固件的命令，则进行固件更新，否则的话，判断芯片中是否已经有之前的可用app。如果有，跳转过去执行app。否则的话继续保持在“等待固件下载模式”。这就是bootloader的大概原理。
+二、Bootloader逻辑说明 第一节简介重复了一次IAP烧写固件的原理。这节使用一个流程图来详细准确的描述一下，IAP的相关判断逻辑。如，下图所示：
+三、编译生成的bin文件和hex文件，都可以使用IAP“烧录”到芯片中吗？ 什么是Bin文件
+Bin文件是最纯粹的二进制机器代码, 是由C或C&#43;&#43;编译成汇编，然后从汇编转换生成的二进制机器码。因此Bin文件就是芯片可以直接运行的程序。
+什么是Hex文件
+全称为“INTEL HEX”，HEX文件是一个ASCII文本文件，文件中放满了一行一行的“Intel HEX格式”的标记文本。每一行包含一个HEX记录。记录是由多个代表机器码或常量数据的16进制数组成。HEX常用来储存要烧写到ROM或EPROM中的程序。大多数的烧写器支持HEX格式。（注意HEX文件包含程序要被下载到芯片中的具体位置）
+以上简介，翻译自“arm KEIL”对HEX格式的介绍。参考地址：http://www.keil.com/support/docs/1584/
+Bin文件与Hex文件的区别
+直接把Bin文件传输并烧写到芯片Flash即可运行。但HEX文件不行，HEX是一个文本文件，里面用标记符号记录程序的详情。方便阅读（二进制查看器和烧写器对被烧写程序的预览查看，就是用的HEX格式。如果用二进制显示，那么你看到的是大量的0101）并且可以包含除“程序”之外的额外信息。一般“下载器”可以使用Hex文件编程，其实是“下载器”对Hex文件做了解析，最终还是转换为Bin文件的格式，然后烧写到了芯片的Flash中。
+“下载器”使用Hex文件的原因是，Hex文件包含“程序”之外的信息，比如“程序烧写地址”。这样就避免了让用户手工输入这些额外的信息。当你用“下载器”下载Bin文件的时候，下载软件有个“烧写地址”的输入框，就是要你指定要把这个bin文件下载到芯片的哪个Flash地址。（因为bin文件本身不包含这个信息）。
+使用IAP下载固件，使用Bin还是Hex文件
+结合IAP的原理和以上的分析可知，IAP需要一种直接传递到芯片即可运行的“程序”，因此要实现IAP下载你只能选择Bin文件格式。
+四、怎样完成“烧写固件”的工作（Flash操作） “把程序烧写（下载）到芯片中”，从始至终都感觉这是一个很“神奇”的事情。现在终于明白了“烧写”程序到底怎么一回事了。原来，本质上就是把“BIN文件”复制粘贴到芯片Flash的指定地址中。也就是说，你只要实现对芯片的内部Flash读写函数。你就可以实现“烧写程序”了。
+对STM32芯片内部Flash的介绍
+（中文版）STM32根据FLASH主存储块容量、页面的不同，系统存储器的不同，可以分为以下几个类别。
+小容量产品主存储块1-32KB，每页1KB。系统存储器2KB。
+中容量产品主存储块64-128KB，每页1KB。系统存储器2KB。
+大容量产品主存储块256KB以上，每页2KB。系统存储器2KB。
+互联型产品主存储块256KB以上，每页2KB。系统存储器18KB。
+（英文版）STM32有4种Flash module organization，分别是：
+low-density devices(32KB，1KB/page)、
+medium-density devices(128KB，1KB/page)、
+high-density devices(512KB，2KB/page)、
+connectivity line devices(256KB，2KB/page)、
+XL-density(devices(1M，2KB/page)。
+本小段的编写的目的是要提醒你，每个STM芯片的Flash是不一样的，你需要根据你的目标芯片来确定具体的读写参数。比如，不同芯片的Flash最小”写单元大小“不同。即，有的芯片Flash一次性最小可以写”一个字=4byte“，有的芯片Flash最小可以写入”两个字=8byte“。因此，再开发Flash读写编程之前，一定要详细阅读芯片手册。确定你所使用芯片的Flash操作要求。
+写flash时为什么需要先擦除？
+因为Flash的编程原理都是只能将1写为0，而不能将0写为1，所以在进行Flash编程之前，必须将对应的块擦除，而擦除的过程就是把所有位都写为1的过程，块内的所有字节变为0xFF。
+操作Flash需要用都的函数说明
+注意，不同的芯片对应的Hal库函数是不同的，但是是相近的。这里以”STM32L072KBUx“来举例说明：
+3.1. Hal库的擦除Flash函数
+HAL_StatusTypeDef HAL_FLASHEx_Erase(FLASH_EraseInitTypeDef *pEraseInit, uint32_t *PageError) 注意HAL还提供另一个Flash擦除函数”FLASH_PageErase“，但是如果擦除完要用于下载程序，必须用”HAL_FLASHEx_Erase“。
+3.2. Hal库写Flash函数
+注意：FLASH的写入地址必须是偶数（FLASH机制决定的FLASH写入的时候只能是偶数地址写入，必须写入半字或字，也就是2个字节或是4字节的内容）
+HAL_StatusTypeDef HAL_FLASH_Program(uint32_t TypeProgram, uint32_t Address, uint32_t Data) HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, Addr, Buff);//32bit 使用实例 3.3. 读Flash函数" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/4d3285d467b081cb1c4be134f668db7b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-08-05T23:37:43+08:00" />
+<meta property="article:modified_time" content="2020-08-05T23:37:43+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">13.4-“制作一款私有IAP串口下载小工具”之STM32的Bootloader设计说明</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="_0"></a>一、原理简要说明</h3> 
+<p>从上一章可知，IAP更新程序的原理，就是在单片机flash中的划分出两个区域，分别叫做Bootloader区域和一个App区域。芯片上电启动的时候，会默认运行Bootloader，然后bootloader来做逻辑判断，bootloader会等待5s左右，如果在5s之内收到需要更新固件的命令，则进行固件更新，否则的话，判断芯片中是否已经有之前的可用app。如果有，跳转过去执行app。否则的话继续保持在“等待固件下载模式”。这就是bootloader的大概原理。</p> 
+<h3><a id="Bootloader_3"></a>二、Bootloader逻辑说明</h3> 
+<p>第一节简介重复了一次IAP烧写固件的原理。这节使用一个流程图来详细准确的描述一下，IAP的相关判断逻辑。如，下图所示：</p> 
+<p><img src="https://images2.imgbox.com/e5/fa/jdid3BJM_o.png" alt="在这里插入图片描述" width="600" height="500"></p> 
+<h3><a id="binhexIAP_8"></a>三、编译生成的bin文件和hex文件，都可以使用IAP“烧录”到芯片中吗？</h3> 
+<ol><li> <p>什么是Bin文件<br> Bin文件是最纯粹的二进制机器代码, 是由C或C++编译成汇编，然后从汇编转换生成的二进制机器码。因此Bin文件就是芯片可以直接运行的程序。</p> </li><li> <p>什么是Hex文件<br> 全称为“INTEL HEX”，HEX文件是一个ASCII文本文件，文件中放满了一行一行的“Intel HEX格式”的标记文本。每一行包含一个HEX记录。记录是由多个代表机器码或常量数据的16进制数组成。HEX常用来储存要烧写到ROM或EPROM中的程序。大多数的烧写器支持HEX格式。（注意HEX文件包含程序要被下载到芯片中的具体位置）<br> 以上简介，翻译自“arm KEIL”对HEX格式的介绍。参考地址：http://www.keil.com/support/docs/1584/</p> </li><li> <p>Bin文件与Hex文件的区别<br> 直接把Bin文件传输并烧写到芯片Flash即可运行。但HEX文件不行，HEX是一个文本文件，里面用标记符号记录程序的详情。方便阅读（二进制查看器和烧写器对被烧写程序的预览查看，就是用的HEX格式。如果用二进制显示，那么你看到的是大量的0101）并且可以包含除“程序”之外的额外信息。一般“下载器”可以使用Hex文件编程，其实是“下载器”对Hex文件做了解析，最终还是转换为Bin文件的格式，然后烧写到了芯片的Flash中。<br> “下载器”使用Hex文件的原因是，Hex文件包含“程序”之外的信息，比如“程序烧写地址”。这样就避免了让用户手工输入这些额外的信息。当你用“下载器”下载Bin文件的时候，下载软件有个“烧写地址”的输入框，就是要你指定要把这个bin文件下载到芯片的哪个Flash地址。（因为bin文件本身不包含这个信息）。</p> </li><li> <p>使用IAP下载固件，使用Bin还是Hex文件<br> 结合IAP的原理和以上的分析可知，IAP需要一种直接传递到芯片即可运行的“程序”，因此要实现IAP下载你只能选择Bin文件格式。</p> </li></ol> 
+<h3><a id="Flash_23"></a>四、怎样完成“烧写固件”的工作（Flash操作）</h3> 
+<p>“把程序烧写（下载）到芯片中”，从始至终都感觉这是一个很“神奇”的事情。现在终于明白了“烧写”程序到底怎么一回事了。原来，本质上就是把“BIN文件”复制粘贴到芯片Flash的指定地址中。也就是说，你只要实现对芯片的内部Flash读写函数。你就可以实现“烧写程序”了。</p> 
+<ol><li> <p>对STM32芯片内部Flash的介绍<br> （中文版）STM32根据FLASH主存储块容量、页面的不同，系统存储器的不同，可以分为以下几个类别。<br> 小容量产品主存储块1-32KB，每页1KB。系统存储器2KB。<br> 中容量产品主存储块64-128KB，每页1KB。系统存储器2KB。<br> 大容量产品主存储块256KB以上，每页2KB。系统存储器2KB。<br> 互联型产品主存储块256KB以上，每页2KB。系统存储器18KB。<br> （英文版）STM32有4种Flash module organization，分别是：<br> low-density devices(32KB，1KB/page)、<br> medium-density devices(128KB，1KB/page)、<br> high-density devices(512KB，2KB/page)、<br> connectivity line devices(256KB，2KB/page)、<br> XL-density(devices(1M，2KB/page)。<br> 本小段的编写的目的是要提醒你，每个STM芯片的Flash是不一样的，你需要根据你的目标芯片来确定具体的读写参数。比如，不同芯片的Flash最小”写单元大小“不同。即，有的芯片Flash一次性最小可以写”一个字=4byte“，有的芯片Flash最小可以写入”两个字=8byte“。因此，再开发Flash读写编程之前，一定要详细阅读芯片手册。确定你所使用芯片的Flash操作要求。</p> </li><li> <p>写flash时为什么需要先擦除？<br> 因为Flash的编程原理都是只能将1写为0，而不能将0写为1，所以在进行Flash编程之前，必须将对应的块擦除，而擦除的过程就是把所有位都写为1的过程，块内的所有字节变为0xFF。</p> </li><li> <p>操作Flash需要用都的函数说明<br> 注意，不同的芯片对应的Hal库函数是不同的，但是是相近的。这里以”STM32L072KBUx“来举例说明：<br> <strong>3.1. Hal库的擦除Flash函数</strong></p> </li></ol> 
+<pre><code class="prism language-c">HAL_StatusTypeDef <span class="token function">HAL_FLASHEx_Erase</span><span class="token punctuation">(</span>FLASH_EraseInitTypeDef <span class="token operator">*</span>pEraseInit<span class="token punctuation">,</span> uint32_t <span class="token operator">*</span>PageError<span class="token punctuation">)</span>
+
+</code></pre> 
+<p>注意HAL还提供另一个Flash擦除函数”FLASH_PageErase“，但是如果擦除完要用于下载程序，必须用”HAL_FLASHEx_Erase“。<br> <strong>3.2. Hal库写Flash函数</strong><br> 注意：FLASH的写入地址必须是偶数（FLASH机制决定的FLASH写入的时候只能是偶数地址写入，必须写入半字或字，也就是2个字节或是4字节的内容）</p> 
+<pre><code class="prism language-c">HAL_StatusTypeDef <span class="token function">HAL_FLASH_Program</span><span class="token punctuation">(</span>uint32_t TypeProgram<span class="token punctuation">,</span> uint32_t Address<span class="token punctuation">,</span> uint32_t Data<span class="token punctuation">)</span>
+<span class="token function">HAL_FLASH_Program</span><span class="token punctuation">(</span>FLASH_TYPEPROGRAM_WORD<span class="token punctuation">,</span> Addr<span class="token punctuation">,</span> Buff<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//32bit 使用实例</span>
+
+
+</code></pre> 
+<p><strong>3.3. 读Flash函数</strong><br> 注意Hal没有提供Flash的读函数，那怎么从Flash读取数据呢？答案是自己编写一个读取函数，如下：</p> 
+<pre><code class="prism language-c"><span class="token keyword">static</span> uint32_t <span class="token function">FLASH_ReadWord</span><span class="token punctuation">(</span>uint32_t Addr<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">return</span> <span class="token operator">*</span><span class="token punctuation">(</span>uint32_t <span class="token operator">*</span><span class="token punctuation">)</span>Addr<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>第一眼看上去，有种不可思议的感觉。是事实，这是单片机，就是这么特别，结合单片机的运行原理慢慢理解吧（我也解释不好）。<br> <strong>3.4. 解锁Flash（防止对Flash的非法访问或意外操作）</strong></p> 
+<pre><code class="prism language-c">HAL_StatusTypeDef <span class="token function">HAL_FLASH_Unlock</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>3.5. 锁定Flash（防止对Flash的非法访问或意外操作）</p> 
+<pre><code class="prism language-c">HAL_StatusTypeDef <span class="token function">HAL_FLASH_Lock</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span>
+</code></pre> 
+<p><strong>3.6. 开中断（操作完Flash之后，开启中断）</strong></p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">BSP_EnableIrq</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token function">__set_PRIMASK</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//打开中断</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>3.7. 关中断（操作Flash之前，需要关中断）</strong></p> 
+<pre><code class="prism language-c"><span class="token keyword">void</span> <span class="token function">BSP_DisableIrq</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token function">__set_PRIMASK</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//关闭中断</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="AppFlashflash_88"></a>五、要把App“烧写”在Flash的哪个地址呢，怎样确定地址？（flash地址规划）</h3> 
+<ol><li> <p>Flash相关知识<br> Flash的最小擦除单位是“page”。多个“page”组成“sector”。多个“sector”构成了整个flash的容量。<br> 注意flash操作背景知识：FLASH的写入地址必须是偶数</p> </li><li> <p>“是否有可用App”标志位<br> 根据前面介绍的bootloader启动原理，可知，我们需要一个“掉电不丢失”的储存区域来储存“芯片上是否有可用App的标志位”，从而支持bootloader在启动时候的逻辑判断。而芯片中掉电不丢失的部分就是Flash。因此在规划Flash的时候，除了Bootloader区域和App区域之外，还需要一个“标志位”区域。根据Flash的最小可擦除单位为“page”，其次Flash写数据之前，必须先擦除的约束可知。我们需要单独保留一个page来专门存放“标志位”。即便“标志位”只需使用1bit即可。但为了实现对Flash中的“标志位”随时读写的功能。我们只能用一整个page来储存“标志位”。</p> </li><li> <p>地址分配说明<br> <strong>3.1 举例所使用的芯片STM32L072KBUx对应的参数如下：</strong><br> Ultra-low-power ARM Cortex-M0+ MCU with 128-Kbytes Flash, 32 MHz CPU, USB<br> medium-density devices(128KB，1KB/page)<br> 从芯片手册可知，此芯片共有128k的Flash ，一页为1k，因此，本芯片共有128页，多个page组成的sector如下：<br> page0_31 //sector0<br> page32_63 //sector1<br> page64_95 //sector2<br> page96_127 //sector3<br> <strong>3.2 每一页的地址范围如下（地址以byte为单位）：</strong><br> page0:0 - 1023 //1k<br> page1:1024 - 2047 //1k<br> page2:2048 - 3071 //1k<br> page3:3072 - 4095 //1k<br> <strong>3.3 所用示例芯片“STM32L072KBUx”地址分配如下</strong><br> //total flash size : 128k 128page<br> //bootloader page_index : 0 ~ 30 31k<br> //bootloader_flag page_index : 31 1k<br> //app page_index : 32 ~ 127 96k<br> <strong>3.4 在代码中使用的 Flash相关宏定义</strong><br> #define STM32_FLASH_ONE_PAGE_BYTE 1024 //页大小<br> #define STM32_FLASH_PAGE_SIZE 128 <br> #define STM32_FLASH_BASE 0x08000000 //FLASH_BASE<br> #define FLASH_USER_APP_FLAG_START_ADDR (STM32_FLASH_BASE + STM32_FLASH_ONE_PAGE_BYTE * 31)<br> #define FLASH_USER_APP_START_ADDR (STM32_FLASH_BASE + STM32_FLASH_ONE_PAGE_BYTE * 32)<br> //计算后：FLASH_USER_APP_START_ADDR = 32768 = 0x8000， 也就是说0x8000就是在flash中存放app的起始地址<br> <strong>3.5 Flash中，任意一页的起始地址计算公式</strong><br> uint32_t addr = STM32_FLASH_BASE + StartPageIndex * STM32_FLASH_ONE_PAGE_BYTE;</p> </li></ol> 
+<h3><a id="IAP_126"></a>六、使用IAP“烧写”完程序之后，怎样运行程序呢？（见证奇迹的时候）</h3> 
+<ol><li> <p>STM32芯片启动原理<br> stm32的flash地址起始于0x08000000，结束地址是0x080000000加上芯片实际的flash大小，不同的芯片flash大小不同。RAM起始地址上0x200000000，结束地址是0x20000000加上芯片的RAM大小。<br> 我们一般烧写程序默认烧写在flash的0x08000000地址处。使用Iap的时候bootloader就是被烧写在0x08000000。<br> Stm32单片机上电后，从0x08000004取出复位中断的地址，并且跳转到复位中断程序，中断执行完之后,会把PC指针指向0x08000000，开始运行我们烧写在芯片地址0x08000000中的“程序”。</p> </li><li> <p>IAP中从Bootloader跳转到App的说明<br> 所以说，在IAP中，芯片上电先运行的是bootloader，并不会主动执行App。因此在bootloader确认有app可用的时候，需要一段代码来把当前PC指针指向App所在flash的地址。从而实现，跳转到App运行的效果。这也意味着完成了“bootloader”名副其实的工作内容。跳转代码示例如下：</p> </li></ol> 
+<pre><code class="prism language-c"><span class="token macro property">#<span class="token directive keyword">define</span> APPLICATION_ADDRESS        0x08008000</span>
+<span class="token keyword">typedef</span>  <span class="token keyword">void</span> <span class="token punctuation">(</span><span class="token operator">*</span>pFunction<span class="token punctuation">)</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token keyword">void</span> <span class="token function">APP_RunApp</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	pFunction appEntry<span class="token punctuation">;</span>
+	uint32_t appStack<span class="token punctuation">;</span>
+
+	<span class="token function">BSP_DisableIrq</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* Get the application stack pointer (First entry in the application vector table) */</span>
+	appStack <span class="token operator">=</span> <span class="token punctuation">(</span>uint32_t<span class="token punctuation">)</span> <span class="token operator">*</span><span class="token punctuation">(</span><span class="token punctuation">(</span>__IO uint32_t<span class="token operator">*</span><span class="token punctuation">)</span>APPLICATION_ADDRESS<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* Get the application entry point (Second entry in the application vector table) */</span>
+	appEntry <span class="token operator">=</span> <span class="token punctuation">(</span>pFunction<span class="token punctuation">)</span> <span class="token operator">*</span><span class="token punctuation">(</span>__IO uint32_t<span class="token operator">*</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>APPLICATION_ADDRESS <span class="token operator">+</span> <span class="token number">4</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* Reconfigure vector table offset register to match the application location */</span>
+	SCB<span class="token operator">-&gt;</span>VTOR <span class="token operator">=</span> APPLICATION_ADDRESS<span class="token punctuation">;</span>
+
+	<span class="token comment">/* Set the application stack pointer */</span>
+	<span class="token function">__set_MSP</span><span class="token punctuation">(</span>appStack<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token comment">/* Start the application */</span>
+	<span class="token function">appEntry</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<blockquote> 
+ <p>以上代码引用自：<br> How to develop and debug BOOTLOADER + APPLICATION systems on ARM Cortex-M devices<br> http://blog.atollic.com/how-to-develop-and-debug-bootloader-application-systems-on-arm-cortex-m-devices</p> 
+</blockquote>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/1251cc705bd5fcb4d051a2ef856c1497/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">13.3-“制作一款私有IAP串口下载小工具”之上位机软件设计说明（包含源码）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/84b6e6a4d2a8ca4d8c11133a5f6d0a20/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">fsevents@1.2.13: fsevents 1 will break on node v14&#43; and could be using insecure binaries. Upgrade to</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

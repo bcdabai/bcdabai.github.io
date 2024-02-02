@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Mysql必知必会之聚簇索引 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Mysql必知必会之聚簇索引" />
+<meta property="og:description" content="数据页数据存储 我们知道，我们插入表的数据其实最终都要持久化到磁盘上，InnoDB为了方便管理这些数据，提出了页的概念，它会将数据划分到多个页中，每个页大小默认是16KB，这个页我们可以称为数据页。当我们插入一条数据的时候，数据都会存在数据页中，如下图所示
+当数据不断地插入数据页中，数据会根据主键（没有的话会自动生成）的大小进行排序，形成一个单向链表
+单个数据页的数据查找 既然数据会存在数据页中，那么该如何从数据页中去查数据呢？假设现在需要在数据页中定位到id=2的这条记录的数据，如何快速定位？有一种笨办法就是从头开始顺着链表遍历就行了，判断id是不是等于2，如果等于2就取出数据就行了。虽然这种方法可行，但是如果一个数据页存储的数据多，几十或者是几百条数据，每次都这么遍历，不是太麻烦了所以mysql想了一个好办法，那就是给这些数据分组。假设数据页中存了12条数据，那么整个分组大致如下图所示
+为了方便，我这里只标出了id值，省略了其它字段的值。这里我假设每4条数据算一个组，图上就有3个组，组分好之后，mysql会取出每组中最大的id值，就是图中的4、8、12，放在一起，在数据页中找个位置存起来，这就是前面提到的数据页存储的额外信息之一，被称为页目录。假设此时要查询id=6的数据之后，此时只需要从页目录中根据二分查找，发现在4-8之间，由于4和8是他们所在分组的最大的id，那么id=6肯定在8那个分组中，之后就会到id=8的那个分组中，遍历每个数据，判断id是不是等于6即可。由于mysql规定每个组的数据条数大概为4~8条，所以肯定比遍历整个数据页的数据快的多。
+上面分组的情况实际上我做了一点简化，但是不耽误理解
+多个数据页中的数据查找 当我们不断的往表中插入数据的时候，数据占用空间就会不断变大，但是一个数据页的大小是一定的，当一个数据页存不下数据的时候，就会重新创建一个数据页来存储数据
+mysql为了区分每个页，会为每个数据页分配一个页号，存在额外信息的存储空间中，同时额外信息还会存储当前数据页的前一个和后一个数据页的位置，从而形成数据页之间的双向链表
+数据页2的页号就是2，数据页3的页号就是3，这里我为了方便理解，就直接写数据页几。并且mysql规定，前一个数据页的存储数据id的最大值要小于后一个数据页的存储数据id的最小值，这样就实现了数据在所有数据页中按照id的大小排序。
+现在，如果有多个数据页，当我们需要查找id=5的数据，怎么办呢？当然还是可以用上面的笨办法，那就是从第一个数据页开始遍历，然后遍历每个数据页中的数据，最终也可以找到id=5的数据。但是你仔细想想，这个笨办法就相当于全表扫描了呀，这肯定是不行的。那么怎么优化呢？mysql优化的思路其实跟前面单数据页查找数据的优化思路差不多它会将每个数据页中最小的id拿出来，单独放到另一个数据页中，这个数据页不存储我们实际插入的数据，只存储最小的id和这个id所在数据页的页号，如图所示
+为了图更加饱满，我加了一个存放数据的数据页4。此时数据页5就是抽取出来的，存放了下面三个存放数据的数据页的最小的id和对应的数据页号。如果此时查找id=5的数据就很方便了，大致分为以下几个步骤：
+从数据页5直接根据二分查找，发现在4-7之间由于4和7是所在数据页最小的id，那么此时id=5的数据必在id=4的数据页上(因为id=7的数据页最小的id就是7)，接下来就到id=4对应的数据页2的页号找到数据页2之后再根据前面提到的根据数据的主键id从单个数据页查找的流程查找数据 这样就实现了根据主键id到在多个数据页之间查找数据
+聚簇索引 随着数据量不断增多，存储数据的数据页不断变多，数据页5的数据就会越来越多，但是每个数据页默认就16k，所以数据页5也会分裂出多个数据页的情况，如下图
+数据页10的作用就跟数据页5是一样的。此时如还要查找id=5的数据，那么应该去数据页5进行二分查找呢还是去数据页10进行二分查找呢？笨办法就是遍历，但是真没必要，mysql会去抽取数据页5和数据页10存储的最小的数据的id和对应的数据页号，单独拎出来放到一个数据页中，如下图
+数据页11就是新抽取的数据页，存储了id=1和对应的数据页5的页号以及数id=10和对应的数据页10的页号。而这就是B&#43;树。一般来说，mysql数据库的B&#43;树一般三层就可以放下几千万条数据。
+此时查找id=5的数据，大致分为以下几个步骤：
+从数据页11根据二分查找定位到id=5对应数据页5再到数据页5根据id=5二分查找定位到数据页3再到数据页3根据id=5查找数据，具体的逻辑前面也提到很多次了 这样就能成功查找到数据了。而这种叶子节点存储实际插入的数据的B&#43;树就被称为聚簇索引，非叶子节点存储的就是记录的id和对应的数据页号。所以对于InnoDB存储引擎来说，数据本身就存储在一颗B&#43;树中。
+原文来自于三友的java日记" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/a529f020b17c3d5106b9dffe4dd9a492/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-06-04T10:52:56+08:00" />
+<meta property="article:modified_time" content="2023-06-04T10:52:56+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Mysql必知必会之聚簇索引</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2>数据页数据存储</h2> 
+<p>我们知道，我们插入表的数据其实最终都要持久化到磁盘上，InnoDB为了方便管理这些数据，提出了<strong>页</strong>的概念，它会将数据划分到多个页中，每个页大小默认是16KB，这个页我们可以称为数据页。当我们插入一条数据的时候，数据都会存在数据页中，如下图所示</p> 
+<p class="img-center"><img alt="" height="178" src="https://images2.imgbox.com/5d/98/3pxhF2Cl_o.png" width="200"></p> 
+<p>当数据不断地插入数据页中，数据会根据主键（没有的话会自动生成）的大小进行排序，形成一个单向链表</p> 
+<p class="img-center"><img alt="" height="153" src="https://images2.imgbox.com/7d/74/G6Hn1Ql3_o.png" width="200"></p> 
+<h3>单个数据页的数据查找</h3> 
+<p>既然数据会存在数据页中，那么该如何从数据页中去查数据呢？假设现在需要在数据页中定位到id=2的这条记录的数据，如何快速定位？有一种笨办法就是从头开始顺着链表遍历就行了，判断id是不是等于2，如果等于2就取出数据就行了。虽然这种方法可行，但是如果一个数据页存储的数据多，几十或者是几百条数据，每次都这么遍历，不是太麻烦了所以mysql想了一个好办法，那就是给这些数据分组。假设数据页中存了12条数据，那么整个分组大致如下图所示</p> 
+<p class="img-center"><img alt="" height="125" src="https://images2.imgbox.com/37/2e/3eQEziJ0_o.png" width="400"></p> 
+<p>为了方便，我这里只标出了id值，省略了其它字段的值。这里我假设每4条数据算一个组，图上就有3个组，组分好之后，mysql会取出每组中最大的id值，就是图中的4、8、12，放在一起，在数据页中找个位置存起来，这就是前面提到的数据页存储的额外信息之一，被称为页目录。假设此时要查询id=6的数据之后，此时只需要从页目录中根据二分查找，发现在4-8之间，由于4和8是他们所在分组的最大的id，那么id=6肯定在8那个分组中，之后就会到id=8的那个分组中，遍历每个数据，判断id是不是等于6即可。由于mysql规定每个组的数据条数大概为4~8条，所以肯定比遍历整个数据页的数据快的多。</p> 
+<blockquote> 
+ <p>上面分组的情况实际上我做了一点简化，但是不耽误理解</p> 
+</blockquote> 
+<h3>多个数据页中的数据查找</h3> 
+<p>当我们不断的往表中插入数据的时候，数据占用空间就会不断变大，但是一个数据页的大小是一定的，当一个数据页存不下数据的时候，就会重新创建一个数据页来存储数据</p> 
+<p class="img-center"><img alt="" height="140" src="https://images2.imgbox.com/cb/f7/Lp88rwFp_o.png" width="400"></p> 
+<p>mysql为了区分每个页，会为每个数据页分配一个页号，存在额外信息的存储空间中，同时额外信息还会存储当前数据页的前一个和后一个数据页的位置，从而形成数据页之间的双向链表</p> 
+<p class="img-center"><img alt="" height="129" src="https://images2.imgbox.com/ef/0f/sEhdk4HE_o.png" width="400"></p> 
+<p>数据页2的页号就是2，数据页3的页号就是3，这里我为了方便理解，就直接写数据页几。并且mysql规定，前一个数据页的存储数据id的最大值要小于后一个数据页的存储数据id的最小值，这样就实现了数据在所有数据页中按照id的大小排序。</p> 
+<p>现在，如果有多个数据页，当我们需要查找id=5的数据，怎么办呢？当然还是可以用上面的笨办法，那就是从第一个数据页开始遍历，然后遍历每个数据页中的数据，最终也可以找到id=5的数据。但是你仔细想想，这个笨办法就相当于全表扫描了呀，这肯定是不行的。那么怎么优化呢？mysql优化的思路其实跟前面单数据页查找数据的优化思路差不多它会将每个数据页中最小的id拿出来，单独放到另一个数据页中，这个数据页不存储我们实际插入的数据，只存储最小的id和这个id所在数据页的页号，如图所示</p> 
+<p class="img-center"><img alt="" height="253" src="https://images2.imgbox.com/48/d3/sozhEFxq_o.png" width="500"></p> 
+<p>为了图更加饱满，我加了一个存放数据的数据页4。此时数据页5就是抽取出来的，存放了下面三个存放数据的数据页的最小的id和对应的数据页号。如果此时查找id=5的数据就很方便了，大致分为以下几个步骤：</p> 
+<ul><li>从数据页5直接根据二分查找，发现在4-7之间</li><li>由于4和7是所在数据页最小的id，那么此时id=5的数据必在id=4的数据页上(因为id=7的数据页最小的id就是7)，</li><li>接下来就到id=4对应的数据页2的页号找到数据页2</li><li>之后再根据前面提到的根据数据的主键id从单个数据页查找的流程查找数据</li></ul> 
+<p>这样就实现了根据主键id到在多个数据页之间查找数据</p> 
+<h2>聚簇索引</h2> 
+<p>随着数据量不断增多，存储数据的数据页不断变多，数据页5的数据就会越来越多，但是每个数据页默认就16k，所以数据页5也会分裂出多个数据页的情况，如下图</p> 
+<p class="img-center"><img alt="" height="186" src="https://images2.imgbox.com/27/2a/6gDyeolt_o.png" width="700"></p> 
+<p>数据页10的作用就跟数据页5是一样的。此时如还要查找id=5的数据，那么应该去数据页5进行二分查找呢还是去数据页10进行二分查找呢？笨办法就是遍历，但是真没必要，mysql会去抽取数据页5和数据页10存储的最小的数据的id和对应的数据页号，单独拎出来放到一个数据页中，如下图</p> 
+<p class="img-center"><img alt="" height="356" src="https://images2.imgbox.com/2d/47/B86vhsbE_o.png" width="800"></p> 
+<p>数据页11就是新抽取的数据页，存储了id=1和对应的数据页5的页号以及数id=10和对应的数据页10的页号。而这就是<strong>B+树</strong>。一般来说，mysql数据库的B+树一般三层就可以放下几千万条数据。</p> 
+<p>此时查找id=5的数据，大致分为以下几个步骤：</p> 
+<ul><li>从数据页11根据二分查找定位到id=5对应数据页5</li><li>再到数据页5根据id=5二分查找定位到数据页3</li><li>再到数据页3根据id=5查找数据，具体的逻辑前面也提到很多次了</li></ul> 
+<p>这样就能成功查找到数据了。而这种叶子节点存储实际插入的数据的B+树就被称为聚簇索引，非叶子节点存储的就是记录的id和对应的数据页号。所以对于InnoDB存储引擎来说，数据本身就存储在一颗B+树中。</p> 
+<p><strong>原文来自于三友的java日记</strong></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f8cd21596b37893f0b1d12f8d2be52eb/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">​Linux开源存储漫谈（3）Linux-IO iSCSI Target vs NFS</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/c21d252e85f4164be5ccab47645bc69d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">2023林科大涉外频蓝Python比赛总决赛</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

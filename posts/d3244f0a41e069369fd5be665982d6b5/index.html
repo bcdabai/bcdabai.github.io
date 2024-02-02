@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>java通过TCP实现HL7医疗系统传输协议 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="java通过TCP实现HL7医疗系统传输协议" />
+<meta property="og:description" content="环境 开发：java、maven、HAPI、socket、IDEA
+测试工具：HAPI testPanel 2.0.1、7Edit
+问题记录 句段头不对应导致的读取异常 使用测试工具交互正常
+客户端（测试工具）
+服务端
+连接仪器出现以下问题
+客户端 操作历史结果传输（日志）
+服务端 接收消息异常
+原因： 如上图，抛出异常为大意为 违反MLLP协议-预期字节“11”处于START状态，但为“239”。
+刚开始思路不清晰，以为是自己本地版本或者编码的问题，一顿搞，中间问了对方工程师，也以为是版本问题，刚好对方有个中间件版本需要更新，以为是这个原因，结果更新完一试，还是这样。
+后来觉着自己对HL7协议还是太不熟悉了，太着急上来就开始搞功能了，于是沉下心有好好熟悉了一下HL7协议的内容。又仔细看了仪器客户端的日志，发现发送的消息前后都有一个字符 展示出来为 如下图的样子：
+了解过HL7底层协议的都知道，这两个字符是为了确定消息边界，我称之为句块头、句块尾，各占一个字节，所以千万不要给它认成字符串，类似的还有（相当于回车或换行），
+对应的ASC
+VT对应句段头，对应的句段头是11，但是怎么会出来个239呢。查自付码表也没有查出来是个什么东西，那么这个239到底是是什么，从哪里来的呢？
+可以确定的是，这个239是读取客户端发送过来的信息时候读出来的。这里与客户端交互使用的是第三方的工具包HAPI，通过查看源码可以看出来，HAPI是通过socket与客户端通信的：
+关于socket的内容可以自行问度娘，这里不做重点讲解.根据HAPI和仪器与服务端的交互逻辑可以知道，这里使用的是一种面向连接套接字【也成为流格式套接字（Stream Sockets）】。流格式套接字的内部有一个缓冲区（也就是字符数组），通过 socket 传输的数据将保存到这个缓冲区。接收端在收到数据后并不一定立即读取，只要数据不超过缓冲区的容量，接收端有可能在缓冲区被填满以后一次性地读取，也可能分成好几次读取。
+也就是说服务端在读取数据的时候会不会是根据自己的设定，并不是一次读一个字符，从而导致判定句段头的时候出错？因为在HAPI TestPanel（HAPI此时工具）中是可以正常读取仪器客户端传送过来的消息的，所以接着扒拉源码…
+下图可以看出，HAPI中支持的句段头确实是11，且不是11的时候就会抛出异常，这也正是 违反MLLP协议-预期字节“11”处于START状态，但为“239”异常的原因。
+这里大胆猜一下，会不会是仪器客户端 传过来的句段头虽然在文本编辑器中展示的是[VT]，但是它对饮的字节码并不是11？由于没有权限直接进入系统查看仪器的日志，那就用socket自己写了一个服务端，去灵活读取客户端传输过来的信息。服务端代码不贴了就，HL7官方也有对应的demo: java socket 实现HL7服务端 将输入流读取为字符串
+*
+通过对传输信息的逐个读取，断点调试发现开始读取的时候有空格和特殊字符（乱码），使用测试工具则没有。判定仪器客户端与测试工具客户端传输的规范不一致。这种方式能读取到仪器客户端的内容入下： 进一步确认
+偶然发现，向日葵（远程工具）可以通过远程文件跳过仪器的检测系统读取到系统文件，方便了我查看仪器客户端的日志。通过系统日志可以看到，当服务端端使用HAPI 的时候直接抛出异常被客户端接收，连接断开，客户端进行重试，客户端一共进行了五次重试：
+客户端发送的内容为：
+目测没有问题，那服务端接收到的空格和乱码怎么解释？当我把日志中的内容复制到文本编辑器的时候展示为：
+可以发现[VT]和[FS]在文本编辑器中不可见，且开头多出一个不能识别的字符。将客户端发送得消息在粘贴到IDEA看一下：
+通过ASC码表知道，正常的[VT]对应的应该是\u000B,这里多出来的不可见字符\uFEFF应该就是读取字段头时候导致239的原因。基于自己的socket服务读取到的句段头字符码是239，因此将句段头改为239后成功读取到仪器客户端发送过来的内容 MSH|^~\\&amp;|||||20220707133720||ORU^R01|1|P|2.3.1||||0||UTF-8 &#34;PID|1|||||||F &#34;OBR|1||1||N|20220622170125|20220622173444||1|1005^1^1||||20220622170125|Serum||||||||||Finished &#34;OBX|1|NM|1|PGⅠ|23.52|ng/mL|-||||F||587367||||0||||2112055C:427 响应客户端 按照规范，服务端接收到消息后应该返回一个ACK格式的MSG，且携带客户端发送信息的ID。消息体也应该包裹在句段头和句段尾之间。官方给出的示例：
+示例中将句段头.尾等格式相关的字符设置为了常量，即保持请求跟响应的格式一致。
+但是在与仪器客户端的信息交互中，客户端依然提示失败，查看日志并跟工程师沟通，结论为客户端没有收到响应。
+汲取之前的教训，将句段头改为正常的格式，再次测试，客户端收到响应并提示操作成功
+至此，仪器客户端与服务端信息交互实现。接下来是解析和拼装HL7信息。
+参考：
+https://saravanansubramanian.com/hl72xjavaprogramming/#step-2-of-8—build-a-simple-tcpip-server-capable-of-receiving-and-echo-ing-of-received-information
+https://hapifhir.github.io/hapi-hl7v2/hapi-hl7overhttp/apidocs/index.html
+https://blog.csdn.net/weixin_45004203/article/details/125360186
+https://hapifhir.github.io/hapi-hl7v2/hapi-testpanel/index.html" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/d3244f0a41e069369fd5be665982d6b5/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-07-11T10:53:56+08:00" />
+<meta property="article:modified_time" content="2022-07-11T10:53:56+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">java通过TCP实现HL7医疗系统传输协议</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h4><a id="_0"></a>环境</h4> 
+<p>开发：java、maven、HAPI、socket、IDEA<br> 测试工具：HAPI testPanel 2.0.1、7Edit</p> 
+<h4><a id="_5"></a>问题记录</h4> 
+<h5><a id="_6"></a>句段头不对应导致的读取异常</h5> 
+<ul><li>使用测试工具交互正常<br> 客户端（测试工具）<br> <img src="https://images2.imgbox.com/ab/78/zX7yiqkr_o.png" alt="在这里插入图片描述">服务端<br> <img src="https://images2.imgbox.com/5d/38/rKnvAUCY_o.png" alt="在这里插入图片描述"></li><li>连接仪器出现以下问题<br> 客户端 操作历史结果传输（日志）<br> <img src="https://images2.imgbox.com/ae/8c/bw2I7aZL_o.png" alt="在这里插入图片描述"></li></ul> 
+<p>服务端 接收消息异常<br> <img src="https://images2.imgbox.com/b5/9f/SEH5WID1_o.png" alt="在这里插入图片描述"></p> 
+<h6><a id="_17"></a>原因：</h6> 
+<p>如上图，抛出异常为大意为 <code>违反MLLP协议-预期字节“11”处于START状态，但为“239”</code>。<br> 刚开始思路不清晰，以为是自己本地版本或者编码的问题，一顿搞，中间问了对方工程师，也以为是版本问题，刚好对方有个中间件版本需要更新，以为是这个原因，结果更新完一试，还是这样。<br> 后来觉着自己对HL7协议还是太不熟悉了，太着急上来就开始搞功能了，于是沉下心有好好熟悉了一下HL7协议的内容。又仔细看了仪器客户端的日志，发现发送的消息前后都有一个字符 展示出来为 如下图的样子：<br> <img src="https://images2.imgbox.com/d1/7b/mlsSc2Fl_o.png" alt="在这里插入图片描述"><br> 了解过HL7底层协议的都知道，这两个字符是为了确定消息边界，我称之为句块头、句块尾，各占一个字节，所以千万不要给它认成字符串，类似的还有（相当于回车或换行），</p> 
+<p>对应的ASC<br> <img src="https://images2.imgbox.com/49/b9/kO8uM39X_o.png" alt="在这里插入图片描述"><br> VT对应句段头，对应的句段头是11，但是怎么会出来个239呢。查自付码表也没有查出来是个什么东西，那么这个239到底是是什么，从哪里来的呢？</p> 
+<ol><li>可以确定的是，这个239是读取客户端发送过来的信息时候读出来的。这里与客户端交互使用的是第三方的工具包HAPI，通过查看源码可以看出来，HAPI是通过socket与客户端通信的：<br> <img src="https://images2.imgbox.com/0f/e7/O50UYZSE_o.png" alt="package ca.uhn.hl7v2.app.SimpleServer"><br> <img src="https://images2.imgbox.com/d4/fd/LSaC1rMG_o.png" alt="在这里插入图片描述"><br> 关于socket的内容可以自行问度娘，这里不做重点讲解.</li><li>根据HAPI和仪器与服务端的交互逻辑可以知道，这里使用的是一种面向连接套接字【也成为流格式套接字（Stream Sockets）】。流格式套接字的内部有一个缓冲区（也就是字符数组），通过 socket 传输的数据将保存到这个缓冲区。接收端在收到数据后并不一定立即读取，只要数据不超过缓冲区的容量，接收端有可能在缓冲区被填满以后一次性地读取，也可能分成好几次读取。<br> 也就是说服务端在读取数据的时候会不会是根据自己的设定，并不是一次读一个字符，从而导致判定句段头的时候出错？因为在HAPI TestPanel（HAPI此时工具）中是可以正常读取仪器客户端传送过来的消息的，所以接着扒拉源码…<br> 下图可以看出，HAPI中支持的句段头确实是11，且不是11的时候就会抛出异常，这也正是 <code>违反MLLP协议-预期字节“11”处于START状态，但为“239”</code>异常的原因。<br> <img src="https://images2.imgbox.com/b6/5d/hl7N1DbE_o.png" alt="在这里插入图片描述"></li><li>这里大胆猜一下，会不会是仪器客户端 传过来的句段头虽然在文本编辑器中展示的是[VT]，但是它对饮的字节码并不是11？由于没有权限直接进入系统查看仪器的日志，那就用socket自己写了一个服务端，去灵活读取客户端传输过来的信息。服务端代码不贴了就，HL7官方也有对应的demo: <a href="https://saravanansubramanian.com/hl72xjavaprogramming/#step-2-of-8---build-a-simple-tcpip-server-capable-of-receiving-and-echo-ing-of-received-information" rel="nofollow">java socket 实现HL7服务端</a></li></ol> 
+<ul><li>将输入流读取为字符串<br> *<img src="https://images2.imgbox.com/a8/50/wYXMVMIZ_o.png" alt="在这里插入图片描述"><br> 通过对传输信息的逐个读取，断点调试发现开始读取的时候有空格和特殊字符（乱码），使用测试工具则没有。判定仪器客户端与测试工具客户端传输的规范不一致。这种方式能读取到仪器客户端的内容入下：</li></ul> 
+<ol start="4"><li>进一步确认<br> 偶然发现，向日葵（远程工具）可以通过远程文件跳过仪器的检测系统读取到系统文件，方便了我查看仪器客户端的日志。通过系统日志可以看到，当服务端端使用HAPI 的时候直接抛出异常被客户端接收，连接断开，客户端进行重试，客户端一共进行了五次重试：<br> <img src="https://images2.imgbox.com/0e/dc/EJTHXGNO_o.png" alt="在这里插入图片描述"><br> 客户端发送的内容为：<br> <img src="https://images2.imgbox.com/8e/b1/vu8AtyLS_o.png" alt="在这里插入图片描述"><br> 目测没有问题，那服务端接收到的空格和乱码怎么解释？当我把日志中的内容复制到文本编辑器的时候展示为：<br> <img src="https://images2.imgbox.com/78/04/ar5AdiH8_o.png" alt="在这里插入图片描述"><br> 可以发现[VT]和[FS]在文本编辑器中不可见，且开头多出一个不能识别的字符。将客户端发送得消息在粘贴到IDEA看一下：<br> <img src="https://images2.imgbox.com/9d/65/Az0dMWWF_o.png" alt="在这里插入图片描述"><br> 通过ASC码表知道，正常的[VT]对应的应该是<code>\u000B</code>,这里多出来的不可见字符<code>\uFEFF</code>应该就是读取字段头时候导致239的原因。</li><li>基于自己的socket服务读取到的句段头字符码是239，因此将句段头改为239后成功读取到仪器客户端发送过来的内容</li></ol> 
+<pre><code class="prism language-java">MSH<span class="token operator">|</span><span class="token operator">^</span><span class="token operator">~</span>\\<span class="token operator">&amp;</span><span class="token operator">||</span><span class="token operator">||</span><span class="token operator">|</span><span class="token number">20220707133720</span><span class="token operator">||</span>ORU<span class="token operator">^</span>R01<span class="token operator">|</span><span class="token number">1</span><span class="token operator">|</span><span class="token class-name">P</span><span class="token operator">|</span><span class="token number">2.3</span><span class="token number">.1</span><span class="token operator">||</span><span class="token operator">||</span><span class="token number">0</span><span class="token operator">||</span>UTF<span class="token operator">-</span><span class="token number">8</span>
+"PID<span class="token operator">|</span><span class="token number">1</span><span class="token operator">||</span><span class="token operator">||</span><span class="token operator">||</span><span class="token operator">|</span><span class="token class-name">F</span>
+"OBR<span class="token operator">|</span><span class="token number">1</span><span class="token operator">||</span><span class="token number">1</span><span class="token operator">||</span><span class="token class-name">N</span><span class="token operator">|</span><span class="token number">20220622170125</span><span class="token operator">|</span><span class="token number">20220622173444</span><span class="token operator">||</span><span class="token number">1</span><span class="token operator">|</span><span class="token number">1005</span><span class="token operator">^</span><span class="token number">1</span><span class="token operator">^</span><span class="token number">1</span><span class="token operator">||</span><span class="token operator">||</span><span class="token number">20220622170125</span><span class="token operator">|</span><span class="token class-name">Serum</span><span class="token operator">||</span><span class="token operator">||</span><span class="token operator">||</span><span class="token operator">||</span><span class="token operator">||</span><span class="token class-name">Finished</span>
+"OBX<span class="token operator">|</span><span class="token number">1</span><span class="token operator">|</span>NM<span class="token operator">|</span><span class="token number">1</span><span class="token operator">|</span>PGⅠ<span class="token operator">|</span><span class="token number">23.52</span><span class="token operator">|</span>ng<span class="token operator">/</span>mL<span class="token operator">|</span><span class="token operator">-</span><span class="token operator">||</span><span class="token operator">||</span><span class="token class-name">F</span><span class="token operator">||</span><span class="token number">587367</span><span class="token operator">||</span><span class="token operator">||</span><span class="token number">0</span><span class="token operator">||</span><span class="token operator">||</span><span class="token number">2112055</span>C<span class="token operator">:</span><span class="token number">427</span>
+</code></pre> 
+<h5><a id="_59"></a>响应客户端</h5> 
+<p>按照规范，服务端接收到消息后应该返回一个ACK格式的MSG，且携带客户端发送信息的ID。消息体也应该包裹在句段头和句段尾之间。官方给出的示例：</p> 
+<p><img src="https://images2.imgbox.com/d5/3b/FRxUADaV_o.png" alt="在这里插入图片描述"><br> 示例中将句段头.尾等格式相关的字符设置为了常量，即保持请求跟响应的格式一致。<br> 但是在与仪器客户端的信息交互中，客户端依然提示失败，查看日志并跟工程师沟通，结论为客户端没有收到响应。<br> 汲取之前的教训，将句段头改为正常的格式，再次测试，客户端收到响应并提示操作成功<br> 至此，仪器客户端与服务端信息交互实现。接下来是解析和拼装HL7信息。</p> 
+<p>参考：<br> <a href="https://saravanansubramanian.com/hl72xjavaprogramming/#step-2-of-8---build-a-simple-tcpip-server-capable-of-receiving-and-echo-ing-of-received-information" rel="nofollow">https://saravanansubramanian.com/hl72xjavaprogramming/#step-2-of-8—build-a-simple-tcpip-server-capable-of-receiving-and-echo-ing-of-received-information</a><br> <a href="https://hapifhir.github.io/hapi-hl7v2/hapi-hl7overhttp/apidocs/index.html" rel="nofollow">https://hapifhir.github.io/hapi-hl7v2/hapi-hl7overhttp/apidocs/index.html</a><br> <a href="https://blog.csdn.net/weixin_45004203/article/details/125360186">https://blog.csdn.net/weixin_45004203/article/details/125360186</a><br> <a href="https://hapifhir.github.io/hapi-hl7v2/hapi-testpanel/index.html" rel="nofollow">https://hapifhir.github.io/hapi-hl7v2/hapi-testpanel/index.html</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/44e808b426907a5c1336129f41c504e0/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">从树莓派系统安装小白到系统SD卡复制克隆高手</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e655efb8f20e0cd18b52109160ad319d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">详细解读：MIT经典的语义分割数据集ADE20K，附下载链接</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

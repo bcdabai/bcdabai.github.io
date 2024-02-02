@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Android Framework 包管理子系统（06）解读installd - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Android Framework 包管理子系统（06）解读installd" />
+<meta property="og:description" content="该系列文章总纲链接：专题分纲目录 Android Framework 包管理子系统
+本章关键点总结 &amp; 说明： 导图是不断迭代的，这里主要关注➕installd部分。主要对installd守护进程进行分析，从main函数开始，主要解读了权限变更和部分命令（install、patchoat、movefiles）的解析流程。
+1 installd启动分析
+前面对PkgMS构造函数分析时介绍过一个Installer类型的对象mInstaller，它通过socket和后台服务installd交互，以完成一些重要操作。installd是一个native进程，其功能就是启动一个socket，然后处理来自Installer的命令，在init.rc中定义如下：
+service installd /system/bin/installd class main socket installd stream 600 system system 在android安装、卸载、优化应用，创建/删除数据文件等操作都是由Intsalld来完成，那为什么不在PkgMS中做呢？因为PkgMS所属SystemServer进程，属于system用户组，没有root权限，而在文件系统中创建和删除文件都需要root权限，因此这里用installd来作为最后一步工作(后面会说明为什么installd用户组是install，却可以执行root操作)
+1.1 installd核心main分析
+主函数代码如下：
+int main(const int argc, const char *argv[]) { char buf[BUFFER_MAX]; struct sockaddr addr; socklen_t alen; int lsocket, s, count; int selinux_enabled = (is_selinux_enabled() &gt; 0); union selinux_callback cb; cb.func_log = log_callback; //SELINUX设置相关 selinux_set_callback(SELINUX_CB_LOG, cb); if (initialize_globals() &lt; 0) {//初始化全局变量，安装应用需要的目录名 exit(1); } if (initialize_directories() &lt; 0) {//初始化系统目录，创建所有用户的安装目录 exit(1); } if (selinux_enabled &amp;&amp; selinux_status_open(true) &lt; 0) { exit(1); } drop_privileges();//更改installd进程权限 //开始创建并监听本地socket lsocket = android_get_control_socket(SOCKET_PATH); if (lsocket &lt; 0) { exit(1); } if (listen(lsocket, 5)) { exit(1); } fcntl(lsocket, F_SETFD, FD_CLOEXEC); //处理请求 for (;;) { alen = sizeof(addr); s = accept(lsocket, &amp;addr, &amp;alen); if (s &lt; 0) { continue; } fcntl(s, F_SETFD, FD_CLOEXEC); for (;;) { unsigned short count; if (readx(s, &amp;count, sizeof(count))) {//读取命令 break; } if ((count &lt; 1) || (count &gt;= BUFFER_MAX)) {); break; } if (readx(s, buf, count)) { break; } buf[count] = 0; if (selinux_enabled &amp;&amp; selinux_status_updated() &gt; 0) { selinux_android_seapp_context_reload(); } if (execute(s, buf)) break;//执行命令 } close(s); } return 0; } 1." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/92829a3f96c3874e5f8fef49477c99bf/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-07-18T20:21:00+08:00" />
+<meta property="article:modified_time" content="2019-07-18T20:21:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Android Framework 包管理子系统（06）解读installd</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>该系列文章总纲链接：<a href="https://blog.csdn.net/vviccc/article/details/104195000">专题分纲目录 Android Framework 包管理子系统</a></p> 
+<hr> 
+<h3>本章关键点总结 &amp; 说明：</h3> 
+<p style="text-align:center;"><img alt="" class="has" height="326" src="https://images2.imgbox.com/b8/0a/1GYIWY2T_o.png" width="600"></p> 
+<p>导图是不断迭代的，这里主要关注➕installd部分。主要对installd守护进程进行分析，从main函数开始，主要解读了权限变更和部分命令（install、patchoat、movefiles）的解析流程。</p> 
+<p><strong>1 installd启动分析</strong></p> 
+<p>前面对PkgMS构造函数分析时介绍过一个Installer类型的对象mInstaller，它通过socket和后台服务installd交互，以完成一些重要操作。installd是一个native进程，其功能就是启动一个socket，然后处理来自Installer的命令，在init.rc中定义如下：</p> 
+<pre class="has"><code class="language-bash">service installd /system/bin/installd
+    class main
+    socket installd stream 600 system system</code></pre> 
+<p>在android安装、卸载、优化应用，创建/删除数据文件等操作都是由Intsalld来完成，那为什么不在PkgMS中做呢？因为PkgMS所属SystemServer进程，属于system用户组，没有root权限，而在文件系统中创建和删除文件都需要root权限，因此这里用installd来作为最后一步工作(后面会说明为什么installd用户组是install，却可以执行root操作)</p> 
+<p><strong>1.1 installd核心main分析</strong></p> 
+<p>主函数代码如下：</p> 
+<pre class="has"><code class="language-cpp">int main(const int argc, const char *argv[]) {
+    char buf[BUFFER_MAX];
+    struct sockaddr addr;
+    socklen_t alen;
+    int lsocket, s, count;
+    int selinux_enabled = (is_selinux_enabled() &gt; 0);
+    union selinux_callback cb;
+    cb.func_log = log_callback;
+    //SELINUX设置相关
+    selinux_set_callback(SELINUX_CB_LOG, cb);
+
+    if (initialize_globals() &lt; 0) {//初始化全局变量，安装应用需要的目录名
+        exit(1);
+    }
+    if (initialize_directories() &lt; 0) {//初始化系统目录，创建所有用户的安装目录
+        exit(1);
+    }
+    if (selinux_enabled &amp;&amp; selinux_status_open(true) &lt; 0) {
+        exit(1);
+    }
+    drop_privileges();//更改installd进程权限
+    //开始创建并监听本地socket
+    lsocket = android_get_control_socket(SOCKET_PATH);
+    if (lsocket &lt; 0) {
+        exit(1);
+    }
+    if (listen(lsocket, 5)) {
+        exit(1);
+    }
+    fcntl(lsocket, F_SETFD, FD_CLOEXEC);
+    //处理请求
+    for (;;) {
+        alen = sizeof(addr);
+        s = accept(lsocket, &amp;addr, &amp;alen);
+        if (s &lt; 0) {
+            continue;
+        }
+        fcntl(s, F_SETFD, FD_CLOEXEC);
+        for (;;) {
+            unsigned short count;
+            if (readx(s, &amp;count, sizeof(count))) {//读取命令
+                break;
+            }
+            if ((count &lt; 1) || (count &gt;= BUFFER_MAX)) {);
+                break;
+            }
+            if (readx(s, buf, count)) {
+                break;
+            }
+            buf[count] = 0;
+            if (selinux_enabled &amp;&amp; selinux_status_updated() &gt; 0) {
+                selinux_android_seapp_context_reload();
+            }
+            if (execute(s, buf)) break;//执行命令
+        }
+        close(s);
+    }
+    return 0;
+}</code></pre> 
+<p><strong>1.2 变更进程权限</strong></p> 
+<p>drop_privileges的代码实现如下：</p> 
+<pre class="has"><code class="language-cpp">static void drop_privileges() {
+    //保留进程的权限
+    if (prctl(PR_SET_KEEPCAPS, 1) &lt; 0) {
+        ALOGE("prctl(PR_SET_KEEPCAPS) failed: %s\n", strerror(errno));
+        exit(1);
+    }
+
+    if (setgid(AID_INSTALL) &lt; 0) {//设置gid为install
+        ALOGE("setgid() can't drop privileges; exiting.\n");
+        exit(1);
+    }
+
+    if (setuid(AID_INSTALL) &lt; 0) {//设置uid为install
+        ALOGE("setuid() can't drop privileges; exiting.\n");
+        exit(1);
+    }
+
+    struct __user_cap_header_struct capheader;
+    struct __user_cap_data_struct capdata[2];
+    memset(&amp;capheader, 0, sizeof(capheader));
+    memset(&amp;capdata, 0, sizeof(capdata));
+    capheader.version = _LINUX_CAPABILITY_VERSION_3;
+    capheader.pid = 0;
+
+    capdata[CAP_TO_INDEX(CAP_DAC_OVERRIDE)].permitted |= CAP_TO_MASK(CAP_DAC_OVERRIDE);
+    capdata[CAP_TO_INDEX(CAP_CHOWN)].permitted        |= CAP_TO_MASK(CAP_CHOWN);
+    capdata[CAP_TO_INDEX(CAP_SETUID)].permitted       |= CAP_TO_MASK(CAP_SETUID);
+    capdata[CAP_TO_INDEX(CAP_SETGID)].permitted       |= CAP_TO_MASK(CAP_SETGID);
+    capdata[CAP_TO_INDEX(CAP_FOWNER)].permitted       |= CAP_TO_MASK(CAP_FOWNER);
+
+    capdata[0].effective = capdata[0].permitted;
+    capdata[1].effective = capdata[1].permitted;
+    capdata[0].inheritable = 0;
+    capdata[1].inheritable = 0;
+
+    if (capset(&amp;capheader, &amp;capdata[0]) &lt; 0) {//设置进程的权限
+        exit(1);
+    }
+}
+</code></pre> 
+<p>这里使用了prctl方法来保留了进程的能力，这里首先对进程能力做一个简单概述，如下：</p> 
+<p><span style="color:#3399ea;">从Linux内核2.1版开始,Linux内核有了能力(capability)的概念,打破了UNIX/LINUX操作系统中超级用户/普通用户的概念,由普通用户也可以做只有超级用户可以完成的工作.每个进程有三个和能力有关的位图:inheritable(I),permitted(P)和effective(E),对应进程描述符task_struct(include/linux/sched.h)里面的cap_effective, cap_inheritable, cap_permitted,所以我们可以查看/proc/PID/status来查看进程的能力，能力解读如下：</span></p> 
+<ol><li><span style="color:#3399ea;">cap_effective:当一个进程要进行某个特权操作时,操作系统会检查cap_effective的对应位是否有效,而不再是检查进程的有效UID是否为0.例如，一个进程要设置系统的时钟,Linux的内核就会检查cap_effective的CAP_SYS_TIME位(第25位)是否有效。</span></li><li><span style="color:#3399ea;">cap_permitted:表示进程能够使用的能力,在cap_permitted中可以包含cap_effective中没有的能力，这些能力是被进程自己临时放弃的,也可以说cap_effective是cap_permitted的一个子集。</span></li><li><span style="color:#3399ea;">cap_inheritable:表示能够被当前进程执行的程序继承的能力。</span></li></ol> 
+<p>因此在drop_privileges函数中，虽然uid和gid都发生了变化，但进程依然保存了5种能力：CAP_DAC_OVERRIDE、CAP_CHOWN、CAP_SETUID、CAP_SETGID、CAP_FOWNER，有了这些能力，即便没有root也能够完成安装过程。</p> 
+<p><strong>2 installd命令支持与解读</strong></p> 
+<p>installd支持的命令及参数信息都保存在数据结构cmds中，代码如下：</p> 
+<pre class="has"><code class="language-cpp">struct cmdinfo cmds[] = {//第二个变量是参数个数，第三个参数是命令响应函数
+    { "ping",                 0, do_ping },
+    { "install",              4, do_install },
+    { "dexopt",               6, do_dexopt },
+    { "markbootcomplete",     1, do_mark_boot_complete },
+    { "movedex",              3, do_move_dex },
+    { "rmdex",                2, do_rm_dex },
+    { "remove",               2, do_remove },
+    { "rename",               2, do_rename },
+    { "fixuid",               3, do_fixuid },
+    { "freecache",            1, do_free_cache },
+    { "rmcache",              2, do_rm_cache },
+    { "rmcodecache",          2, do_rm_code_cache },
+    { "getsize",              7, do_get_size },
+    { "rmuserdata",           2, do_rm_user_data },
+    { "movefiles",            0, do_movefiles },
+    { "linklib",              3, do_linklib },
+    { "mkuserdata",           4, do_mk_user_data },
+    { "mkuserconfig",         1, do_mk_user_config },
+    { "rmuser",               1, do_rm_user },
+    { "idmap",                3, do_idmap },
+    { "restorecondata",       3, do_restorecon_data },
+    { "patchoat",             5, do_patchoat },
+};</code></pre> 
+<p>这里每一个命令对应一个处理函数。接下来分别对一些常见的命令进行简要的解读。</p> 
+<p><strong>2.1 install命令</strong></p> 
+<p>处理函数如下：</p> 
+<pre class="has"><code class="language-cpp">static int do_install(char **arg, char reply[REPLY_MAX])
+{
+    return install(arg[0], atoi(arg[1]), atoi(arg[2]), arg[3]); /* pkgname, uid, gid, seinfo */
+}</code></pre> 
+<p>继续分析install，代码如下：</p> 
+<pre class="has"><code class="language-cpp">
+int install(const char *pkgname, uid_t uid, gid_t gid, const char *seinfo)
+{
+    char pkgdir[PKG_PATH_MAX];
+    char libsymlink[PKG_PATH_MAX];
+    char applibdir[PKG_PATH_MAX];
+    struct stat libStat;
+
+    //检查uid和gid
+    if ((uid &lt; AID_SYSTEM) || (gid &lt; AID_SYSTEM)) {
+        ALOGE("invalid uid/gid: %d %d\n", uid, gid);
+        return -1;
+    }
+
+    //得到应用的数据目录名/data/data/&lt;包名&gt;
+    if (create_pkg_path(pkgdir, pkgname, PKG_DIR_POSTFIX, 0)) {
+        ALOGE("cannot create package path\n");
+        return -1;
+    }    
+    //得到应用的动态库目录名/data/data/&lt;包名&gt;/lib
+    if (create_pkg_path(libsymlink, pkgname, PKG_LIB_POSTFIX, 0)) {
+        ALOGE("cannot create package lib symlink origin path\n");
+        return -1;
+    }
+    //得到app-lib目录下的符号链接名称，/data/app-lib/&lt;包名&gt;
+    if (create_pkg_path_in_dir(applibdir, &amp;android_app_lib_dir, pkgname, PKG_DIR_POSTFIX)) {
+        ALOGE("cannot create package lib symlink dest path\n");
+        return -1;
+    }
+    //创建应用数据目录
+    if (mkdir(pkgdir, 0751) &lt; 0) {
+        ALOGE("cannot create dir '%s': %s\n", pkgdir, strerror(errno));
+        return -1;
+    }
+    //修改目录权限
+    if (chmod(pkgdir, 0751) &lt; 0) {
+        ALOGE("cannot chmod dir '%s': %s\n", pkgdir, strerror(errno));
+        unlink(pkgdir);
+        return -1;
+    }
+    //检查链接符号是否已经存在
+    if (lstat(libsymlink, &amp;libStat) &lt; 0) {
+        if (errno != ENOENT) {
+            ALOGE("couldn't stat lib dir: %s\n", strerror(errno));
+            return -1;
+        }
+    } else {
+        if (S_ISDIR(libStat.st_mode)) {
+            if (delete_dir_contents(libsymlink, 1, NULL) &lt; 0) {
+                ALOGE("couldn't delete lib directory during install for: %s", libsymlink);
+                return -1;
+            }
+        } else if (S_ISLNK(libStat.st_mode)) {
+            if (unlink(libsymlink) &lt; 0) {
+                ALOGE("couldn't unlink lib directory during install for: %s", libsymlink);
+                return -1;
+            }
+        }
+    }
+    //设置selinux上下文
+    if (selinux_android_setfilecon(pkgdir, pkgname, seinfo, uid) &lt; 0) {
+        ALOGE("cannot setfilecon dir '%s': %s\n", pkgdir, strerror(errno));
+        unlink(libsymlink);
+        unlink(pkgdir);
+        return -errno;
+    }
+    //创建符号链接
+    if (symlink(applibdir, libsymlink) &lt; 0) {
+        ALOGE("couldn't symlink directory '%s' -&gt; '%s': %s\n", libsymlink, applibdir,
+                strerror(errno));
+        unlink(pkgdir);
+        return -1;
+    }
+    //修改目录的uid和gid
+    if (chown(pkgdir, uid, gid) &lt; 0) {
+        ALOGE("cannot chown dir '%s': %s\n", pkgdir, strerror(errno));
+        unlink(libsymlink);
+        unlink(pkgdir);
+        return -1;
+    }
+
+    return 0;
+}
+</code></pre> 
+<p>这里创建了 应用的数据目录，同时把目录的uid和gid修正；在/data/app-lib/目录下创建了一个符号链接，指向应用的本地动态库的安装路径。</p> 
+<p><strong>2.2 patchoat命令</strong></p> 
+<p>处理函数如下：</p> 
+<pre class="has"><code class="language-cpp">static int do_patchoat(char **arg, char reply[REPLY_MAX]) {
+    /* apk_path, uid, is_public, pkgname, instruction_set, vm_safe_mode, should_relocate */
+    return dexopt(arg[0], atoi(arg[1]), atoi(arg[2]), arg[3], arg[4], 0, 1);
+}</code></pre> 
+<p>继续分析dexopt，代码如下：</p> 
+<pre class="has"><code class="language-java">int dexopt(const char *apk_path, uid_t uid, bool is_public,
+           const char *pkgname, const char *instruction_set,
+           bool vm_safe_mode, bool is_patchoat)
+{
+    //...
+    //得到目前虚拟机使用的动态库名称，若没有设置，则使用libart.so
+    property_get("persist.sys.dalvik.vm.lib.2", persist_sys_dalvik_vm_lib, "libart.so");
+    //...
+    //生成转换的文件名
+    if (is_patchoat) {//如果是patchoat命令
+        //oat格式的文件根据指令集不同放在不同的目录
+        //这里根据指令集来生成目录
+        /* /system/framework/whatever.jar -&gt; /system/framework/&lt;isa&gt;/whatever.odex */
+        strcpy(in_odex_path, apk_path);
+        end = strrchr(in_odex_path, '/');
+        if (end == NULL) {
+            return -1;
+        }
+        //...
+    } else {
+        input_file = apk_path;
+    }
+
+    //...
+    unlink(out_path);
+    out_fd = open(out_path, O_RDWR | O_CREAT | O_EXCL, 0644);
+    //...
+    pid = fork();//创建子进程进行优化
+    if (pid == 0) {
+        //...
+        // drop capabilities
+        //...
+        if (capset(&amp;capheader, &amp;capdata[0]) &lt; 0) {
+            exit(66);
+        }
+        //...调整子进程的cap，保留一些能力
+        if (strncmp(persist_sys_dalvik_vm_lib, "libdvm", 6) == 0) {
+            //关键点1
+            run_dexopt(input_fd, out_fd, input_file, out_path);//odex格式
+        } else if (strncmp(persist_sys_dalvik_vm_lib, "libart", 6) == 0) {//art格式
+            if (is_patchoat) {
+                //关键点2
+                run_patchoat(input_fd, out_fd, input_file, out_path, pkgname, instruction_set);
+            } else {
+                //关键点3
+                run_dex2oat(input_fd, out_fd, input_file, out_path, swap_fd, pkgname,
+                            instruction_set, vm_safe_mode);
+            }
+        } 
+        //...
+    } else {
+        res = wait_child(pid);
+        //...
+    }
+    //...
+}
+</code></pre> 
+<p>这里dexopt函数主要是创建了子进程来进行优化，会根据目前使用的是dalvik还是art虚拟机来决定apk转换成何种格式。接下来 关注3个关键点：run_dexopt、run_patchoat、run_dex2oat，这三个子进程分别调用了三个命令来将apk文件进行转换，分别对应 /system/bin/dexopt(转换odex格式) 、/system/bin/dex2oat(转换oat格式)、/system/bin/patchoat(重定位oat到oat和art文件)。</p> 
+<p><strong>2.3 movefiles命令</strong></p> 
+<p>PkgMS扫描完系统Package后，将发送该命令给installd，对应处理函数的代码如下：</p> 
+<pre class="has"><code class="language-cpp">static int do_movefiles(char **arg, char reply[REPLY_MAX])
+{
+    return movefiles();
+}
+</code></pre> 
+<p>继续分析movefiles，代码如下：</p> 
+<pre class="has"><code class="language-cpp">int movefiles()
+{
+    //...
+    //打开/system/etc/updatecmds/目录
+    d = opendir(UPDATE_COMMANDS_DIR_PREFIX);
+    //...
+    while ((de = readdir(d))) {
+        const char *name = de-&gt;d_name;
+        if (de-&gt;d_type == DT_DIR) {
+            continue;
+        } else {
+            //读取目录下的文件
+            subfd = openat(dfd, name, O_RDONLY);
+            //...
+            while (1) {
+                //执行循环中的所有命令
+                //...
+                //执行结果，移动文件或者目录
+                movefileordir(srcpath, dstpath,...);
+                //...
+            }
+            close(subfd);
+        }
+    }
+    closedir(d);
+done:
+    return 0;
+}
+</code></pre> 
+<p>该函数主要目的是解析/system/etc/updatecmds/目录，然后执行它们，比如：</p> 
+<p style="text-align:center;"><img alt="" class="has" src="https://images2.imgbox.com/c4/a9/9OkU3B5T_o.png"></p> 
+<p>movefiles将把com.google.android.gsf下的databases目录移动到com.andorid.providers.im下。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/18aa096dc2a51471c9ee8d63f4ea5070/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Android Framework 包管理子系统（05）intent查询组件</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/efdc66bafb9f4fbfb832749e4ba9f02b/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">[Error] too many arguments to function &#39;func1&#39;（DEV编辑器）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

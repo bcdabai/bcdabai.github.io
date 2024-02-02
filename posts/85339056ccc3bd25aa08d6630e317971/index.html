@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>ANR问题分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="ANR问题分析" />
+<meta property="og:description" content="ANR有哪些类型？什么情况下会产生ANR？ANR如何解决？ ANR概念 ANR(Application Not Responding) 应用程序无响应。如果应用程序在UI线程被阻塞太长时间，就会出现ANR，通常出现ANR，系统会弹出一个提示提示框，让用户知道，该程序正在被阻塞，是否继续等待还是关闭。
+出现ANR必须解决
+ANR类型 KeyDispatchTimeout（常见） input事件在5S内没有处理完成发生了ANR。
+logcat日志关键字：Input event dispatching timed out
+BroadcastTimeout 前台Broadcast：onReceiver在10S内没有处理完成发生ANR。
+后台Broadcast：onReceiver在60s内没有处理完成发生ANR。
+logcat日志关键字：Timeout of broadcast BroadcastRecord
+ServiceTimeout 前台Service：onCreate，onStart，onBind等生命周期在20s内没有处理完成发生ANR。
+后台Service：onCreate，onStart，onBind等生命周期在200s内没有处理完成发生ANR
+logcat日志关键字：Timeout executing service
+ContentProviderTimeout ContentProvider 在10S内没有处理完成发生ANR。
+logcat日志关键字：timeout publishing content providers
+为什么出现ANR 1:主线程频繁进行耗时的IO操作：如网络请求，数据库读写 UI线程进行潜在的耗时操作都很可能造成ANR，如网络请求，操作数据库、IO操作、复杂的layout、庞大的for循环、高耗时的计算(如改变位图尺寸)等。
+这些耗时操作都应该在子线程中来完成，然而并不是说主线程阻塞在那里等待子线程的完成(也不是调用Thread.wait()或是Thread.sleep())，而是主线程应该为子线程提供给一个Handler或者使用AsyncTask等异步操作的方式，以便子线程完成操作时能够提交结果给主线程，主线程根据结果更新UI。以这种方式设计应用，将可以保证主线程保持对输入事件的响应的敏感性，并能避免由于输入事件的5秒超时引发的ANR对话框。
+具体例子：
+(1)Realm数据库官方称速度非常快，可以在UI线程中操作，测试时的确没有问题，但是上线后，发现一大堆anr问题(项目接入bugly)。(2)在onlayout读写一个文件，用sysytrace测试执行时间，只有微秒级别，测试时没有任何问题，但是上线后一大堆anr问题。(3)主线程使用SharedPreference，测试时没有任何问题，但是上线后一大堆anr问题。 原因：
+为什么测试时没有任何anr问题，一上线就报各种anr问题？
+测试用的手机都是性能比较好的手机，而且手机没有安装各种一大堆软件，内存占用少，硬件性能好。而用户的手机可能是性能不大好的机子，而且可能还安装了大量的软件，手机速度下降等等。
+总结：
+凡是进行IO读写操作(数据库，文件，网络，序列化等)，都不要在UI线程操作。
+2:多线程操作的死锁，主线程被block； 并发编程导致的死锁引起的ANR，比如调用thread的join() / Sleep() / Wait() 或者等待lock的时候
+3:主线程被 Binder 对端block； Binder通信机制默认是同步的，会阻塞调用的线程，当然也有异步的oneway机制。
+4:System Server中WatchDog出现ANR； framework层的开发遇到的比较多。
+5:service binder的连接数量达到上线无法和和System Server通信 Binder被占满导致主线程无法和SystemServer通信
+6:系统资源已耗尽（管道、CPU、RAM、IO），无法获取到系统资源 大量的线程死循环的去做任务，导致应用获取不到CPU的时间片去处理用户输入事件。
+ANR问题如何解决 线下开发过程中，如果出现ANR，Android Studio的logcat会有输出信息提示(但并不一定真的是那一行代码导致的anr，需要根据提示信息综合判断)，并且还会在/data/anr/traces_*.txt 中保存有anr相关信息，结合logcat中的提示信息判断anr是由什么原因导致的。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/85339056ccc3bd25aa08d6630e317971/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-01-02T17:43:29+08:00" />
+<meta property="article:modified_time" content="2021-01-02T17:43:29+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">ANR问题分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-dracula">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <ul><li>ANR有哪些类型？</li><li>什么情况下会产生ANR？</li><li>ANR如何解决？</li></ul> 
+<h2><a id="ANR_4"></a>ANR概念</h2> 
+<p>ANR(Application Not Responding) 应用程序无响应。如果应用程序在UI线程被阻塞太长时间，就会出现ANR，通常出现ANR，系统会弹出一个提示提示框，让用户知道，该程序正在被阻塞，是否继续等待还是关闭。</p> 
+<p>出现ANR必须解决</p> 
+<h2><a id="ANR_9"></a>ANR类型</h2> 
+<h3><a id="KeyDispatchTimeout_10"></a>KeyDispatchTimeout（常见）</h3> 
+<p>input事件在5S内没有处理完成发生了ANR。<br> logcat日志关键字：Input event dispatching timed out</p> 
+<h3><a id="BroadcastTimeout_13"></a>BroadcastTimeout</h3> 
+<p>前台Broadcast：onReceiver在10S内没有处理完成发生ANR。<br> 后台Broadcast：onReceiver在60s内没有处理完成发生ANR。<br> logcat日志关键字：Timeout of broadcast BroadcastRecord</p> 
+<h3><a id="ServiceTimeout_17"></a>ServiceTimeout</h3> 
+<p>前台Service：onCreate，onStart，onBind等生命周期在20s内没有处理完成发生ANR。<br> 后台Service：onCreate，onStart，onBind等生命周期在200s内没有处理完成发生ANR<br> logcat日志关键字：Timeout executing service</p> 
+<h3><a id="ContentProviderTimeout_21"></a>ContentProviderTimeout</h3> 
+<p>ContentProvider 在10S内没有处理完成发生ANR。<br> logcat日志关键字：timeout publishing content providers</p> 
+<h2><a id="ANR_24"></a>为什么出现ANR</h2> 
+<h3><a id="1IO_25"></a>1:主线程频繁进行耗时的IO操作：如网络请求，数据库读写</h3> 
+<p>UI线程进行潜在的耗时操作都很可能造成ANR，如网络请求，操作数据库、IO操作、复杂的layout、庞大的for循环、高耗时的计算(如改变位图尺寸)等。</p> 
+<p>这些耗时操作都应该在子线程中来完成，然而并不是说主线程阻塞在那里等待子线程的完成(也不是调用Thread.wait()或是Thread.sleep())，而是主线程应该为子线程提供给一个Handler或者使用AsyncTask等异步操作的方式，以便子线程完成操作时能够提交结果给主线程，主线程根据结果更新UI。以这种方式设计应用，将可以保证主线程保持对输入事件的响应的敏感性，并能避免由于输入事件的5秒超时引发的ANR对话框。</p> 
+<p>具体例子：</p> 
+<ul><li>(1)Realm数据库官方称速度非常快，可以在UI线程中操作，测试时的确没有问题，但是上线后，发现一大堆anr问题(项目接入bugly)。</li><li>(2)在onlayout读写一个文件，用sysytrace测试执行时间，只有微秒级别，测试时没有任何问题，但是上线后一大堆anr问题。</li><li>(3)主线程使用SharedPreference，测试时没有任何问题，但是上线后一大堆anr问题。</li></ul> 
+<p>原因：<br> 为什么测试时没有任何anr问题，一上线就报各种anr问题？<br> 测试用的手机都是性能比较好的手机，而且手机没有安装各种一大堆软件，内存占用少，硬件性能好。而用户的手机可能是性能不大好的机子，而且可能还安装了大量的软件，手机速度下降等等。</p> 
+<p>总结：<br> 凡是进行IO读写操作(数据库，文件，网络，序列化等)，都不要在UI线程操作。</p> 
+<h3><a id="2block_43"></a>2:多线程操作的死锁，主线程被block；</h3> 
+<p>并发编程导致的死锁引起的ANR，比如调用thread的join() / Sleep() / Wait() 或者等待lock的时候</p> 
+<h3><a id="3_Binder_block_46"></a>3:主线程被 Binder 对端block；</h3> 
+<p>Binder通信机制默认是同步的，会阻塞调用的线程，当然也有异步的oneway机制。</p> 
+<h3><a id="4System_ServerWatchDogANR_50"></a>4:System Server中WatchDog出现ANR；</h3> 
+<p>framework层的开发遇到的比较多。</p> 
+<h3><a id="5service_binderSystem_Server_54"></a>5:service binder的连接数量达到上线无法和和System Server通信</h3> 
+<p>Binder被占满导致主线程无法和SystemServer通信</p> 
+<h3><a id="6CPURAMIO_58"></a>6:系统资源已耗尽（管道、CPU、RAM、IO），无法获取到系统资源</h3> 
+<p>大量的线程死循环的去做任务，导致应用获取不到CPU的时间片去处理用户输入事件。</p> 
+<h2><a id="ANR_63"></a>ANR问题如何解决</h2> 
+<p>线下开发过程中，如果出现ANR，Android Studio的logcat会有输出信息提示(但并不一定真的是那一行代码导致的anr，需要根据提示信息综合判断)，并且还会在/data/anr/traces_*.txt 中保存有anr相关信息，结合logcat中的提示信息判断anr是由什么原因导致的。</p> 
+<h3><a id="traces_txt_66"></a>traces_*.txt</h3> 
+<p>*一般是firstPid，即发生anr的pid</p> 
+<p>ActivityManagerservice 中实现 通过appNotResponding(), dumpStackTraces() 两个主要方法来生成应用的anr</p> 
+<h3><a id="traces_SystemServer_WDTtxtwatchdog_71"></a>traces_SystemServer_WDT.txt(watchdog)</h3> 
+<p>Watchdog中实现<br> system_server进程栈信息</p> 
+<h3><a id="tracestxtdalvikvmstacktracefile_75"></a>traces.txt（dalvik.vm.stack-trace-file）</h3> 
+<p>系统定义的默认trace文件路径</p> 
+<h3><a id="_78"></a>分析技巧</h3> 
+<p>整体思路：<br> 通过logcat日志和traces文件确认anr发生时间点<br> traces文件和CPU使用率<br> /data/anr/traces.txt<br> 主线程状态<br> 其他线程状态</p> 
+<p>如何根据logcat日志和traces文件分析anr？<br> 1.根据anr的几种类型，在logcat日志中搜索对应的关键字。<br> 比如：Input event dispatching timed out<br> Timeout of broadcast BroadcastRecord<br> Timeout executing service<br> timeout publishing content providers<br> 2.在traces文件中搜索对应的关键字。<br> 比如：waiting、held、held by等</p> 
+<p>比如搜索waiting关键字：<br> <img src="https://images2.imgbox.com/9d/25/03BR5JbK_o.png" alt="在这里插入图片描述"><br> 可以发现就是发送广播时造成的堵塞，引起的ANR。</p> 
+<p>再比如下面这种，io占用了CPU 87%：<br> <img src="https://images2.imgbox.com/6a/16/Krc3lYkD_o.png" alt="在这里插入图片描述"><br> 一般就是在主线程进行IO操作引起的ANR。</p> 
+<h3><a id="_103"></a>关键信息</h3> 
+<p>ANR时间：07-20 15:36:36.472<br> 进程pid：1480<br> 进程名：com.xxxx.moblie<br> ANR类型：KeyDispatchTimeout</p> 
+<p>main：main标识是主线程，如果是线程，那么命名成“Thread-X”的格式,x表示线程id,逐步递增。<br> prio：线程优先级,默认是5<br> tid：tid不是线程的id，是线程唯一标识ID<br> group：是线程组名称<br> sCount：该线程被挂起的次数<br> dsCount：是线程被调试器挂起的次数<br> obj：对象地址<br> self：该线程Native的地址<br> sysTid：是线程号(主线程的线程号和进程号相同)<br> nice：是线程的调度优先级<br> sched：分别标志了线程的调度策略和优先级<br> cgrp：调度归属组<br> handle：线程处理函数的地址。<br> state：是调度状态<br> schedstat：从 /proc/[pid]/task/[tid]/schedstat读出，三个值分别表示线程在cpu上执行的时间、线程的等待时间和线程执行的时间片长度，不支持这项信息的三个值都是0；<br> utm：是线程用户态下使用的时间值(单位是jiffies）<br> stm：是内核态下的调度时间值<br> core：是最后执行这个线程的cpu核的序号</p> 
+<h3><a id="_128"></a>线程状态</h3> 
+<p>THREAD_UNDEFINED = -1<br> THREAD_ZOMBIE = 0, /* TERMINATED <em>/<br> THREAD_RUNNING = 1, /</em> RUNNABLE or running now <em>/<br> THREAD_TIMED_WAIT = 2,/</em> TIMED_WAITING Object.wait()<br> THREAD_MONITOR = 3, /* BLOCKED on a monitor <em>/<br> THREAD_WAIT = 4, /</em> WAITING in Object.wait() <em>/<br> THREAD_INITIALIZING= 5, /</em> allocated, not yet running <em>/<br> THREAD_STARTING = 6, /</em> started, not yet on thread list <em>/<br> THREAD_NATIVE = 7, /</em> off in a JNI native method <em>/<br> THREAD_VMWAIT = 8, /</em> waiting on a VM resource <em>/<br> THREAD_SUSPENDED = 9, /</em> suspended, usually by GC or debugger</p> 
+<h3><a id="Android_141"></a>Android线程状态</h3> 
+<p><img src="https://images2.imgbox.com/dc/0c/QkMt6IEe_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="ANR_143"></a>ANR监控方案</h2> 
+<p>ANR是如何监控的？<br> 一般有两种监控方案，一种是原生的，FileObserver：监控某个目录/文件的状态有没有发生改变，或者是在某个目录 有没有创建或者删除文件。<br> 一般通过自定义类继承FileObserver：<br> <code>class MyFileObserver extends FileObserver //路径传data/anr</code><br> 这样当文件发生变化时说明有ANR产生(这时可以上传trace.txt文件到服务器用于分析anr)，当文件发生相应的变化时会回调FileObserver 中的<code>public void onEvent(int event, @Nullable String path)</code>方法。</p> 
+<p>另一种是，watchdog方案。</p> 
+<h3><a id="ANR1watchdog_152"></a>ANR监控方案1-watchdog</h3> 
+<p>watchdog 和leakcanary原理很相似。<br> <img src="https://images2.imgbox.com/02/88/FOGJBBNu_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/19/57/6NaCb6W2_o.png" alt="在这里插入图片描述"><br> <a href="https://www.androidos.net.cn/android/9.0.0_r8/xref/frameworks/base/services/core/java/com/android/server/Watchdog.java" rel="nofollow">Watchdog.java</a><br> Watchdog有个假唤醒机制，while循环判断，如果还没有wait到足够的时间，那么继续wait：</p> 
+<pre><code class="prism language-java"><span class="token comment">//Watchdog.java</span>
+
+                <span class="token comment">// NOTE: We use uptimeMillis() here because we do not want to increment the time we</span>
+                <span class="token comment">// wait while asleep. If the device is asleep then the thing that we are waiting</span>
+                <span class="token comment">// to timeout on is asleep as well and won't have a chance to run, causing a false</span>
+                <span class="token comment">// positive on when to kill things.</span>
+                <span class="token keyword">long</span> start <span class="token operator">=</span> SystemClock<span class="token punctuation">.</span><span class="token function">uptimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">while</span> <span class="token punctuation">(</span>timeout <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>Debug<span class="token punctuation">.</span><span class="token function">isDebuggerConnected</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        debuggerWasConnected <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                    <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token function">wait</span><span class="token punctuation">(</span>timeout<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">InterruptedException</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        Log<span class="token punctuation">.</span><span class="token function">wtf</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                    <span class="token keyword">if</span> <span class="token punctuation">(</span>Debug<span class="token punctuation">.</span><span class="token function">isDebuggerConnected</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        debuggerWasConnected <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">;</span>
+                    <span class="token punctuation">}</span>
+                    timeout <span class="token operator">=</span> CHECK_INTERVAL <span class="token operator">-</span> <span class="token punctuation">(</span>SystemClock<span class="token punctuation">.</span><span class="token function">uptimeMillis</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> start<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                
+</code></pre> 
+<p>这个小技巧在很多地方都有使用。</p> 
+<h3><a id="ANR2FileObserver_188"></a>ANR监控方案2-FileObserver</h3> 
+<p><a href="https://www.androidos.net.cn/android/9.0.0_r8/xref/frameworks/base/core/java/android/os/FileObserver.java" rel="nofollow">FileObserver.java</a></p> 
+<p>Android系统在此基础上封装了一个FileObserver类来方便使用Inotify机制。FileObserver是一个抽象类，需要定义子类实现该类的onEvent抽象方法，当被监控的文件或者目录发生变更事件时，将回调FileObserver的onEvent()函数来处理文件或目录的变更事件</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">ANRFileObserver</span> <span class="token keyword">extends</span> <span class="token class-name">FileObserver</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> String TAG <span class="token operator">=</span> <span class="token string">"ANRFileObserver"</span><span class="token punctuation">;</span>
+
+
+    <span class="token comment">/**
+     *
+     * @param path 传 data/anr/ 这个目录
+     */</span>
+    <span class="token keyword">public</span> <span class="token function">ANRFileObserver</span><span class="token punctuation">(</span>String path<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">super</span><span class="token punctuation">(</span>path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token function">ANRFileObserver</span><span class="token punctuation">(</span>String path<span class="token punctuation">,</span> <span class="token keyword">int</span> mask<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">super</span><span class="token punctuation">(</span>path<span class="token punctuation">,</span> mask<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+
+    <span class="token comment">/**
+     * ANRFileObserver监控的路径/文件发生改变时会回调onEvent()方法，对应的各个事件类型如下
+     * @param event
+     * @param path
+     */</span>
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">onEvent</span><span class="token punctuation">(</span><span class="token keyword">int</span> event<span class="token punctuation">,</span> <span class="token annotation punctuation">@Nullable</span> String path<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">switch</span> <span class="token punctuation">(</span>event<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">case</span> FileObserver<span class="token punctuation">.</span>ACCESS<span class="token operator">:</span><span class="token operator">/</span><span class="token operator">/</span>文件被访问
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"ACCESS: "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> FileObserver<span class="token punctuation">.</span>ATTRIB<span class="token operator">:</span><span class="token operator">/</span><span class="token operator">/</span>文件属性被修改，如 chmod、chown、touch 等
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"ATTRIB: "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> FileObserver<span class="token punctuation">.</span>CLOSE_NOWRITE<span class="token operator">:</span><span class="token operator">/</span><span class="token operator">/</span>不可写文件被 close
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"CLOSE_NOWRITE: "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> FileObserver<span class="token punctuation">.</span>CLOSE_WRITE<span class="token operator">:</span><span class="token operator">/</span><span class="token operator">/</span>可写文件被 close
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"CLOSE_WRITE: "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> FileObserver<span class="token punctuation">.</span>CREATE<span class="token operator">:</span><span class="token operator">/</span><span class="token operator">/</span>创建新文件
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"CREATE: "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> FileObserver<span class="token punctuation">.</span>DELETE<span class="token operator">:</span><span class="token operator">/</span><span class="token operator">/</span> 文件被删除，如 rm
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"DELETE: "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> FileObserver<span class="token punctuation">.</span>DELETE_SELF<span class="token operator">:</span><span class="token operator">/</span><span class="token operator">/</span> 自删除，即一个可执行文件在执行时删除自己
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"DELETE_SELF: "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> FileObserver<span class="token punctuation">.</span>MODIFY<span class="token operator">:</span><span class="token operator">/</span><span class="token operator">/</span>文件被修改
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"MODIFY: "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> FileObserver<span class="token punctuation">.</span>MOVE_SELF<span class="token operator">:</span><span class="token operator">/</span><span class="token operator">/</span>自移动，即一个可执行文件在执行时移动自己
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"MOVE_SELF: "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> FileObserver<span class="token punctuation">.</span>MOVED_FROM<span class="token operator">:</span><span class="token operator">/</span><span class="token operator">/</span>文件被移走，如 mv
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"MOVED_FROM: "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> FileObserver<span class="token punctuation">.</span>MOVED_TO<span class="token operator">:</span><span class="token operator">/</span><span class="token operator">/</span>文件被移来，如 mv、cp
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"MOVED_TO: "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> FileObserver<span class="token punctuation">.</span>OPEN<span class="token operator">:</span><span class="token operator">/</span><span class="token operator">/</span>文件被 open
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"OPEN: "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">default</span><span class="token operator">:</span>
+                <span class="token comment">//CLOSE ： 文件被关闭，等同于(IN_CLOSE_WRITE | IN_CLOSE_NOWRITE)</span>
+                <span class="token comment">//ALL_EVENTS ： 包括上面的所有事件</span>
+                Log<span class="token punctuation">.</span><span class="token function">i</span><span class="token punctuation">(</span>TAG<span class="token punctuation">,</span> <span class="token string">"DEFAULT("</span> <span class="token operator">+</span> event <span class="token operator">+</span> <span class="token string">"): "</span> <span class="token operator">+</span> path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>FileObserver会不会被selinux挡住？<br> Android 5.0之后肯定会。</p> 
+<h2><a id="ANR_271"></a>实例分析ANR</h2> 
+<h3><a id="1_272"></a>实例1：</h3> 
+<p>先看cpu：</p> 
+<pre><code class="prism language-bash">CPU usage from 76016ms to 0ms ago <span class="token punctuation">(</span>2020-01-01 13:06:16.027 to 2020-01-01 13:07:32.043<span class="token punctuation">)</span>:
+<span class="token punctuation">..</span>.
+26% TOTAL: 22% user + 3.6% kernel + 0% iowait + 0.1% softirq
+</code></pre> 
+<p>从CPU使用数据可以看出不是因为CPU使用率高资源耗尽或者IO读写堵塞引起的ANR。</p> 
+<p>看是否是由于线程死锁导致的，可以在traces.txt文件中搜索 held 关键字：</p> 
+<pre><code class="prism language-bash"><span class="token function">suspend</span> all histogram:	Sum: 482us 99% C.I. 15us-232us Avg: 48.200us Max: 239us
+DALVIK THREADS <span class="token punctuation">(</span>13<span class="token punctuation">)</span>:
+<span class="token string">"main"</span> prio<span class="token operator">=</span>5 tid<span class="token operator">=</span>1 Runnable
+  <span class="token operator">|</span> group<span class="token operator">=</span><span class="token string">"main"</span> sCount<span class="token operator">=</span>0 dsCount<span class="token operator">=</span>0 flags<span class="token operator">=</span>0 obj<span class="token operator">=</span>0x742b2a28 self<span class="token operator">=</span>0x715052814c00
+  <span class="token operator">|</span> sysTid<span class="token operator">=</span>16842 nice<span class="token operator">=</span>-10 cgrp<span class="token operator">=</span>default sched<span class="token operator">=</span>0/0 handle<span class="token operator">=</span>0x7150d8012548
+  <span class="token operator">|</span> state<span class="token operator">=</span>R schedstat<span class="token operator">=</span><span class="token punctuation">(</span> 6802667952 210121864 1103 <span class="token punctuation">)</span> utm<span class="token operator">=</span>610 stm<span class="token operator">=</span>70 core<span class="token operator">=</span>2 HZ<span class="token operator">=</span>100
+  <span class="token operator">|</span> stack<span class="token operator">=</span>0x7ffefec17000-0x7ffefec19000 stackSize<span class="token operator">=</span>8MB
+  <span class="token operator">|</span> held mutexes<span class="token operator">=</span> <span class="token string">"mutator lock"</span><span class="token punctuation">(</span>shared held<span class="token punctuation">)</span>
+  at com.zero.interviewdemo.MainActivity.clickTest<span class="token punctuation">(</span>MainActivity.java:26<span class="token punctuation">)</span>
+  at java.lang.reflect.Method.invoke<span class="token punctuation">(</span>Native method<span class="token punctuation">)</span>
+  at androidx.appcompat.app.AppCompatViewInflater<span class="token variable">$DeclaredOnClickListener</span>.onClick<span class="token punctuation">(</span>AppCompatViewInflater.java:397<span class="token punctuation">)</span>
+  at android.view.View.performClick<span class="token punctuation">(</span>View.java:6597<span class="token punctuation">)</span>
+  at android.view.View.performClickInternal<span class="token punctuation">(</span>View.java:6574<span class="token punctuation">)</span>
+  at android.view.View.access<span class="token variable">$3100</span><span class="token punctuation">(</span>View.java:778<span class="token punctuation">)</span>
+  at android.view.View<span class="token variable">$PerformClick</span>.run<span class="token punctuation">(</span>View.java:25885<span class="token punctuation">)</span>
+  at android.os.Handler.handleCallback<span class="token punctuation">(</span>Handler.java:873<span class="token punctuation">)</span>
+  at android.os.Handler.dispatchMessage<span class="token punctuation">(</span>Handler.java:99<span class="token punctuation">)</span>
+  at android.os.Looper.loop<span class="token punctuation">(</span>Looper.java:193<span class="token punctuation">)</span>
+  at android.app.ActivityThread.main<span class="token punctuation">(</span>ActivityThread.java:6669<span class="token punctuation">)</span>
+  at java.lang.reflect.Method.invoke<span class="token punctuation">(</span>Native method<span class="token punctuation">)</span>
+  at com.android.internal.os.RuntimeInit<span class="token variable">$MethodAndArgsCaller</span>.run<span class="token punctuation">(</span>RuntimeInit.java:493<span class="token punctuation">)</span>
+  at com.android.internal.os.ZygoteInit.main<span class="token punctuation">(</span>ZygoteInit.java:858<span class="token punctuation">)</span>
+</code></pre> 
+<p>可以看到是由于线程死锁导致的anr。</p> 
+<h3><a id="2_312"></a>实例2:</h3> 
+<p>可以参考：<a href="https://blog.csdn.net/yzpbright/article/details/111996277">什么是ANR，如何避免ANR</a>的 trace.txt文件解读</p> 
+<p>参考：<br> <a href="https://cloud.tencent.com/developer/article/1071025" rel="nofollow">Iowait的成因、对系统影响及对策</a><br> <a href="https://blog.csdn.net/shift_wwx/article/details/81021257">Android 系统中的 WatchDog 详解</a><br> <a href="https://blog.csdn.net/qq_29443203/article/details/87181213">性能优化-Android之ANR分析解决 traces.txt文件分析</a><br> <a href="https://www.sohu.com/a/220647552_741445" rel="nofollow">Android ANR监测方案解析</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/b35592e0d5b2c42398c218339e95cff9/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">炸弹人游戏</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/46df9d7abad147a12b36726df0d16f8f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">设置全屏_优考试在线考试系统：【防切屏】与【霸屏考试】功能下的全屏考试有什么区别？...</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

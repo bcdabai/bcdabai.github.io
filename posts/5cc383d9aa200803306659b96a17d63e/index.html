@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>基于Netty实现Web容器-Netty版Tomcat（一） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="基于Netty实现Web容器-Netty版Tomcat（一）" />
+<meta property="og:description" content="在正式进入主题之前，先要看看一些基本的理论。这里旨在明确这些基础的概念，好更深刻的进一步理解Netty。
+首先，什么是IO？其实平常其实工作中用得也是比较多的了，这里简单做个总结。
+I：InputStream，字节输入流 ，用于读取数据为字节流《Reads the next byte of data from the input stream》
+O：OutputStream，字节输出流，用于将字节流写入到流《Writes the specified byte to this output stream》
+流，啥是流？日常生活中，听过比较多的就是河流、水流、车流等等，这里就拿车流做比喻。
+假定小C要结婚了，请了一个豪华车队，去新娘老家接新娘到酒店，于是就有了这么个概念：这里有一车队从新娘家，经过一路到达到酒店。这里有起始点，有结束点，可以理解为数据的产出点和数据的接收点。这个过程，可以理解为建立一个传输通道（车队走过的一路），通过流的方式，将数据从一个地方传输到了另外一个地方。当有这么一种情况，每一辆车只能载一个人，同时，一辆车装完一个人，然后就开车出发，然后下一辆车，在上一个人，出发，持续这么过程，可以理解为字节输入流（一个上车），到达目的地后，下一个人，可以理解为字节输出流（一个人下车）。这时候，可能就太慢了，于是新郎新娘决定，一辆车多上些人，把一家人的那种单独上一辆车，此时，可以理解为字符流（以字符的方式输入输出），与此同时，车队上满了之后，一个车队一起走，理解这种情况为缓冲流（一个车队可能就一次把人都带走了）。于是，流就可以简单分为字节流和字符流，同时两者都可以通过包含缓冲区的方式传输，也就都存在字节缓冲流和字符缓冲流。
+下面看下其相互依赖关系（这里仅仅截取常用到的，实际并不仅仅这些，详细请查看API）
+字节流：
+字符流：
+那么接下来家假设这么一种情况，小C邀请其好友小D全程协助车队出发到达这么一个过程，把小D全程协助的过程，称为线程，也就是小D线程来做这件事，于是车队上车开始，小D就只能在这里逐个看着每个车上乘客，然后沿着一条路到达酒店，假定这一路属于乡村公路，也就是单行道，往酒店走的，则只能往酒店走，反之亦然。
+IO(BIO)、NIO、NIO2(AIO)
+有需要的同学，可关注公众号“依荨”，不定期分享技术干货
+基于上述过程，可以理解为传统IO的一个操作，也叫BIO，即同步阻塞IO，同步在于，读的时候不能写，写的时候不能读(类似上述过程，单行道车流)，当然这里也可以用多线程去做一个伪异步，这里不过这种探讨；阻塞在于，读和写这个过程阻塞的，读/写需要线程把所有的数据全部读/写完毕，或者发生异常，这个线程才能结束(类似上述过程，小D全程协助时，在车队上乘客的时候，小D只能等着乘客都上车完毕后，他才能继续做下一步操作)。
+同步阻塞IO在实际应用中，会存在很多弊端，用之前写的小demo（详情请见《基于socket通信编写的聊天工具》）为例，解释下这种同步阻塞存在的一些问题和弊端
+看服务端的主要代码，在可以获取多个客户端连接的情况下，采用了多线程监听：
+如果存在大量客户端连接的情况下，服务端是会开辟很多线程来监听并获取数据，首先多线程的线程间交替本身就很好系统性能，再者过多的服务端线程易造成堆栈溢出，创建线程失败等情况的发生，严重甚至发生服务器宕机等情况的发生
+由于读写操作属于阻塞的（不仅仅是读写操作，还有上图中，等待连接的时候，也是线程阻塞的），那么就有可能存在大量连接的线程出现在一个阻塞的情况，服务端处理速度过慢，后续的客户端连接容易出现连接不上服务端的情况。同时写的时候不能读，读数据的时候不能写，这也是一种很不良好的体验。
+如何比较良好的解决这些问题？
+小C的新娘告诉他，现在政府新修建了高速公路，双向车道，于是车可以从上面过，同时基于双车道，车辆可以方便在接送切换，不需要再去遵循哪条路是来的路，哪条路是去的路，再者小D觉得这样子挨个守着太累而且费时，于是留下每个车师傅的电话，轮询的方式了解到车辆目前的状态（是否上好了人，是否到达目的地等等），方便指挥车辆的下一个操作。
+对于上述改进的接送人操作，映射到JDK1.4以后的NIO，同样对传统的IO操作，进行类似的改进，相对于传统的流（单向乡间小道），变成了现在的通道Channel（牛叉的双向高速公路）传输数据，传统的阻塞读写操作（守候车辆上下人），变成了选择器-多路复用器Selector轮询当前通道Channel中的数据状态，进行后续IO操作（远程轮询车辆状态，安排工作）
+通道（Channel）、多路复用器（Selector）是NIO（官方称为new IO，也称为non-blocking IO）的三大重要概念中的2种了，下面介绍下另外一个概念–缓冲区（buffer）
+传统BIO数据读写主要针对字节/字符操作，而NIO读写数据则是针对缓冲区操作，任何的NIO都是操作缓冲区，缓冲区内部是数组，并且提供了对数据结构化访问及其维护读写位置信息
+以下是几个常用的缓冲区的相互依赖关系：
+这里用代码描述几个核心属性：
+package com.lgli.nio.api; import java.nio.ByteBuffer; /** * NioApi properties * capacity:缓冲区中的最大容量 * limit:限制，缓冲区中最大可操作容量 * position:位置，当前操作的缓冲区的位置 * mark:标记，记录读取的缓冲区的位置 * @author lgli * @since 1.0 */ public class NioApi { public static void main(String[] args) { String str = &#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/5cc383d9aa200803306659b96a17d63e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-06-27T21:18:48+08:00" />
+<meta property="article:modified_time" content="2020-06-27T21:18:48+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">基于Netty实现Web容器-Netty版Tomcat（一）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>在正式进入主题之前，先要看看一些基本的理论。这里旨在明确这些基础的概念，好更深刻的进一步理解Netty。</p> 
+<p>首先，什么是IO？其实平常其实工作中用得也是比较多的了，这里简单做个总结。</p> 
+<p>I：InputStream，字节输入流 ，用于读取数据为字节流《Reads the next byte of data from the input stream》</p> 
+<p>O：OutputStream，字节输出流，用于将字节流写入到流《Writes the specified byte to this output stream》</p> 
+<p>流，啥是流？日常生活中，听过比较多的就是河流、水流、车流等等，这里就拿车流做比喻。</p> 
+<p>假定小C要结婚了，请了一个豪华车队，去新娘老家接新娘到酒店，于是就有了这么个概念：这里有一车队从新娘家，经过一路到达到酒店。这里有起始点，有结束点，可以理解为数据的产出点和数据的接收点。这个过程，可以理解为建立一个传输通道（车队走过的一路），通过流的方式，将数据从一个地方传输到了另外一个地方。当有这么一种情况，每一辆车只能载一个人，同时，一辆车装完一个人，然后就开车出发，然后下一辆车，在上一个人，出发，持续这么过程，可以理解为字节输入流（一个上车），到达目的地后，下一个人，可以理解为字节输出流（一个人下车）。这时候，可能就太慢了，于是新郎新娘决定，一辆车多上些人，把一家人的那种单独上一辆车，此时，可以理解为字符流（以字符的方式输入输出），与此同时，车队上满了之后，一个车队一起走，理解这种情况为缓冲流（一个车队可能就一次把人都带走了）。于是，流就可以简单分为字节流和字符流，同时两者都可以通过包含缓冲区的方式传输，也就都存在字节缓冲流和字符缓冲流。</p> 
+<p>下面看下其相互依赖关系（这里仅仅截取常用到的，实际并不仅仅这些，详细请查看API）</p> 
+<p>字节流：</p> 
+<p><img src="https://images2.imgbox.com/91/15/eOAQEDLF_o.png" alt="在这里插入图片描述"><br> 字符流：<br> <img src="https://images2.imgbox.com/5b/19/yC9Vc9HL_o.png" alt="在这里插入图片描述"><br> 那么接下来家假设这么一种情况，小C邀请其好友小D全程协助车队出发到达这么一个过程，把小D全程协助的过程，称为线程，也就是小D线程来做这件事，于是车队上车开始，小D就只能在这里逐个看着每个车上乘客，然后沿着一条路到达酒店，假定这一路属于乡村公路，也就是单行道，往酒店走的，则只能往酒店走，反之亦然。<br> <strong>IO(BIO)、NIO、NIO2(AIO)</strong><br> 有需要的同学，可关注公众号“依荨”，不定期分享技术干货<br> <img src="https://images2.imgbox.com/07/f4/imUP6CQb_o.jpg" alt="在这里插入图片描述"><br> 基于上述过程，可以理解为传统IO的一个操作，也叫BIO，即同步阻塞IO，同步在于，读的时候不能写，写的时候不能读(类似上述过程，单行道车流)，当然这里也可以用多线程去做一个伪异步，这里不过这种探讨；阻塞在于，读和写这个过程阻塞的，读/写需要线程把所有的数据全部读/写完毕，或者发生异常，这个线程才能结束(类似上述过程，小D全程协助时，在车队上乘客的时候，小D只能等着乘客都上车完毕后，他才能继续做下一步操作)。</p> 
+<p>同步阻塞IO在实际应用中，会存在很多弊端，用之前写的小demo（详情请见《<a href="https://blog.csdn.net/weixin_37957321/article/details/105924599">基于socket通信编写的聊天工具</a>》）为例，解释下这种同步阻塞存在的一些问题和弊端</p> 
+<p>看服务端的主要代码，在可以获取多个客户端连接的情况下，采用了多线程监听：<br> <img src="https://images2.imgbox.com/71/6b/1fYsTymX_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/62/fd/Huc6QhGA_o.png" alt="在这里插入图片描述"><br> 如果存在大量客户端连接的情况下，服务端是会开辟很多线程来监听并获取数据，首先多线程的线程间交替本身就很好系统性能，再者过多的服务端线程易造成堆栈溢出，创建线程失败等情况的发生，严重甚至发生服务器宕机等情况的发生</p> 
+<p>由于读写操作属于阻塞的（不仅仅是读写操作，还有上图中，等待连接的时候，也是线程阻塞的），那么就有可能存在大量连接的线程出现在一个阻塞的情况，服务端处理速度过慢，后续的客户端连接容易出现连接不上服务端的情况。同时写的时候不能读，读数据的时候不能写，这也是一种很不良好的体验。<br> 如何比较良好的解决这些问题？</p> 
+<p>小C的新娘告诉他，现在政府新修建了高速公路，双向车道，于是车可以从上面过，同时基于双车道，车辆可以方便在接送切换，不需要再去遵循哪条路是来的路，哪条路是去的路，再者小D觉得这样子挨个守着太累而且费时，于是留下每个车师傅的电话，轮询的方式了解到车辆目前的状态（是否上好了人，是否到达目的地等等），方便指挥车辆的下一个操作。</p> 
+<p>对于上述改进的接送人操作，映射到JDK1.4以后的NIO，同样对传统的IO操作，进行类似的改进，相对于传统的流（单向乡间小道），变成了现在的通道Channel（牛叉的双向高速公路）传输数据，传统的阻塞读写操作（守候车辆上下人），变成了选择器-多路复用器Selector轮询当前通道Channel中的数据状态，进行后续IO操作（远程轮询车辆状态，安排工作）</p> 
+<p>通道（Channel）、多路复用器（Selector）是NIO（官方称为new IO，也称为non-blocking IO）的三大重要概念中的2种了，下面介绍下另外一个概念–缓冲区（buffer）</p> 
+<p>传统BIO数据读写主要针对字节/字符操作，而NIO读写数据则是针对缓冲区操作，任何的NIO都是操作缓冲区，缓冲区内部是数组，并且提供了对数据结构化访问及其维护读写位置信息</p> 
+<p>以下是几个常用的缓冲区的相互依赖关系：<br> <img src="https://images2.imgbox.com/b6/8f/lYXvc5YY_o.png" alt="在这里插入图片描述"><br> 这里用代码描述几个核心属性：</p> 
+<pre><code>package com.lgli.nio.api;
+
+import java.nio.ByteBuffer;
+
+/**
+ * NioApi properties
+ * capacity:缓冲区中的最大容量
+ * limit:限制，缓冲区中最大可操作容量
+ * position:位置，当前操作的缓冲区的位置
+ * mark:标记，记录读取的缓冲区的位置
+ * @author lgli
+ * @since 1.0
+ */
+public class NioApi {
+    public static void main(String[] args) {
+        String str = "hello,世界";
+        // 1 分配一块指定大小的非直接缓冲区
+        ByteBuffer allocate = ByteBuffer.allocate(1024);
+        // ByteBuffer allocates = ByteBuffer.allocateDirect(1024);
+        System.out.println("分配非直接缓冲区后缓冲区容量（capacity）:"+allocate.capacity());
+        System.out.println("分配非直接缓冲区后缓冲区限制（limit）:"+allocate.limit());
+        System.out.println("分配非直接缓冲区后缓冲区位置（position）:"+allocate.position());
+        // 2 向缓冲区中放入数据
+        allocate.put(str.getBytes());
+        System.out.println("缓冲区中写入数据后缓冲区容量（capacity）:"+allocate.capacity());
+        System.out.println("缓冲区中写入数据后缓冲区限制（limit）:"+allocate.limit());
+        System.out.println("缓冲区中写入数据后缓冲区位置（position）:"+allocate.position());
+        // 3 切换读写模式，由前面的写切换为读
+        allocate.flip();
+        System.out.println("切换读取数据后缓冲区容量（capacity）:"+allocate.capacity());
+        System.out.println("切换读取数据后缓冲区限制（limit）:"+allocate.limit());
+        System.out.println("切换读取数据后缓冲区位置（position）:"+allocate.position());
+
+        // 4 读取缓冲区中的数据
+        ByteBuffer byteBuffer = allocate.get(str.getBytes(), allocate.position(), allocate.limit());
+        System.out.println("读取缓冲区中的数据为:"+new String(byteBuffer.array()));
+        System.out.println("读取缓冲区后缓冲区容量（capacity）:"+allocate.capacity());
+        System.out.println("读取缓冲区后缓冲区限制（limit）:"+allocate.limit());
+        System.out.println("读取缓冲区后缓冲区位置（position）:"+allocate.position());
+
+        //切换为重新读取缓冲区中的数据
+        allocate.rewind();
+        System.out.println("切换为重新读取缓冲区中的数据后缓冲区容量（capacity）:"+allocate.capacity());
+        System.out.println("切换为重新读取缓冲区中的数据后缓冲区限制（limit）:"+allocate.limit());
+        System.out.println("切换为重新读取缓冲区中的数据后缓冲区位置（position）:"+allocate.position());
+
+        //再次读取缓冲区中的数据
+        byte [] strArr = new byte[allocate.limit()];
+        byteBuffer.get(strArr);
+        System.out.println("再次读取缓冲区中的数据:"+new String(strArr,0,allocate.limit()));
+        System.out.println("再次读取缓冲区中的数据后缓冲区容量（capacity）:"+allocate.capacity());
+        System.out.println("再次读取缓冲区中的数据后缓冲区限制（limit）:"+allocate.limit());
+        System.out.println("再次读取缓冲区中的数据后缓冲区位置（position）:"+allocate.position());
+    }
+}
+
+</code></pre> 
+<p>上述代码同时也描述了NIO在读写文件操作的具体过程，即：</p> 
+<p><img src="https://images2.imgbox.com/f2/d2/ASJAqNy6_o.png" alt="在这里插入图片描述"><br> 上述创建缓冲区的方式有2种：</p> 
+<p>java.nio.ByteBuffer#allocate</p> 
+<p>java.nio.ByteBuffer#allocateDirect</p> 
+<p>这两种方式，均是获取内存中指定大小的缓冲区，其中allocate是指在JVM堆内存中分配一块儿缓冲区，如下源码：<br> <img src="https://images2.imgbox.com/e2/9d/BJ6yeAjo_o.png" alt="在这里插入图片描述"><br> 而allocateDirect是指在JVM堆外内存中分配内存空间，源码如下：</p> 
+<p><img src="https://images2.imgbox.com/af/70/agFPjrX1_o.png" alt="在这里插入图片描述"><br> 点击进去：<br> <img src="https://images2.imgbox.com/bc/3e/oVpbQS1x_o.png" alt="在这里插入图片描述"><br> 有兴趣的朋友可以追根到底的了解下JVM堆内内存和堆外内存的具体详细区别和差异，网上有对此做出大量分析的博文。这里只做简单说明（如果有不正确的请指出），Java的IO操作(不仅仅只是IO)，通常会在JVM堆中和堆外存在2份数据，即JVM堆中存在一份数据，然后拷贝到堆外，真正操作系统层面所操作到的数据是堆外的数据，因为JVM堆中存在的数据受到MinorGC影响较大，导致数据移动较大，同时Java的IO操作最底层的byte数组也不一定是一个连续的地址空间， 然后Java的IO操作，最终都会调用到操作系统的IO接口，而操作系统的IO操作，需要一个准确连续的数据地址，所以相对堆中的数据地址对于操作系统而言，极大程度来说就不是一个正确的数据地址空间，所以Java的IO操作，在堆内内存中需要一份操作的数据，然后复制一份到堆外内存中。<br> 此时，allocate方法就是按照常规的在JVM堆内中分配空间，然后copy到堆外，供操作系统层面操作<br> 而allocateDirect则是省掉了JVM对内分配空间然后拷贝到堆外内存的操作，直接在堆外内存分配内存<br> 这个时候，有个疑问，为啥需要在JVM堆内分配空间，然后copy，直接allocateDirect多好。其实两者有弊有利。<br> allocateDirect，对于读写文件效率高，但是分配和取消内存所耗费成本较大。<br> allocate，效率偏低，但是直接操作在JVM内存中，其耗费承成本较低。<br> 两者差异其实在读取字节数量级较小的时候，差距并不是那么明显，只有当Buffer容量到达一定的级别后，差距才比较突出，这里引用别人的一张图片描述下，就不做过多深究了<br> <img src="https://images2.imgbox.com/78/5b/bHrJnRL7_o.png" alt="在这里插入图片描述"><br> 一般来说，应用程序在读取文件操作，首先通过操作系统接口层面读取文件接口将文件加载到物理内核中，在通过一个复制操作，将文件缓冲到应用程序内存，供应用程序操作，然后应用程序操作后，复制到物理内核中，最后将文件读出到磁盘，即下面过程：<br> <img src="https://images2.imgbox.com/f4/dd/tvWdSX1z_o.png" alt="在这里插入图片描述"><br> NIO基于文件操作，实现了一种利用内存映射文件的方式来读取写入文件，其实现机制主要通过直接操作内存映射文件，而不需要应用程序和系统接口层面同时拷贝操作文件，下面用图解表示这一过程：</p> 
+<p><img src="https://images2.imgbox.com/3f/8c/aDFB81Yy_o.png" alt="在这里插入图片描述"><br> 这里用3段代码描述下，同样的复制一个文件，描述三者的区别：</p> 
+<pre><code>package com.lgli.nio.copy;
+
+import java.nio.ByteBuffer;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+
+/**
+ * NioCopyFile
+ * 比较复制复制文件性能
+ * @author lgli
+ * @since 1.0
+ */
+public class NioCopyFile {
+
+
+    public static void main(String[] args) throws Exception{
+//        copyByAllocate();
+//        copyByAllocateDirect();
+        copyByAllocateDirectMapped();
+    }
+
+
+    /**
+     * 此方法通过分配非直接缓冲区，然后来复制文件
+     * @throws Exception Exception
+     */
+    private static void copyByAllocate() throws Exception{
+        long start = System.currentTimeMillis();
+        //获取文件读取通道，方法需要传入参数，路径+文件模式《这里表示读取》
+        FileChannel in = FileChannel.open(Paths.get("F:\\entertainment\\movie\\马达加斯加的企鹅.mkv"),
+                StandardOpenOption.READ);
+        //获取文件写入通道，方法传入参数，路径+文件模式《这里可读可写，后面表示创建或者替换（已经存在则替换）》
+        FileChannel out = FileChannel.open(Paths.get("F:\\entertainment\\movie\\马达加斯加的企鹅-01.mkv"),
+                StandardOpenOption.WRITE,StandardOpenOption.READ,StandardOpenOption.CREATE);
+        ByteBuffer byteBuffer = ByteBuffer.allocate(2048);
+        //读取文件至缓冲区
+        while(in.read(byteBuffer)&gt;0){
+            //切换至读取模式
+            byteBuffer.flip();
+            //把缓冲区中的数据写出
+            out.write(byteBuffer);
+            //清空缓冲区，再次读取文件
+            byteBuffer.clear();
+        }
+        in.close();
+        out.close();
+        System.out.println("非直接缓冲区方式复制文件耗费："+(System.currentTimeMillis()-start)+"毫秒！");
+    }
+
+
+    /**
+     * 此方法通过分配直接缓冲区复制文件
+     * @throws Exception Exception
+     */
+    private static void copyByAllocateDirect() throws Exception{
+        long start = System.currentTimeMillis();
+        //获取文件读取通道，方法需要传入参数，路径+文件模式《这里表示读取》
+        FileChannel in = FileChannel.open(Paths.get("F:\\entertainment\\movie\\马达加斯加的企鹅.mkv"),
+                StandardOpenOption.READ);
+        //获取文件写入通道，方法传入参数，路径+文件模式《这里可读可写，后面表示创建或者替换（已经存在则替换）》
+        FileChannel out = FileChannel.open(Paths.get("F:\\entertainment\\movie\\马达加斯加的企鹅-02.mkv"),
+                StandardOpenOption.WRITE,StandardOpenOption.READ,StandardOpenOption.CREATE);
+        ByteBuffer byteBuffer = ByteBuffer.allocateDirect(Integer.MAX_VALUE);
+        //读取文件至缓冲区
+        while(in.read(byteBuffer)&gt;0){
+            //切换至读取模式
+            byteBuffer.flip();
+            //把缓冲区中的数据写出
+            out.write(byteBuffer);
+            //清空缓冲区，再次读取文件
+            byteBuffer.clear();
+        }
+        in.close();
+        out.close();
+        System.out.println("直接缓冲区方式复制文件耗费："+(System.currentTimeMillis()-start)+"毫秒！");
+    }
+
+    /**
+     * 方法通过内存映射文件复制文件
+     * @throws Exception Exception
+     */
+    private static void  copyByAllocateDirectMapped() throws Exception{
+
+        long start = System.currentTimeMillis();
+        //获取文件读取通道，方法需要传入参数，路径+文件模式《这里表示读取》
+        FileChannel in = FileChannel.open(Paths.get("F:\\entertainment\\movie\\马达加斯加的企鹅.mkv"),
+                StandardOpenOption.READ);
+        //获取文件写入通道，方法传入参数，路径+文件模式《这里可读可写，后面表示创建或者替换（已经存在则替换）》
+        FileChannel out = FileChannel.open(Paths.get("F:\\entertainment\\movie\\马达加斯加的企鹅-03.mkv"),
+                StandardOpenOption.WRITE,StandardOpenOption.READ,StandardOpenOption.CREATE);
+        //获取读通道的缓冲区
+        MappedByteBuffer inMapped = in.map(FileChannel.MapMode.READ_ONLY, 0, in.size());
+        //获取写通道缓冲区
+        MappedByteBuffer outMapped = out.map(FileChannel.MapMode.READ_WRITE, 0, in.size());
+        byte[] bytes = new byte[inMapped.limit()];
+        inMapped.get(bytes);
+        outMapped.put(bytes);
+        in.close();
+        out.close();
+        System.out.println("MappedByteBuffer映射文件方式复制文件耗费："+(System.currentTimeMillis()-start)+"毫秒！");
+
+    }
+}
+</code></pre> 
+<p>运行上述代码，通过时间对比可以看出，当操作的Buffer的容量不是很大的时候，其实非直接缓冲区和直接缓冲区复制文件差不多，但是利用内存映射文件的方式，效率是高了很多，但是内存映射文件呢存在的一个问题就是，在运行的时候，会占用较大的CPU内存，易出现程序假死状态（这时候文件复制其实已经完成）。<br> <img src="https://images2.imgbox.com/e6/af/OhuUEaE7_o.png" alt="在这里插入图片描述"><br> 下面，基于NIO通信，对之前的聊天系统进行改造</p> 
+<p>其客户端和服务端连接方式改为如下：<br> <img src="https://images2.imgbox.com/15/aa/bJeULzHW_o.png" alt="在这里插入图片描述"><br> 基于服务端，主要思想如下：<br> <img src="https://images2.imgbox.com/0b/e0/dzHIb5Wm_o.png" alt="在这里插入图片描述"><br> 轮询期间，可根据不同的状态，做不一样的事，而不是排队等待</p> 
+<p>客户端，主要思想如下：</p> 
+<p><img src="https://images2.imgbox.com/50/52/ZtQlxEii_o.png" alt="在这里插入图片描述"><br> 下面看代码，服务端：</p> 
+<pre><code>package com.lgli.nio.chart.server;
+
+
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.*;
+import java.nio.charset.StandardCharsets;
+import java.util.Scanner;
+import java.util.Set;
+
+/**
+ * NioChartService
+ * @author lgli
+ * @since 1.0
+ */
+public class NioChartServer {
+
+    //多路复用器
+    private Selector selector;
+
+    private int port = 8080;
+
+
+
+
+    public NioChartServer() {
+        try {
+            //打开多路复用器
+            selector = Selector.open();
+            //打开数据传输管道，服务端打开serversocket
+            ServerSocketChannel socketChannel = ServerSocketChannel.open();
+            //设置管道非阻塞
+            socketChannel.configureBlocking(false);
+            //将管道绑定到socket上，建立服务器监听
+            socketChannel.bind(new InetSocketAddress(port));
+            //将数据传输管道注册到多路复用器上,状态为等待连接
+            socketChannel.register(selector, SelectionKey.OP_ACCEPT);
+            //输出打印服务端提示
+            System.out.println("服务端启动服务连接监听，端口："+port);
+            Runnable runnable = ()-&gt;{
+                while(true){
+                    try{
+                        //等待时间100毫秒，返回可用数据传输管道的数量
+                        int channelCounts = selector.select(100);
+                        if(channelCounts &lt;= 0){
+                            //没有则继续循环监听
+                            continue;
+                        }
+                        //获取所有的选择通道集合
+                        Set&lt;SelectionKey&gt; selectionKeys = selector.selectedKeys();
+                        //循环处理通道中的事件
+                        //java新特性写法
+                        //selectionKey是循环的每个参数对象；param是需要传入的其他参数
+                        //selectionKeys.forEach(this::dealWith);
+                        selectionKeys.forEach(selectionKey-&gt;dealWith(selectionKey,socketChannel));
+                        //清空处理过的事件
+                        selectionKeys.clear();
+                    }catch (Exception e){
+                        e.printStackTrace();
+                    }
+                }
+            };
+            new Thread(runnable).start();
+            Scanner scanner = new Scanner(System.in);
+            while(scanner.hasNextLine()){
+                //服务端发送数据到客户端
+                String s = scanner.nextLine();
+                SocketChannel accept = socketChannel.accept();
+                System.out.println(accept);
+                accept.write(StandardCharsets.UTF_8.encode(s));
+            }
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+    }
+
+    private void dealWith(SelectionKey selectionKey,ServerSocketChannel socketChannel) {
+
+        if(null == selectionKey){
+            return;
+        }
+        if(!selectionKey.isValid()){
+            //无效连接，直接退出
+            return;
+        }
+        if(selectionKey.isAcceptable()){
+            //管道处于可接受状态，
+            try{
+                //获取数据传输管道
+                SocketChannel sc = socketChannel.accept();
+                //设置为非阻塞
+                sc.configureBlocking(false);
+                //注册多路复用器，设置为可读取模式,即当前连接的数据传输管道，注册到多路复用器上，之后好处理这个连接中的数据传输
+                sc.register(selector,SelectionKey.OP_READ);
+                //将对应的此管道设置为其他连接可连接
+                selectionKey.interestOps(SelectionKey.OP_ACCEPT);
+                //打印输出，服务端获取到此连接
+                System.out.println("服务端收到连接："+sc.getRemoteAddress());
+                //欢迎语发送给客户端
+                sc.write(StandardCharsets.UTF_8.encode("欢迎您："+sc.getRemoteAddress()));
+            }catch (Exception e){
+                e.printStackTrace();
+            }
+        }else if(selectionKey.isReadable()){
+            //管道有数据传输过来，即，服务端可以读取数据
+            //获取到管道
+            SocketChannel sc = (SocketChannel) selectionKey.channel();
+            ByteBuffer byteBuffer = ByteBuffer.allocate(2048);
+            StringBuilder stringBuilder = new StringBuilder();
+            try{
+                while(sc.read(byteBuffer)&gt;0){
+                    //切换读写模式
+                    byteBuffer.flip();
+                    stringBuilder.append(StandardCharsets.UTF_8.decode(byteBuffer));
+                }
+                //打印客户端回复的数据
+                System.out.println("服务端收到"+sc.getRemoteAddress()+"说："+stringBuilder.toString());
+
+                //将此对应的数据传输管道设置为下一次可读取数据
+                selectionKey.interestOps(SelectionKey.OP_READ);
+            }catch (Exception e){
+                selectionKey.cancel();
+                if(selectionKey.channel() != null){
+                    try {
+                        selectionKey.channel().close();
+                    }catch (Exception es){
+                        es.printStackTrace();
+                    }
+                }
+                e.printStackTrace();
+            }
+            if(stringBuilder.length()&gt;0){
+                //将客户端发送的数据，发送给其他客户端
+                System.out.println("准备发送数据.....");
+                Set&lt;SelectionKey&gt; keys = selector.keys();
+                keys.forEach(keyKeys-&gt; {
+                    try {
+                        sendMsg(keyKeys,sc,sc.getRemoteAddress()+":"+stringBuilder.toString());
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                });
+            }
+        }
+    }
+
+    private void sendMsg(SelectionKey keyKeys, SocketChannel thisSc,String toString) {
+        //获取所有注册到多路复用器中的通道
+        Channel channel = keyKeys.channel();
+        if(!(channel instanceof SocketChannel)){
+            return;
+        }
+        SocketChannel sc = (SocketChannel) channel;
+        try {
+            //发送给非当前通道连接的客户端
+            boolean isEq = sc.getRemoteAddress().toString().equals(thisSc.getRemoteAddress().toString());
+            if(isEq){
+                return;
+            }
+            sc.write(StandardCharsets.UTF_8.encode(toString));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+
+    public static void main(String[] args) {
+        new NioChartServer();
+    }
+
+
+
+
+}
+
+</code></pre> 
+<p>客户端：</p> 
+<pre><code>package com.lgli.nio.chart.client;
+
+
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
+import java.util.Scanner;
+import java.util.Set;
+
+/**
+ * NioChartClient
+ * @author lgli
+ * @since 1.0
+ */
+public class NioChartClient {
+
+    private Selector selector;
+
+    private SocketChannel socketChannel;
+
+
+    public NioChartClient(int port) {
+        try{
+            //打开多路复用器
+            selector = Selector.open();
+            //打开连接服务端的数据传输管道
+            socketChannel = SocketChannel.open(new InetSocketAddress("localhost",port));
+            //设置非阻塞
+            socketChannel.configureBlocking(false);
+            //将传输管道注册到多路复用器上
+            socketChannel.register(selector, SelectionKey.OP_READ);
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+    }
+
+    private void monitor() {
+        //接受服务端发过来的数据，这里由于键盘输入是线程阻塞的，所以这里新起一个线程来进行这个操作
+        Runnable runnable = () -&gt;{
+            while(true){
+                try{
+                    int select = selector.select(100);
+                    if(select &lt;= 0){
+                        continue;
+                    }
+                    Set&lt;SelectionKey&gt; selectionKeys = selector.selectedKeys();
+                    selectionKeys.forEach(this :: dealWith);
+                    selectionKeys.clear();
+                }catch (Exception e){
+                    e.printStackTrace();
+                }
+            }
+        };
+        new Thread(runnable).start();
+
+        //监听键盘输入向服务端写入数据，
+        Scanner scanner = new Scanner(System.in);
+        try{
+            while(scanner.hasNext()){
+                String next = scanner.next();
+                if(!"".equals(next)){
+                    socketChannel.write(StandardCharsets.UTF_8.encode(next));
+                }
+            }
+
+        }catch (Exception e){
+            e.printStackTrace();
+        }
+
+    }
+
+    private void dealWith(SelectionKey sc) {
+        if(!sc.isValid()){
+            //无效退出
+            System.out.println("无效连接退出");
+            return;
+        }
+        if(sc.isReadable()){
+            //可读，则读取服务端发送来的数据
+            ByteBuffer byteBuffer = ByteBuffer.allocate(2048);
+            //获取通道
+            SocketChannel scl = (SocketChannel)sc.channel();
+            StringBuilder sb = new StringBuilder();
+            try{
+                while(scl.read(byteBuffer)&gt;0){
+                    byteBuffer.flip();
+                    sb.append(StandardCharsets.UTF_8.decode(byteBuffer));
+                }
+                if(sb.length()&gt;0){
+//                    System.out.println(scl.getRemoteAddress()+"说："+sb.toString());
+                    System.out.println(sb.toString());
+                }
+            }catch (Exception e){
+                e.printStackTrace();
+            }
+            sc.interestOps(SelectionKey.OP_READ);
+        }
+    }
+
+    public static void main(String[] args) {
+        new NioChartClient(8080).monitor();
+
+    }
+
+
+}
+</code></pre> 
+<p>然后运行服务端，接着运行多个客户端，这里用IntelliJ IDEA的小伙伴，提示下，可以并行跑相同代码，只需要编辑配置即可（部分低版本的不行）<br> <img src="https://images2.imgbox.com/1c/31/dRaADL4X_o.png" alt="在这里插入图片描述"><br> 把这个勾上即可，于是达到了理想的状态了</p> 
+<p>这儿本来有个视频效果的，公众号里面可以看，这里不能上传视频</p> 
+<p>下面简单了解下NIO2，其实NIO是在传统的BIO基础上实现的同步非阻塞IO，那么对于java1.7之后引入的NIO2（也叫AIO），就是一个异步非阻塞的IO，更加的优化了许多的操作，比较重大的改进是：1）比较全面的文件IO操作和对文件系统访问的支持；2）异步通道的IO</p> 
+<p>对于NIO2的详细介绍、及其Netty的引入将在后续中更新，本次若有不正确的地方，烦请指出。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/efdb75292460eac15dcbaafdd016497b/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">java的接口中是否可以定义静态方法</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a818d680c0c0c09ba3d87adf92d40e4e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">snprintf()函数使用方法</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

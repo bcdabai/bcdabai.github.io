@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>基于FPGA的VGA协议显示彩条、字符、图片 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="基于FPGA的VGA协议显示彩条、字符、图片" />
+<meta property="og:description" content="文章目录 一、VGA协议二、实现1、创建项目2、时钟分频3、提取字模4、图片显示 三、代码实现1、VGA Driver2、数据显示模块3、按键消抖4、顶层模块5、TCL引脚绑定脚本 四、RTL原理图五、实现效果六、总结七、参考资料 本次实验所需工具： 链接： https://pan.baidu.com/s/1VYLHUd4uXtw_9jGiLIKaig?pwd=u1d5 提取码：u1d5 一、VGA协议 VGA（Video Graphics Array）视频图形阵列是 IBM 于1987年提出的一个使用模拟信号的电脑显示标准。VGA具有分辨率高、显示速率快、颜色丰富等优点。VGA 接口不但是CRT 显示设备的标准接口，同样也是 LCD 液晶显示设备的标准接口，具有广泛的应用范围。使用原理：显示器扫描方式分为逐行扫描和隔行扫描：逐行扫描是扫描从屏幕左上角一点开始，从左向右逐点扫描，每扫描完一行,电子束回到屏幕的左边下一行的起始位置，在这期间，每行结束时，用行同步信号进行同步；当扫描完所有的行，形成一帧，用场同步信号进行场同步，并使扫描回到屏幕左上方，开始下一帧。隔行扫描是指电子束扫描时每隔一行扫一线，完成一屏后在返回来扫描剩下的线，隔行扫描的显示器闪烁的厉害，会让使用者的眼睛疲劳。在此我们选择逐行扫描的方式。 二、实现 1、创建项目 首先，利用Quartus Ⅱ创建相关项目，具体可参照博主以前的博客。
+2、时钟分频 按照下图所示在IP核中搜索PLL，并进行时钟分频
+基础时钟选择50M：
+取消勾选输出
+c0默认输出50M即可,c1分频到25M,如需其他时钟频率可以自己进行设置
+勾选如下选项后finish
+3、提取字模 在字模提取工具里面输入需要显示的字符并设置字符大小为64*64
+点击左上角文件-&gt;另存为BMP文件
+再点击文件-打开，把保存的BMP图片打开得到整体的字符
+再点击选项按如下参数设置
+最后点击生成字模并保存字模为文本文件
+4、图片显示 显示图片前需要使用工具把图片转为HEX文件，同时图片分辨率不能太高，否则会超出FPGA储存上限
+转换工具设置如下（该工具只可转换24位图片）：
+由于图片数据太多因此需要使用ROM来存储数据
+操作如下:
+打开Quartus，在左侧工具栏搜索ROM
+点击后创建文件名
+在弹出的设置界面，选择图片位数，图片内存大小为各位选择图片的分辨率大小，例：10×10的图片，则选择100
+取消勾选下列选项
+找到刚才生成的图片文件：
+最后勾选以下选项
+三、代码实现 1、VGA Driver module vga_dirve (input	wire	clk, //系统时钟 input	wire	rst_n, //复位 input	wire	[ 15:0 ]	rgb_data, //16位RGB对应值 output	wire	vga_clk, //vga时钟 25M output	reg	h_sync, //行同步信号 output	reg	v_sync, //场同步信号 output	reg	[ 11:0 ]	addr_h, //行地址 output	reg	[ 11:0 ]	addr_v, //列地址 output	wire	[ 4:0 ]	rgb_r, //红基色 output	wire	[ 5:0 ]	rgb_g, //绿基色 output	wire	[ 4:0 ]	rgb_b //蓝基色 ); // 640 * 480 60HZ localparam	H_FRONT = 16; // 行同步前沿信号周期长 localparam	H_SYNC = 96; // 行同步信号周期长 localparam	H_BLACK = 48; // 行同步后沿信号周期长 localparam	H_ACT = 640; // 行显示周期长 localparam	V_FRONT = 11; // 场同步前沿信号周期长 localparam	V_SYNC = 2; // 场同步信号周期长 localparam	V_BLACK = 31; // 场同步后沿信号周期长 localparam	V_ACT = 480; // 场显示周期长 // 800 * 600 72HZ // localparam	H_FRONT = 40; // 行同步前沿信号周期长 // localparam	H_SYNC = 120; // 行同步信号周期长 // localparam	H_BLACK = 88; // 行同步后沿信号周期长 // localparam	H_ACT = 800; // 行显示周期长 // localparam	V_FRONT = 37; // 场同步前沿信号周期长 // localparam	V_SYNC = 6; // 场同步信号周期长 // localparam	V_BLACK = 23; // 场同步后沿信号周期长 // localparam	V_ACT = 600; // 场显示周期长 localparam	H_TOTAL = H_FRONT &#43; H_SYNC &#43; H_BLACK &#43; H_ACT; // 行周期 localparam	V_TOTAL = V_FRONT &#43; V_SYNC &#43; V_BLACK &#43; V_ACT; // 列周期 reg	[ 11:0 ]	cnt_h	; // 行计数器 reg	[ 11:0 ]	cnt_v	; // 场计数器 reg	[ 15:0 ]	rgb	; // 对应显示颜色值 // 对应计数器开始、结束、计数信号 wire	flag_enable_cnt_h	; wire	flag_clear_cnt_h	; wire	flag_enable_cnt_v	; wire	flag_clear_cnt_v	; wire	flag_add_cnt_v ; wire	valid_area ; // 25M时钟 行周期*场周期*刷新率 = 800 * 525* 60 wire	clk_25	; // 50M时钟 1040 * 666 * 72 wire	clk_50	; //PLL pll	pll_inst ( ." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/73ead9388c95eeed87423ea5c2935289/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-04-24T16:41:43+08:00" />
+<meta property="article:modified_time" content="2023-04-24T16:41:43+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">基于FPGA的VGA协议显示彩条、字符、图片</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#VGA_4" rel="nofollow">一、VGA协议</a></li><li><a href="#_7" rel="nofollow">二、实现</a></li><li><ul><li><a href="#1_8" rel="nofollow">1、创建项目</a></li><li><a href="#2_10" rel="nofollow">2、时钟分频</a></li><li><a href="#3_30" rel="nofollow">3、提取字模</a></li><li><a href="#4_47" rel="nofollow">4、图片显示</a></li></ul> 
+  </li><li><a href="#_73" rel="nofollow">三、代码实现</a></li><li><ul><li><a href="#1VGA_Driver_74" rel="nofollow">1、VGA Driver</a></li><li><a href="#2_265" rel="nofollow">2、数据显示模块</a></li><li><a href="#3_470" rel="nofollow">3、按键消抖</a></li><li><a href="#4_533" rel="nofollow">4、顶层模块</a></li><li><a href="#5TCL_631" rel="nofollow">5、TCL引脚绑定脚本</a></li></ul> 
+  </li><li><a href="#RTL_670" rel="nofollow">四、RTL原理图</a></li><li><a href="#_673" rel="nofollow">五、实现效果</a></li><li><a href="#_679" rel="nofollow">六、总结</a></li><li><a href="#_681" rel="nofollow">七、参考资料</a></li></ul> 
+</div> 
+<br> 本次实验所需工具： 
+<br> 链接： 
+<a href="https://pan.baidu.com/s/1VYLHUd4uXtw_9jGiLIKaig?pwd=u1d5" rel="nofollow">https://pan.baidu.com/s/1VYLHUd4uXtw_9jGiLIKaig?pwd=u1d5</a> 
+<br> 提取码：u1d5 
+<p></p> 
+<h2><a id="VGA_4"></a>一、VGA协议</h2> 
+<ul><li>VGA（Video Graphics Array）视频图形阵列是 IBM 于1987年提出的一个使用模拟信号的电脑显示标准。VGA具有分辨率高、显示速率快、颜色丰富等优点。VGA 接口不但是CRT 显示设备的标准接口，同样也是 LCD 液晶显示设备的标准接口，具有广泛的应用范围。</li><li>使用原理：显示器扫描方式分为逐行扫描和隔行扫描：逐行扫描是扫描从屏幕左上角一点开始，从左向右逐点扫描，每扫描完一行,电子束回到屏幕的左边下一行的起始位置，在这期间，每行结束时，用行同步信号进行同步；当扫描完所有的行，形成一帧，用场同步信号进行场同步，并使扫描回到屏幕左上方，开始下一帧。隔行扫描是指电子束扫描时每隔一行扫一线，完成一屏后在返回来扫描剩下的线，隔行扫描的显示器闪烁的厉害，会让使用者的眼睛疲劳。在此我们选择逐行扫描的方式。</li></ul> 
+<h2><a id="_7"></a>二、实现</h2> 
+<h3><a id="1_8"></a>1、创建项目</h3> 
+<p>首先，利用Quartus Ⅱ创建相关项目，具体可参照博主以前的<a href="https://blog.csdn.net/qq_54347584/article/details/129684308">博客</a>。</p> 
+<h3><a id="2_10"></a>2、时钟分频</h3> 
+<p>按照下图所示在IP核中搜索PLL，并进行时钟分频<br> <img src="https://images2.imgbox.com/f6/99/THYoBumV_o.png" alt="在这里插入图片描述"></p> 
+<p>基础时钟选择50M：</p> 
+<p><img src="https://images2.imgbox.com/20/d4/Nzbip7EX_o.png" alt="在这里插入图片描述"></p> 
+<p>取消勾选输出</p> 
+<p><img src="https://images2.imgbox.com/f5/5a/32YPIaIV_o.png" alt="在这里插入图片描述"></p> 
+<p>c0默认输出50M即可,c1分频到25M,如需其他时钟频率可以自己进行设置</p> 
+<p><img src="https://images2.imgbox.com/ad/cc/1HBTVDPY_o.png" alt="在这里插入图片描述"></p> 
+<p>勾选如下选项后finish</p> 
+<p><img src="https://images2.imgbox.com/3a/55/y61yqE2D_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="3_30"></a>3、提取字模</h3> 
+<p>在字模提取工具里面输入需要显示的字符并设置字符大小为64*64<br> <img src="https://images2.imgbox.com/ee/ad/0LRzyCTt_o.png" alt="在这里插入图片描述"></p> 
+<p>点击左上角文件-&gt;另存为BMP文件</p> 
+<p><img src="https://images2.imgbox.com/8f/b6/Yg5p0D6S_o.png" alt="在这里插入图片描述"></p> 
+<p>再点击文件-打开，把保存的BMP图片打开得到整体的字符<br> 再点击选项按如下参数设置</p> 
+<p><img src="https://images2.imgbox.com/d7/e9/gbvHLCf4_o.png" alt="在这里插入图片描述"></p> 
+<p>最后点击生成字模并保存字模为文本文件</p> 
+<p><img src="https://images2.imgbox.com/a7/3b/hIXNkTYo_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="4_47"></a>4、图片显示</h3> 
+<p>显示图片前需要使用工具把图片转为HEX文件，同时图片分辨率不能太高，否则会超出FPGA储存上限<br> 转换工具设置如下（该工具只可转换24位图片）：<br> <img src="https://images2.imgbox.com/24/db/dmBABKFL_o.png" alt="在这里插入图片描述"><br> 由于图片数据太多因此需要使用ROM来存储数据<br> 操作如下:<br> 打开Quartus，在左侧工具栏搜索ROM<br> <img src="https://images2.imgbox.com/9b/a5/enzcRmxT_o.png" alt="在这里插入图片描述"></p> 
+<p>点击后创建文件名</p> 
+<p>在弹出的设置界面，选择图片位数，图片内存大小为各位选择图片的分辨率大小，例：10×10的图片，则选择100</p> 
+<p><img src="https://images2.imgbox.com/ca/58/mvXrbwvX_o.png" alt="在这里插入图片描述"></p> 
+<p>取消勾选下列选项</p> 
+<p><img src="https://images2.imgbox.com/8e/3d/9Yt46j2W_o.png" alt="在这里插入图片描述"></p> 
+<p>找到刚才生成的图片文件：<br> <img src="https://images2.imgbox.com/d6/96/pbSqUYXz_o.png" alt="在这里插入图片描述"></p> 
+<p>最后勾选以下选项</p> 
+<p><img src="https://images2.imgbox.com/77/d3/TQW53qJc_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="_73"></a>三、代码实现</h2> 
+<h3><a id="1VGA_Driver_74"></a>1、VGA Driver</h3> 
+<pre><code class="prism language-c">module <span class="token function">vga_dirve</span> <span class="token punctuation">(</span>input			wire						clk<span class="token punctuation">,</span>            <span class="token comment">//系统时钟</span>
+                  input			wire						rst_n<span class="token punctuation">,</span>          <span class="token comment">//复位</span>
+                  input			wire		<span class="token punctuation">[</span> <span class="token number">15</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>		rgb_data<span class="token punctuation">,</span>       <span class="token comment">//16位RGB对应值</span>
+                  output			wire							vga_clk<span class="token punctuation">,</span>    <span class="token comment">//vga时钟 25M</span>
+                  output			reg							h_sync<span class="token punctuation">,</span>     <span class="token comment">//行同步信号</span>
+                  output			reg							v_sync<span class="token punctuation">,</span>     <span class="token comment">//场同步信号</span>
+                  output			reg		<span class="token punctuation">[</span> <span class="token number">11</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>				addr_h<span class="token punctuation">,</span> <span class="token comment">//行地址</span>
+                  output			reg		<span class="token punctuation">[</span> <span class="token number">11</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>				addr_v<span class="token punctuation">,</span>  <span class="token comment">//列地址</span>
+                  output			wire		<span class="token punctuation">[</span> <span class="token number">4</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>				rgb_r<span class="token punctuation">,</span>  <span class="token comment">//红基色</span>
+                  output			wire		<span class="token punctuation">[</span> <span class="token number">5</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>				rgb_g<span class="token punctuation">,</span>  <span class="token comment">//绿基色</span>
+                  output			wire		<span class="token punctuation">[</span> <span class="token number">4</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>				rgb_b  <span class="token comment">//蓝基色</span>
+<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">// 640 * 480 60HZ</span>
+localparam	 H_FRONT <span class="token operator">=</span> <span class="token number">16</span><span class="token punctuation">;</span> <span class="token comment">// 行同步前沿信号周期长</span>
+localparam	 H_SYNC  <span class="token operator">=</span> <span class="token number">96</span><span class="token punctuation">;</span> <span class="token comment">// 行同步信号周期长</span>
+localparam	 H_BLACK <span class="token operator">=</span> <span class="token number">48</span><span class="token punctuation">;</span> <span class="token comment">// 行同步后沿信号周期长</span>
+localparam	 H_ACT   <span class="token operator">=</span> <span class="token number">640</span><span class="token punctuation">;</span> <span class="token comment">// 行显示周期长</span>
+localparam	 V_FRONT <span class="token operator">=</span> <span class="token number">11</span><span class="token punctuation">;</span> <span class="token comment">// 场同步前沿信号周期长</span>
+localparam	 V_SYNC  <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">;</span> <span class="token comment">// 场同步信号周期长</span>
+localparam	 V_BLACK <span class="token operator">=</span> <span class="token number">31</span><span class="token punctuation">;</span> <span class="token comment">// 场同步后沿信号周期长</span>
+localparam	 V_ACT   <span class="token operator">=</span> <span class="token number">480</span><span class="token punctuation">;</span> <span class="token comment">// 场显示周期长</span>
+
+<span class="token comment">// 800 * 600 72HZ</span>
+<span class="token comment">// localparam	 H_FRONT = 40; // 行同步前沿信号周期长</span>
+<span class="token comment">// localparam	 H_SYNC  = 120; // 行同步信号周期长</span>
+<span class="token comment">// localparam	 H_BLACK = 88; // 行同步后沿信号周期长</span>
+<span class="token comment">// localparam	 H_ACT   = 800; // 行显示周期长</span>
+<span class="token comment">// localparam	 V_FRONT = 37; // 场同步前沿信号周期长</span>
+<span class="token comment">// localparam	 V_SYNC  = 6; // 场同步信号周期长</span>
+<span class="token comment">// localparam	 V_BLACK = 23; // 场同步后沿信号周期长</span>
+<span class="token comment">// localparam	 V_ACT   = 600; // 场显示周期长</span>
+
+
+localparam	H_TOTAL <span class="token operator">=</span> H_FRONT <span class="token operator">+</span> H_SYNC <span class="token operator">+</span> H_BLACK <span class="token operator">+</span> H_ACT<span class="token punctuation">;</span> <span class="token comment">// 行周期</span>
+localparam	V_TOTAL <span class="token operator">=</span> V_FRONT <span class="token operator">+</span> V_SYNC <span class="token operator">+</span> V_BLACK <span class="token operator">+</span> V_ACT<span class="token punctuation">;</span> <span class="token comment">// 列周期</span>
+
+reg			<span class="token punctuation">[</span> <span class="token number">11</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			cnt_h			<span class="token punctuation">;</span> <span class="token comment">// 行计数器</span>
+reg			<span class="token punctuation">[</span> <span class="token number">11</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			cnt_v			<span class="token punctuation">;</span> <span class="token comment">// 场计数器</span>
+reg			<span class="token punctuation">[</span> <span class="token number">15</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			rgb			<span class="token punctuation">;</span> <span class="token comment">// 对应显示颜色值</span>
+
+<span class="token comment">// 对应计数器开始、结束、计数信号</span>
+wire							flag_enable_cnt_h			<span class="token punctuation">;</span>
+wire							flag_clear_cnt_h			<span class="token punctuation">;</span>
+wire							flag_enable_cnt_v			<span class="token punctuation">;</span>
+wire							flag_clear_cnt_v			<span class="token punctuation">;</span>
+wire							flag_add_cnt_v  			<span class="token punctuation">;</span>
+wire							valid_area      			<span class="token punctuation">;</span>
+
+
+<span class="token comment">// 25M时钟 行周期*场周期*刷新率 = 800 * 525* 60</span>
+wire							clk_25			<span class="token punctuation">;</span>
+<span class="token comment">// 50M时钟 1040 * 666 * 72</span>
+wire							clk_50			<span class="token punctuation">;</span>
+<span class="token comment">//PLL</span>
+pll	<span class="token function">pll_inst</span> <span class="token punctuation">(</span>
+	<span class="token punctuation">.</span><span class="token function">areset</span> <span class="token punctuation">(</span> <span class="token operator">~</span>rst_n <span class="token punctuation">)</span><span class="token punctuation">,</span>
+	<span class="token punctuation">.</span><span class="token function">inclk0</span> <span class="token punctuation">(</span> clk <span class="token punctuation">)</span><span class="token punctuation">,</span>
+	<span class="token punctuation">.</span><span class="token function">c0</span> <span class="token punctuation">(</span> clk_50 <span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token comment">//50M</span>
+	<span class="token punctuation">.</span><span class="token function">c1</span> <span class="token punctuation">(</span> clk_25 <span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token comment">//25M</span>
+	<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//根据不同分配率选择不同频率时钟</span>
+assign vga_clk <span class="token operator">=</span> clk_25<span class="token punctuation">;</span>
+
+
+<span class="token comment">// 行计数</span>
+always @<span class="token punctuation">(</span> posedge vga_clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        cnt_h <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> flag_enable_cnt_h <span class="token punctuation">)</span> begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span> flag_clear_cnt_h <span class="token punctuation">)</span> begin
+            cnt_h <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> begin
+            cnt_h <span class="token operator">&lt;=</span> cnt_h <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+        end
+    end
+    <span class="token keyword">else</span> begin
+        cnt_h <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+end
+assign flag_enable_cnt_h <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+assign flag_clear_cnt_h  <span class="token operator">=</span> cnt_h <span class="token operator">==</span> H_TOTAL <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span>
+
+<span class="token comment">// 行同步信号</span>
+always @<span class="token punctuation">(</span> posedge vga_clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        h_sync <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> cnt_h <span class="token operator">==</span> H_SYNC <span class="token operator">-</span> <span class="token number">1</span> <span class="token punctuation">)</span> begin <span class="token comment">// 同步周期时为1</span>
+        h_sync <span class="token operator">&lt;=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    end
+        <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> flag_clear_cnt_h <span class="token punctuation">)</span> begin <span class="token comment">// 其余为0</span>
+        h_sync <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        end
+    <span class="token keyword">else</span> begin
+        h_sync <span class="token operator">&lt;=</span> h_sync<span class="token punctuation">;</span>
+    end
+end
+
+<span class="token comment">// 场计数</span>
+always @<span class="token punctuation">(</span> posedge vga_clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        cnt_v <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> flag_enable_cnt_v <span class="token punctuation">)</span> begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span> flag_clear_cnt_v <span class="token punctuation">)</span> begin
+            cnt_v <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> flag_add_cnt_v <span class="token punctuation">)</span> begin
+            cnt_v <span class="token operator">&lt;=</span> cnt_v <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> begin
+            cnt_v <span class="token operator">&lt;=</span> cnt_v<span class="token punctuation">;</span>
+        end
+    end
+    <span class="token keyword">else</span> begin
+        cnt_v <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+end
+assign flag_enable_cnt_v <span class="token operator">=</span> flag_enable_cnt_h<span class="token punctuation">;</span>
+assign flag_clear_cnt_v  <span class="token operator">=</span> cnt_v <span class="token operator">==</span> V_TOTAL <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span>
+assign flag_add_cnt_v    <span class="token operator">=</span> flag_clear_cnt_h<span class="token punctuation">;</span>
+
+<span class="token comment">// 场同步信号</span>
+always @<span class="token punctuation">(</span> posedge vga_clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        v_sync <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> cnt_v <span class="token operator">==</span> V_SYNC <span class="token operator">-</span> <span class="token number">1</span> <span class="token punctuation">)</span> begin
+        v_sync <span class="token operator">&lt;=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    end
+        <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> flag_clear_cnt_v <span class="token punctuation">)</span> begin
+        v_sync <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        end
+    <span class="token keyword">else</span> begin
+        v_sync <span class="token operator">&lt;=</span> v_sync<span class="token punctuation">;</span>
+    end
+end
+
+<span class="token comment">// 对应有效区域行地址 1-640</span>
+always @<span class="token punctuation">(</span> posedge vga_clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        addr_h <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> valid_area <span class="token punctuation">)</span> begin
+        addr_h <span class="token operator">&lt;=</span> cnt_h <span class="token operator">-</span> H_SYNC <span class="token operator">-</span> H_BLACK <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> begin
+        addr_h <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+end
+<span class="token comment">// 对应有效区域列地址 1-480</span>
+always @<span class="token punctuation">(</span> posedge vga_clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        addr_v <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> valid_area <span class="token punctuation">)</span> begin
+        addr_v <span class="token operator">&lt;=</span> cnt_v <span class="token operator">-</span>V_SYNC <span class="token operator">-</span> V_BLACK <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> begin
+        addr_v <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+end
+<span class="token comment">// 有效显示区域</span>
+assign valid_area <span class="token operator">=</span> cnt_h <span class="token operator">&gt;=</span> H_SYNC <span class="token operator">+</span> H_BLACK <span class="token operator">&amp;&amp;</span> cnt_h <span class="token operator">&lt;=</span> H_SYNC <span class="token operator">+</span> H_BLACK <span class="token operator">+</span> H_ACT <span class="token operator">&amp;&amp;</span> cnt_v <span class="token operator">&gt;=</span> V_SYNC <span class="token operator">+</span> V_BLACK <span class="token operator">&amp;&amp;</span> cnt_v <span class="token operator">&lt;=</span> V_SYNC <span class="token operator">+</span> V_BLACK <span class="token operator">+</span> V_ACT<span class="token punctuation">;</span>
+
+
+<span class="token comment">// 显示颜色</span>
+always @<span class="token punctuation">(</span> posedge vga_clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        rgb <span class="token operator">&lt;=</span> <span class="token number">16</span>'h0<span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> valid_area <span class="token punctuation">)</span> begin
+        rgb <span class="token operator">&lt;=</span> rgb_data<span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> begin
+        rgb <span class="token operator">&lt;=</span> <span class="token number">16</span>'b0<span class="token punctuation">;</span>
+    end
+end
+assign rgb_r <span class="token operator">=</span> rgb<span class="token punctuation">[</span> <span class="token number">15</span><span class="token operator">:</span><span class="token number">11</span> <span class="token punctuation">]</span><span class="token punctuation">;</span>
+assign rgb_g <span class="token operator">=</span> rgb<span class="token punctuation">[</span> <span class="token number">10</span><span class="token operator">:</span><span class="token number">5</span> <span class="token punctuation">]</span><span class="token punctuation">;</span>
+assign rgb_b <span class="token operator">=</span> rgb<span class="token punctuation">[</span> <span class="token number">4</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+endmodule <span class="token comment">// vga_dirve</span>
+</code></pre> 
+<h3><a id="2_265"></a>2、数据显示模块</h3> 
+<pre><code class="prism language-c">module <span class="token function">data_drive</span> <span class="token punctuation">(</span>input			wire						vga_clk<span class="token punctuation">,</span>
+                   input			wire						rst_n<span class="token punctuation">,</span>
+                   input			wire		<span class="token punctuation">[</span> <span class="token number">11</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>		addr_h<span class="token punctuation">,</span>
+                   input			wire		<span class="token punctuation">[</span> <span class="token number">11</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>		addr_v<span class="token punctuation">,</span>
+                   input			wire		<span class="token punctuation">[</span> <span class="token number">2</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>		 key<span class="token punctuation">,</span>
+                   output			reg		<span class="token punctuation">[</span> <span class="token number">15</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>				rgb_data<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+localparam	red    <span class="token operator">=</span> <span class="token number">16</span>'d63488<span class="token punctuation">;</span>
+localparam	orange <span class="token operator">=</span> <span class="token number">16</span>'d64384<span class="token punctuation">;</span>
+localparam	yellow <span class="token operator">=</span> <span class="token number">16</span>'d65472<span class="token punctuation">;</span>
+localparam	green  <span class="token operator">=</span> <span class="token number">16</span>'d1024<span class="token punctuation">;</span>
+localparam	blue   <span class="token operator">=</span> <span class="token number">16</span>'d31<span class="token punctuation">;</span>
+localparam	indigo <span class="token operator">=</span> <span class="token number">16</span>'d18448<span class="token punctuation">;</span>
+localparam	purple <span class="token operator">=</span> <span class="token number">16</span>'d32784<span class="token punctuation">;</span>
+localparam	white  <span class="token operator">=</span> <span class="token number">16</span>'d65503<span class="token punctuation">;</span>
+localparam	black  <span class="token operator">=</span> <span class="token number">16</span>'d0<span class="token punctuation">;</span>
+reg <span class="token punctuation">[</span> <span class="token number">383</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span> char_line<span class="token punctuation">[</span> <span class="token number">64</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+localparam	states_1 <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span> <span class="token comment">// 彩条</span>
+localparam	states_2 <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">;</span> <span class="token comment">// 字符</span>
+localparam	states_3 <span class="token operator">=</span> <span class="token number">3</span><span class="token punctuation">;</span> <span class="token comment">// 图片</span>
+
+parameter	height <span class="token operator">=</span> <span class="token number">78</span><span class="token punctuation">;</span> <span class="token comment">// 图片高度</span>
+parameter	width  <span class="token operator">=</span> <span class="token number">128</span><span class="token punctuation">;</span> <span class="token comment">// 图片宽度</span>
+reg			<span class="token punctuation">[</span> <span class="token number">1</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			states_current			<span class="token punctuation">;</span> <span class="token comment">// 当前状态</span>
+reg			<span class="token punctuation">[</span> <span class="token number">1</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			states_next			    <span class="token punctuation">;</span> <span class="token comment">// 下个状态</span>
+reg			<span class="token punctuation">[</span> <span class="token number">13</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>		rom_address				<span class="token punctuation">;</span> <span class="token comment">// ROM地址</span>
+wire			<span class="token punctuation">[</span> <span class="token number">15</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>		rom_data				<span class="token punctuation">;</span> <span class="token comment">// 图片数据</span>
+
+wire							flag_enable_out1			<span class="token punctuation">;</span> <span class="token comment">// 文字有效区域</span>
+wire							flag_enable_out2			<span class="token punctuation">;</span> <span class="token comment">// 图片有效区域</span>
+wire							flag_clear_rom_address		<span class="token punctuation">;</span> <span class="token comment">// 地址清零</span>
+wire							flag_begin_h			    <span class="token punctuation">;</span> <span class="token comment">// 图片显示行</span>
+wire							flag_begin_v			    <span class="token punctuation">;</span> <span class="token comment">// 图片显示列</span>
+
+<span class="token comment">//状态转移</span>
+always @<span class="token punctuation">(</span> posedge vga_clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        states_current <span class="token operator">&lt;=</span> states_1<span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> begin
+        states_current <span class="token operator">&lt;=</span> states_next<span class="token punctuation">;</span>
+    end
+end
+
+<span class="token comment">//状态判断</span>
+always @<span class="token punctuation">(</span> posedge vga_clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        states_next <span class="token operator">&lt;=</span> states_1<span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> key<span class="token punctuation">[</span> <span class="token number">0</span> <span class="token punctuation">]</span> <span class="token punctuation">)</span> begin
+        states_next <span class="token operator">&lt;=</span> states_1<span class="token punctuation">;</span>
+    end
+        <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> key<span class="token punctuation">[</span> <span class="token number">1</span> <span class="token punctuation">]</span> <span class="token punctuation">)</span> begin
+        states_next <span class="token operator">&lt;=</span> states_2<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> key<span class="token punctuation">[</span> <span class="token number">2</span> <span class="token punctuation">]</span> <span class="token punctuation">)</span> begin
+        states_next <span class="token operator">&lt;=</span> states_3<span class="token punctuation">;</span>
+        end
+    <span class="token keyword">else</span> begin
+        states_next <span class="token operator">&lt;=</span> states_next<span class="token punctuation">;</span>
+    end
+end
+
+<span class="token comment">//状态输出</span>
+always @<span class="token punctuation">(</span> <span class="token operator">*</span> <span class="token punctuation">)</span> begin
+    <span class="token keyword">case</span> <span class="token punctuation">(</span> states_current <span class="token punctuation">)</span>
+        states_1 <span class="token operator">:</span> begin
+            <span class="token keyword">if</span> <span class="token punctuation">(</span> addr_h <span class="token operator">==</span> <span class="token number">0</span> <span class="token punctuation">)</span> begin
+                rgb_data <span class="token operator">=</span> black<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> addr_h <span class="token operator">&gt;</span><span class="token number">0</span> <span class="token operator">&amp;&amp;</span> addr_h <span class="token operator">&lt;</span><span class="token number">81</span> <span class="token punctuation">)</span> begin
+                rgb_data <span class="token operator">=</span> red<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> addr_h <span class="token operator">&gt;</span><span class="token number">80</span> <span class="token operator">&amp;&amp;</span> addr_h <span class="token operator">&lt;</span><span class="token number">161</span> <span class="token punctuation">)</span> begin
+                rgb_data <span class="token operator">=</span> orange<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> addr_h <span class="token operator">&gt;</span><span class="token number">160</span> <span class="token operator">&amp;&amp;</span> addr_h <span class="token operator">&lt;</span><span class="token number">241</span> <span class="token punctuation">)</span> begin
+                rgb_data <span class="token operator">=</span> yellow<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> addr_h <span class="token operator">&gt;</span><span class="token number">240</span> <span class="token operator">&amp;&amp;</span> addr_h <span class="token operator">&lt;</span><span class="token number">321</span> <span class="token punctuation">)</span> begin
+                rgb_data <span class="token operator">=</span> green<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> addr_h <span class="token operator">&gt;</span><span class="token number">320</span> <span class="token operator">&amp;&amp;</span> addr_h <span class="token operator">&lt;</span><span class="token number">401</span> <span class="token punctuation">)</span> begin
+                rgb_data <span class="token operator">=</span> blue<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> addr_h <span class="token operator">&gt;</span><span class="token number">400</span> <span class="token operator">&amp;&amp;</span> addr_h <span class="token operator">&lt;</span><span class="token number">481</span> <span class="token punctuation">)</span> begin
+                rgb_data <span class="token operator">=</span> indigo<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> addr_h <span class="token operator">&gt;</span><span class="token number">480</span> <span class="token operator">&amp;&amp;</span> addr_h <span class="token operator">&lt;</span><span class="token number">561</span> <span class="token punctuation">)</span> begin
+                rgb_data <span class="token operator">=</span> purple<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> addr_h <span class="token operator">&gt;</span><span class="token number">560</span> <span class="token operator">&amp;&amp;</span> addr_h <span class="token operator">&lt;</span><span class="token number">641</span> <span class="token punctuation">)</span> begin
+                rgb_data <span class="token operator">=</span> white<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> begin
+                rgb_data <span class="token operator">=</span> black<span class="token punctuation">;</span>
+            end
+            
+        end
+        states_2 <span class="token operator">:</span> begin
+            <span class="token keyword">if</span> <span class="token punctuation">(</span> flag_enable_out1 <span class="token punctuation">)</span> begin
+                rgb_data <span class="token operator">=</span> char_line<span class="token punctuation">[</span> addr_v<span class="token operator">-</span><span class="token number">208</span> <span class="token punctuation">]</span><span class="token punctuation">[</span> <span class="token number">532</span> <span class="token operator">-</span> addr_h <span class="token punctuation">]</span><span class="token operator">?</span> white<span class="token operator">:</span>black<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> begin
+                rgb_data <span class="token operator">=</span> black<span class="token punctuation">;</span>
+            end
+        end
+        states_3 <span class="token operator">:</span> begin
+            <span class="token keyword">if</span> <span class="token punctuation">(</span> flag_enable_out2 <span class="token punctuation">)</span> begin
+                rgb_data <span class="token operator">=</span> rom_data<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> begin
+                rgb_data <span class="token operator">=</span> black<span class="token punctuation">;</span>
+            end
+            
+        end
+        <span class="token keyword">default</span><span class="token operator">:</span> begin
+            <span class="token keyword">case</span> <span class="token punctuation">(</span> addr_h <span class="token punctuation">)</span>
+                <span class="token number">0</span> <span class="token operator">:</span> rgb_data      <span class="token operator">=</span> black<span class="token punctuation">;</span>
+                <span class="token number">1</span> <span class="token operator">:</span> rgb_data      <span class="token operator">=</span> red<span class="token punctuation">;</span>
+                <span class="token number">81</span> <span class="token operator">:</span> rgb_data     <span class="token operator">=</span> orange<span class="token punctuation">;</span>
+                <span class="token number">161</span><span class="token operator">:</span> rgb_data     <span class="token operator">=</span> yellow<span class="token punctuation">;</span>
+                <span class="token number">241</span><span class="token operator">:</span> rgb_data     <span class="token operator">=</span> green<span class="token punctuation">;</span>
+                <span class="token number">321</span><span class="token operator">:</span> rgb_data     <span class="token operator">=</span> blue<span class="token punctuation">;</span>
+                <span class="token number">401</span><span class="token operator">:</span> rgb_data     <span class="token operator">=</span> indigo<span class="token punctuation">;</span>
+                <span class="token number">481</span><span class="token operator">:</span> rgb_data     <span class="token operator">=</span> purple<span class="token punctuation">;</span>
+                <span class="token number">561</span><span class="token operator">:</span> rgb_data     <span class="token operator">=</span> white<span class="token punctuation">;</span>
+                <span class="token keyword">default</span><span class="token operator">:</span> rgb_data <span class="token operator">=</span> rgb_data<span class="token punctuation">;</span>
+            endcase
+        end
+    endcase
+end
+
+assign flag_enable_out1 <span class="token operator">=</span> states_current <span class="token operator">==</span> states_2 <span class="token operator">&amp;&amp;</span> addr_h <span class="token operator">&gt;</span> <span class="token number">148</span> <span class="token operator">&amp;&amp;</span> addr_h <span class="token operator">&lt;</span> <span class="token number">533</span> <span class="token operator">&amp;&amp;</span> addr_v <span class="token operator">&gt;</span> <span class="token number">208</span>  <span class="token operator">&amp;&amp;</span> addr_v <span class="token operator">&lt;</span> <span class="token number">273</span> <span class="token punctuation">;</span>
+assign flag_begin_h     <span class="token operator">=</span> addr_h <span class="token operator">&gt;</span> <span class="token punctuation">(</span> <span class="token punctuation">(</span> <span class="token number">640</span> <span class="token operator">-</span> width <span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">2</span> <span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> addr_h <span class="token operator">&lt;</span> <span class="token punctuation">(</span> <span class="token punctuation">(</span> <span class="token number">640</span> <span class="token operator">-</span> width <span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">2</span> <span class="token punctuation">)</span> <span class="token operator">+</span> width <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+assign flag_begin_v     <span class="token operator">=</span> addr_v <span class="token operator">&gt;</span> <span class="token punctuation">(</span> <span class="token punctuation">(</span> <span class="token number">480</span> <span class="token operator">-</span> height <span class="token punctuation">)</span><span class="token operator">/</span><span class="token number">2</span> <span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> addr_v <span class="token operator">&lt;</span><span class="token punctuation">(</span> <span class="token punctuation">(</span> <span class="token number">480</span> <span class="token operator">-</span> height <span class="token punctuation">)</span><span class="token operator">/</span><span class="token number">2</span> <span class="token punctuation">)</span> <span class="token operator">+</span> height <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+assign flag_enable_out2 <span class="token operator">=</span> states_current <span class="token operator">==</span> states_3 <span class="token operator">&amp;&amp;</span> flag_begin_h <span class="token operator">&amp;&amp;</span> flag_begin_v<span class="token punctuation">;</span>
+
+<span class="token comment">//ROM地址计数器</span>
+always @<span class="token punctuation">(</span> posedge vga_clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        rom_address <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> flag_clear_rom_address <span class="token punctuation">)</span> begin <span class="token comment">//计数满清零</span>
+        rom_address <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+        <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> flag_enable_out2 <span class="token punctuation">)</span> begin  <span class="token comment">//在有效区域内+1</span>
+        rom_address <span class="token operator">&lt;=</span> rom_address <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+        end
+    <span class="token keyword">else</span> begin  <span class="token comment">//无效区域保持</span>
+        rom_address <span class="token operator">&lt;=</span> rom_address<span class="token punctuation">;</span>
+    end
+end
+assign flag_clear_rom_address <span class="token operator">=</span> rom_address <span class="token operator">==</span> height <span class="token operator">*</span> width <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span>
+
+<span class="token comment">//初始化显示文字</span>
+always@<span class="token punctuation">(</span> posedge vga_clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        char_line<span class="token punctuation">[</span> <span class="token number">0</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000<span class="token punctuation">;</span>
+       	char_line<span class="token punctuation">[</span> <span class="token number">1</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h000000000200000000000000000000000000000000000000000000000380000000000000000000000000000000000000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">2</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h0000000003E0000000000000000000000000000000000000000000000780000000000000000000000000700000008000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">3</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h00000000070000000000200000000000000078300001C0000000000007000000018038000C001C0000007E3FFFFFF000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">4</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h000000000600000001FFFC000FFFFE000000F83FFFFFE000000000040C00100001FFFC000FFFFF000000F03C0001C000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">5</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h000002060800380001C078000E001E000001E03C0001C00000000707FFFFFC0001C078200E001C000001E03C0001C000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">6</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h0FFFFF87FFFFFE0001C078300E001C000003C03C0001C00007FFFFC780003C0001C078380E001C000003803C0001C000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">7</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h02000FC78000380001C0781C0E001C000007803C0001C00000000F078400380001C0781E0E001C000007003C0001C000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">8</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h00000F078600380001C0781E0E001C00000E003C0001C00000000F078380380001C0781F0E001C00000E003FFFFFC000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">9</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h00000E0781E0380001C0780F0FFFFC00001F003FFFFFC00000001E0780F0380001C0780F0FFFFC00001F803C0701E000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">10</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h00001E0780F8380001C0780E0E001C00003F003C0701000001001E078078380001FFF80C0E001C00007F002007000000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">11</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h01801C078078780001FFF8000E001C00006F00000700008000C03C078038780001C078000E001C0000CF0000070001C0<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">12</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h00403C078030780001C078000E001C0001CF0000070003E0006038078000780001C078000E001C00038F7FFFFFFFFFF0<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">13</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h003038078000700001C078000E001C00070F3FFFFFFFFFF80038780781C0F00001C078000E001C00060F00007F600000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">14</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h0018700780FFF00001C078080FFFFC00080F0000F7200000001C7007803FE00001C0781C0FFFFC00100F0001E7300000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">15</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h000EF007800FC00001C07FFE0E001C00000F0003C71800000006E0078007800001C07BFF0E001180000F0003870C0000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">16</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h0007E0078002000001C0791E0E0001C0000F0007070700000003C0078000008001C0781C0E0003E0000F000E07078000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">17</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h0003C007800001C001FFF81C0E3007C0000F001C0703E0000003C00FFFFFFFE001FFF81C0E180F00000F00380701F800<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">18</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h0003E00FFFFFFFF001C0781C0E0E1C00000F00F007007F000007E007000001E001C0781C0E073000000F01C007003FF0<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">19</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h0007F002000001C001C0781C0E03E000000F038007001FC0000E7800000001C001C0781C0E01E000000F0E0007000780<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">20</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h000E7800000001C001C0781C0E00F000000F380187000300001C3C00000101C001C0781C0E007C00000F2001E8000000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">21</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h001C3C00000381C003C0781C0E0C3E00000F0001F000000000381E000007C3C00380781C0E181F00000E0001C0000000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">22</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h00301E7FFFFFE3C00380781C0E701F8000000001C000200000701E3FFFFFF3C00380781C0EE00F8000000001C0007000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">23</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h00601E18000003C00380781C0FC0078000000001C000F80000C00F00000003C00380781C0F800380001FFFFFFFFFFC00<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">24</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h01C00F00000003C00300781C1F000380000FFFFFFFFFFE0001800F00000003C00300781C0F00010000040001C0000000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">25</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h03000F00000003800700781C0600000000000001C000000007000E00000003800700783E0000000000000001C0000000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">26</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h0600040000000780060078738000000000000001C00001000C00000000000780060079E1E000000000000001C0000380<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">27</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h1800000000600F800E007BC07800000000000001C00007C010000000007FDF000C1FFFC03FF003F800000001C0000FE0<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">28</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h20000000000FFF000C07FB801FFFFFF00FFFFFFFFFFFFFF0000000000003FE001801F18007FFFFC007FFFFFFFFFFFFF8<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">29</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h000000000000FC001000E000007FFF80030000000000000000000000000078001000C000000000000000000000000000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">30</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h000000000000600020000000000000000000000000000000000000000000000000000000000000000000000000000000<span class="token punctuation">;</span>
+		char_line<span class="token punctuation">[</span> <span class="token number">31</span> <span class="token punctuation">]</span>  <span class="token operator">=</span> <span class="token number">384</span>'h000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000<span class="token punctuation">;</span>
+    end
+end
+
+<span class="token comment">//实例化ROM</span>
+rom	<span class="token function">rom_inst</span> <span class="token punctuation">(</span>
+<span class="token punctuation">.</span><span class="token function">address</span> <span class="token punctuation">(</span> rom_address <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">clock</span> <span class="token punctuation">(</span> vga_clk <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">q</span> <span class="token punctuation">(</span> rom_data <span class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token punctuation">;</span>
+endmodule <span class="token comment">// data_drive</span>
+</code></pre> 
+<h3><a id="3_470"></a>3、按键消抖</h3> 
+<pre><code class="prism language-c">module <span class="token function">key_debounce</span><span class="token punctuation">(</span>
+	input 	wire	clk<span class="token punctuation">,</span>
+	input 	wire 	rst_n<span class="token punctuation">,</span>
+	input 	wire 	key<span class="token punctuation">,</span>
+	
+	output 	reg 	flag<span class="token punctuation">,</span><span class="token comment">// 0抖动, 1抖动结束</span>
+	output 	reg	key_value<span class="token comment">//key抖动结束后的值</span>
+<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+parameter MAX_NUM <span class="token operator">=</span> <span class="token number">20</span>'d1_000_000<span class="token punctuation">;</span>
+
+reg <span class="token punctuation">[</span><span class="token number">19</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span> delay_cnt<span class="token punctuation">;</span><span class="token comment">//1_000_000</span>
+
+reg key_reg<span class="token punctuation">;</span><span class="token comment">//key上一次的值</span>
+
+always @<span class="token punctuation">(</span>posedge clk or negedge rst_n<span class="token punctuation">)</span> begin
+	<span class="token keyword">if</span><span class="token punctuation">(</span><span class="token operator">!</span>rst_n<span class="token punctuation">)</span> begin
+		key_reg <span class="token operator">&lt;=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+		delay_cnt <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+	end
+	
+	<span class="token keyword">else</span> begin
+		key_reg <span class="token operator">&lt;=</span> key<span class="token punctuation">;</span>
+		<span class="token comment">//当key为1 key 为0 表示按下抖动,开始计时</span>
+		<span class="token keyword">if</span><span class="token punctuation">(</span>key_reg  <span class="token operator">!=</span> key  <span class="token punctuation">)</span> begin 
+		   delay_cnt <span class="token operator">&lt;=</span> MAX_NUM <span class="token punctuation">;</span>
+		end
+		<span class="token keyword">else</span> begin
+		    <span class="token keyword">if</span><span class="token punctuation">(</span>delay_cnt <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+				delay_cnt <span class="token operator">&lt;=</span> delay_cnt <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+			<span class="token keyword">else</span>
+				delay_cnt <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		end
+	end
+end
+
+
+<span class="token comment">//当计时完成,获取key的值</span>
+always @<span class="token punctuation">(</span>posedge clk or negedge rst_n<span class="token punctuation">)</span> begin
+	<span class="token keyword">if</span><span class="token punctuation">(</span><span class="token operator">!</span>rst_n<span class="token punctuation">)</span> begin
+		flag <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		key_value <span class="token operator">&lt;=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+	end
+
+	<span class="token keyword">else</span> begin
+		
+		<span class="token comment">// 计时完成 处于稳定状态,进行赋值</span>
+		<span class="token keyword">if</span><span class="token punctuation">(</span>delay_cnt <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">)</span> begin
+			flag <span class="token operator">&lt;=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+			key_value <span class="token operator">&lt;=</span> key<span class="token punctuation">;</span>
+		end
+		<span class="token keyword">else</span> begin
+			flag <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+			key_value <span class="token operator">&lt;=</span> key_value<span class="token punctuation">;</span>
+		end
+	end
+end
+
+endmodule
+</code></pre> 
+<h3><a id="4_533"></a>4、顶层模块</h3> 
+<pre><code class="prism language-c">module <span class="token function">vga_top</span> <span class="token punctuation">(</span>input			wire						clk<span class="token punctuation">,</span>
+                input			wire						rst_n<span class="token punctuation">,</span>
+                input			wire		<span class="token punctuation">[</span> <span class="token number">2</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>		    key<span class="token punctuation">,</span>
+                output			wire						vga_clk<span class="token punctuation">,</span>
+                output			wire						h_sync<span class="token punctuation">,</span>
+                output			wire						v_sync<span class="token punctuation">,</span>
+                output			wire		<span class="token punctuation">[</span> <span class="token number">4</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			rgb_r<span class="token punctuation">,</span>
+                output			wire		<span class="token punctuation">[</span> <span class="token number">5</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			rgb_g<span class="token punctuation">,</span>
+                output			wire		<span class="token punctuation">[</span> <span class="token number">4</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			rgb_b<span class="token punctuation">,</span>
+                output			reg		    <span class="token punctuation">[</span> <span class="token number">3</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			led<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+reg			<span class="token punctuation">[</span> <span class="token number">27</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			cnt			        <span class="token punctuation">;</span>
+wire		<span class="token punctuation">[</span> <span class="token number">11</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>		    addr_h              <span class="token punctuation">;</span>
+wire		<span class="token punctuation">[</span> <span class="token number">11</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>		    addr_v              <span class="token punctuation">;</span>
+wire		<span class="token punctuation">[</span> <span class="token number">15</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			rgb_data			<span class="token punctuation">;</span>
+wire		<span class="token punctuation">[</span> <span class="token number">2</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			    key_flag			<span class="token punctuation">;</span>
+wire		<span class="token punctuation">[</span> <span class="token number">2</span><span class="token operator">:</span><span class="token number">0</span> <span class="token punctuation">]</span>			    key_value			<span class="token punctuation">;</span>
+
+<span class="token comment">//vga模块</span>
+vga_dirve <span class="token function">u_vga_dirve</span><span class="token punctuation">(</span>
+<span class="token punctuation">.</span><span class="token function">clk</span>      <span class="token punctuation">(</span> clk <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">rst_n</span>    <span class="token punctuation">(</span> rst_n <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">rgb_data</span> <span class="token punctuation">(</span> rgb_data <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">vga_clk</span>  <span class="token punctuation">(</span> vga_clk <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">h_sync</span>   <span class="token punctuation">(</span> h_sync <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">v_sync</span>   <span class="token punctuation">(</span> v_sync <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">rgb_r</span>    <span class="token punctuation">(</span> rgb_r <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">rgb_g</span>    <span class="token punctuation">(</span> rgb_g <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">rgb_b</span>    <span class="token punctuation">(</span> rgb_b <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">addr_h</span>   <span class="token punctuation">(</span> addr_h <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">addr_v</span>   <span class="token punctuation">(</span> addr_v <span class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">//数据模块</span>
+data_drive <span class="token function">u_data_drive</span><span class="token punctuation">(</span>
+<span class="token punctuation">.</span><span class="token function">vga_clk</span> <span class="token punctuation">(</span> vga_clk <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">rst_n</span>   <span class="token punctuation">(</span> rst_n <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">addr_h</span>  <span class="token punctuation">(</span> addr_h <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">addr_v</span>  <span class="token punctuation">(</span> addr_v <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">key</span>     <span class="token punctuation">(</span> <span class="token punctuation">{<!-- --></span>key_value<span class="token punctuation">[</span> <span class="token number">2</span> <span class="token punctuation">]</span> <span class="token operator">&amp;&amp;</span> key_flag<span class="token punctuation">[</span> <span class="token number">2</span> <span class="token punctuation">]</span><span class="token punctuation">,</span> key_value<span class="token punctuation">[</span> <span class="token number">1</span> <span class="token punctuation">]</span> <span class="token operator">&amp;&amp;</span> key_flag<span class="token punctuation">[</span> <span class="token number">1</span> <span class="token punctuation">]</span><span class="token punctuation">,</span> key_value<span class="token punctuation">[</span> <span class="token number">0</span> <span class="token punctuation">]</span> <span class="token operator">&amp;&amp;</span> key_flag<span class="token punctuation">[</span> <span class="token number">0</span> <span class="token punctuation">]</span> <span class="token punctuation">}</span> <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">rgb_data</span>  <span class="token punctuation">(</span> rgb_data <span class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+<span class="token comment">//按键消抖</span>
+key_debounce <span class="token function">u_key_debounce0</span><span class="token punctuation">(</span>
+<span class="token punctuation">.</span><span class="token function">clk</span>   <span class="token punctuation">(</span> vga_clk <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">rst_n</span> <span class="token punctuation">(</span> rst_n <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">key</span>   <span class="token punctuation">(</span> key<span class="token punctuation">[</span> <span class="token number">0</span> <span class="token punctuation">]</span> <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">flag</span>  <span class="token punctuation">(</span> key_flag<span class="token punctuation">[</span> <span class="token number">0</span> <span class="token punctuation">]</span> <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">key_value</span>  <span class="token punctuation">(</span> key_value<span class="token punctuation">[</span> <span class="token number">0</span> <span class="token punctuation">]</span> <span class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+key_debounce <span class="token function">u_key_debounce1</span><span class="token punctuation">(</span>
+<span class="token punctuation">.</span><span class="token function">clk</span>   <span class="token punctuation">(</span> vga_clk <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">rst_n</span> <span class="token punctuation">(</span> rst_n <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">key</span>   <span class="token punctuation">(</span> key<span class="token punctuation">[</span> <span class="token number">1</span> <span class="token punctuation">]</span> <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">flag</span>  <span class="token punctuation">(</span> key_flag<span class="token punctuation">[</span> <span class="token number">1</span> <span class="token punctuation">]</span> <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">key_value</span>  <span class="token punctuation">(</span> key_value<span class="token punctuation">[</span> <span class="token number">1</span> <span class="token punctuation">]</span> <span class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+key_debounce <span class="token function">u_key_debounce2</span><span class="token punctuation">(</span>
+<span class="token punctuation">.</span><span class="token function">clk</span>   <span class="token punctuation">(</span> vga_clk <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">rst_n</span> <span class="token punctuation">(</span> rst_n <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">key</span>   <span class="token punctuation">(</span> key<span class="token punctuation">[</span> <span class="token number">2</span> <span class="token punctuation">]</span> <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">flag</span>  <span class="token punctuation">(</span> key_flag<span class="token punctuation">[</span> <span class="token number">2</span> <span class="token punctuation">]</span> <span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">.</span><span class="token function">key_value</span>  <span class="token punctuation">(</span> key_value<span class="token punctuation">[</span> <span class="token number">2</span> <span class="token punctuation">]</span> <span class="token punctuation">)</span>
+<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+<span class="token comment">// led</span>
+always @<span class="token punctuation">(</span> posedge clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        cnt <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> cnt <span class="token operator">==</span> <span class="token number">50</span>_000_000 <span class="token operator">-</span> <span class="token number">1</span> <span class="token punctuation">)</span> begin
+        cnt <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> begin
+        cnt <span class="token operator">&lt;=</span> cnt <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    end
+end
+always @<span class="token punctuation">(</span> posedge clk or negedge rst_n <span class="token punctuation">)</span> begin
+    <span class="token keyword">if</span> <span class="token punctuation">(</span> <span class="token operator">!</span>rst_n <span class="token punctuation">)</span> begin
+        led <span class="token operator">&lt;=</span> <span class="token number">4</span>'b0000<span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span> cnt <span class="token operator">==</span> <span class="token number">50</span>_000_000 <span class="token operator">-</span><span class="token number">1</span> <span class="token punctuation">)</span>begin
+        led <span class="token operator">&lt;=</span> <span class="token operator">~</span>led<span class="token punctuation">;</span>
+    end
+    <span class="token keyword">else</span> begin
+        led <span class="token operator">&lt;=</span> led<span class="token punctuation">;</span>
+    end
+end
+endmodule <span class="token comment">// vga_top</span>
+</code></pre> 
+<h3><a id="5TCL_631"></a>5、TCL引脚绑定脚本</h3> 
+<pre><code class="prism language-c">package require <span class="token operator">::</span>quartus<span class="token operator">::</span>project
+
+set_location_assignment PIN_E1 <span class="token operator">-</span>to clk
+set_location_assignment PIN_E15 <span class="token operator">-</span>to rst_n
+set_location_assignment PIN_C16 <span class="token operator">-</span>to h_sync
+set_location_assignment PIN_D15 <span class="token operator">-</span>to v_sync
+
+set_location_assignment PIN_E16 <span class="token operator">-</span>to key<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+set_location_assignment PIN_M16 <span class="token operator">-</span>to key<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span>
+set_location_assignment PIN_M15 <span class="token operator">-</span>to key<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span>
+
+set_location_assignment PIN_G15 <span class="token operator">-</span>to led<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+set_location_assignment PIN_F16 <span class="token operator">-</span>to led<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span>
+set_location_assignment PIN_F15 <span class="token operator">-</span>to led<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span>
+set_location_assignment PIN_D16 <span class="token operator">-</span>to led<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span>
+
+set_location_assignment PIN_A14 <span class="token operator">-</span>to rgb_b<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span>
+set_location_assignment PIN_B14 <span class="token operator">-</span>to rgb_b<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span>
+set_location_assignment PIN_A15 <span class="token operator">-</span>to rgb_b<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span>
+set_location_assignment PIN_B16 <span class="token operator">-</span>to rgb_b<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span>
+set_location_assignment PIN_C15 <span class="token operator">-</span>to rgb_b<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+
+
+set_location_assignment PIN_A11 <span class="token operator">-</span>to rgb_g<span class="token punctuation">[</span><span class="token number">5</span><span class="token punctuation">]</span>
+set_location_assignment PIN_B11 <span class="token operator">-</span>to rgb_g<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span>
+set_location_assignment PIN_A12 <span class="token operator">-</span>to rgb_g<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span>
+set_location_assignment PIN_B12 <span class="token operator">-</span>to rgb_g<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span>
+set_location_assignment PIN_A13 <span class="token operator">-</span>to rgb_g<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span>
+set_location_assignment PIN_B13 <span class="token operator">-</span>to rgb_g<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+
+set_location_assignment PIN_C8 <span class="token operator">-</span>to rgb_r<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span>
+set_location_assignment PIN_A9 <span class="token operator">-</span>to rgb_r<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span>
+set_location_assignment PIN_B9 <span class="token operator">-</span>to rgb_r<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span>
+set_location_assignment PIN_A10 <span class="token operator">-</span>to rgb_r<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span>
+set_location_assignment PIN_B10 <span class="token operator">-</span>to rgb_r<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+</code></pre> 
+<h2><a id="RTL_670"></a>四、RTL原理图</h2> 
+<p><img src="https://images2.imgbox.com/ad/e6/P3lqAiwX_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="_673"></a>五、实现效果</h2> 
+<p><img src="https://images2.imgbox.com/cd/61/q6FY9JDv_o.jpg" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/5c/0e/41womCVz_o.jpg" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/35/de/fq5jt0YU_o.jpg" alt="在这里插入图片描述"></p> 
+<h2><a id="_679"></a>六、总结</h2> 
+<p>本次实验学习了解了VGA协议的基础知识，并在FPGA开发板上实现了VGA协议，为后续FPGA学习以及图像显示打上了坚实的基础。</p> 
+<h2><a id="_681"></a>七、参考资料</h2> 
+<p><a href="https://blog.csdn.net/qq_47281915/article/details/125134764">https://blog.csdn.net/qq_47281915/article/details/125134764</a><br> <a href="https://blog.csdn.net/weixin_56102526/article/details/124964347">https://blog.csdn.net/weixin_56102526/article/details/124964347</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/799c2a65520f9324b4e7c84d13115d59/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">package.json的scripts节点下的脚本可以用npm run执行</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/4b875db2fc4637aabbb2189a6892e083/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Strapi部署到nginx服务器</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Kafka生产者原理与优化 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Kafka生产者原理与优化" />
+<meta property="og:description" content=" 目录
+1.Kafka生产者原理：
+1.基础流程：
+2.Sender相关：
+3.怎样保证消息的有序性：
+2.Kafka消费者：
+1.Kafka生产者原理： 1.基础流程： Kafka生产者生产消息，基本上包括下面4个部分：
+线程：多个线程可以操作同一个kafkaProducer去生产消息，并且可以给多个不同的topic生产消息。kafkaProducer: kafka消息生产者，具体对应kafka的一个java类，里面包含了partitioner分区器（根据具体消息的key去选择发送到哪个分区，如果没有key则轮询选择分区）；accumulator累加器(针对缓冲区进行操作，缓存产生的消息，缓冲区大小可以根据业务调优-调优，默认是32M)，还有双向队列dq用来缓存消息（缓冲区中topic-&gt;partition），dq中的又包含了batch，batch默认大小为16K，每个batch中可以存放一条或者多条消息，因为默认是16K，所以如果出现很多消息msg&gt;16K的情况，就不能使用默认大小的已经开辟出内存的batch，需要重新进行系统调用开辟符合大小的batch内存，用完后还要回收，这样既可能造成内存碎片，还有频繁的系统调用，降低性能，所以需要根据msg大小对batch大小进行调整（调优），使得kafkaProducer开辟出符合业务需求的固定大小的batch。kafkaProducer 生产消息-&gt; accumulator累加器（缓冲区）-&gt; dq双向队列（t每个partition对应一个dq，并且对其操作是线程安全的） -&gt; batch。Sender：这是一个IO thread，用来将缓冲区缓存的消息发送到broker集群。有一个kafkaProducer的参数定义IO thread发送数据的时间间隔，如果这个参数设置为0，那么缓冲区每写入一个消息，就发送一次，这样的话缓冲区的意义就不存在了，例如可以将这个参数的值设置为10秒，这样的话，每隔10秒，IO thread就会将缓存区缓存的消息发送到broker集群。Sender(IO thread)与kafkaProducer是一对一的关系， 在kafkaProducer的构造方法中会为其生成一个sender（IO thread），还有就是在执行newSender(...)方法的时候，会new Selector，最终调用到java.nio.channels.Selector.open()，使用到了NIO（但是不是使用Netty，是自己实现NIO），要把channel注册到selector。broker集群：就是kafka集群，每个broker表示一个kafka单例。 2.Sender相关： conf.setProperty(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, &#34;1048576&#34;)，表示每次Sender(IO thread) 发送出去的数据的最大大小，这1M大小是由多个batch组成的。
+(1).accumulator累加器（缓冲区）在累加的数据达到MAX_REQUEST_SIZE_CONFIG之后，就会唤醒IO thread进行发送？？？不是这样的，kafkaProducer会把消息以topic-&gt;partition-&gt;dq-&gt;batch的方式存放到缓冲区，IO thread每隔一段时间会以MAX_REQUEST_SIZE_CONFIG的大小从缓冲区拉取数据，发送到kafka集群。可以针对MAX_REQUEST_SIZE_CONFIG大小进行调优，但是要同时调整kafka集群接收端的大小。
+IO thread在非阻塞的情况下每次发送最大的数据量是1M，但是最小的是多少呢？在阻塞的情况下，每发送一条消息到缓冲区，IO thread会将其发送到kafka集群。
+(2).conf.setProperty(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,&#34;5&#34;);表示连续发送5次，但是kafka没返回，那么kafkaProducer就不再发了，这里也可以进行调优。这里是什么情况？
+(3). 这两个是Kafka自己设置的默认的TCP（socket）的缓冲区的大小。可以使用netstat - natp指令查看每个网络应用的tcp缓冲区大小。 conf.setProperty(ProducerConfig.SEND_BUFFER_CONFIG,&#34;32768&#34;); //32K -1 conf.setProperty(ProducerConfig.RECEIVE_BUFFER_CONFIG,&#34;32768&#34;); //32k -1k 可以根据需要将其调大，进行调优。
+其实操作系统有自己的TCP(socket) IO缓存的大小，所有的网络应用都要用到这个系统缓冲区，如果kafkaProducer需要发送大量数据，但是速度达不到预期，造成一些消息的积压，可以将上面的两个参数都设置为-1（调优），这样的话，就会使用操作系统默认的大小124928.
+(4).综上所述，如果业务需要，可以通过设置缓冲区大小、batch大小（缓冲区相关，还有Sender相关的几个参数）来给kafkaProducer进行调优，但是这是有个前提的，那就是只有在ACK被设置为0的时候才会发挥缓冲器的作用，并且还要求用的是非阻塞的方式发送消息。ACK可以被设置为1,0,-1或者all，这4种方式代表不同的意义。
+进入到 IO thread. 如果ACK设置为1或-1，那么往batch存一条消息，IO thread会立即将其发送给broker，这样缓冲区就不起作用了。
+3.怎样保证消息的有序性： 有序的消息要保存到某个topic的用一个分区，为了保证这点，要将任务交给同一个线程，并且是同一个kafkaProducer，消息的key必须是相同的，kafkaProducer的分区器是根据key为消息选择分区的，如果没有key，那么消息将以轮询的方式分散发送给topic下的所有分区。
+2.Kafka消费者： 需要注意的是：
+每个KafkaConsumer都要指定一个group，这样的话这个consumer因为意外导致重启的时候，还能够继续从原来的offset进行消费；如果不指定具体的group名字，那么意外重启后，会属于一个随机的group，跟原来不一样，无法从原来的offset继续消费，因为offset记录在group中。虽然offset是属于某个partition的，但是根据不同业务的需要，也是按照group来存储的，多个业务消费同一个partition，就需要group，每个业务在不同的group中。 " />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/54a2520bf2b656b5cf4ef95183deace1/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-04-16T09:25:41+08:00" />
+<meta property="article:modified_time" content="2022-04-16T09:25:41+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Kafka生产者原理与优化</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"></p> 
+<p id="main-toc"><strong>目录</strong></p> 
+<p id="1.Kafka%E7%94%9F%E4%BA%A7%E8%80%85%E5%8E%9F%E7%90%86%EF%BC%9A-toc" style="margin-left:40px;"><a href="#1.Kafka%E7%94%9F%E4%BA%A7%E8%80%85%E5%8E%9F%E7%90%86%EF%BC%9A" rel="nofollow">1.Kafka生产者原理：</a></p> 
+<p id="1.%E5%9F%BA%E7%A1%80%E6%B5%81%E7%A8%8B%EF%BC%9A-toc" style="margin-left:80px;"><a href="#1.%E5%9F%BA%E7%A1%80%E6%B5%81%E7%A8%8B%EF%BC%9A" rel="nofollow">1.基础流程：</a></p> 
+<p id="2.Sender%E7%9B%B8%E5%85%B3%EF%BC%9A-toc" style="margin-left:80px;"><a href="#2.Sender%E7%9B%B8%E5%85%B3%EF%BC%9A" rel="nofollow">2.Sender相关：</a></p> 
+<p id="3.%E6%80%8E%E6%A0%B7%E4%BF%9D%E8%AF%81%E6%B6%88%E6%81%AF%E7%9A%84%E6%9C%89%E5%BA%8F%E6%80%A7%EF%BC%9A-toc" style="margin-left:80px;"><a href="#3.%E6%80%8E%E6%A0%B7%E4%BF%9D%E8%AF%81%E6%B6%88%E6%81%AF%E7%9A%84%E6%9C%89%E5%BA%8F%E6%80%A7%EF%BC%9A" rel="nofollow">3.怎样保证消息的有序性：</a></p> 
+<p id="2.Kafka%E6%B6%88%E8%B4%B9%E8%80%85%EF%BC%9A-toc" style="margin-left:40px;"><a href="#2.Kafka%E6%B6%88%E8%B4%B9%E8%80%85%EF%BC%9A" rel="nofollow">2.Kafka消费者：</a></p> 
+<hr id="hr-toc"> 
+<h3>1.Kafka生产者原理：</h3> 
+<h4 id="1.%E5%9F%BA%E7%A1%80%E6%B5%81%E7%A8%8B%EF%BC%9A">1.基础流程：</h4> 
+<p>Kafka生产者生产消息，基本上包括下面4个部分：</p> 
+<ol><li>线程：多个线程可以操作同一个kafkaProducer去生产消息，并且可以给多个不同的topic生产消息。</li><li>kafkaProducer: kafka消息生产者，具体对应kafka的一个java类，里面包含了partitioner分区器（根据具体消息的key去选择发送到哪个分区，如果没有key则轮询选择分区）；accumulator累加器(针对缓冲区进行操作，<strong>缓存产生的消息</strong>，缓冲区大小可以根据业务调优-<span style="color:#956fe7;"><strong>调优，默认是32M</strong></span>)，还有双向队列dq用来缓存消息（缓冲区中topic-&gt;partition），dq中的又包含了batch，batch默认大小为16K，每个batch中可以存放一条或者多条消息，因为默认是16K，所以如果出现很多消息msg&gt;16K的情况，就不能使用默认大小的已经开辟出内存的batch，需要重新进行系统调用开辟符合大小的batch内存，用完后还要回收，这样既可能造成内存碎片，还有频繁的系统调用，降低性能，所以需要根据msg大小对batch大小进行调整<span style="color:#956fe7;"><strong>（调优）</strong></span>，使得kafkaProducer开辟出符合业务需求的固定大小的batch。<span style="color:#956fe7;"><strong>kafkaProducer 生产消息-&gt; accumulator累加器（缓冲区）-&gt; dq双向队列（t每个partition对应一个dq，并且对其操作是线程安全的） -&gt; batch。</strong></span></li><li>Sender：这是一个IO thread，用来将缓冲区缓存的消息发送到broker集群。有一个kafkaProducer的参数定义IO thread发送数据的时间间隔，如果这个参数设置为0，那么缓冲区每写入一个消息，就发送一次，这样的话缓冲区的意义就不存在了，例如可以将这个参数的值设置为10秒，这样的话，每隔10秒，IO thread就会将缓存区缓存的消息发送到broker集群。<strong>Sender(IO thread)与kafkaProducer是一对一的关系， 在kafkaProducer的构造方法中会为其生成一个sender（IO thread），还有就是在执行newSender(...)方法的时候，会new Selector，最终调用到java.nio.channels.Selector.open()，使用到了NIO（但是不是使用Netty，是自己实现NIO），要把channel注册到selector。</strong><img alt="" height="573" src="https://images2.imgbox.com/1e/b6/Pcyldp6L_o.png" width="1200"><img alt="" height="607" src="https://images2.imgbox.com/5e/6e/vfvkTWnD_o.png" width="1167"><img alt="" height="675" src="https://images2.imgbox.com/54/98/HXvmAeBT_o.png" width="1200"></li><li>broker集群：就是kafka集群，每个broker表示一个kafka单例。</li></ol> 
+<p><img alt="" height="411" src="https://images2.imgbox.com/d6/b8/iUA1pmP9_o.png" width="1034"></p> 
+<p><img alt="" height="570" src="https://images2.imgbox.com/88/5f/ZIo2LRes_o.png" width="1103"></p> 
+<p><img alt="" height="474" src="https://images2.imgbox.com/f2/07/ktlnkhRN_o.png" width="1166"></p> 
+<h4 id="2.Sender%E7%9B%B8%E5%85%B3%EF%BC%9A"><strong>2.Sender相关：</strong></h4> 
+<p>conf.setProperty(ProducerConfig.<strong>MAX_REQUEST_SIZE_CONFIG</strong>, "1048576")，表示每次Sender(IO thread) 发送出去的数据的最大大小，这1M大小是由多个batch组成的。</p> 
+<p><strong><span style="color:#0d0016;">(1).</span><span style="color:#956fe7;">accumulator累加器（缓冲区）</span><span style="color:#0d0016;">在累加的数据达到</span>MAX_REQUEST_SIZE_CONFIG之后，就会唤醒IO thread进行发送？？？不是这样的，kafkaProducer会把消息以topic-&gt;partition-&gt;dq-&gt;batch的方式存放到缓冲区，IO thread每隔一段时间会以MAX_REQUEST_SIZE_CONFIG的大小从缓冲区拉取数据，发送到kafka集群。可以针对MAX_REQUEST_SIZE_CONFIG大小进行<span style="color:#956fe7;">调优</span>，但是要同时调整kafka集群接收端的大小。</strong></p> 
+<p><strong>IO thread在非阻塞的情况下每次发送最大的数据量是1M，但是最小的是多少呢？在阻塞的情况下，每发送一条消息到缓冲区，IO thread会将其发送到kafka集群。</strong></p> 
+<p><img alt="" height="611" src="https://images2.imgbox.com/95/ad/iqGD9MWf_o.png" width="1200"></p> 
+<p>(2).conf.setProperty(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,"5");表示连续发送5次，但是kafka没返回，那么kafkaProducer就不再发了，这里也可以进行<span style="color:#956fe7;"><strong>调优</strong></span>。这里是什么情况？</p> 
+<p><img alt="" height="640" src="https://images2.imgbox.com/1e/df/YL0JMttO_o.png" width="1164"></p> 
+<p><img alt="" height="572" src="https://images2.imgbox.com/f2/4c/4kn1IfEb_o.png" width="1200"></p> 
+<pre><strong>(3).
+</strong><strong>这两个是Kafka自己设置的默认的TCP（socket）的缓冲区的大小。可以使用netstat - natp指令查看每个网络应用的tcp缓冲区大小。</strong>
+conf.setProperty(ProducerConfig.SEND_BUFFER_CONFIG,"32768");  //32K   -1
+conf.setProperty(ProducerConfig.RECEIVE_BUFFER_CONFIG,"32768"); //32k  -1k</pre> 
+<p><img alt="" height="897" src="https://images2.imgbox.com/ac/bc/PqEH4x0G_o.png" width="1200"></p> 
+<p> 可以根据需要将其调大，进行<span style="color:#956fe7;"><strong>调优</strong></span>。</p> 
+<p><img alt="" height="167" src="https://images2.imgbox.com/f0/9f/caWjMXrt_o.png" width="1165"></p> 
+<p>其实操作系统有自己的TCP(socket) IO缓存的大小，所有的网络应用都要用到这个系统缓冲区，如果kafkaProducer需要发送大量数据，但是速度达不到预期，造成一些消息的积压，可以将上面的两个参数都设置为-1<span style="color:#956fe7;"><strong>（调优）</strong></span>，这样的话，就会使用操作系统默认的大小124928.</p> 
+<p><img alt="" height="279" src="https://images2.imgbox.com/f3/43/wZxKbDNH_o.png" width="1148"></p> 
+<p>(4).综上所述，如果业务需要，可以通过设置缓冲区大小、batch大小（缓冲区相关，还有Sender相关的几个参数）来给kafkaProducer进行<span style="color:#956fe7;"><strong>调优</strong></span>，但是这是有个前提的，那就是只有在ACK被设置为0的时候才会发挥缓冲器的作用，并且还要求用的是非阻塞的方式发送消息。<strong>ACK可以被设置为1,0,-1<span style="color:#956fe7;">或者all</span>，这4种方式代表不同的意义</strong>。</p> 
+<p><img alt="" height="468" src="https://images2.imgbox.com/cf/96/KRsJjT0O_o.png" width="1173"></p> 
+<p><strong>进入到 IO thread. </strong></p> 
+<p><img alt="" height="483" src="https://images2.imgbox.com/60/d5/sZE4JgpM_o.png" width="1200"></p> 
+<p><img alt="" height="591" src="https://images2.imgbox.com/ad/2a/8Pvzy3Ha_o.png" width="1200"></p> 
+<p><img alt="" height="583" src="https://images2.imgbox.com/21/d1/TQDP7I8C_o.png" width="1200"></p> 
+<p><img alt="" height="572" src="https://images2.imgbox.com/70/ac/NNSIBUGU_o.png" width="1097"></p> 
+<p>如果ACK设置为1或-1，那么往batch存一条消息，IO thread会立即将其发送给broker，这样缓冲区就不起作用了。</p> 
+<h4 id="3.%E6%80%8E%E6%A0%B7%E4%BF%9D%E8%AF%81%E6%B6%88%E6%81%AF%E7%9A%84%E6%9C%89%E5%BA%8F%E6%80%A7%EF%BC%9A">3.怎样保证消息的有序性：</h4> 
+<p>有序的消息要保存到某个topic的用一个分区，为了保证这点，要将任务交给同一个线程，并且是同一个kafkaProducer，消息的key必须是相同的，kafkaProducer的分区器是根据key为消息选择分区的，如果没有key，那么消息将以轮询的方式分散发送给topic下的所有分区。</p> 
+<h3 id="2.Kafka%E6%B6%88%E8%B4%B9%E8%80%85%EF%BC%9A">2.Kafka消费者：</h3> 
+<p>需要注意的是：</p> 
+<ol><li>每个KafkaConsumer都要指定一个group，这样的话这个consumer因为意外导致重启的时候，还能够继续从原来的offset进行消费；如果不指定具体的group名字，那么意外重启后，会属于一个随机的group，跟原来不一样，无法从原来的offset继续消费，因为offset记录在group中。<strong>虽然offset是属于某个partition的，但是根据不同业务的需要，也是按照group来存储的，多个业务消费同一个partition，就需要group，每个业务在不同的group中</strong>。</li></ol>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ca1f1c63ee20f2fdd9b85a73641f0f83/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">(五) 爬虫教程 ｜Ajax 数据爬取</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/d746040853dc3ba9ebbd04663b9de28f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">3-2 高速公路超速处罚 (15 分)</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

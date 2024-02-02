@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>c&#43;&#43; 11 实现简单 signal slot - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="c&#43;&#43; 11 实现简单 signal slot" />
+<meta property="og:description" content="c&#43;&#43; 11以前要实现 signal slot 非常麻烦，需要重写很多代码。之前使用 libsig&#43;&#43; 后来发现 这代码中与qt 的slots emit等名称冲突。虽然可以解决，但是比较麻烦。所以 就使用 新的 c&#43;&#43;特性，自行实现了简单的 signal 类。 目前实现比较简单。没有太多考虑异常或者智能情况。
+这里面包含了结合线程使用,编程异步信号的 部分代码.需要屏蔽掉才能正常使用.
+#include &lt;functional&gt; #include &lt;map&gt; #include &lt;vector&gt; #include &#34;ScTypes.h&#34; #include &#34;ScCoreDefine.h&#34; #define AsyncSignal #ifdef AsyncSignal #include &#34;ScAsyncMessage.h&#34; #include &#34;ScThread.h&#34; #include &#34;ScMutex.h&#34; #include &#34;ScReadWriteLock.h&#34; #endif #ifdef PostMessage #define PostMessageOld PostMessage #undef PostMessage #endif // A signal object may call multiple slots with the // same signature. You can connect functions to the signal // which will be called when the emit() method on the // signal object is invoked." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/c8fb009d6d7a5cfcc1b46413697fcc2b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-10-31T11:14:57+08:00" />
+<meta property="article:modified_time" content="2018-10-31T11:14:57+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">c&#43;&#43; 11 实现简单 signal slot</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>c++ 11以前要实现 signal slot 非常麻烦，需要重写很多代码。之前使用 libsig++ 后来发现 这代码中与qt 的slots emit等名称冲突。虽然可以解决，但是比较麻烦。所以 就使用 新的 c++特性，自行实现了简单的 signal 类。 目前实现比较简单。没有太多考虑异常或者智能情况。</p> 
+<p>     这里面包含了结合线程使用,编程异步信号的 部分代码.需要屏蔽掉才能正常使用.</p> 
+<pre class="has"><code>
+#include &lt;functional&gt;
+#include &lt;map&gt;
+#include &lt;vector&gt;
+#include "ScTypes.h"
+#include "ScCoreDefine.h"
+
+#define AsyncSignal
+#ifdef AsyncSignal
+#include "ScAsyncMessage.h"
+#include "ScThread.h"
+#include "ScMutex.h"
+#include "ScReadWriteLock.h"
+#endif
+
+#ifdef PostMessage
+#define PostMessageOld PostMessage
+#undef  PostMessage
+#endif
+// A signal object may call multiple slots with the
+// same signature. You can connect functions to the signal
+// which will be called when the emit() method on the
+// signal object is invoked. Any argument passed to emit()
+// will be passed to the given functions.
+//异步消息大约每秒d 70 万 r 500w
+//不可使用引用作参数
+namespace SimpleCpp {
+	class CThread;
+
+    class SCCORE_API CSignalInitializer {
+    public:
+        CSignalInitializer();
+        ~CSignalInitializer();
+
+        static CThread*	m_pThreadDefault;
+        static CSignalInitializer m_signalInitializer;
+    };
+
+	template &lt;class T_Ret, typename... Args&gt;
+	class CSignalConnection {
+	public:
+		CSignalConnection() {
+
+		}
+		CSignalConnection(const CSignalConnection&amp; other) {
+			m_pFun = other.m_pFun;
+			m_pObject = other.m_pObject;
+			m_function = other.m_function;
+		}
+		~CSignalConnection()
+		{
+
+		}
+
+		CSignalConnection&amp; operator =(const CSignalConnection&amp; other) {
+			m_pFun = other.m_pFun;
+			m_pObject = other.m_pObject;
+			m_function = other.m_function;
+
+			return *this;
+		}
+	public:
+
+		std::function&lt;T_Ret(Args...)&gt; m_function;
+		void* m_pFun;
+		void* m_pObject;
+	};
+
+
+	template &lt;class T_Ret, typename... Args&gt;
+	class CSignal {
+
+	public:
+
+		CSignal(void* pOwner=nullptr, bool bThreadSafe=true)
+#ifdef AsyncSignal
+			: m_pThread(nullptr)
+
+#endif
+			//, m_pMutex(nullptr)
+			, m_pOwner(pOwner)
+		{
+			//默认都要打开线程安全
+			if (bThreadSafe)
+			{
+				//m_pMutex = new CMutex();
+				m_pRWLock = new CReadWriteLock();
+			}
+		}
+
+		// copy creates new signal
+		CSignal(CSignal const&amp; other)
+#ifdef AsyncSignal
+			: m_pThread(nullptr) 
+#endif
+			//, m_pMutex(nullptr)
+		{
+// 			if (other.m_pMutex)
+// 			{
+// 				m_pMutex = new CMutex();
+// 			}
+			
+		}
+		~CSignal() {
+// 			for (auto it : m_lstSlots) {
+// 				delete it.first;
+// 			}
+			if (m_pThread)
+			{
+				//m_pThread-&gt;RemoveMessage(this);
+				m_pThread-&gt;RemoveSignal(this);
+			}
+			for (int i=0; i&lt;m_lstSlots.size(); i++)
+			{
+				delete m_lstSlots[i];
+			}
+			m_lstSlots.clear();
+// 			if (m_pMutex)
+// 			{
+// 				delete m_pMutex;
+// 				m_pMutex = nullptr;
+// 			}
+			if (m_pRWLock)
+			{
+				delete m_pRWLock;
+				m_pRWLock = nullptr;
+			}
+		}
+
+		// connects a member function of a given object to this Signal  
+// 		template &lt; typename T_Fun, typename T_O, typename... A&gt;
+// 		int Connect(T_Fun&amp;&amp; fun, T_O&amp;&amp; object, A&amp;&amp; ... a) 
+		template &lt; typename T_Fun,  typename... A&gt;
+		int Connect(T_Fun&amp;&amp; fun,  A&amp;&amp; ... a)
+		{
+			ScDebug("%s: ptr fun \n", __FUNCTION__);
+			CSignalConnection&lt;T_Ret, Args...&gt; *pConnection = new CSignalConnection&lt;T_Ret, Args...&gt;();
+			pConnection-&gt;m_pFun = (void*)*(long long*)&amp;fun;
+			pConnection-&gt;m_pObject = (void*)nullptr;
+
+			pConnection-&gt;m_function = std::bind(fun, a...);
+			//pConnection-&gt;m_function = std::bind(fun, object, a...);
+			//m_lstSlots.insert({ ++m_Id, std::bind(fun, object, a...) });
+			//m_lstSlots.insert({ pFunction, pFunction-&gt;m_function });
+// 			if (m_pMutex)
+// 			{
+// 				m_pMutex-&gt;Lock();
+// 				m_lstSlots.push_back(pConnection);
+// 				m_pMutex-&gt;Unlock();
+// 			}
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;LockForWrite();
+				m_lstSlots.push_back(pConnection);
+				m_pRWLock-&gt;UnlockForWrite();
+			}
+			else
+			{
+				m_lstSlots.push_back(pConnection);
+			}
+
+			return 0;
+		}
+// 		template &lt; typename T_Fun&gt;
+// 		int Connect(T_Fun&amp;&amp; fun)
+// 		{
+// 			ScDebug("%s: ptr fun \n", __FUNCTION__);
+// 			CSignalConnection&lt;T_Ret, Args...&gt; *pConnection = new CSignalConnection&lt;T_Ret, Args...&gt;();
+// 			pConnection-&gt;m_pFun = (void*)*(long long*)&amp;fun;
+// 			pConnection-&gt;m_pObject = (void*)nullptr;
+// 
+// 			pConnection-&gt;m_function = std::bind(fun);
+// 			//pConnection-&gt;m_function = std::bind(fun, object, a...);
+// 			if (m_pRWLock)
+// 			{
+// 				m_pRWLock-&gt;LockForWrite();
+// 				m_lstSlots.push_back(pConnection);
+// 				m_pRWLock-&gt;UnlockForWrite();
+// 			}
+// 			else
+// 			{
+// 				m_lstSlots.push_back(pConnection);
+// 			}
+// 
+// 			return 0;
+// 		}
+
+		template &lt;typename T_Ret1, typename T_O, typename... A&gt;
+		int Connect(T_Ret1 T_O::* fun, T_O* object, A&amp;&amp; ... a) {
+			ScDebug("%s: mem fun \n", __FUNCTION__);
+			CSignalConnection&lt;T_Ret, Args...&gt; *pConnection = new CSignalConnection&lt;T_Ret, Args...&gt;();
+			pConnection-&gt;m_pFun = (void*)*(long long*)&amp;fun;//(void*)*(long long*)&amp;fun;
+			pConnection-&gt;m_pObject = (void*)object;
+			pConnection-&gt;m_function = std::bind(fun, object, a...);
+
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;LockForWrite();
+				m_lstSlots.push_back(pConnection);
+				m_pRWLock-&gt;UnlockForWrite();
+			}
+			else
+			{
+				m_lstSlots.push_back(pConnection);
+			}
+			return 0;
+		}
+		template &lt; typename T_Fun,  typename... A&gt;
+		int Connect1(T_Fun* fun, A&amp;&amp; ... a) {
+			ScDebug("%s: ptr fun \n", __FUNCTION__);
+			CSignalConnection&lt;T_Ret, Args...&gt; *pConnection = new CSignalConnection&lt;T_Ret, Args...&gt;();
+			pConnection-&gt;m_pFun = (void*)*(long long*)fun;
+			pConnection-&gt;m_pObject = (void*)nullptr;
+
+			pConnection-&gt;m_function = std::bind(fun, a...);
+	 
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;LockForWrite();
+				m_lstSlots.push_back(pConnection);
+				m_pRWLock-&gt;UnlockForWrite();
+			}
+			else
+			{
+				m_lstSlots.push_back(pConnection);
+			}
+
+			return 0;
+		}
+		template &lt;typename T_Ret1, typename T_O, typename... A&gt;
+		int Connect1(T_Ret1 T_O::* fun, T_O* object, A&amp;&amp; ... a) {
+ 			ScDebug("%s: mem fun \n", __FUNCTION__);
+ 			CSignalConnection&lt;T_Ret, Args...&gt; *pConnection = new CSignalConnection&lt;T_Ret, Args...&gt;();
+			pConnection-&gt;m_pFun = (void*)*(long long*)&amp;fun;//(void*)*(long long*)&amp;fun;
+ 			pConnection-&gt;m_pObject = (void*)object;
+ 			pConnection-&gt;m_function = std::bind(fun, object, a...);
+ 
+ 			if (m_pRWLock)
+ 			{
+ 				m_pRWLock-&gt;LockForWrite();
+ 				m_lstSlots.push_back(pConnection);
+ 				m_pRWLock-&gt;UnlockForWrite();
+ 			}
+ 			else
+ 			{
+ 				m_lstSlots.push_back(pConnection);
+ 			}
+			return 0;
+		}
+
+		template &lt;typename T_Fun, typename T_O, typename... A&gt;
+		CSignalConnection&lt;T_Ret, Args...&gt; MemFun(T_Fun&amp;&amp; fun, T_O&amp;&amp; object, A&amp;&amp; ... a)
+		{
+			CSignalConnection&lt;T_Ret, Args...&gt; connection;
+			connection.m_pFun = (void*)*(long long*)&amp;fun;
+			connection.m_pObject = (void*)&amp;object;
+			connection.m_function = std::bind(fun, object, a...);
+
+			return connection;
+		}
+		template &lt;typename T_Fun, typename T_O, typename... A&gt;
+		CSignalConnection&lt;T_Ret, Args...&gt; Fun(T_Fun&amp;&amp; fun, T_O&amp;&amp; object, A&amp;&amp; ... a)
+		{
+			CSignalConnection&lt;T_Ret, Args...&gt; connection;
+			connection.m_pFun = (void*)*(long long*)&amp;fun;
+			connection.m_pObject = (void*)&amp;object;
+			connection.m_function = std::bind(fun, object, a...);
+
+			return connection;
+		}
+
+		template &lt;typename T_Fun, typename... A&gt;
+		CSignalConnection&lt;T_Ret, Args...&gt; PtrFun(T_Fun&amp;&amp; fun, A&amp;&amp; ... a)
+		{
+			CSignalConnection&lt;T_Ret, Args...&gt; connection;
+			connection.m_pFun = (void*)*(long long*)&amp;fun;
+			connection.m_pObject = nullptr;
+			//function.function = std::bind(fun, a...);
+			return connection;
+		}
+		// connects a free function to the signal. The returned
+        // can not use std::bind, use function ptr directly
+		int Connect(std::function&lt;T_Ret(Args...)&gt; const&amp; fun) {
+             typedef T_Ret T_Fun(Args...);
+             T_Fun* pFun = nullptr;
+			 long long* pTmp = (long long*)fun.template target&lt;T_Ret(*)(Args...)&gt;();
+            // fun.template target&lt;decltype(pFun)&gt;();
+             //int64* pTmp = (int64*)fun.target&lt;decltype(pFun)&gt;();
+			if (pTmp == nullptr)
+			{//不能使用bind 方式绑定.
+				return -1;
+			}
+			// 			;
+			CSignalConnection&lt;T_Ret, Args...&gt; *pConnection = new CSignalConnection&lt;T_Ret, Args...&gt;();
+			//pFunction-&gt;pFun = (void*)*(int64*)function.target&lt;T_Ret(Args...)&gt;();
+			pConnection-&gt;m_pFun = (void*)*pTmp;
+			pConnection-&gt;m_pObject = nullptr;
+			pConnection-&gt;m_function = fun;
+
+			//m_lstSlots.insert({ pFunction, fun });
+// 			if (m_pMutex)
+// 			{
+// 				m_pMutex-&gt;Lock();
+// 				m_lstSlots.push_back(pConnection);
+// 				m_pMutex-&gt;Unlock();
+// 			}
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;LockForWrite();
+				m_lstSlots.push_back(pConnection);
+				m_pRWLock-&gt;UnlockForWrite();
+			}
+			else
+			{
+				m_lstSlots.push_back(pConnection);
+			}
+			return 0;
+		}
+		//成员函数 mem function， 不可使用bind
+		template &lt; typename T_Fun, typename T_O, typename... A&gt;
+		int Disconnect(T_Fun&amp;&amp; fun, T_O&amp;&amp; object, A&amp;&amp; ... a) {
+			CSignalConnection&lt;T_Ret, Args...&gt; connection;
+			connection.m_pFun = (void*)*(long long*)&amp;fun;
+			connection.m_pObject = (void*)object;
+// 			if (m_pMutex)
+// 			{
+// 				m_pMutex-&gt;Lock();
+// 			}
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;LockForWrite();
+			}
+            typename std::vector&lt;CSignalConnection&lt;T_Ret, Args...&gt; *&gt; ::iterator item;
+			for (item = m_lstSlots.begin(); item != m_lstSlots.end(); item++) {
+				CSignalConnection&lt;T_Ret, Args...&gt;* pConnectionTmp;
+				pConnectionTmp = *item;
+				if (pConnectionTmp-&gt;m_pFun == connection.m_pFun
+					&amp;&amp; pConnectionTmp-&gt;m_pObject == connection.m_pObject)
+				{
+					item = m_lstSlots.erase(item);
+					delete pConnectionTmp;
+					break;
+				}
+			}
+// 			if (m_pMutex)
+// 			{
+// 				m_pMutex-&gt;Unlock();
+// 			}
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;UnlockForWrite();
+			}
+			return 0;
+		}
+		//断开普通函数 free function ， 不可使用 bind 
+		int Disconnect(std::function&lt;T_Ret(Args...)&gt; const&amp; fun) {
+
+			long long* pTmp = (long long*)fun.template target&lt;T_Ret(*)(Args...)&gt;();
+			if (pTmp == nullptr)
+			{//不能使用bind 方式绑定.
+				return -1;
+			}
+
+			CSignalConnection&lt;T_Ret, Args...&gt; connection;
+			connection.m_pFun = (void*)*pTmp;
+			connection.m_pObject = nullptr;
+// 			if (m_pMutex)
+// 			{
+// 				m_pMutex-&gt;Lock();
+// 			}
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;LockForWrite();
+			}
+            typename std::vector&lt;CSignalConnection&lt;T_Ret, Args...&gt; *&gt; ::iterator item;
+			for (item = m_lstSlots.begin(); item != m_lstSlots.end(); item++) {
+				CSignalConnection&lt;T_Ret, Args...&gt;* pConnectionTmp;
+				pConnectionTmp = *item;
+				if (pConnectionTmp-&gt;m_pFun == connection.m_pFun
+					&amp;&amp; pConnectionTmp-&gt;m_pObject == connection.m_pObject)
+				{
+					item = m_lstSlots.erase(item);
+					delete pConnectionTmp;
+					break;
+				}
+			}
+// 			if (m_pMutex)
+// 			{
+// 				m_pMutex-&gt;Unlock();
+// 			}
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;UnlockForWrite();
+			}
+			return 0;
+		}
+
+		int Connect(CSignalConnection&lt;T_Ret, Args...&gt; connection)
+		{
+			CSignalConnection&lt;T_Ret, Args...&gt;* pNewConnection = new CSignalConnection&lt;T_Ret, Args...&gt;(connection);
+
+			//m_lstSlots.insert({ pFunction, function.m_function });
+// 			if (m_pMutex)
+// 			{
+// 				m_pMutex-&gt;Lock();
+// 			}
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;LockForWrite();
+			}
+
+			m_lstSlots.push_back(pNewConnection);
+// 			if (m_pMutex)
+// 			{
+// 				m_pMutex-&gt;Unlock();
+// 			}
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;UnlockForWrite();
+			}
+
+			return 0;
+		}
+
+		// disconnects a previously connected function
+
+
+		// disconnects all previously connected functions
+		void Clear()  {
+// 			for (auto it : m_lstSlots) {
+// 				delete *it;
+// 			}
+// 			if (m_pMutex)
+// 			{
+// 				m_pMutex-&gt;Lock();
+// 			}
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;LockForWrite();
+			}
+			for (int i = 0; i &lt; m_lstSlots.size(); i++)
+			{
+				delete m_lstSlots[i];
+			}
+			m_lstSlots.clear();
+// 			if (m_pMutex)
+// 			{
+// 				m_pMutex-&gt;Unlock();
+// 			}
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;UnlockForWrite();
+			}
+		}
+
+		// calls all connected functions
+		T_Ret Emit(Args... p) {
+			bool bVoid = std::is_same&lt;T_Ret, void&gt;::value;
+			T_Ret ret(0);
+#ifdef AsyncSignal
+			if (m_pThread)
+			{//异步信号
+				//为了锁住 m_pThread 不被detach
+				m_pRWLock-&gt;LockForWrite();
+				if (!m_pThread)
+				{
+					m_pRWLock-&gt;UnlockForWrite();
+					return ret;
+				}
+				CAsyncMessage&lt;T_Ret, Args...&gt;* pMessage = new CAsyncMessage&lt;T_Ret, Args...&gt;(p...);
+				//pMessage-&gt;SetParams(p...);
+				pMessage-&gt;m_pSignal = this;
+				pMessage-&gt;m_pUserData = this;
+				m_pThreadMessage = pMessage;
+				m_pThread-&gt;PostMessage(pMessage);
+				m_pRWLock-&gt;UnlockForWrite();
+			}
+			else 
+#endif	
+			{
+// 				if (m_pMutex)
+// 				{
+// 					m_pMutex-&gt;Lock();
+// 				}
+				if (m_pRWLock)
+				{
+					m_pRWLock-&gt;LockForRead();
+				}
+
+				for (int i = 0; i &lt; m_lstSlots.size(); i++)
+				{
+					m_lstSlots[i]-&gt;m_function(p...);
+				}
+// 				if (m_pMutex)
+// 				{
+// 					m_pMutex-&gt;Unlock();
+// 				}
+				if (m_pRWLock)
+				{
+					m_pRWLock-&gt;UnlockForRead();
+				}
+			}
+			return ret;
+		}
+		//发射异步信号
+		T_Ret EmitAsync(CThread* pThread, Args... p) {
+			T_Ret ret(0);
+#ifdef AsyncSignal
+			if (pThread)
+			{//异步信号
+				CAsyncMessage&lt;T_Ret, Args...&gt;* pMessage = new CAsyncMessage&lt;T_Ret, Args...&gt;(p...);
+				//pMessage-&gt;SetParams(p...);
+				pMessage-&gt;m_pSignal = this;
+				m_pThreadMessage = pMessage;
+				pThread-&gt;PostMessage(pMessage);
+			}
+			else
+#endif
+			{
+// 				if (m_pMutex)
+// 				{
+// 					m_pMutex-&gt;Lock();
+// 				}
+				if (m_pRWLock)
+				{
+					m_pRWLock-&gt;LockForRead();
+				}
+				for (int i = 0; i &lt; m_lstSlots.size(); i++)
+				{
+					m_lstSlots[i]-&gt;m_function(p...);
+				}
+// 				if (m_pMutex)
+// 				{
+// 					m_pMutex-&gt;Unlock();
+// 				}
+				if (m_pRWLock)
+				{
+					m_pRWLock-&gt;UnlockForRead();
+				}
+			}
+			return ret;
+		}
+		// assignment creates new Signal
+		CSignal&amp; operator=(CSignal const&amp; other) {
+			Clear();
+			return *this;
+		}
+		
+		vector&lt;CSignalConnection&lt;T_Ret, Args...&gt;*&gt;&amp;	GetSlots()
+		{
+			return m_lstSlots;
+		} 
+		//附加到 thread， 那么消息将发到该线程去处理
+		//也将是异步信号
+		int		AttachThread(CThread* pThread) {
+			if (pThread == nullptr)
+			{
+				m_pThread = CSignalInitializer::m_pThreadDefault;
+			}
+			else {
+				m_pThread = pThread;
+			}
+			// 			if (!m_pMutex)
+			// 			{//异步的一定需要是线程安全的。
+			// 				m_pMutex = new CMutex();
+// 			}
+			if (!m_pRWLock)
+			{//异步的一定需要是线程安全的。
+				m_pRWLock = new CReadWriteLock();
+			}
+			return 0;
+		};
+		int		DetachThread(/*CThread* pThread*/)
+		{
+			m_pThread = nullptr;
+			return 0;
+		}
+		int GetCount() {
+			int nCount(0);
+// 			if (m_pMutex)
+// 			{
+// 				m_pMutex-&gt;Lock();
+// 				nCount = m_lstSlots.size();
+// 				m_pMutex-&gt;Unlock();
+// 			}
+			if (m_pRWLock)
+			{
+				m_pRWLock-&gt;LockForRead();
+				nCount = m_lstSlots.size();
+				m_pRWLock-&gt;UnlockForRead();
+			}
+			else {
+				nCount = m_lstSlots.size();
+			}
+			return nCount;
+		}
+		//
+		CThread*	GetThread() {
+			return m_pThread;
+		};
+		bool		Lock() {
+// 			if (!m_pMutex)
+// 			{
+// 				return false;
+// 			}
+// 			return m_pMutex-&gt;Lock();
+			if (!m_pRWLock)
+			{
+				return false;
+			}
+			return m_pRWLock-&gt;LockForRead();
+
+		};
+		bool		Unlock()
+		{
+// 			if (!m_pMutex)
+// 			{
+// 				return false;
+// 			}
+// 			return m_pMutex-&gt;Unlock();
+			if (!m_pRWLock)
+			{
+				return false;
+			}
+			m_pRWLock-&gt;UnlockForRead();
+
+			return true;
+		};
+		void*		GetOwner()
+		{
+			return m_pOwner;
+		}
+		void		SetOwner(void* pOwner)
+		{
+			m_pOwner = pOwner;
+		}
+	protected:
+		//std::map&lt;int, std::function&lt;T_Ret(Args...)&gt;&gt; m_lstSlots;;
+		//std::map&lt;CFunction&lt;T_Ret, Args...&gt;*, std::function&lt;T_Ret(Args...)&gt;&gt; m_lstSlots;
+		std::vector&lt;CSignalConnection&lt;T_Ret, Args...&gt;*&gt;	m_lstSlots;
+		CThread*	m_pThread;
+		//CMutex*		m_pMutex;
+		CReadWriteLock*	m_pRWLock=nullptr;
+		void*		m_pOwner;
+		CThreadMessage*	m_pThreadMessage=nullptr;
+	};</code></pre> 
+<p>  </p> 
+<p>使用connect或者disconnect， 直接传入函数地址。不要使用bind 方式传入。 这是为了 保存函数 地址和对象地址。以便 disconnect</p> 
+<p>测试(进行了修改,自由函数或者成员函数不再需要bind函数区分)：</p> 
+<pre class="has"><code>int TestFun()
+{
+	return 0;
+}
+class CTestClass {
+public:
+	int TestFun()
+	{
+		return 0;
+	}
+};
+
+void TestSignal1()
+{
+	CTestClass obj;
+	CSignal&lt;int&gt; sig;
+	//sig.MemFun(&amp;CTestClass::TestFun, &amp;obj);
+
+	sig.Connect(&amp;CTestClass::TestFun, &amp;obj);
+	sig.Connect(&amp;TestFun);
+
+	ScDebug("%s: %p, %p\n", __FUNCTION__, &amp;CTestClass::TestFun, &amp;TestFun);
+	//Function(&amp;CTestClass::TestFun);
+
+	//Function(&amp;TestFun);
+}
+</code></pre> 
+<p>此类内部，有 thread。可以自行屏蔽。这是为了扩展为线程异步信号。</p> 
+<p>类似qt 信号一样。可以让信号在某个线程中异步回调Slot。</p> 
+<p>传统的 异步消息处理方式 都是 case xxxx: OnXXX这样为程序扩展带来很大麻烦。每一个消息需要做函数映射处理，同时消息处理函数必须是完全是相同参数。</p> 
+<p>直接将信号扩展为异步信号。可以在任何时候，灵活绑定行程异步消息处理过程。同时可以使用任意参数的函数做消息和对应处理函数。 这可以极大方便程序使用。 后面再继续贴出线程异步信号</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d3ac93754cc82029ffdbefec6d7e3f3a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">PHP-FastCGI详解</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/80e9a1452d8367b2fc15134bef652f1d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">网络爬虫-破解京东滑块验证码</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

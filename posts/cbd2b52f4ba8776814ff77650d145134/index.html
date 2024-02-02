@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>k8s-Kubernetes--集群部署 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="k8s-Kubernetes--集群部署" />
+<meta property="og:description" content="文章目录 一、Kubernetes简介与架构1.Kubernetes简介2.kubernetes设计架构3.Kubernetes和Docker的关系、区别 二、Kubernetes集群部署1.集群环境初始化2.所有节点安装kubeadm3.拉取集群所需镜像4.集群初始化5.安装flannel网络插件6.扩容节点7.设置kubectl命令补齐 一、Kubernetes简介与架构 1.Kubernetes简介 在Docker 作为高级容器引擎快速发展的同时，在Google内部，容器技术已经应用了很多年，Borg系统运行管理着成千上万的容器应用。
+Kubernetes项目来源于Borg，可以说是集结了Borg设计思想的精华，并且吸收了Borg系统中的经验和教训。
+Kubernetes对计算资源进行了更高层次的抽象，通过将容器进行细致的组合，将最终的应用服务交给用户。
+Kubernetes的优势：
+（1）隐藏资源管理和错误处理，用户仅需要关注应用的开发。
+（2）服务高可用、高可靠。
+（3）可将负载运行在由成千上万的机器联合而成的集群中。
+2.kubernetes设计架构 Kubernetes集群包含有节点代理kubelet和Master组件(APIs, scheduler, etcd)，一切都基于分布式的存储系统。
+Kubernetes主要由以下几个核心组件组成：
+etcd：保存了整个集群的状态；数据存储引擎；后期可替换为其他存储引擎，仅对应需改变apiserver即可apiserver：提供了资源操作的唯一入口，并提供认证、授权、访问控制、API(Application Programming Interface,应用程序编程接口)注册和发现等机制；其他所有组件通过apiserver连接etcd，进行写入数据等；controller manager：负责维护集群的状态，比如故障检测、自动扩展、滚动更新等scheduler：负责资源的调度，按照预定的调度策略将Pod调度到相应的机器上kubelet：负责维护容器的生命周期，同时也负责Volume（CVI）和网络（CNI）的管理Container runtime：负责镜像管理以及Pod和容器的真正运行（CRI）；目前阶段就是dockerkube-proxy：负责为Service提供cluster内部的服务发现和负载均衡 除了核心组件，还有一些推荐的Add-ons：
+kube-dns：负责为整个集群提供DNS服务Ingress Controller：为服务提供外网入口Heapster：提供资源监控Dashboard：提供GUI，界面Federation：提供跨可用区的集群Fluentd-elasticsearch：提供集群日志采集、存储与查询 Kubernetes设计理念和功能其实就是一个类似Linux的分层架构
+核心层：Kubernetes最核心的功能，对外提供API构建高层的应用，对内提供插件式应用执行环境应用层：部署（无状态应用、有状态应用、批处理任务、集群应用等）和路由（服务发现、DNS解析等）管理层：系统度量（如基础设施、容器和网络的度量），自动化（如自动扩展、动态Provision等）以及策略管理（RBAC、Quota、PSP、NetworkPolicy等）接口层：kubectl命令行工具、客户端SDK以及集群联邦生态系统：在接口层之上的庞大容器集群管理调度的生态系统，可以划分为两个范畴: Kubernetes外部：日志、监控、配置管理、CI、CD、Workflow、FaaS、OTS应用、ChatOps等Kubernetes内部：CRI、CNI、CVI、镜像仓库、Cloud Provider、集群自身的配置和管理等 3.Kubernetes和Docker的关系、区别 Kubernetes和Docker定义
+Kubernetes: 是一个开源的容器集群管理系统，可以实现容器集群的自动化部署、自动扩缩容、维护等功能。它是一个全面的系统，用于自动化部署、调度和扩展容器化应用，并支持许多容器化工具，如Docker。
+Docker：是一个开源的应用容器引擎，开发者可以打包他们的应用及依赖到一个可移植的容器中，可运行在Debian、CentOS、Ubuntu等多操作系统上，也可实现虚拟化。
+Kubernetes和Docker区别
+Docker是用于构建、分发和运行Docker容器的平台和工具；而Kubernetes不包含用于创建或管理容器镜像的功能，并且它本身并不运行容器。因此两者的主要区别在于Docker在单个节点上运行，而Kubernetes设计为在集群上运行。
+Kubernetes和Docker另一个主要区别在于Docker可以在没有Kubernetes的情况下使用，而Kubernetes需要容器运行时才能进行编排。
+两者各有各的优势，解决的问题也有所不同
+二、Kubernetes集群部署 官方网址：https://kubernetes.io/
+1-23版本：https://v1-23.docs.kubernetes.io/zh/docs/setup/production-environment/tools/kubeadm/install-kubeadm/
+由上图，本次实验我们选择安装1.23版本
+本次实验需准备4台主机：
+主机名ip角色server1192.168.117.11reg.westos.org，harbor仓库server2192.168.117.12master，k8s集群控制节点server3192.168.117.13node，k8s集群工作节点server4192.168.117.14node，k8s集群工作节点 所有节点禁用selinux和防火墙
+所有节点同步时间和/etc/hosts解析
+所有节点安装docker-ce
+所有节点禁用swap，注意注释掉/etc/fstab文件中的定义
+1.集群环境初始化 server1拉起仓库：
+[root@server1 harbor]# docker-compose up -d
+由于传文件较多，也可以在server1做免密，本实验未采用免密
+所有k8s集群节点执行以下步骤
+禁用swap
+[root@server2 ~]# swapoff -a
+[root@server2 ~]# vim /etc/fstab
+#/dev/mapper/rhel-swap swap swap defaults 0 0" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/cbd2b52f4ba8776814ff77650d145134/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-08-14T01:05:28+08:00" />
+<meta property="article:modified_time" content="2023-08-14T01:05:28+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">k8s-Kubernetes--集群部署</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#Kubernetes_12" rel="nofollow">一、Kubernetes简介与架构</a></li><li><ul><li><a href="#1Kubernetes_15" rel="nofollow">1.Kubernetes简介</a></li><li><a href="#2kubernetes_24" rel="nofollow">2.kubernetes设计架构</a></li><li><a href="#3KubernetesDocker_56" rel="nofollow">3.Kubernetes和Docker的关系、区别</a></li></ul> 
+  </li><li><a href="#Kubernetes_69" rel="nofollow">二、Kubernetes集群部署</a></li><li><ul><li><a href="#1_93" rel="nofollow">1.集群环境初始化</a></li><li><a href="#2kubeadm_162" rel="nofollow">2.所有节点安装kubeadm</a></li><li><a href="#3_180" rel="nofollow">3.拉取集群所需镜像</a></li><li><a href="#4_199" rel="nofollow">4.集群初始化</a></li><li><a href="#5flannel_232" rel="nofollow">5.安装flannel网络插件</a></li><li><a href="#6_289" rel="nofollow">6.扩容节点</a></li><li><a href="#7kubectl_306" rel="nofollow">7.设置kubectl命令补齐</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<hr> 
+<h2><a id="Kubernetes_12"></a>一、Kubernetes简介与架构</h2> 
+<h3><a id="1Kubernetes_15"></a>1.Kubernetes简介</h3> 
+<blockquote> 
+ <p>在Docker 作为高级容器引擎快速发展的同时，<strong>在Google内部，容器技术已经应用了很多年</strong>，Borg系统运行管理着成千上万的容器应用。<br> Kubernetes项目来<strong>源于Borg</strong>，可以说是集结了Borg设计思想的精华，并且吸收了Borg系统中的经验和教训。<br> <mark>Kubernetes对计算资源进行了更高层次的抽象，通过将容器进行细致的组合，将最终的应用服务交给用户。</mark><br> <strong>Kubernetes的优势：</strong><br> （1）隐藏资源管理和错误处理，用户仅需要关注应用的开发。<br> （2）服务高可用、高可靠。<br> （3）可将负载运行在由成千上万的机器联合而成的集群中。</p> 
+</blockquote> 
+<h3><a id="2kubernetes_24"></a>2.kubernetes设计架构</h3> 
+<p>Kubernetes集群包含有节点代理kubelet和Master组件(APIs, scheduler, etcd)，一切都基于分布式的存储系统。<br> <img src="https://images2.imgbox.com/16/3d/JjWsXwNd_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>Kubernetes主要由以下几个核心组件组成：</p> 
+ <ul><li>etcd：保存了整个集群的状态；数据存储引擎；后期可替换为其他存储引擎，仅对应需改变apiserver即可</li><li>apiserver：<mark>提供了资源操作的唯一入口</mark>，并提供认证、授权、访问控制、API(Application Programming Interface,应用程序编程接口)注册和发现等机制；<mark>其他所有组件通过apiserver连接etcd，进行写入数据等；</mark></li><li>controller manager：负责维护集群的状态，比如故障检测、自动扩展、滚动更新等</li><li>scheduler：负责资源的调度，按照预定的调度策略将Pod调度到相应的机器上</li><li>kubelet：负责维护容器的生命周期，同时也负责Volume（CVI）和网络（CNI）的管理</li><li>Container runtime：负责镜像管理以及Pod和容器的真正运行（CRI）；目前阶段就是docker</li><li>kube-proxy：负责为Service提供cluster内部的服务发现和负载均衡</li></ul> 
+</blockquote> 
+<blockquote> 
+ <p>除了核心组件，还有一些推荐的Add-ons：</p> 
+ <ul><li>kube-dns：负责为整个集群提供DNS服务</li><li>Ingress Controller：为服务提供外网入口</li><li>Heapster：提供资源监控</li><li>Dashboard：提供GUI，界面</li><li>Federation：提供跨可用区的集群</li><li>Fluentd-elasticsearch：提供集群日志采集、存储与查询</li></ul> 
+</blockquote> 
+<blockquote> 
+ <p><mark>Kubernetes设计理念和功能其实就是一个类似Linux的分层架构</mark><br> <img src="https://images2.imgbox.com/c5/07/ZdSb75U6_o.png" alt="在这里插入图片描述"></p> 
+ <ul><li>核心层：Kubernetes最核心的功能，<mark>对外</mark>提供API构建高层的应用，<mark>对内</mark>提供插件式应用执行环境</li><li>应用层：部署（无状态应用、有状态应用、批处理任务、集群应用等）和路由（服务发现、DNS解析等）</li><li>管理层：系统度量（如基础设施、容器和网络的度量），自动化（如自动扩展、动态Provision等）以及策略管理（RBAC、Quota、PSP、NetworkPolicy等）</li><li>接口层：kubectl命令行工具、客户端SDK以及集群联邦</li><li>生态系统：在接口层之上的庞大容器集群管理调度的生态系统，可以划分为两个范畴: 
+   <ul><li>Kubernetes外部：日志、监控、配置管理、CI、CD、Workflow、FaaS、OTS应用、ChatOps等</li><li>Kubernetes内部：CRI、CNI、CVI、镜像仓库、Cloud Provider、集群自身的配置和管理等</li></ul> </li></ul> 
+</blockquote> 
+<h3><a id="3KubernetesDocker_56"></a>3.Kubernetes和Docker的关系、区别</h3> 
+<p>Kubernetes和Docker定义</p> 
+<blockquote> 
+ <p><mark>Kubernetes:</mark> 是一个开源的容器集群管理系统，可以实现容器集群的自动化部署、自动扩缩容、维护等功能。它是一个全面的系统，用于自动化部署、调度和扩展容器化应用，并支持许多容器化工具，如Docker。<br> <mark>Docker</mark>：是一个开源的应用容器引擎，开发者可以打包他们的应用及依赖到一个可移植的容器中，可运行在Debian、CentOS、Ubuntu等多操作系统上，也可实现虚拟化。</p> 
+</blockquote> 
+<p>Kubernetes和Docker区别</p> 
+<blockquote> 
+ <p>Docker是用于构建、分发和运行Docker容器的平台和工具；而Kubernetes不包含用于创建或管理容器镜像的功能，并且它本身并不运行容器。因此<mark>两者的主要区别在于</mark>Docker在单个节点上运行，而Kubernetes设计为在集群上运行。</p> 
+ <p>Kubernetes和Docker<mark>另一个主要区别在于</mark>Docker可以在没有Kubernetes的情况下使用，而Kubernetes需要容器运行时才能进行编排。<br> 两者各有各的优势，解决的问题也有所不同</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/8f/ad/iFSFudFz_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="Kubernetes_69"></a>二、Kubernetes集群部署</h2> 
+<p>官方网址：<a href="https://kubernetes.io/" rel="nofollow">https://kubernetes.io/</a><br> 1-23版本：<a href="https://v1-23.docs.kubernetes.io/zh/docs/setup/production-environment/tools/kubeadm/install-kubeadm/" rel="nofollow">https://v1-23.docs.kubernetes.io/zh/docs/setup/production-environment/tools/kubeadm/install-kubeadm/</a><br> <img src="https://images2.imgbox.com/ee/9b/GL2Co4lR_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/17/2d/fdBmRx6Y_o.png" alt="在这里插入图片描述"></p> 
+<p>由上图，本次实验我们选择安装1.23版本</p> 
+<p><img src="https://images2.imgbox.com/7f/b8/Cwa0r9GA_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>本次实验需准备4台主机：</strong></p> 
+<table><thead><tr><th>主机名</th><th>ip</th><th>角色</th></tr></thead><tbody><tr><td>server1</td><td>192.168.117.11</td><td>reg.westos.org，harbor仓库</td></tr><tr><td>server2</td><td>192.168.117.12</td><td>master，k8s集群控制节点</td></tr><tr><td>server3</td><td>192.168.117.13</td><td>node，k8s集群工作节点</td></tr><tr><td>server4</td><td>192.168.117.14</td><td>node，k8s集群工作节点</td></tr></tbody></table> 
+<p>所有节点禁用selinux和防火墙<br> 所有节点同步时间和/etc/hosts解析<br> 所有节点安装docker-ce<br> 所有节点禁用swap，注意注释掉/etc/fstab文件中的定义</p> 
+<h3><a id="1_93"></a>1.集群环境初始化</h3> 
+<p><strong>server1拉起仓库：</strong><br> [root@server1 harbor]# docker-compose up -d<br> <img src="https://images2.imgbox.com/e7/1e/NfOuSsQ9_o.png" alt="在这里插入图片描述"></p> 
+<p>由于传文件较多，也可以在server1做免密，本实验未采用免密<br> <img src="https://images2.imgbox.com/87/89/2TXrNm9U_o.png" alt="在这里插入图片描述"><br> <strong>所有k8s集群节点执行以下步骤</strong><br> <strong>禁用swap</strong><br> [root@server2 ~]# swapoff -a<br> [root@server2 ~]# vim /etc/fstab<br> #/dev/mapper/rhel-swap swap swap defaults 0 0<br> <img src="https://images2.imgbox.com/aa/37/GOXaz9Y5_o.png" alt="在这里插入图片描述"><br> <strong>修改内核参数</strong><br> [root@server2 sysctl.d]# vim /etc/sysctl.d/docker.conf<br> net.bridge.bridge-nf-call-iptables=1<br> net.bridge.bridge-nf-call-ip6tables=1<br> net.ipv4.ip_forward=1<br> 让内核参数生效：<br> [root@server2 ~]# sysctl --system<br> <img src="https://images2.imgbox.com/0c/28/8qP3ndND_o.png" alt="在这里插入图片描述"><br> [root@server2 ~]# vim /etc/yum.repos.d/docker.repo<br> [docker]<br> name=docker-ce<br> baseurl=https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/centos/7/x86_64/stable/<br> gpgcheck=0</p> 
+<p>[centos]<br> name=extras<br> baseurl=https://mirrors.tuna.tsinghua.edu.cn/centos/7/extras/x86_64/<br> gpgcheck=0<br> <img src="https://images2.imgbox.com/e5/78/WQISJFKN_o.png" alt="在这里插入图片描述"><br> <strong>安装docker-ce</strong><br> <img src="https://images2.imgbox.com/af/3a/FlEYtZPC_o.png" alt="在这里插入图片描述"></p> 
+<p>[root@server2 ~]# yum install -y docker-ce<br> [root@server2 ~]# systemctl enable --now docker<br> 配置默认仓库为：reg.westos.org<br> [root@server2 ~]# vim /etc/docker/daemon.json<br> {<!-- --><br> “registry-mirrors”: [“https://reg.westos.org”],<br> “exec-opts”: [“native.cgroupdriver=systemd”],<br> “log-driver”: “json-file”,<br> “log-opts”: {<!-- --><br> “max-size”: “100m”<br> },<br> “storage-driver”: “overlay2”<br> }</p> 
+<p>[root@server2 ~]# systemctl restart docker<br> <img src="https://images2.imgbox.com/c8/ea/Y1AX0X7y_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>所有节点同步docker配置，以及拷贝harbor仓库的证书</strong><br> 证书为之前docker实验时在server1生成（<a href="https://blog.csdn.net/Gong_yz/article/details/129351134?spm=1001.2014.3001.5502">可参考此链接</a>）<br> [root@server1 ~]# cd /etc/docker/<br> [root@server1 docker]# ls<br> certs.d<br> [root@server1 docker]# scp -r certs.d/ server2:/etc/docker/<br> [root@server1 docker]# scp -r certs.d/ server3:/etc/docker/<br> [root@server1 docker]# scp -r certs.d/ server4:/etc/docker/</p> 
+<p><strong>所有节点添加仓库的地址解析</strong><br> <img src="https://images2.imgbox.com/48/92/JH0sxZY4_o.png" alt="在这里插入图片描述"><br> <mark>确保所有k8s节点可以从私有仓库下载镜像</mark><br> 注：可以在仓库页面查看日志，确保所有节点可以拉取<br> [root@server2 docker]# docker pull nginx<br> [root@server3 docker]# docker pull nginx<br> [root@server4 docker]# docker pull nginx</p> 
+<h3><a id="2kubeadm_162"></a>2.所有节点安装kubeadm</h3> 
+<p><img src="https://images2.imgbox.com/65/8e/bzy54RVP_o.png" alt="在这里插入图片描述"></p> 
+<p>[root@server2 yum.repos.d]# vim /etc/yum.repos.d/k8s.repo<br> [kubernetes]<br> name=Kubernetes<br> baseurl=https://mirrors.tuna.tsinghua.edu.cn/kubernetes/yum/repos/kubernetes-el7-x86_64/<br> gpgcheck=0<br> <img src="https://images2.imgbox.com/4c/4e/h3PtvHRU_o.png" alt="在这里插入图片描述"><br> [root@server2 ~]# yum install -y kubelet-1.23.17-0 kubeadm-1.23.17-0 kubectl-1.23.17-0</p> 
+<p>[root@server2 ~]# systemctl enable --now kubelet<br> kubelet是一个循环程序，会主动探测集群的状态，一直会尝试重启<br> 若安装安装很多软件，建议建立本地yum源<br> <strong>注：下图为列出软件版本</strong><br> [root@server2 ~]# yum list --showduplicates kubeadm<br> <img src="https://images2.imgbox.com/8e/1e/Io124j98_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="3_180"></a>3.拉取集群所需镜像</h3> 
+<p><img src="https://images2.imgbox.com/f3/c8/rnnQlo8o_o.png" alt="在这里插入图片描述"></p> 
+<p>[root@server2 ~]# kubeadm config images pull --image-repository registry.aliyuncs.com/google_containers<br> 注:指定镜像的位置是阿里云：registry.aliyuncs.com<br> <img src="https://images2.imgbox.com/4b/a8/DqIh5dfR_o.png" alt="在这里插入图片描述"><br> 登录仓库<br> [root@server2 ~]# docker login reg.westos.org<br> Username: admin<br> Password:<br> 先在harbor仓库上新建一个项目（需设置为公开）:<br> <img src="https://images2.imgbox.com/57/7f/LLYZ6NRr_o.png" alt="在这里插入图片描述"><br> <strong>上传镜像:</strong><br> 1.给拉取的镜像加标签（用变量的方式进行替换）<br> [root@server2 ~]# docker images | grep google_containers | awk ‘{print $1":"$2}’ | awk -F/ ‘{system(“docker tag “$0” reg.westos.org/k8s/”$3"")}’<br> 2.上传<br> [root@server2 ~]# docker images |grep k8s | awk ‘{system(“docker push “$1”:”$2"")}’<br> <img src="https://images2.imgbox.com/92/73/HqOG5m6G_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="4_199"></a>4.集群初始化</h3> 
+<p>[root@server2 ~]# kubeadm init --pod-network-cidr=10.244.0.0/16 --image-repository reg.westos.org/k8s --kubernetes-version v1.23.17<br> 注：–pod-network-cidr=10.244.0.0/16是一个比较常用的网络段<br> –kubernetes-version指定k8s安装版本<br> <img src="https://images2.imgbox.com/82/f0/LWGl072q_o.png" alt="在这里插入图片描述"><br> 根据上图，进行下一步设置环境变量：root执行export KUBECONFIG=/etc/kubernetes/admin.conf即可<br> 普通用户执行按照上图的另一条要求执行（箭头所指位置）<br> <strong>设置环境变量</strong><br> [root@server2 ~]# export KUBECONFIG=/etc/kubernetes/admin.conf<br> 注：/etc/kubernetes/admin.conf为证书，用来连接APIserver的证书<br> 注意：没有设置变量会有以下报错<br> <img src="https://images2.imgbox.com/df/de/Uv7p47JW_o.png" alt="在这里插入图片描述"><br> 写入环境变量文件，确保重启后依然生效<br> [root@server2 ~]# vim .bash_profile<br> export KUBECONFIG=/etc/kubernetes/admin.conf<br> <img src="https://images2.imgbox.com/ba/33/8VACU79b_o.png" alt="在这里插入图片描述"><br> 查看集群状态<br> [root@server2 ~]# kubectl get node<br> NAME STATUS ROLES AGE VERSION<br> k8s2 <mark>NotReady</mark> control-plane,master 74s v1.23.17<br> 当前节点还没有就绪，是因为没有安装网络插件，pod还没运行</p> 
+<pre><code>[root@server2 ~]# kubectl get pod -A                                    ##和docker ps -a 作用一致
+NAMESPACE     NAME                           READY   STATUS    RESTARTS   AGE
+kube-system   coredns-7b56f6bc55-b495q       0/1     Pending   0          79s
+kube-system   coredns-7b56f6bc55-ch2ts       0/1     Pending   0          79s
+kube-system   etcd-k8s2                      1/1     Running   0          92s
+kube-system   kube-apiserver-k8s2            1/1     Running   0          92s
+kube-system   kube-controller-manager-k8s2   1/1     Running   0          92s
+kube-system   kube-proxy-7ckfn               1/1     Running   0          79s
+kube-system   kube-scheduler-k8s2            1/1     Running   0          92s
+</code></pre> 
+<h3><a id="5flannel_232"></a>5.安装flannel网络插件</h3> 
+<blockquote> 
+ <p><mark>Flannel简介</mark><br> Flannel官网：https://github.com/coreos/flannel<br> Flannel是由CoreOS开源的针对k8s的网络服务，<mark>其目的是为解决k8s集群中各主机上Pod之间的通信问题，其借助etcd维护网络IP地址分配，并为每个Node节点分配一个不同的IP地址段。</mark><br> Flannel在每个节点运行一个名为flanneld的二进制代理程序，它负责从预留的网络中按照指定或者默认的掩码长度为当前节点申请分配一个子网，并将网络配置、已分配的子网和辅助数据（比如主机的公网IP等）存储在Kubernetes API或独立的etcd中。<mark>Flannel通过不同的后端来实现跨节点Pod间的通信</mark></p> 
+</blockquote> 
+<p>所有node节点都要去下载flannel网络插件，所以将镜像上传至私有仓库，并将访问地址修改为我们建立的私有仓库即可<br> <strong>下载flannel网络插件</strong><br> [root@server2 ~]# yum install -y wget<br> [root@server2 ~]# wget https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml<br> <strong>修改镜像位置</strong>:从官方仓库改为默认找私有仓库<br> [root@server2 ~]# vim kube-flannel.yml<br> <img src="https://images2.imgbox.com/62/6c/ypJIcva2_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/9d/13/94lruVfh_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/d7/d1/ijeKvXLH_o.png" alt="在这里插入图片描述"><br> <strong>新建项目仓库</strong>（需设置为公开）<br> <img src="https://images2.imgbox.com/fb/31/4xFp4nWS_o.png" alt="在这里插入图片描述"><br> <strong>下载镜像</strong><br> [root@server1 docker]# docker pull docker.io/flannel/flannel:v0.21.2<br> [root@server1 docker]# docker pull docker.io/flannel/flannel-cni-plugin:v1.1.2<br> <strong>上传镜像</strong>：($0表示取出来的部分)<br> [root@server1 docker]# docker images |grep flannel | awk ‘{print $1":"$2}’ | awk ‘{system(“docker tag “$0” reg.westos.org/”$0"")}’</p> 
+<p>[root@server1 docker]# docker push reg.westos.org/flannel/flannel:v0.21.2<br> [root@server1 docker]# docker push reg.westos.org/flannel/flannel-cni-plugin:v1.1.2<br> <strong>确保镜像上传成功</strong><br> <img src="https://images2.imgbox.com/34/9e/djAcYL5c_o.png" alt="在这里插入图片描述"><br> <strong>部署网络插件</strong><br> [root@server2 ~]# kubectl apply -f kube-flannel.yml</p> 
+<p>namespace/kube-flannel created<br> serviceaccount/flannel created<br> clusterrole.rbac.authorization.k8s.io/flannel created<br> clusterrolebinding.rbac.authorization.k8s.io/flannel created<br> configmap/kube-flannel-cfg created<br> daemonset.apps/kube-flannel-ds created</p> 
+<pre><code>[root@server2 ~]# kubectl  -n kube-flannel get pod
+NAME                    READY   STATUS    RESTARTS   AGE
+kube-flannel-ds-6gnh4   1/1     Running   0          11s
+
+[root@server2 ~]# kubectl get node
+NAME   STATUS   ROLES                  AGE   VERSION
+k8s2   Ready    control-plane,master   14m   v1.23.17
+
+[root@server2 ~]# kubectl get pod -A
+NAMESPACE      NAME                           READY   STATUS    RESTARTS   AGE
+kube-flannel   kube-flannel-ds-6gnh4          1/1     Running   0          20s
+kube-system    coredns-7b56f6bc55-b495q       1/1     Running   0          14m
+kube-system    coredns-7b56f6bc55-ch2ts       1/1     Running   0          14m
+kube-system    etcd-k8s2                      1/1     Running   0          14m
+kube-system    kube-apiserver-k8s2            1/1     Running   0          14m
+kube-system    kube-controller-manager-k8s2   1/1     Running   0          14m
+kube-system    kube-proxy-7ckfn               1/1     Running   0          14m
+kube-system    kube-scheduler-k8s2            1/1     Running   0          14m
+</code></pre> 
+<p><mark>以上所有的信息已经写到了etcd中，当有节点加进来的时候，会从etcd中获取集群状态</mark></p> 
+<h3><a id="6_289"></a>6.扩容节点</h3> 
+<p>以下两条命令为<strong>3.集群初始化</strong>时在server2生成，复制在server3、server4直接使用即可；（–token有效期为24小时）</p> 
+<pre><code>[root@server3 ~]# kubeadm join 192.168.56.12:6443 --token u9a137.tll3mwnlqgc74gll \
+&gt;         --discovery-token-ca-cert-hash sha256:01198c9ecacf6d15068debb4cd4fddf8ac0fa1dba65c3b049c5dc1761c355e02
+
+[root@server4 ~]# kubeadm join 192.168.56.12:6443 --token u9a137.tll3mwnlqgc74gll \
+&gt;         --discovery-token-ca-cert-hash sha256:01198c9ecacf6d15068debb4cd4fddf8ac0fa1dba65c3b049c5dc1761c355e02
+
+[root@server2 ~]# kubectl get node
+NAME   STATUS   ROLES                  AGE   VERSION
+k8s2   Ready    control-plane,master   16m   v1.23.17
+k8s3   Ready    &lt;none&gt;                 52s   v1.23.17
+k8s4   Ready    &lt;none&gt;                 46s   v1.23.17
+</code></pre> 
+<p><img src="https://images2.imgbox.com/ca/af/DCDwM8gU_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="7kubectl_306"></a>7.设置kubectl命令补齐</h3> 
+<p>[root@server2 ~]# yum install -y bash-completion<br> [root@server2 ~]# echo “source &lt;(kubectl completion bash)” &gt;&gt; ~/.bashrc<br> [root@server2 ~]# source ~/.bashrc<br> <img src="https://images2.imgbox.com/8e/1a/Hs3lWBEH_o.png" alt="在这里插入图片描述"><br> <strong>kubectl命令指南</strong><br> <a href="https://kubernetes.io/docs/reference/generated/kubectl/kubectl-commands" rel="nofollow">https://kubernetes.io/docs/reference/generated/kubectl/kubectl-commands</a></p> 
+<hr>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/adfea236cf3f9b268b09b844a90e5bc5/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">基于java的学生宿舍管理系统设计与实现</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/f9fae99204330b0c1a596974ea145fdf/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Kafka——两种集群搭建详解</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

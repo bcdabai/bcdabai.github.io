@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>RK fb源码分析（转载） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="RK fb源码分析（转载）" />
+<meta property="og:description" content="RK fb源码分析（转）
+转载地址：https://blog.csdn.net/u014770862/article/details/65442066?fps=1&amp;locationNum=6
+前言
+学习，学而时习之。在工作中，利用闲暇时光简单分析下RK平台下fb源码部分，本人才疏学浅，很多地方理解的也不到位，只是简单的分析下代码流程，搞明白驱动调试过程中需要注意的地方。现将自己的一些理解与建议总结下来，如有错误之处，还望指正。
+RK的LCD这块，亮点也就在于双屏异显，才开始搞驱动时，感觉这就是个高大上的东西，一脸懵逼，不知所措。随着后来慢慢深入才发现，原理和单屏也是差不多的。
+分析之前，我将RK LCD这块首先分为四大块：fb、lcdc、screen、screen_type.这四部分相互依赖，首先从我们最容易入手的地方开始:rk_screen.c 1 一、函数调用关系 rk_screen.c函数调用关系如下： 二、probe()分析
+毫无疑问，驱动的重点就是probe()函数，驱动在匹配到compatible = “rockchip,screen”后进入probe()函数，rk_screen_probe()： 在probe函数中获取”screen_prop”、”native-mode”等属性，在这里有个重要的结构体：prmry_screen会被初始化，prmry_screen 定义如下： static struct rk_screen *prmry_screen 还有一个结构体：struct rk_screen *rk_screen，rk_screen贯串上下文，并将prmry_screen指向rk_screen，prmry_screen之所以重要,是因为之后screen_type(例如LVDS，EDP,MIPI等)需要获取screen参数，就是获取prmry_screen的值，而这里prmry_screen就是rk_screen。 进入probe函数有两个函数比较重要：rk_fb_prase_timing_dt()和rk_disp_pwr_ctr_parse_dt。 首先会根据device_node中”screen_prop”的值，来决定rk_screen的”归属”： 代码中，dts的”screen_prop”的值决定了屏参文件传递进来后赋值给了谁：prmry_screen或者extend_screen.(NOTE:只有在DUAL_LCD时，screen节点下才会有”screen_prop”属性，单屏，由LCDC部分判断”screen_prop”) rk_fb_prase_timing_dt() 通过of_get_display_timings(np)解析device_node中的所有display_timing条目，然后调用 display_timings_get()从结构体display_timing中得到入口地址，最后调用了rk_fb_video_mode_from_timing(dt, screen)从display_timing中获取screen的详细信息，并将其赋值给rk_screen结构体(即prmry_screen).
+rk_disp_pwr_ctr_parse_dt() 该函数主要是从dts中解析power control节点。其中，又引出来一个比较重要的结构体：struct rk_disp_pwr_ctr_list *pwr_ctr;该结构体也是一个双向链表。然后，初始化了一个双向链表rk_screen-&gt;pwrlist_head，最终会将pwr_ctr挂到rk_screen-&gt;pwrlist_head链表下： list_add_tail(&amp;pwr_ctr-&gt;list, rk_screen-&gt;pwrlist_head); for_each_child_of_node(root, child)循环解析每个子节点,例如： 首先为每个子节点(如lcd_en,lcd_cs,lcd_rst等)kmalloc一段空间, 解析dts中”rockchip,power_type”的值，rockchip,power_type = GPIO，分别获取其GPIO存至各自的pwr_ctr-&gt;pwr_ctr.gpio中，然后申请GPIO。这里，还有一个值：rockchip,delay，可以控制上电时序的延时操作，这个值在后面用到时再讲。 2. rk_fb_video_mode_from_timing() 该函数获取dts中display_timing各个子节点的值，其中有我们熟悉的VBP,VFP,HBP,HFP等可变参数，最终将获取到的值写入变量screen中，这样screen就被初始化完。 至此，screen部分probe()函数完结，现在总结下： Screen的probe()函数主要干了两件事： 解析dts中的display_timing，获取屏幕信息 解析dts中的power control，获取LCD的使能脚、片选脚、复位脚 最终，这些信息都存在了struct rk_screen *rk_screen这个结构体中，也就是prmry_screen这个结构体。那么，prmry_screen这个结构体在什么地方会用到呢？答案也是在rk_screen.c中： 调用rk_fb_get_screen()这个函数来取得screen的信息。该函数在哪被调用，后续会碰到，暂且不讨论。
+以上部分，是双屏时screen部分的流程，事实上，单屏的代码更为简单。就是在probe()直接调用rk_fb_prase_timing_dt(np, rk_screen)来获取LCD屏信息，获取screen： 区别在于display_timings_get()的第二形参不同
+但是，有些人又有疑问了？那双屏时会去获取power control节点的信息，单屏时为什么不用获取呢？其实也不是没有获取，只不过处理的地方不一样。双屏时，在screen部分获取power control，因为有两个LCD屏，有各自的使能脚、背光脚等等，所以引入链表保存至rk_screen结构体中，待将来使用。而单屏只有一组控制脚，只要在需要的地方获取使用就可以了。后续，只分析单屏的，理清思路即可。
+最后，我们再来总结下probe()的功能： 1.如果是双屏，解析dts中screen节点下的power_ctl节点,单屏的power_ctl节点在别的地方(后续讲述)处理 2.从dts中获取LCD各个参数(VFP,VBP,HBP,HFP,W,H,CLOCK等等) 3.单屏保存至全局静态变量rk_screen，双屏时分别保存至prmry_screen和extend_screen以区别主副屏
+SCREEN部分是整个fb调试过程中，需要更改参数最多的，通常LCD调试只需要调整screen的dts各个参数即可。LCD调试部分请参考另外一篇博文【Rk平台LCD调试说明】
+三、struct rk_screen struct rk_screen {" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/c7a046b9c2a96b9d02e5e6944b817e17/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-04-17T22:40:05+08:00" />
+<meta property="article:modified_time" content="2021-04-17T22:40:05+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">RK fb源码分析（转载）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>RK fb源码分析（转）<br> 转载地址：https://blog.csdn.net/u014770862/article/details/65442066?fps=1&amp;locationNum=6</p> 
+<p>前言<br> 学习，学而时习之。在工作中，利用闲暇时光简单分析下RK平台下fb源码部分，本人才疏学浅，很多地方理解的也不到位，只是简单的分析下代码流程，搞明白驱动调试过程中需要注意的地方。现将自己的一些理解与建议总结下来，如有错误之处，还望指正。</p> 
+<p>RK的LCD这块，亮点也就在于双屏异显，才开始搞驱动时，感觉这就是个高大上的东西，一脸懵逼，不知所措。随着后来慢慢深入才发现，原理和单屏也是差不多的。</p> 
+<hr> 
+<pre class="prettyprint"><code class="has-numbering">分析之前，我将RK LCD这块首先分为四大块：fb、lcdc、screen、screen_type.这四部分相互依赖，首先从我们最容易入手的地方开始:rk_screen.c
+</code>
+ 
+ <div class="hljs-button signin"></div>
+ 
+ </pre><ul class="pre-numbering"><li>1</li></ul> 
+<p><strong>一、函数调用关系</strong> <br> rk_screen.c函数调用关系如下： <br> <img src="https://images2.imgbox.com/c0/55/QOoYedSr_o.png" alt="这里写图片描述" title=""></p> 
+<p><strong>二、probe()分析</strong></p> 
+<p>毫无疑问，驱动的重点就是probe()函数，驱动在匹配到compatible = “rockchip,screen”后进入probe()函数，rk_screen_probe()： <br> 在probe函数中获取”screen_prop”、”native-mode”等属性，在这里有个重要的结构体：prmry_screen会被初始化，prmry_screen 定义如下： <br> static struct rk_screen *prmry_screen <br> 还有一个结构体：struct rk_screen *rk_screen，rk_screen贯串上下文，并将prmry_screen指向rk_screen，prmry_screen之所以重要,是因为之后screen_type(例如LVDS，EDP,MIPI等)需要获取screen参数，就是获取prmry_screen的值，而这里prmry_screen就是rk_screen。 <br> 进入probe函数有两个函数比较重要：rk_fb_prase_timing_dt()和rk_disp_pwr_ctr_parse_dt。 <br> 首先会根据device_node中”screen_prop”的值，来决定rk_screen的”归属”： <br> <img src="https://images2.imgbox.com/25/8f/OFDF5x8t_o.jpg" alt="这里写图片描述" title=""> <br> 代码中，dts的”screen_prop”的值决定了屏参文件传递进来后赋值给了谁：prmry_screen或者extend_screen.(NOTE:只有在DUAL_LCD时，screen节点下才会有”screen_prop”属性，单屏，由LCDC部分判断”screen_prop”) <br> rk_fb_prase_timing_dt() <br> <img src="https://images2.imgbox.com/46/30/9B67z26j_o.jpg" alt="这里写图片描述" title=""> <br> 通过of_get_display_timings(np)解析device_node中的所有display_timing条目，然后调用 <br> display_timings_get()从结构体display_timing中得到入口地址，最后调用了rk_fb_video_mode_from_timing(dt, screen)从display_timing中获取screen的详细信息，并将其赋值给rk_screen结构体(即prmry_screen).</p> 
+<ol><li>rk_disp_pwr_ctr_parse_dt() <br> 该函数主要是从dts中解析power control节点。其中，又引出来一个比较重要的结构体：struct rk_disp_pwr_ctr_list *pwr_ctr;该结构体也是一个双向链表。然后，初始化了一个双向链表rk_screen-&gt;pwrlist_head，最终会将pwr_ctr挂到rk_screen-&gt;pwrlist_head链表下： <br> list_add_tail(&amp;pwr_ctr-&gt;list, rk_screen-&gt;pwrlist_head); <br> <img src="https://images2.imgbox.com/a7/b5/mKDEBfP6_o.jpg" alt="这里写图片描述" title=""> </li></ol> 
+<p>for_each_child_of_node(root, child)循环解析每个子节点,例如： <br> <img src="https://images2.imgbox.com/8e/78/6ic6o0c3_o.jpg" alt="这里写图片描述" title=""> <br> 首先为每个子节点(如lcd_en,lcd_cs,lcd_rst等)kmalloc一段空间, 解析dts中”rockchip,power_type”的值，rockchip,power_type = GPIO，分别获取其GPIO存至各自的pwr_ctr-&gt;pwr_ctr.gpio中，然后申请GPIO。这里，还有一个值：rockchip,delay，可以控制上电时序的延时操作，这个值在后面用到时再讲。 <br> <img src="https://images2.imgbox.com/31/db/N3JwVtSQ_o.jpg" alt="这里写图片描述" title=""> <br> 2. rk_fb_video_mode_from_timing() <br> <img src="https://images2.imgbox.com/e1/07/jLYhV6Bc_o.jpg" alt="这里写图片描述" title=""> <br> 该函数获取dts中display_timing各个子节点的值，其中有我们熟悉的VBP,VFP,HBP,HFP等可变参数，最终将获取到的值写入变量screen中，这样screen就被初始化完。 <br> 至此，screen部分probe()函数完结，现在总结下： <br> Screen的probe()函数主要干了两件事： <br> 解析dts中的display_timing，获取屏幕信息 <br> 解析dts中的power control，获取LCD的使能脚、片选脚、复位脚 <br> 最终，这些信息都存在了struct rk_screen *rk_screen这个结构体中，也就是prmry_screen这个结构体。那么，prmry_screen这个结构体在什么地方会用到呢？答案也是在rk_screen.c中： <br> <img src="https://images2.imgbox.com/49/95/oZP42sRg_o.jpg" alt="这里写图片描述" title=""> <br> 调用rk_fb_get_screen()这个函数来取得screen的信息。该函数在哪被调用，后续会碰到，暂且不讨论。</p> 
+<p>以上部分，是双屏时screen部分的流程，事实上，单屏的代码更为简单。就是在probe()直接调用rk_fb_prase_timing_dt(np, rk_screen)来获取LCD屏信息，获取screen： <br> <img src="https://images2.imgbox.com/c9/ad/7iZUPXbs_o.jpg" alt="这里写图片描述" title=""> <br> 区别在于display_timings_get()的第二形参不同</p> 
+<p>但是，有些人又有疑问了？那双屏时会去获取power control节点的信息，单屏时为什么不用获取呢？其实也不是没有获取，只不过处理的地方不一样。双屏时，在screen部分获取power control，因为有两个LCD屏，有各自的使能脚、背光脚等等，所以引入链表保存至rk_screen结构体中，待将来使用。而单屏只有一组控制脚，只要在需要的地方获取使用就可以了。后续，只分析单屏的，理清思路即可。</p> 
+<p>最后，我们再来总结下probe()的功能： <br> 1.如果是双屏，解析dts中screen节点下的power_ctl节点,单屏的power_ctl节点在别的地方(后续讲述)处理 <br> 2.从dts中获取LCD各个参数(VFP,VBP,HBP,HFP,W,H,CLOCK等等) <br> 3.单屏保存至全局静态变量rk_screen，双屏时分别保存至prmry_screen和extend_screen以区别主副屏</p> 
+<p>SCREEN部分是整个fb调试过程中，需要更改参数最多的，通常LCD调试只需要调整screen的dts各个参数即可。LCD调试部分请参考另外一篇博文【Rk平台LCD调试说明】</p> 
+<p><strong> </strong></p> 
+<h2><a id="struct_rk_screen_21"></a>三、struct rk_screen</h2> 
+<p>struct rk_screen {<!-- --><br> #ifdef CONFIG_DUAL_LCD<br> struct device *dev;<br> int prop;<br> struct list_head *pwrlist_head; //power ctl链表，保存power ctl gpio<br> int native_mode;<br> #endif<br> u16 type;<br> u16 lvds_format; //LVDS数据格式<br> u16 face; //display out face,18bit,24bit<br> u16 color_mode;<br> u8 lcdc_id; //dual lcd时用于区分LCD<br> u8 screen_id;</p> 
+<pre><code>struct fb_videomode mode;   //important
+u32 post_dsp_stx;
+u32 post_dsp_sty;
+u32 post_xsize;
+u32 post_ysize;
+u16 x_mirror;
+u16 y_mirror;
+int interlace;
+int pixelrepeat; //For 480i/576i format, pixel is repeated twice.
+u16 width;
+u16 height;
+u8  ft;
+int *dsp_lut;
+int *cabc_lut;
+int *cabc_gamma_base;
+</code></pre> 
+<p>#if defined(CONFIG_MFD_RK616) || defined(CONFIG_LCDC_RK312X)<br> u32 pll_cfg_val; //bellow are for jettaB<br> u32 frac;<br> u16 scl_vst;<br> u16 scl_hst;<br> u16 vif_vst;<br> u16 vif_hst;<br> #endif<br> u8 hdmi_resolution;<br> u8 mcu_wrperiod;<br> u8 mcu_usefmk;<br> u8 mcu_frmrate;</p> 
+<pre><code>u8 pin_hsync;
+u8 pin_vsync;
+u8 pin_den;
+u8 pin_dclk;
+
+/* Swap rule */
+u8 swap_gb;
+u8 swap_rg;
+u8 swap_rb;
+u8 swap_delta;
+u8 swap_dumy;
+</code></pre> 
+<p>#if defined(CONFIG_MIPI_DSI)<br> /* MIPI DSI */<br> u8 dsi_lane;<br> u8 dsi_video_mode;<br> u32 hs_tx_clk;<br> #endif</p> 
+<pre><code>int xpos;  //horizontal display start position on the sceen ,then can be changed by application
+int ypos;
+int xsize; //horizontal and vertical display size on he screen,they can be changed by application
+int ysize;
+struct overscan overscan;
+struct rk_screen *ext_screen;
+/* Operation function*/
+int (*init)(void);
+int (*standby)(u8 enable);
+int (*refresh)(u8 arg);
+int (*scandir)(u16 dir);
+int (*disparea)(u8 area);
+int (*sscreen_get)(struct rk_screen *screen, u8 resolution);
+int (*sscreen_set)(struct rk_screen *screen, bool type);// 1: use scaler 0:bypass
+</code></pre> 
+<p>};</p> 
+<h2><a id="struct_fb_videomode_%0A____const_char_name____optional_%0A____u32_refresh_________optional_%0A____u32_xres%0A____u32_yres%0A____u32_pixclock%0A____u32_left_margin_____%0A____u32_right_margin____%0A____u32_upper_margin____%0A____u32_lower_margin____%0A____u32_hsync_len%0A____u32_vsync_len%0A____u32_sync%0A____u32_vmode%0A____u32_flag%0A_101"></a>struct fb_videomode {<!-- --><br> const char <em>name; /</em> optional <em>/<br> u32 refresh; /</em> optional */<br> u32 xres;<br> u32 yres;<br> u32 pixclock;<br> u32 left_margin;<br> u32 right_margin;<br> u32 upper_margin;<br> u32 lower_margin;<br> u32 hsync_len;<br> u32 vsync_len;<br> u32 sync;<br> u32 vmode;<br> u32 flag;<br> };</h2> 
+<p>SCREEN主要填充rk_screen结构体的各个字段，这个结构体将由SCREEN_TYPE和fb来获取使用。</p> 
+<p>后记</p> 
+<p>&lt;还记得初学linux驱动时，老版本的内核大量充斥于arch/arm/mach-xxxx下的board文件，相对于现在的dts机制，此时我们是幸福的，也是悲哀的。”我们不是配置工程师!”&gt;</p> 
+<p>Email:hellobirthdayzhao@gmail.com<br> ————————————————<br> 版权声明：本文为CSDN博主「HelloBirthday」的原创文章，遵循CC 4.0 BY-SA版权协议，转载请附上原文出处链接及本声明。<br> 原文链接：https://blog.csdn.net/u014770862/article/details/65442066</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/844f8df35ba9cd6c2539247e04ea90a5/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">图片与资源的在线链接</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/2447a77476e53ba81d682f50cefc3ea1/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">MVP模式学习</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

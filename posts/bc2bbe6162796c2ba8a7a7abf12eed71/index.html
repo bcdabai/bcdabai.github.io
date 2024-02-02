@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【Oceanbase系列】——obproxy - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【Oceanbase系列】——obproxy" />
+<meta property="og:description" content="一、前言 可能大家对obproxy不是很了解，这里边我提一个类比的,mysql的mysql-router，大家应该就明白了，mysql-router是作为在mysql之上的一个&#34;路由转发&#34;的组件。obproxy对于oceanbase就像mysql-router之于mysql一样。
+二、obpoxy是什么 OBPrxoy是为OceanBase数据库专门量身定制的反向代理服务器，用户的数据在OceanBase上以多副本的形式存放在各个ObServer上， OBProxy负责接收用户发过来的SQL请求，转发用户请求SQL路由到最佳目标ObServer上，并将执行结果给用户。作为OceanBase数据库产品不可或取的一部分，OBProxy具备以下特性：
+高性能转发： OBProxy完整兼容MySQL协议，采用多线程异步框架和透明流式转发的设计，保证了数据的高性能转发（单核5万QPS），以及自身对机器资源的最小消耗（内存不超过50M,单cpu不超过20%）。最佳路由： OBProxy需要充分考虑用户请求涉及的的副本位置、用户配置的读写分离路由策略、OceanBase多地部署的最优链路，以及OceanBase各机器的状态以及负载情况，将用户请求路由到最佳的ObServer，最大限度的保证OceanBase整体性的高性能运转。连接管理：针对一个Client端的物理连接，OBProxy维持自身到后端多个ObServer的连接，采用基于版本号的增量同步方案维持每个ObServer的连接在同一状态，保证了Client高效访问各个ObServer。定制协议：原生MySQL协议存在报文CRC校验缺失，Request ID校验缺失的正确性缺陷，而OBProxy默认使用OceanBase定制协议予以解决，保证了和ObServer之间链路的正确性。易运维：OBProxy本身无状态，支持同时访问多个OceanBase集群，支持无限水平扩展。并且可以通过丰富的内部命令实现对自身状态的实时监控，实现自身冷热升级/下线/重启等常见运维操作，可以提供极大的运维便利性。 OceanBase 数据库与传统单机数据库不同，OceanBase 数据库是分布式数据库，每个表甚至每个表的不同分区都可能存放在不同的机器上。想要对表进行读写，必须先要定位到数据所属的表或是分区的主副本位置，然后才能执行相应的SQL DML 语句，这在应用层面而言是几乎不可能做到的。OBProxy 作为 OceanBase 数据库专用的反向代理软件，其核心功能就是路由以将客户端发起的数据访问请求转发到正确的 OBServer 上。
+客户端通过 OBProxy 访问 OceanBase 数据库的数据链路如下图所示，用户通过任意 Client 驱动发出请求，请求通过负载均衡组件访问到任意一台无状态的 OBProxy 上，然后 OBProxy 再将用户请求转发到后端 OceanBase 集群中最佳的 OBServer 上去执行。
+每个 OBServer 均包含完整的 SQL 引擎和存储引擎，用来负责解析用户 SQL 以生成物理执行计划并执行。分布式的 OBServer 之间通过 Paxos 协议以保证高可用性。这种架构设计中，OBProxy 只承担基本的路由和容灾功能，而数据库的功能全部交由 OBServer 实现。这样更加简单明确的分工可以将各组件性能做得更加极致，OceanBase 数据库整体最高也能做到近似访问单机数据库的性能。
+OBProxy 支持将请求正确发送至主副本，并且通过特定配置还支持读写分离和备优先读等场景。另外在 OBServer 节点发生宕机、升级或合并等状态时，可以通过黑名单机制确保用户请求可以被路由至状态正常的 OBServer 上。
+三、OBProxy是如何设计实现的？ OBProxy的主要架构可以简单描述如上图所示，其中异步框架实现高效的代理转发，通信协议实现OBProxy与Client和ObServer之间通信方式，连接管理实现OBProxy的连接池功能，路由选择实现对用户请求的的最优路由选择,而容灾模块则负责监控OceanBase集群状态。监控运维提供对OBProxy的丰富运维手段，集群管理实现OBProxy对OceanBase多集群的支持。以上组件相互依赖配合，共同实现OBProxy的整体功能。下边我专门讲解一下路由选择模块：
+1. 路由选择
+路由选择是OBProxy的核心功能，如前所述说，路由选择的输入用户的SQL，用户配置规则，ObServer的状态，路由选择的输出是一个可用ObServer地址。其路由逻辑可以入下图所示：
+其中，解析SQL模块使用OBProxy自己定制的语法parser模块，只需要解析出DML语句中数据库名/表名/hint，不需要其他复杂的表达式推演等，因此parser模块做的十分高效。
+路由规则确定模块中，OBProxy需要根据不同情况确定最佳的路由规则。比如强一致性读的DML请求期望发到副本leader的ObServer上，弱读的DML请求和其他请求则不要求，leader和follower均衡负载即可。如果OceanBase集群是多地部署，OBProxy还提供了LDC路由，优先发给同机房的ObServer，其次是同城的ObServer，最后才是其他城市的ObServer。如果OceanBase集群是读写分离部署，OBProxy还需要提供读zone优先，只限读zone，非合并优先等规则供业务按照自身特点配置。上述的几种情况在路由选择中是组合关系，输出是一个确定的路由规则。
+获取路由表是指OBProxy根据用户的请求SQL获取该SQL涉及的副本位置。OBProxy每次首先会尝试从本地线程缓存中获取路由表，其次是全局缓存，最后才是发起异步任务去向ObServer查询路由表。对于路由表的更新，OBProxy采用触发更新机制。OBProxy每次根据路由表转发给ObServer的请求，当ObServer不能本地执行时，会在回包时反馈给OBProxy。OBProxy根据反馈决定是否下次强制更新本地缓存路由表。那么什么时候路由表才会变化呢？通常是在ObServer合并或者负载均衡导致切主发生才会发生。
+选择目标ObServer则是根据上上一步确定的路由规则从上一步获取的路由表中选择最佳的ObServer，在经过黑名单/灰名单检查通过后作为最终的目标server进行请求转发。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/bc2bbe6162796c2ba8a7a7abf12eed71/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-04-05T01:54:25+08:00" />
+<meta property="article:modified_time" content="2022-04-05T01:54:25+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Oceanbase系列】——obproxy</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h3>一、前言</h3> 
+<p>    可能大家对obproxy不是很了解，这里边我提一个类比的,mysql的mysql-router，大家应该就明白了，mysql-router是作为在mysql之上的一个"路由转发"的组件。obproxy对于oceanbase就像mysql-router之于mysql一样。</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/36/a4/xycdE9MV_o.png"></p> 
+<h3>二、obpoxy是什么</h3> 
+<p>OBPrxoy是为OceanBase数据库专门量身定制的反向代理服务器，用户的数据在OceanBase上以多副本的形式存放在各个ObServer上， OBProxy负责接收用户发过来的SQL请求，转发用户请求SQL路由到最佳目标ObServer上，并将执行结果给用户。作为OceanBase数据库产品不可或取的一部分，OBProxy具备以下特性：</p> 
+<ul><li><strong>高性能转发：</strong> OBProxy完整兼容MySQL协议，采用多线程异步框架和透明流式转发的设计，保证了数据的高性能转发（单核5万QPS），以及自身对机器资源的最小消耗（内存不超过50M,单cpu不超过20%）。</li><li><strong>最佳路由：</strong> OBProxy需要充分考虑用户请求涉及的的副本位置、用户配置的读写分离路由策略、OceanBase多地部署的最优链路，以及OceanBase各机器的状态以及负载情况，将用户请求路由到最佳的ObServer，最大限度的保证OceanBase整体性的高性能运转。</li><li><strong>连接管理：</strong>针对一个Client端的物理连接，OBProxy维持自身到后端多个ObServer的连接，采用基于版本号的增量同步方案维持每个ObServer的连接在同一状态，保证了Client高效访问各个ObServer。</li><li><strong>定制协议：</strong>原生MySQL协议存在报文CRC校验缺失，Request ID校验缺失的正确性缺陷，而OBProxy默认使用OceanBase定制协议予以解决，保证了和ObServer之间链路的正确性。</li><li><strong>易运维：</strong>OBProxy本身无状态，支持同时访问多个OceanBase集群，支持无限水平扩展。并且可以通过丰富的内部命令实现对自身状态的实时监控，实现自身冷热升级/下线/重启等常见运维操作，可以提供极大的运维便利性。</li></ul> 
+<p>     OceanBase 数据库与传统单机数据库不同，OceanBase 数据库是分布式数据库，每个表甚至每个表的不同分区都可能存放在不同的机器上。想要对表进行读写，必须先要定位到数据所属的表或是分区的主副本位置，然后才能执行相应的SQL DML 语句，这在应用层面而言是几乎不可能做到的。OBProxy 作为 OceanBase 数据库专用的反向代理软件，其核心功能就是路由以将客户端发起的数据访问请求转发到正确的 OBServer 上。</p> 
+<p>客户端通过 OBProxy 访问 OceanBase 数据库的数据链路如下图所示，用户通过任意 Client 驱动发出请求，请求通过负载均衡组件访问到任意一台无状态的 OBProxy 上，然后 OBProxy 再将用户请求转发到后端 OceanBase 集群中最佳的 OBServer 上去执行。</p> 
+<p><img alt="" height="1200" src="https://images2.imgbox.com/d5/62/xKsTMHtL_o.png" width="1200"></p> 
+<p>      每个 OBServer 均包含完整的 SQL 引擎和存储引擎，用来负责解析用户 SQL 以生成物理执行计划并执行。分布式的 OBServer 之间通过 Paxos 协议以保证高可用性。这种架构设计中，OBProxy 只承担基本的路由和容灾功能，而数据库的功能全部交由 OBServer 实现。这样更加简单明确的分工可以将各组件性能做得更加极致，OceanBase 数据库整体最高也能做到近似访问单机数据库的性能。</p> 
+<p>     OBProxy 支持将请求正确发送至主副本，并且通过特定配置还支持读写分离和备优先读等场景。另外在 OBServer 节点发生宕机、升级或合并等状态时，可以通过黑名单机制确保用户请求可以被路由至状态正常的 OBServer 上。</p> 
+<p> </p> 
+<h3>三、<strong>OBProxy是如何设计实现的？</strong></h3> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/1a/95/DCKSyny3_o.png"></p> 
+<p>     OBProxy的主要架构可以简单描述如上图所示，其中异步框架实现高效的代理转发，通信协议实现OBProxy与Client和ObServer之间通信方式，连接管理实现OBProxy的连接池功能，路由选择实现对用户请求的的最优路由选择,而容灾模块则负责监控OceanBase集群状态。监控运维提供对OBProxy的丰富运维手段，集群管理实现OBProxy对OceanBase多集群的支持。以上组件相互依赖配合，共同实现OBProxy的整体功能。下边我专门讲解一下路由选择模块：</p> 
+<p><strong>1. 路由选择</strong></p> 
+<p>路由选择是OBProxy的核心功能，如前所述说，路由选择的输入用户的SQL，用户配置规则，ObServer的状态，路由选择的输出是一个可用ObServer地址。其路由逻辑可以入下图所示：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/b0/03/F8TBcceL_o.png"></p> 
+<p> </p> 
+<p>     其中，解析SQL模块使用OBProxy自己定制的语法parser模块，只需要解析出DML语句中数据库名/表名/hint，不需要其他复杂的表达式推演等，因此parser模块做的十分高效。</p> 
+<p>      路由规则确定模块中，OBProxy需要根据不同情况确定最佳的路由规则。比如强一致性读的DML请求期望发到副本leader的ObServer上，弱读的DML请求和其他请求则不要求，leader和follower均衡负载即可。如果OceanBase集群是多地部署，OBProxy还提供了LDC路由，优先发给同机房的ObServer，其次是同城的ObServer，最后才是其他城市的ObServer。如果OceanBase集群是读写分离部署，OBProxy还需要提供读zone优先，只限读zone，非合并优先等规则供业务按照自身特点配置。上述的几种情况在路由选择中是组合关系，输出是一个确定的路由规则。</p> 
+<p>      获取路由表是指OBProxy根据用户的请求SQL获取该SQL涉及的副本位置。OBProxy每次首先会尝试从本地线程缓存中获取路由表，其次是全局缓存，最后才是发起异步任务去向ObServer查询路由表。对于路由表的更新，OBProxy采用触发更新机制。OBProxy每次根据路由表转发给ObServer的请求，当ObServer不能本地执行时，会在回包时反馈给OBProxy。OBProxy根据反馈决定是否下次强制更新本地缓存路由表。那么什么时候路由表才会变化呢？通常是在ObServer合并或者负载均衡导致切主发生才会发生。</p> 
+<p>      选择目标ObServer则是根据上上一步确定的路由规则从上一步获取的路由表中选择最佳的ObServer，在经过黑名单/灰名单检查通过后作为最终的目标server进行请求转发。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/97f3eae9a99d42b7bf14e176f0bed0ea/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">LaTeX参考文献类型</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/2309f11478e8d4f09e57e8a63028eff6/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">C&#43;&#43; std::ref————详解</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

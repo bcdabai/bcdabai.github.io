@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>六-4:计时器 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="六-4:计时器" />
+<meta property="og:description" content="一、设计原理 Go语言的定时器经历过很多个版本迭代
+Go 1.9版本之前，使用全局唯一的四叉堆维护Go 1.10-1.13，全局使用64个四叉堆，每个处理器（P）对应一个四叉堆Go 1.14版本之后，每个处理器P直接管理一个四叉堆，通过网络轮询器触发 1. 全局四叉堆 所有的计时器都会存储在如下结构中
+var timers struct { lock mutex gp *g created bool sleeping bool rescheduling bool sleepUntil int64 waitnote note t []*timer } 这个结构中的t就是最小四叉堆，运行时所有的计时器都会加入其中。在以下事件发生时会唤醒计时器 四叉堆中有计时器到期四叉堆加入了触发时间更早的新计时器 缺点：全局互斥锁对性能影响大 2. 分片四叉堆 将全局四叉堆分割成了64个小的四叉堆。
+const timersLen = 64 var timers [timersLen]struct { timersBucket } type timersBucket struct { lock mutex gp *g created bool sleeping bool rescheduling bool sleepUntil int64 waitnote note t []*timer } 如果机器处理器P超过64，就会有多个处理器的计时器在同一个bucket中。每个桶有一个协程处理缺点：分片降低了锁的粒度，但处理器和线程之间频繁的上下文切换影响性能 3. 网络轮询器 四叉堆直接存储在 runtime." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/574f51c1f514a98b3e394a16b3675dc0/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-01-22T16:11:01+08:00" />
+<meta property="article:modified_time" content="2022-01-22T16:11:01+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">六-4:计时器</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-dracula">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h4><a id="_0"></a>一、设计原理</h4> 
+<p>Go语言的定时器经历过很多个版本迭代</p> 
+<ol><li>Go 1.9版本之前，使用全局唯一的四叉堆维护</li><li>Go 1.10-1.13，全局使用64个四叉堆，每个处理器（P）对应一个四叉堆</li><li>Go 1.14版本之后，每个处理器P直接管理一个四叉堆，通过网络轮询器触发</li></ol> 
+<h5><a id="1__8"></a>1. 全局四叉堆</h5> 
+<p>所有的计时器都会存储在如下结构中</p> 
+<pre><code class="prism language-go"><span class="token keyword">var</span> timers <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+	lock         mutex
+	gp           <span class="token operator">*</span>g
+	created      <span class="token builtin">bool</span>
+	sleeping     <span class="token builtin">bool</span>
+	rescheduling <span class="token builtin">bool</span>
+	sleepUntil   <span class="token builtin">int64</span>
+	waitnote     note
+	t            <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">*</span>timer
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>这个结构中的t就是最小四叉堆，运行时所有的计时器都会加入其中。</li><li>在以下事件发生时会唤醒计时器 
+  <ul><li>四叉堆中有计时器到期</li><li>四叉堆加入了触发时间更早的新计时器</li></ul> </li><li>缺点：全局互斥锁对性能影响大</li></ul> 
+<h5><a id="2__31"></a>2. 分片四叉堆</h5> 
+<p>将全局四叉堆分割成了64个小的四叉堆。</p> 
+<pre><code class="prism language-go"><span class="token keyword">const</span> timersLen <span class="token operator">=</span> <span class="token number">64</span>
+
+<span class="token keyword">var</span> timers <span class="token punctuation">[</span>timersLen<span class="token punctuation">]</span><span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+	timersBucket
+<span class="token punctuation">}</span>
+
+<span class="token keyword">type</span> timersBucket <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+	lock         mutex
+	gp           <span class="token operator">*</span>g
+	created      <span class="token builtin">bool</span>
+	sleeping     <span class="token builtin">bool</span>
+	rescheduling <span class="token builtin">bool</span>
+	sleepUntil   <span class="token builtin">int64</span>
+	waitnote     note
+	t            <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">*</span>timer
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>如果机器处理器P超过64，就会有多个处理器的计时器在同一个bucket中。每个桶有一个协程处理</li><li>缺点：分片降低了锁的粒度，但处理器和线程之间频繁的上下文切换影响性能</li></ul> 
+<h5><a id="3__57"></a>3. 网络轮询器</h5> 
+<p>四叉堆直接存储在 runtime.p中</p> 
+<pre><code class="prism language-go"><span class="token keyword">type</span> p <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token operator">...</span>
+	timersLock mutex
+	timers <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">*</span>timer
+
+	numTimers     <span class="token builtin">uint32</span>
+	adjustTimers  <span class="token builtin">uint32</span>
+	deletedTimers <span class="token builtin">uint32</span>
+	<span class="token operator">...</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>timers存储计时器的最小四叉堆</li><li>目前计时器都处理器的网络轮询器和调度器触发</li><li>优点：能充分利用本地性，减少上下文的切换开销</li></ul> 
+<h4><a id="_78"></a>二、数据结构</h4> 
+<p>Go语言计时器的内部表示是runtime.timer</p> 
+<pre><code class="prism language-go"><span class="token keyword">type</span> timer <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+	pp puintptr
+
+	when     <span class="token builtin">int64</span>
+	period   <span class="token builtin">int64</span>
+	f        <span class="token keyword">func</span><span class="token punctuation">(</span><span class="token keyword">interface</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">,</span> <span class="token builtin">uintptr</span><span class="token punctuation">)</span>
+	arg      <span class="token keyword">interface</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+	seq      <span class="token builtin">uintptr</span>
+	nextwhen <span class="token builtin">int64</span>
+	status   <span class="token builtin">uint32</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>when：当前计时器被唤醒的时间</li><li>period：两次被唤醒的间隔</li><li>f：每当计时器被唤醒时调用的函数</li><li>arg：执行f时传入的参数</li><li>nextWhen：计时器处于<code>timeModifiedXX</code>状态时，用于设置when字段</li><li>status：计时器的状态</li></ul> 
+<p>Go语言对外暴露的计时器结构是time.Timer</p> 
+<pre><code class="prism language-go"><span class="token keyword">type</span> Timer <span class="token keyword">struct</span> <span class="token punctuation">{<!-- --></span>
+	C <span class="token operator">&lt;-</span><span class="token keyword">chan</span> Time
+	r runtimeTimer
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="_112"></a>三、状态机</h4> 
+<p>runtime使用状态机的方式处理全部定时器</p> 
+<table><thead><tr><th align="center">状态</th><th align="center">解释</th></tr></thead><tbody><tr><td align="center">timerNoStatus</td><td align="center">还没有设置状态</td></tr><tr><td align="center">timerWaiting</td><td align="center">等待触发</td></tr><tr><td align="center">timerRuning</td><td align="center">运行计时器函数</td></tr><tr><td align="center">timerDelete</td><td align="center">被删除</td></tr><tr><td align="center">timerRemoving</td><td align="center">正在被删除</td></tr><tr><td align="center">timerRemoved</td><td align="center">已经被停止并从堆中删除</td></tr><tr><td align="center">timerModifying</td><td align="center">正在被修改</td></tr><tr><td align="center">timerModifiedEarlier</td><td align="center">被修改到了更早的时间</td></tr><tr><td align="center">timeerModifiedLater</td><td align="center">被修改到了更晚的时间</td></tr><tr><td align="center">timerMoving</td><td align="center">已经被修改正在被移动</td></tr></tbody></table> 
+<h5><a id="1__129"></a>1. 增加计时器</h5> 
+<p>增加计时器会调用<code>runtime.addtimer</code>函数</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">addtimer</span><span class="token punctuation">(</span>t <span class="token operator">*</span>timer<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">if</span> t<span class="token punctuation">.</span>status <span class="token operator">!=</span> timerNoStatus <span class="token punctuation">{<!-- --></span>
+		<span class="token function">badTimer</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+	t<span class="token punctuation">.</span>status <span class="token operator">=</span> timerWaiting
+	<span class="token function">cleantimers</span><span class="token punctuation">(</span>pp<span class="token punctuation">)</span>
+	<span class="token function">doaddtimer</span><span class="token punctuation">(</span>pp<span class="token punctuation">,</span> t<span class="token punctuation">)</span>
+	<span class="token function">wakeNetPoller</span><span class="token punctuation">(</span>when<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>状态：timerNoStatus -&gt; timerWaiting</li><li>清理处理器中的计时器</li><li>将当前计时器加入处理器的timer四叉堆中</li><li>唤醒网络轮询器中休眠的线程</li></ul> 
+<p>每次增加新的计时器都会中断正在阻塞的计时器，触发调度器检查是否有计时器到期</p> 
+<h5><a id="2__152"></a>2. 删除计时器</h5> 
+<p>可能会遇到删除其他处理器的计时器的情况。删除只是将计时器状态标记为删除状态，然后由持久计时器的处理器完成删除工作</p> 
+<h5><a id="3__156"></a>3. 修改计时器</h5> 
+<p>修改计时器会调用<code>runtime.modtimer</code>函数</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">modtimer</span><span class="token punctuation">(</span>t <span class="token operator">*</span>timer<span class="token punctuation">,</span> when<span class="token punctuation">,</span> period <span class="token builtin">int64</span><span class="token punctuation">,</span> f <span class="token keyword">func</span><span class="token punctuation">(</span><span class="token keyword">interface</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">,</span> <span class="token builtin">uintptr</span><span class="token punctuation">)</span><span class="token punctuation">,</span> arg <span class="token keyword">interface</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">,</span> seq <span class="token builtin">uintptr</span><span class="token punctuation">)</span> <span class="token builtin">bool</span> <span class="token punctuation">{<!-- --></span>
+	status <span class="token operator">:=</span> <span class="token function">uint32</span><span class="token punctuation">(</span>timerNoStatus<span class="token punctuation">)</span>
+	wasRemoved <span class="token operator">:=</span> <span class="token boolean">false</span>
+loop<span class="token punctuation">:</span>
+	<span class="token keyword">for</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">switch</span> status <span class="token operator">=</span> atomic<span class="token punctuation">.</span><span class="token function">Load</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>t<span class="token punctuation">.</span>status<span class="token punctuation">)</span><span class="token punctuation">;</span> status <span class="token punctuation">{<!-- --></span>
+			<span class="token operator">...</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+
+	t<span class="token punctuation">.</span>period <span class="token operator">=</span> period
+	t<span class="token punctuation">.</span>f <span class="token operator">=</span> f
+	t<span class="token punctuation">.</span>arg <span class="token operator">=</span> arg
+	t<span class="token punctuation">.</span>seq <span class="token operator">=</span> seq
+
+	<span class="token keyword">if</span> wasRemoved <span class="token punctuation">{<!-- --></span>
+		t<span class="token punctuation">.</span>when <span class="token operator">=</span> when
+		<span class="token function">doaddtimer</span><span class="token punctuation">(</span>pp<span class="token punctuation">,</span> t<span class="token punctuation">)</span>
+		<span class="token function">wakeNetPoller</span><span class="token punctuation">(</span>when<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+		t<span class="token punctuation">.</span>nextwhen <span class="token operator">=</span> when
+		newStatus <span class="token operator">:=</span> <span class="token function">uint32</span><span class="token punctuation">(</span>timerModifiedLater<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> when <span class="token operator">&lt;</span> t<span class="token punctuation">.</span>when <span class="token punctuation">{<!-- --></span>
+			newStatus <span class="token operator">=</span> timerModifiedEarlier
+		<span class="token punctuation">}</span>
+		<span class="token operator">...</span>
+		<span class="token keyword">if</span> newStatus <span class="token operator">==</span> timerModifiedEarlier <span class="token punctuation">{<!-- --></span>
+			<span class="token function">wakeNetPoller</span><span class="token punctuation">(</span>when<span class="token punctuation">)</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>如果被修改的计时器已经被删除，则会调用runtime.doaddtimer创建新的计时器</li><li>如果修改后的时间大于或等于修改时间，设置计时器的状态为<code>timerModifyLater</code></li><li>如果修改后的时间小于修改前时间，设置计时器状态为<code>timerModifyEarlier</code>并触发调度器重新调度</li></ul> 
+<h5><a id="4__198"></a>4. 清除计时器</h5> 
+<p><code>runtime.cleantimers</code>函数会根据状态清理处理器队列头中的计时器</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">cleantimers</span><span class="token punctuation">(</span>pp <span class="token operator">*</span>p<span class="token punctuation">)</span> <span class="token builtin">bool</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">for</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">if</span> <span class="token function">len</span><span class="token punctuation">(</span>pp<span class="token punctuation">.</span>timers<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> <span class="token boolean">true</span>
+		<span class="token punctuation">}</span>
+		t <span class="token operator">:=</span> pp<span class="token punctuation">.</span>timers<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+		<span class="token keyword">switch</span> s <span class="token operator">:=</span> atomic<span class="token punctuation">.</span><span class="token function">Load</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>t<span class="token punctuation">.</span>status<span class="token punctuation">)</span><span class="token punctuation">;</span> s <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">case</span> timerDeleted<span class="token punctuation">:</span>
+			atomic<span class="token punctuation">.</span><span class="token function">Cas</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>t<span class="token punctuation">.</span>status<span class="token punctuation">,</span> s<span class="token punctuation">,</span> timerRemoving<span class="token punctuation">)</span>
+			<span class="token function">dodeltimer0</span><span class="token punctuation">(</span>pp<span class="token punctuation">)</span>
+			atomic<span class="token punctuation">.</span><span class="token function">Cas</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>t<span class="token punctuation">.</span>status<span class="token punctuation">,</span> timerRemoving<span class="token punctuation">,</span> timerRemoved<span class="token punctuation">)</span>
+		<span class="token keyword">case</span> timerModifiedEarlier<span class="token punctuation">,</span> timerModifiedLater<span class="token punctuation">:</span>
+			atomic<span class="token punctuation">.</span><span class="token function">Cas</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>t<span class="token punctuation">.</span>status<span class="token punctuation">,</span> s<span class="token punctuation">,</span> timerMoving<span class="token punctuation">)</span>
+
+			t<span class="token punctuation">.</span>when <span class="token operator">=</span> t<span class="token punctuation">.</span>nextwhen
+
+			<span class="token function">dodeltimer0</span><span class="token punctuation">(</span>pp<span class="token punctuation">)</span>
+			<span class="token function">doaddtimer</span><span class="token punctuation">(</span>pp<span class="token punctuation">,</span> t<span class="token punctuation">)</span>
+			atomic<span class="token punctuation">.</span><span class="token function">Cas</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>t<span class="token punctuation">.</span>status<span class="token punctuation">,</span> timerMoving<span class="token punctuation">,</span> timerWaiting<span class="token punctuation">)</span>
+		<span class="token keyword">default</span><span class="token punctuation">:</span>
+			<span class="token keyword">return</span> <span class="token boolean">true</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>如果计时器状态为<code>timerDeleted</code> 
+  <ul><li>将计时器的状态修改成timerRemoving</li><li>删除四叉堆顶上的计时器</li><li>将计时器状态修改为timerRemoved</li></ul> </li><li>如果计时器的状态为timerModifiedEarlier，timerModifiedLater 
+  <ul><li>将计时器状态修改为timerMoving</li><li>使用计时器下次触发的时间nextWhen覆盖when</li><li>删除四叉堆顶上的计时器</li><li>将计时器加入四叉堆中</li><li>将计时器的状态修改成timerWaiting</li></ul> </li></ul> 
+<h5><a id="5__240"></a>5. 调整计时器</h5> 
+<p>类似清除计时器，都会删除堆中的计时器，并修改状态为timerModifiedEarlier<code>和</code>timerModifiedLater。不同的是，调整计时器会遍历处理器堆中的所有计时器</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">adjusttimers</span><span class="token punctuation">(</span>pp <span class="token operator">*</span>p<span class="token punctuation">,</span> now <span class="token builtin">int64</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">var</span> moved <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token operator">*</span>timer
+loop<span class="token punctuation">:</span>
+	<span class="token keyword">for</span> i <span class="token operator">:=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token function">len</span><span class="token punctuation">(</span>pp<span class="token punctuation">.</span>timers<span class="token punctuation">)</span><span class="token punctuation">;</span> i<span class="token operator">++</span> <span class="token punctuation">{<!-- --></span>
+		t <span class="token operator">:=</span> pp<span class="token punctuation">.</span>timers<span class="token punctuation">[</span>i<span class="token punctuation">]</span>
+		<span class="token keyword">switch</span> s <span class="token operator">:=</span> atomic<span class="token punctuation">.</span><span class="token function">Load</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>t<span class="token punctuation">.</span>status<span class="token punctuation">)</span><span class="token punctuation">;</span> s <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">case</span> timerDeleted<span class="token punctuation">:</span>
+			<span class="token comment">// 删除堆中的计时器</span>
+		<span class="token keyword">case</span> timerModifiedEarlier<span class="token punctuation">,</span> timerModifiedLater<span class="token punctuation">:</span>
+			<span class="token comment">// 修改计时器的时间</span>
+		<span class="token keyword">case</span> <span class="token operator">...</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">if</span> <span class="token function">len</span><span class="token punctuation">(</span>moved<span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token function">addAdjustedTimers</span><span class="token punctuation">(</span>pp<span class="token punctuation">,</span> moved<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h5><a id="6__264"></a>6. 运行计时器</h5> 
+<p><code>runtime.runtimer</code>会检查处理器四叉堆上最顶上的计时器，该函数也会处理计时器的删除以及计时器的更新</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">runtimer</span><span class="token punctuation">(</span>pp <span class="token operator">*</span>p<span class="token punctuation">,</span> now <span class="token builtin">int64</span><span class="token punctuation">)</span> <span class="token builtin">int64</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">for</span> <span class="token punctuation">{<!-- --></span>
+		t <span class="token operator">:=</span> pp<span class="token punctuation">.</span>timers<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span>
+		<span class="token keyword">switch</span> s <span class="token operator">:=</span> atomic<span class="token punctuation">.</span><span class="token function">Load</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>t<span class="token punctuation">.</span>status<span class="token punctuation">)</span><span class="token punctuation">;</span> s <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">case</span> timerWaiting<span class="token punctuation">:</span>
+			<span class="token keyword">if</span> t<span class="token punctuation">.</span>when <span class="token operator">&gt;</span> now <span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">return</span> t<span class="token punctuation">.</span>when
+			<span class="token punctuation">}</span>
+			atomic<span class="token punctuation">.</span><span class="token function">Cas</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>t<span class="token punctuation">.</span>status<span class="token punctuation">,</span> s<span class="token punctuation">,</span> timerRunning<span class="token punctuation">)</span>
+			<span class="token function">runOneTimer</span><span class="token punctuation">(</span>pp<span class="token punctuation">,</span> t<span class="token punctuation">,</span> now<span class="token punctuation">)</span>
+			<span class="token keyword">return</span> <span class="token number">0</span>
+		<span class="token keyword">case</span> timerDeleted<span class="token punctuation">:</span>
+			<span class="token comment">// 删除计时器</span>
+		<span class="token keyword">case</span> timerModifiedEarlier<span class="token punctuation">,</span> timerModifiedLater<span class="token punctuation">:</span>
+			<span class="token comment">// 修改计时器的时间</span>
+		<span class="token keyword">case</span> <span class="token operator">...</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>如果处理器四叉堆顶部的计时器没有到触发事件就会直接返回，否则调用<code>runtime.runOneTimer</code>运行堆顶的计时器</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">runOneTimer</span><span class="token punctuation">(</span>pp <span class="token operator">*</span>p<span class="token punctuation">,</span> t <span class="token operator">*</span>timer<span class="token punctuation">,</span> now <span class="token builtin">int64</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	f <span class="token operator">:=</span> t<span class="token punctuation">.</span>f
+	arg <span class="token operator">:=</span> t<span class="token punctuation">.</span>arg
+	seq <span class="token operator">:=</span> t<span class="token punctuation">.</span>seq
+
+	<span class="token keyword">if</span> t<span class="token punctuation">.</span>period <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+		delta <span class="token operator">:=</span> t<span class="token punctuation">.</span>when <span class="token operator">-</span> now
+		t<span class="token punctuation">.</span>when <span class="token operator">+=</span> t<span class="token punctuation">.</span>period <span class="token operator">*</span> <span class="token punctuation">(</span><span class="token number">1</span> <span class="token operator">+</span> <span class="token operator">-</span>delta<span class="token operator">/</span>t<span class="token punctuation">.</span>period<span class="token punctuation">)</span>
+		<span class="token function">siftdownTimer</span><span class="token punctuation">(</span>pp<span class="token punctuation">.</span>timers<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span>
+		atomic<span class="token punctuation">.</span><span class="token function">Cas</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>t<span class="token punctuation">.</span>status<span class="token punctuation">,</span> timerRunning<span class="token punctuation">,</span> timerWaiting<span class="token punctuation">)</span>
+		<span class="token function">updateTimer0When</span><span class="token punctuation">(</span>pp<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token function">dodeltimer0</span><span class="token punctuation">(</span>pp<span class="token punctuation">)</span>
+		atomic<span class="token punctuation">.</span><span class="token function">Cas</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>t<span class="token punctuation">.</span>status<span class="token punctuation">,</span> timerRunning<span class="token punctuation">,</span> timerNoStatus<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token function">unlock</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pp<span class="token punctuation">.</span>timersLock<span class="token punctuation">)</span>
+	<span class="token function">f</span><span class="token punctuation">(</span>arg<span class="token punctuation">,</span> seq<span class="token punctuation">)</span>
+	<span class="token function">lock</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pp<span class="token punctuation">.</span>timersLock<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>如果period字段大于0 
+  <ul><li>修改计时器下一次触发的时间并更新其在堆中的位置</li><li>将计时器的状态更新至timerWaiting</li><li>设置处理器的timer0When字段</li></ul> </li><li>如果period小于0 
+  <ul><li>删除计时器</li><li>将计时器状态更新至timerNoStatus</li></ul> </li></ul> 
+<h4><a id="_323"></a>四、触发计时器</h4> 
+<p>Go的计时器会在以下两个模块触发</p> 
+<ul><li><strong>调度器</strong>调度时会检查处理器中的计时器是否准备就绪</li><li><strong>系统监控</strong>会检查是否有未执行的到期计数器</li></ul> 
+<h5><a id="1__330"></a>1. 调度器</h5> 
+<p>调度器使用<code>runtime.checkTimers</code>来运行处理器的计时器</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">checkTimers</span><span class="token punctuation">(</span>pp <span class="token operator">*</span>p<span class="token punctuation">,</span> now <span class="token builtin">int64</span><span class="token punctuation">)</span> <span class="token punctuation">(</span>rnow<span class="token punctuation">,</span> pollUntil <span class="token builtin">int64</span><span class="token punctuation">,</span> ran <span class="token builtin">bool</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">// 调整计时器</span>
+  <span class="token keyword">if</span> atomic<span class="token punctuation">.</span><span class="token function">Load</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pp<span class="token punctuation">.</span>adjustTimers<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+		next <span class="token operator">:=</span> <span class="token function">int64</span><span class="token punctuation">(</span>atomic<span class="token punctuation">.</span><span class="token function">Load64</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pp<span class="token punctuation">.</span>timer0When<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token keyword">if</span> next <span class="token operator">==</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> now<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token boolean">false</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">if</span> now <span class="token operator">==</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+			now <span class="token operator">=</span> <span class="token function">nanotime</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">if</span> now <span class="token operator">&lt;</span> next <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">if</span> pp <span class="token operator">!=</span> <span class="token function">getg</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>m<span class="token punctuation">.</span>p<span class="token punctuation">.</span><span class="token function">ptr</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">||</span> <span class="token function">int</span><span class="token punctuation">(</span>atomic<span class="token punctuation">.</span><span class="token function">Load</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pp<span class="token punctuation">.</span>deletedTimers<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&lt;=</span> <span class="token function">int</span><span class="token punctuation">(</span>atomic<span class="token punctuation">.</span><span class="token function">Load</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pp<span class="token punctuation">.</span>numTimers<span class="token punctuation">)</span><span class="token operator">/</span><span class="token number">4</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">return</span> now<span class="token punctuation">,</span> next<span class="token punctuation">,</span> <span class="token boolean">false</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token function">lock</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pp<span class="token punctuation">.</span>timersLock<span class="token punctuation">)</span>
+	<span class="token function">adjusttimers</span><span class="token punctuation">(</span>pp<span class="token punctuation">)</span>
+  
+  <span class="token comment">// 运行计时器</span>
+  rnow <span class="token operator">=</span> now
+	<span class="token keyword">if</span> <span class="token function">len</span><span class="token punctuation">(</span>pp<span class="token punctuation">.</span>timers<span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">if</span> rnow <span class="token operator">==</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+			rnow <span class="token operator">=</span> <span class="token function">nanotime</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">for</span> <span class="token function">len</span><span class="token punctuation">(</span>pp<span class="token punctuation">.</span>timers<span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">if</span> tw <span class="token operator">:=</span> <span class="token function">runtimer</span><span class="token punctuation">(</span>pp<span class="token punctuation">,</span> rnow<span class="token punctuation">)</span><span class="token punctuation">;</span> tw <span class="token operator">!=</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">if</span> tw <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+					pollUntil <span class="token operator">=</span> tw
+				<span class="token punctuation">}</span>
+				<span class="token keyword">break</span>
+			<span class="token punctuation">}</span>
+			ran <span class="token operator">=</span> <span class="token boolean">true</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+  
+  <span class="token comment">// 删除计时器</span>
+  <span class="token keyword">if</span> pp <span class="token operator">==</span> <span class="token function">getg</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span>m<span class="token punctuation">.</span>p<span class="token punctuation">.</span><span class="token function">ptr</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token function">int</span><span class="token punctuation">(</span>atomic<span class="token punctuation">.</span><span class="token function">Load</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pp<span class="token punctuation">.</span>deletedTimers<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token function">len</span><span class="token punctuation">(</span>pp<span class="token punctuation">.</span>timers<span class="token punctuation">)</span><span class="token operator">/</span><span class="token number">4</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token function">clearDeletedTimers</span><span class="token punctuation">(</span>pp<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token function">unlock</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>pp<span class="token punctuation">.</span>timersLock<span class="token punctuation">)</span>
+	<span class="token keyword">return</span> rnow<span class="token punctuation">,</span> pollUntil<span class="token punctuation">,</span> ran
+</code></pre> 
+<ul><li>调整计时器 
+  <ul><li>如果处理器中不存在需要调整的计时器 
+    <ul><li>当没有需要执行的计时器时直接返回</li><li>当下一个计时器没有到期并且需要删除的计时器较少（不到总数四分之一）时直接返回</li></ul> </li><li>如果处理器中存在需要调整的计时器，就调用<code>runtime.adjusttimers</code></li></ul> </li><li>运行计时器 
+  <ul><li>如果存在需要执行的计时器，直接运行</li><li>如果不存在，获取最新计时器的触发事件</li></ul> </li><li>删除计时器 
+  <ul><li>如果当前goroutine的处理器P与传入的处理器相同，且处理器中需要删除的计时器是堆中计时器的1/4以上，就会删除需要删除的计时器</li></ul> </li></ul> 
+<h5><a id="2__392"></a>2. 系统监控</h5> 
+<p>系统监控函数也可能会触发函数的计时器</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token function">sysmon</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token operator">...</span>
+	<span class="token keyword">for</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token operator">...</span>
+		now <span class="token operator">:=</span> <span class="token function">nanotime</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+		next<span class="token punctuation">,</span> <span class="token boolean">_</span> <span class="token operator">:=</span> <span class="token function">timeSleepUntil</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+		<span class="token operator">...</span>
+		lastpoll <span class="token operator">:=</span> <span class="token function">int64</span><span class="token punctuation">(</span>atomic<span class="token punctuation">.</span><span class="token function">Load64</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>sched<span class="token punctuation">.</span>lastpoll<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token keyword">if</span> <span class="token function">netpollinited</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> lastpoll <span class="token operator">!=</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> lastpoll<span class="token operator">+</span><span class="token number">10</span><span class="token operator">*</span><span class="token number">1000</span><span class="token operator">*</span><span class="token number">1000</span> <span class="token operator">&lt;</span> now <span class="token punctuation">{<!-- --></span>
+			atomic<span class="token punctuation">.</span><span class="token function">Cas64</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>sched<span class="token punctuation">.</span>lastpoll<span class="token punctuation">,</span> <span class="token function">uint64</span><span class="token punctuation">(</span>lastpoll<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">uint64</span><span class="token punctuation">(</span>now<span class="token punctuation">)</span><span class="token punctuation">)</span>
+			list <span class="token operator">:=</span> <span class="token function">netpoll</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+			<span class="token keyword">if</span> <span class="token operator">!</span>list<span class="token punctuation">.</span><span class="token function">empty</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token function">incidlelocked</span><span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span>
+				<span class="token function">injectglist</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>list<span class="token punctuation">)</span>
+				<span class="token function">incidlelocked</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">if</span> next <span class="token operator">&lt;</span> now <span class="token punctuation">{<!-- --></span>
+			<span class="token function">startm</span><span class="token punctuation">(</span><span class="token boolean">nil</span><span class="token punctuation">,</span> <span class="token boolean">false</span><span class="token punctuation">)</span>
+		<span class="token punctuation">}</span>
+		<span class="token operator">...</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<ul><li>获取计时器的到期时间以及持有该计时器的堆 
+  <ul><li>此处会遍历所有计时器并查找下一个需要执行的计时器</li></ul> </li><li>如果超过10ms没有轮询，就出发网络轮询</li><li>如果当前有计时器未执行，且处理器无法被抢占，此时应该启动新的线程处理计时器</li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/1a33352f4d3754d09d3171b4c056bb33/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">解决 ImportError: C extension: No module named ‘pandas._libs.tslib‘ not built.</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/782ef86fa8c7f2dfe906323cbd01ab60/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">[二分查找] 二：二分查找的经典例题</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

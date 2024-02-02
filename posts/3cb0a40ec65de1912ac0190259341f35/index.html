@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>mysql 主从复制与读写分离 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="mysql 主从复制与读写分离" />
+<meta property="og:description" content="主从复制概念
+主mysql上的数据，新增，修改库，表，表里的数据，都会同步到mysql上，查不在此类
+主从复制是单向的，只能从主复制到从，从数据库无法复制到主数据库器
+主从复制的工作过程
+1主节点的数据记录发生变化都会记录在二进制日志2Slave节点会在一定时间内对主库的二进制文件进行探测，看其是否发生变化，如果发生变化，从库他会开启一个I/O的线程请求master主库的二进制事件3主库会给每一个I/O的线程启动一个dump，用于发送二进制事件给从库，从库通过I/O线程获取更新，slave_sql负责将更新写入到从库本地，实现主从一至。 Mysql的主从复制的模式
+异步复制 异步复制：mysql的默认复制就是异步复制(不管发送结果)，只要执行完之后，客户端提交事务，主mysql会立即把结果返回从服务器，主mysql并不关心mysql是否已经接收，并且处理。
+主一旦崩溃，主mysql的事务可能没有传到从mysql，这个时候强行把从服务器提升为主，可能到新的主mysql，数据不完整（很少见，工作当中都是异步复制）
+全同步复制全同步复制：主库执行完成一个事务，要等待所有的从库都执行了该事务之后才会返回客户端，因为需要等待所有从库全部执行完成，性能必然下降。（对数据一致性，和数据完整要求很好的场景）半同步复制 半同步复制：介于异步复制和全同步复制之间，主库执行完一个客户端提交的事务之后，至少等待一个从库接收并处理完成之后，才会返回客户端。半同步在一定程度上提高了数据的安全性，也会有一定的延迟。
+这个延迟一般是一个tcp/ip的往返时间。(从发送到接收的时间，单位是毫秒)，半同步复制最好在低延时的网络中使用。
+这边会有一个专业名词：时间&lt;1ms: round-trip time RTT
+mysql主从复制延迟如何解决
+硬件方面 主库一般不需要动的太多，从库配置要更好，提升它的随机写能力性能，比如硬盘可以换成固态
+升级cpu核数，扩大下内存，尽量使用物理机（不要用云服务器）
+网络层面主从服务器都配置在一个局域网内，尽量避免跨网段和跨机房架构方面读写分离，把写入控制在主库，从库负责读，降低从库的压力配置方面mysql配置从配置文件的角度实现性能最大化 追求安全性的双一设置
+追求安全性的配置
+innodb_flush_log_at_trx_commit=1
+1每次提交事务时都会刷新事务日志，以确保持久性，这是最高级别的数据安全性，但是会影响性能，默认就是100就是事务提交时不会立刻刷新，而是每秒刷新一次，可以提性能，但是发生故障会导致数据丢失。22事务提交时，事务日志不会写入硬盘而是保存在系统缓存，也不会进行刷新，提供了一定的安全性能，但要求内存要求比较高Sync_binlog=111也是默认值，每次提交事务之后，直接把二进制日志刷新到磁盘，以确保日志的持久性，但会占用比较高的性能，但是安全性高0会把日志写入到缓存，也不会刷新日志，故障发生也会丢失数据，内存的要求也提高了N每提交了N次事务执行一次刷新到磁盘，提高性能，但是一旦崩溃，数据会大量丢失 追求性能化
+sync_binlog=00设置为0表示二进制日志（binary log）写入操作系统缓存，但不进行物理刷新。
+这提供了较高的性能，但在系统崩溃或断电时可能会导致未刷新的二进制日志数据的丢失2innodb_flush_log_at_trx_commit=2:
+设置为2表示事务提交时将事务日志写入操作系统缓存，但不进行物理刷新。
+这提供了一定的性能提升，但在系统崩溃或断电时可能会导致未刷新的事务日志数据的丢失。logs-slave-updates=0:
+如果设置为0，表示不将从库的更新写入二进制日志。
+这对于避免在主从复制中引入循环复制（circular replication）很有用 增大 innodb_buffer_pool_size
+innodb_buffer_pool_size 控制 InnoDB 存储引擎的缓冲池大小。增大这个值可以提高 InnoDB 的性能，
+因为更多的数据和索引可以缓存在内存中，减少了对磁盘的访问次数。但要注意，
+设置得太大可能导致系统内存不足。
+Innodb_buffer_pool_size 300M 500G
+Innodb 存储引擎的缓存池大小，设置的s数值越高，可以提高innodb的性能
+主从复制的问题
+1只能在主库上发生变化，然后同步到从2复制过程是串行化过程，在从库上复制是串行的，主库的并行更新不能再slave从库上并行操作3核心意义：主从复制的设计目的就是为了实现读写分离，也就是在主库上写，在从库上查，读写分离，实现高可用 读写分离概念
+1要实现读写分离，必须要先实现主从复制2读写分离：所有的写入操作都在主库，从库只负责读（select）。如果有更新，是从主库复制到从库 为什么要有读写分离
+1数据库在写入数据时比较耗时（mysql写1w条数据要3分30秒）2数据库在读的时候，速度很快（读1w条只需要4.96秒）读写分离之后，数据库的写入和读取是分开的，哪怕写入的数据量比较大，但是不影响查询的效率。 什么场景需要读写分离
+1数据库不是一定需要读写分离的，只有在某些程序在使用过程中，更新很少，查询较多，这种情况可以考虑读写分离，读和查的需求差不多，也可以考虑读写分离2生产库一般都会做读写分离3测试库一般不管4在工作当中，数据库的读写不会在同一个库中完成。既不安全也不满足高可用，也不能实现高并发。工作中都会做读写分离 Mysql读写分离的原理，如何实现的
+根据脚本实现在代码当中实现路由分类，select insert 进行路由分类，这类方法是最多的特点性能好，在代码中就可以实现，不需要额外的硬件设备缺点开发实现的，跟我们无关，如果大型的应用复杂的应用，设计改动的代码非常多 基于中间层代理实现Mysql-proxy：自带的开源项目，基于自带的lua脚本，这些lua脚本不是现成的，要自己写，如果你不熟悉他的内置变量写不出来Atlas360内部自己使用的代理工具，每天的读写请求承载量可以到几十亿条，还支持事务，还支持存储过程Amoeba阿米巴 ：陈思儒，之前在阿里就职，由java开发的一个开源团建，他不支持事务，也不支持存储过程，但是amoeba 还是用的最多的，功能比较强大的软件 出现Slave_IO_Running: NO 原因
+1网络问题2My.cnf 配置文件写错了3配置文件 CHANGE master to。。。 要么是文件名错了 ，要么是配置文件错了4防火墙策略问题 主从复制延迟问题" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/3cb0a40ec65de1912ac0190259341f35/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-11-14T14:21:34+08:00" />
+<meta property="article:modified_time" content="2023-11-14T14:21:34+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">mysql 主从复制与读写分离</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p style="margin-left:.0001pt;text-align:justify;"><strong>主从复制概念</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td> <p>主mysql上的数据，新增，修改库，表，表里的数据，都会同步到mysql上，查不在此类</p> <p>主从复制是单向的，只能从主复制到从，从数据库无法复制到主数据库器</p> </td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>主从复制的工作过程</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:56px;">1</td><td style="width:442px;">主节点的数据记录发生变化都会记录在二进制日志</td></tr><tr><td style="width:56px;">2</td><td style="width:442px;">Slave节点会在一定时间内对主库的二进制文件进行探测，看其是否发生变化，如果发生变化，从库他会开启一个I/O的线程请求master主库的二进制事件</td></tr><tr><td style="width:56px;">3</td><td style="width:442px;">主库会给每一个I/O的线程启动一个dump，用于发送二进制事件给从库，从库通过I/O线程获取更新，slave_sql负责将更新写入到从库本地，实现主从一至。</td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>Mysql的主从复制的模式</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:119px;">异步复制</td><td style="width:379px;"> <p>异步复制：mysql的默认复制就是异步复制(不管发送结果)，只要执行完之后，客户端提交事务，主mysql会立即把结果返回从服务器，主mysql并不关心mysql是否已经接收，并且处理。</p> <p>主一旦崩溃，主mysql的事务可能没有传到从mysql，这个时候强行把从服务器提升为主，可能到新的主mysql，数据不完整（很少见，工作当中都是异步复制）</p> </td></tr><tr><td style="width:119px;">全同步复制</td><td style="width:379px;">全同步复制：主库执行完成一个事务，要等待所有的从库都执行了该事务之后才会返回客户端，因为需要等待所有从库全部执行完成，性能必然下降。（对数据一致性，和数据完整要求很好的场景）</td></tr><tr><td style="width:119px;">半同步复制</td><td style="width:379px;"> <p>半同步复制：介于异步复制和全同步复制之间，主库执行完一个客户端提交的事务之后，至少等待一个从库接收并处理完成之后，才会返回客户端。半同步在一定程度上提高了数据的安全性，也会有一定的延迟。</p> <p style="margin-left:.0001pt;text-align:justify;">这个延迟一般是一个tcp/ip的往返时间。(从发送到接收的时间，单位是毫秒)，半同步复制最好在低延时的网络中使用。</p> <p style="margin-left:.0001pt;text-align:justify;">这边会有一个专业名词：时间&lt;1ms:  round-trip time RTT</p> </td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>mysql主从复制延迟如何解决</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:80px;">硬件方面</td><td style="width:419px;"> <p>主库一般不需要动的太多，从库配置要更好，提升它的随机写能力性能，比如硬盘可以换成固态</p> <p>升级cpu核数，扩大下内存，尽量使用物理机（不要用云服务器）</p> </td></tr><tr><td style="width:80px;">网络层面</td><td style="width:419px;">主从服务器都配置在一个局域网内，尽量避免跨网段和跨机房</td></tr><tr><td style="width:80px;">架构方面</td><td style="width:419px;">读写分离，把写入控制在主库，从库负责读，降低从库的压力</td></tr><tr><td style="width:80px;">配置方面</td><td style="width:419px;">mysql配置从配置文件的角度实现性能最大化</td></tr></tbody></table> 
+<p><strong>追求安全性的双一设置</strong></p> 
+<p><strong>追求安全性的配置</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:46px;"></td><td style="width:453px;"> <p>innodb_flush_log_at_trx_commit=1</p> </td></tr><tr><td style="width:46px;">1</td><td style="width:453px;">每次提交事务时都会刷新事务日志，以确保持久性，这是最高级别的数据安全性，但是会影响性能，默认就是1</td></tr><tr><td style="width:46px;">0</td><td style="width:453px;">0就是事务提交时不会立刻刷新，而是每秒刷新一次，可以提性能，但是发生故障会导致数据丢失。</td></tr><tr><td style="width:46px;">2</td><td style="width:453px;">2事务提交时，事务日志不会写入硬盘而是保存在系统缓存，也不会进行刷新，提供了一定的安全性能，但要求内存要求比较高</td></tr><tr><td style="width:46px;"></td><td style="width:453px;">Sync_binlog=1</td></tr><tr><td style="width:46px;">1</td><td style="width:453px;">1也是默认值，每次提交事务之后，直接把二进制日志刷新到磁盘，以确保日志的持久性，但会占用比较高的性能，但是安全性高</td></tr><tr><td style="width:46px;">0</td><td style="width:453px;">会把日志写入到缓存，也不会刷新日志，故障发生也会丢失数据，内存的要求也提高了</td></tr><tr><td style="width:46px;">N</td><td style="width:453px;">每提交了N次事务执行一次刷新到磁盘，提高性能，但是一旦崩溃，数据会大量丢失</td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;">追求性能化</p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:47px;"></td><td style="width:452px;">sync_binlog=0</td></tr><tr><td style="width:47px;">0</td><td style="width:452px;">设置为0表示二进制日志（binary log）写入操作系统缓存，但不进行物理刷新。<br> 这提供了较高的性能，但在系统崩溃或断电时可能会导致未刷新的二进制日志数据的丢失</td></tr><tr><td style="width:47px;">2</td><td style="width:452px;">innodb_flush_log_at_trx_commit=2:<br> 设置为2表示事务提交时将事务日志写入操作系统缓存，但不进行物理刷新。<br> 这提供了一定的性能提升，但在系统崩溃或断电时可能会导致未刷新的事务日志数据的丢失。</td></tr><tr><td style="width:47px;"></td><td style="width:452px;">logs-slave-updates=0:<br> 如果设置为0，表示不将从库的更新写入二进制日志。<br> 这对于避免在主从复制中引入循环复制（circular replication）很有用</td></tr><tr><td style="width:47px;"></td><td style="width:452px;"> <p>增大 innodb_buffer_pool_size<br> innodb_buffer_pool_size 控制 InnoDB 存储引擎的缓冲池大小。增大这个值可以提高 InnoDB 的性能，<br> 因为更多的数据和索引可以缓存在内存中，减少了对磁盘的访问次数。但要注意，<br> 设置得太大可能导致系统内存不足。</p> <p style="margin-left:.0001pt;text-align:justify;">Innodb_buffer_pool_size 300M 500G</p> <p style="margin-left:.0001pt;text-align:justify;">Innodb 存储引擎的缓存池大小，设置的s数值越高，可以提高innodb的性能</p> </td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>主从复制的问题</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:42px;">1</td><td style="width:456px;">只能在主库上发生变化，然后同步到从</td></tr><tr><td style="width:42px;">2</td><td style="width:456px;">复制过程是串行化过程，在从库上复制是串行的，主库的并行更新不能再slave从库上并行操作</td></tr><tr><td style="width:42px;">3</td><td style="width:456px;">核心意义：主从复制的设计目的就是为了实现读写分离，也就是在主库上写，在从库上查，读写分离，实现高可用</td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>读写分离概念</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:59px;">1</td><td style="width:439px;">要实现读写分离，必须要先实现主从复制</td></tr><tr><td style="width:59px;">2</td><td style="width:439px;">读写分离：所有的写入操作都在主库，从库只负责读（select）。如果有更新，是从主库复制到从库</td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>为什么要有读写分离</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:51px;">1</td><td style="width:447px;">数据库在写入数据时比较耗时（mysql写1w条数据要3分30秒）</td></tr><tr><td style="width:51px;">2</td><td style="width:447px;">数据库在读的时候，速度很快（读1w条只需要4.96秒）</td></tr><tr><td style="width:51px;"></td><td style="width:447px;">读写分离之后，数据库的写入和读取是分开的，哪怕写入的数据量比较大，但是不影响查询的效率。</td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>什么场景需要读写分离</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:48px;">1</td><td style="width:450px;">数据库不是一定需要读写分离的，只有在某些程序在使用过程中，更新很少，查询较多，这种情况可以考虑读写分离，读和查的需求差不多，也可以考虑读写分离</td></tr><tr><td style="width:48px;">2</td><td style="width:450px;">生产库一般都会做读写分离</td></tr><tr><td style="width:48px;">3</td><td style="width:450px;">测试库一般不管</td></tr><tr><td style="width:48px;">4</td><td style="width:450px;">在工作当中，数据库的读写不会在同一个库中完成。既不安全也不满足高可用，也不能实现高并发。工作中都会做读写分离</td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>Mysql读写分离的原理，如何实现的</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:111px;">根据脚本实现</td><td style="width:387px;">在代码当中实现路由分类，select insert 进行路由分类，这类方法是最多的</td></tr><tr><td style="width:111px;">特点</td><td style="width:387px;">性能好，在代码中就可以实现，不需要额外的硬件设备</td></tr><tr><td style="width:111px;">缺点</td><td style="width:387px;">开发实现的，跟我们无关，如果大型的应用复杂的应用，设计改动的代码非常多</td></tr></tbody></table> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:149px;">基于中间层代理实现</td><td style="width:350px;">Mysql-proxy：自带的开源项目，基于自带的lua脚本，这些lua脚本不是现成的，要自己写，如果你不熟悉他的内置变量写不出来</td></tr><tr><td style="width:149px;">Atlas</td><td style="width:350px;">360内部自己使用的代理工具，每天的读写请求承载量可以到几十亿条，还支持事务，还支持存储过程</td></tr><tr><td style="width:149px;">Amoeba</td><td style="width:350px;">阿米巴 ：陈思儒，之前在阿里就职，由java开发的一个开源团建，他不支持事务，也不支持存储过程，但是amoeba 还是用的最多的，功能比较强大的软件</td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;"></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>出现Slave_IO_Running: NO 原因</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:64px;">1</td><td style="width:434px;">网络问题</td></tr><tr><td style="width:64px;">2</td><td style="width:434px;">My.cnf 配置文件写错了</td></tr><tr><td style="width:64px;">3</td><td style="width:434px;">配置文件  CHANGE master to。。。   要么是文件名错了 ，要么是配置文件错了</td></tr><tr><td style="width:64px;">4</td><td style="width:434px;">防火墙策略问题</td></tr></tbody></table> 
+<p><strong><span style="color:#4d4d4d;">主从复制延迟问题</span></strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:55px;">1</td><td style="width:443px;">网络问题</td></tr><tr><td style="width:55px;">2</td><td style="width:443px;">主从硬件问题（cpu主频频率也就是性能不够，内存IO，硬件IO）</td></tr><tr><td style="width:55px;">3</td><td style="width:443px;">同步复制而不是异步复制</td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;">面试题</p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:111px;">主从复制原理</td><td style="width:388px;"> <p>开发可以说脚本</p> <p>运维一般用amoeba或者mycat</p> </td></tr><tr><td style="width:111px;">如何查看主从复制是否成功</td><td style="width:388px;"> <p>show salve status\G 两个yes就ok</p> <p>在主库创建表或库，看能否同步到从库</p> </td></tr><tr><td style="width:111px;">如果slave_IO_running no 排查思路是什么</td><td style="width:388px;">85%配置文件</td></tr><tr><td style="width:111px;">show slave STATUS\G 能看到的信息有哪些</td><td style="width:388px;"> <p style="text-align:justify;">IO和sql线程的状态信息</p> <p style="text-align:justify;">Master的服务器的ip地址，端口，事务开始的位置</p> <p style="text-align:justify;">最近一次的错误信息和错误的位置</p> <p style="text-align:justify;">最近一次的IO报错信息</p> <p style="text-align:justify;">最近一次sql报错的信息</p> </td></tr><tr><td style="width:111px;">主从复制的延迟如何解决</td><td style="width:388px;"></td></tr></tbody></table> 
+<p><strong>主从复制数据库 show slave status\G内容解释</strong></p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td style="width:278px;">slave_IO_State:Waiting for master to send event</td><td style="width:220px;">等待接收主数据库的操作与变化</td></tr><tr><td style="width:278px;">master_host:192.168.233.88</td><td style="width:220px;">指定主服务器ip地址是谁</td></tr><tr><td style="width:278px;">masteruser:myslave</td><td style="width:220px;">登录主服务器的名称为myslave</td></tr><tr><td style="width:278px;">master_port:3306</td><td style="width:220px;">主服务器的端口是3306</td></tr><tr><td style="width:278px;">connect_retry:60</td><td style="width:220px;">连接重试60秒</td></tr><tr><td style="width:278px;">master_log_file:master-bin.000001</td><td style="width:220px;">指定master</td></tr><tr><td style="width:278px;">read_master_log_pos</td><td style="width:220px;">每个起始位置开始指定604</td></tr><tr><td style="width:278px;">relay_log_file:relay-log-bin.000002</td><td style="width:220px;">从服务器自己的起始位置日志</td></tr><tr><td style="width:278px;">relay_master_log_file=master-bin.000001</td><td style="width:220px;">一切变化都指向主的000001来</td></tr></tbody></table> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>架构主从复制和读写分离</strong></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><strong>主从复制</strong></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><img alt="" height="177" src="https://images2.imgbox.com/25/e7/ApizF0RN_o.png" width="350"></p> 
+<p style="margin-left:.0001pt;text-align:justify;"></p> 
+<pre><code class="language-bash">#Mysql1为主,Mysql2为从,Mysql3为从,Test1作为读写分离的服务器,Test2作为客户端
+#时间必须要同步
+
+主mysql
+systemctl stop firewalld
+setenforce 0
+yum -y install ntp
+vim /etc/ntp.conf
+#最后一行添加
+server 127.127.233.0
+#233为自己ip地址所在网段
+fudge 127.127.233.0 stratum 8
+#从本地获取时间源同步,不走网络,设置层级,数字越小,时间精确度越高,设置fudge 8,最高到15
+wq!
+systemctl restart  ntpd
+#时间同步完成之后的操作
+vim /etc/my.cnf
+log-bin=master-bin
+#打开二进制日志，它是根据二进制日志进行同步的
+binlog_format=MIXED
+#如果并发量变高，会自动切换高并发
+log-slave-updates=true
+#允许从数据库复制数据时,可以从主数据库的二进制日志写到自己的二进制日志当中
+wq!
+systemctl restart mysqld
+mysql -u root -p123456
+grant replication slave on *.* to 'myslave'@'192.168.233.%' identified by '123456';
+#给从数据库授权,从库能够访问主数据库,给他定义一个用户名为myslave,从233这个网段中来,密码是123456
+flush privileges;
+show master status;
+#最主要的就是看master-bin.000001,position下的604,看系统显示每个人可能都不一样
+
+
+
+从mysql(1)
+systemctl stop firewalld
+setenforce 0
+yum -y install ntp
+systemctl restart ntpd
+/usr/sbin/ntpdate 192.168.233.88
+#两台从数据库的时间源指向主数据库的
+crontab -e -u root
+#生产当中会加一个定时任务，随时进行同步
+*/30 * * * * /usr/sbin/ntpdate 192.168.233.88
+#每三十分钟执行一次与主数据库进行时间同步
+wq!
+#同步完成之后可以多重执行 date 查看时间是否同步成功
+vim /etc/my.cnf
+server-id = 2 
+#id不能重复
+relay-log=relay-log-bin
+#名称可以自定义
+relay-log-index=slave-relay-bin.index
+relay_log_recovery=1
+#默认是0,1表示开启中继日志的恢复,如果从数据库出现异常或者崩溃时，从数据库会从主数据库二进制日志正确读取和应用中继日志，主要是为了同步，如果不开启，需要手动添加。
+wq!
+systemctl restart mysqld
+mysql -u root -p123456
+
+CHANGE master to 
+master_host='192.168.233.88',master_user='myslave',master_password='123456',master_log_file='master-bin.000002',master_log_pos=604;
+#指向主数据库,之前创建的用户myslave,它的密码是123456,指定它的二进制日志文件为000002,主的position是多少就输入多少,这边是604
+start slave;
+#开启从服务器
+show slave status\G;
+#看slave_IO_Running:Yes
+#负责和主库的IO通信
+#slave_SQL_Running:Yes 是否都为yes
+#负责自己的slave mysql 进程
+
+
+
+
+
+从mysql(2)
+systemctl stop firewalld
+setenforce 0
+yun -y install ntp
+systemctl restart ntpd
+/usr/sbin/ntpdate 192.168.233.88
+crontab -e -u root
+*/30 * * * * /usr/sbin/ntpdate 192.168.233.88
+wq!
+vim /etc/my.cnf
+server-id = 3
+#id不能相同
+relay-log=relay-log-bin
+relay-log-index=slave-slave-relay-bin,index
+relay_log_recovery = 1
+#与从数据库2一样
+wq！
+systemctl restart mysqld
+mysql -u root -p123456
+
+CHANGE master to 
+master_host='192.168.233.88',master_user='myslave',master_password='123456',master_log_file='master-bin.000002',master_log_pos=604;
+start slave;
+show slave status\G;</code></pre> 
+<p><strong>amoeba读写分离</strong></p> 
+<p><img alt="" height="185" src="https://images2.imgbox.com/ba/ed/M6lC7nkD_o.png" width="350"></p> 
+<pre><code class="language-bash">读写分离基于主从复制，要实现读写分离，必须要先实现主从复制
+
+主数据库
+mysql -u root -p123456
+grant all on *.* to 'amoeba'@'192.168.233.%' identified by '123456';
+#开放权限给amoeba给,233整个网段,密码123456
+flush privileges;
+vim /etc/my.cnf
+general_log=on
+general_log_file=/usr/local/mysql/data/mysql_general.log
+#最下面加上开启日志
+systemctl restart mysqld
+tail -f /usr/local/mysql/data/mysql_general.log
+
+从数据库1
+mysql -u root -p123456
+grant all on *.* to 'amoeba'@'192.168.233.%' identified by '123456';
+flush privileges;
+vim /etc/my.cnf
+general_log=on
+general_log_file=/usr/local/mysql/data/mysql_general.log
+#最下面加上开启日志
+systemctl restart mysqld
+tail -f /usr/local/mysql/data/mysql_general.log
+
+从数据库2
+mysql -u root -p123456
+grant all on *.* to 'amoeba'@'192.168.233.%' identified by '123456';
+flush privieges;
+vim /etc/my.cnf
+general_log=on
+general_log_file=/usr/local/mysql/data/mysql_general.log
+#最下面加上开启日志
+systemctl restart mysqld
+tail -f /usr/local/mysql/data/mysql_general.log
+
+
+amoeba
+java -version
+#看一下版本,推荐1.6
+cp jdk-6u14-linux-x64.bin /usr/local
+cd /usr/local
+chmod +x jdk-6u14-linux-x64.bin
+./jdk-6u14-linux-x64.bin
+#执行完成之后直接yes,然后回车就行,之后会有提示需要...直接否就行
+mv jdk-6u14-linux-x64.bin jdk1.6
+#方便之后的环境变量好配置
+vim /etc/profile
+#最后一行添加
+export JAVA_HOME=/usr/local/jdk1.6
+export CLASSPATH=.:$JAVA_HOME/lib:$JAVA_HOME/jre/lib
+export PATH=$JAVA_HOME/lib:$JAVA_HOME/jre/bin/:$PATH:$HOME/bin
+export AMOEBA HOME=/usr/local/amoeba
+export PATH=$PATH:$AMOEBA_HOME/bin
+wq！
+source /etc/profile
+#立即生效
+java -version
+#看一下版本1.6就可以了
+mkdir /usr/local/amoeba
+tar -xf amoeba-mysql-binary-2.2.0.tar.gz -C /usr/local/amoeba/
+chmod -R 755 /usr/local/amoeba/
+/usr/local/amoeba/bin/amoeba
+#出现amoeba start|stop就说明amoeba安装完毕了
+#主从数据库开放amoeba权限之后操作
+cd /usr/local/amoeba/conf/
+#amoeba.xml是配置用户信息,dbServer.xml配置数据库信息,改配置文件之前最好先备份一下,看个人意愿不强制
+vim amoeba.xml
+#amoeba默认的端口是3306
+&lt;property name="user"&gt;amoeba&lt;/property&gt;
+#第30行将root改成amoeba,之前给的权限是给amoeba的所以不能用root
+&lt;property name="password"&gt;123456&lt;/property&gt;
+#第32行密码可以自定义
+&lt;property name="defaultPool"&gt;master&lt;/property&gt;
+#第115行指定主
+&lt;property name="writepool"&gt;master&lt;/property&gt;
+&lt;property name="readpool"&gt;saves&lt;/property&gt;
+#第117行和120行的注释&lt;!-- , --&gt; ,取消掉,写指定master写,读指定slaves,slaves表示有多个从服务器
+vim dbServer.xml
+#将22行23行注释掉,默认会往test库,如果myql没有test库就会报错,把22行右边注释删除掉,24行加上--&gt;
+&lt;property name="user"&gt;amoeba&lt;/property&gt;
+#26行改一下名字改成amoeba
+&lt;property name="password"&gt;123456&lt;/property&gt;
+#28行删除掉，30行注释也删除掉，29行密码改成123456
+&lt;dbServer name="master" parent="abstractServer"&gt;
+#45行先指定主,48行指定主的ip地址192.168.233.88
+&lt;dbServer name="slave1" parent="abstractServer"&gt;
+#52行指定从,55行指定从ip地址192.168.233.89
+#再从52行yy复制6行在57行p插入,要把slave1改成2,ip地址也要改成19.168.233.90
+&lt;dbServer name="slaves" virtual="true"&gt;
+#65行指定从服务器
+&lt;property name="poolNames"&gt;slave1,slave2&lt;/property&gt;
+#71行对应slave1和slave2
+wq！
+/usr/local/amoeba/bin/amoeba start &amp;
+netstat -antp | grep java
+#看一下端口起来没
+
+
+客户端
+yum -y install mariadb-server mariadb
+#安装需要epel源
+systemctl restart mariadb.service
+netstat -antp | grep 3306
+mysql -u amoeba -p123456 -h192.168.233.66 -P8066
+show databases;
+insert into test values('test2')
+select * from test;
+select * from test;
+#可以实现轮询
+
+</code></pre> 
+<p><strong>mycat读写分离</strong></p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d220acba7eb289a09f73fba5c13a75b5/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">安装MinGW并在codeblocks下使用</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b909ddc00904ec0e80a45fc1ed7cfc61/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">输出日期格式</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

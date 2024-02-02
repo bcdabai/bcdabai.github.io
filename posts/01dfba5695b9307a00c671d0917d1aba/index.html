@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>FIFO（原理、框图、代码、深度计算） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="FIFO（原理、框图、代码、深度计算）" />
+<meta property="og:description" content="Fifo分为同步fifo和异步fifo。同步fifo是指读写时钟是同一个时钟，异步fifo是指读写时钟不是同一个时钟。不管事同步fifo还是异步fifo都能起到数据缓存的作用。Fifo有一个特征：地址是顺序&#43;1的。
+1、异步框图
+图片来源于《FPGA深度解析》
+2、原理：
+异步fifo的设计思想：核心是状态信号的产生和跨时钟域的转换及同步
+异步fifo如上图所示，主要包含写控制逻辑、写地址、状态产生、读控制逻辑产生、读地址、格雷码同步。其中状态产生分为空信号、将空信号、满信号、将满信号。格雷码同步分为写地址格雷码从写时钟域到读时钟域的同步、读地址格雷码从读时钟域到写时钟域的同步。
+（1）格雷码同步
+格雷码同步在异步fifo中的作用：用于状态产生。
+格雷码实现多比特跨时钟域转换的原理：因为fifo中地址是逐次&#43;1的，而格雷码相邻两位数据一次只有一位数据发生变化。因此，将写地址（读地址）变换成格雷码，虽然地址是多比特的，但是每次变化只有1bit发生变化。这就是将二进制的地址转换成格雷码的好处了。
+如果是将写地址变成格雷码，转换完以后再进行垮时钟域到读时钟域去就能最大限度的降低垮时钟域带来的风险（亚稳态）。（敲黑板：先转换成格雷码再跨时钟域）
+二进制到格雷码：
+二进制右移一位后与原来的二进制按位异或=格雷码
+格雷码转二进制：
+格雷码的最高位作为二进制的最高位，然后将二进制的最高位和格雷码的次高位异或作为二进制的次高位，依次类推。
+（2）空满状态的判断
+要判断fifo的状态，就需要知道读写地址。通过判断读写地址的差值来判断状态。其中存在一直特殊情况：读写地址指针指向同一个地址，但是可能是满，也可能是空。
+具体分析：因为fifo是回卷式的写和读，这也就是说如果fifo深度为1023，如果写地址在1023，写地址指针会重新回到0地址，如果此时读地址还在地址0，就会存在读写地址都在地址0。而空的时候，读写地址也存在都在0地址的问题。
+这就带来了一个问题，当读地址和写地址都在0的时候，可能是空，也可能是满。怎么区分是满和空呢？
+那就是将读写地址扩展一位，当读写地址的值相等时，为空；读写地址除最高位不同，其余相同为满。
+3、关键部分代码
+关键部分的代码也主要来源于《FPGA深度解析》，我最开始不能理解的就是gap计算部分，这部分我附图进行说明了。
+//写地址使能 assign wen=wr_en&amp;&amp;(!full); //写地址二进制到格雷码的转换 always@(posedge wr_clk or negedge wr_reset) if(wr_reset) waddr_gray&lt;={(ADDR_WIDTH&#43;1){1&#39;b0}}; else waddr_gray&lt;=waddr^{1&#39;b0,[waddr[ADDR_WIDTH:1]]};//相当于右移一位后与原来的二进制异或 //读地址格雷码转换为二进制码 always@(*) begin raddr_gray2bin={raddr_gray_sync_d[4], raddr_gray_sync_d[4]^raddr_gray_sync_d[3], raddr_gray_sync_d[4]^raddr_gray_sync_d[3]^raddr_gray_sync_d[2], raddr_gray_sync_d[4]^raddr_gray_sync_d[3]^raddr_gray_sync_d[2]^raddr_gray_sync_d[1], raddr_gray_sync_d[4]^raddr_gray_sync_d[3]^raddr_gray_sync_d[2]^raddr_gray_sync_d[1]^raddr_gray_sync_d[0] }; End 这个图片可以帮助理解rd_gap和wr_gap计算的原因：
+/状态生成/ //写指针与读指针间隔计算，在写时钟域的情况,判断满信号full和将满信号almost full的产生 always@(*)//地址宽度为4bit，扩展一位后为5bit begin if(waddr[4]^raddr_gray2bin[4])//相同为0，相异为1；需要判断还有多少空格，看看啥时候写满 wr_gap=raddr_gray2bin[3:0]-waddr[3:0];//最高位不相同的情况 else wr_gap=FIFO_DEEP&#43;raddr_gray2bin-waddr;//最高位相同的情况 end //almost_full信号的产生 always@(posedge wr_clk or wr_reset) begin if(wr_reset) almost_full&lt;=1&#39;b0; else if(wr_gap&lt;ALMOST_FULL_GAP)//空格子比规定的格子少了 almost_full&lt;=1&#39;b1; else almost_full&lt;=1&#39;b0; end //full信号的产生 always@(posedge wr_clk or wr_reset) begin if(wr_reset) full&lt;=1&#39;b0; else if(wr_gap==1&amp;&amp;wen) full&lt;=1&#39;b1; else full&lt;=1&#39;b0; end //读指针和写指针的间隔，在读时钟域，读空，计算的是还有几个格子不是空的 always@(posedge rd_clk or negedge rd_reset) begin if(rd_reset) ra_gap&lt;=0; else ra_gap&lt;=waddr_gray2bin-raddr; end //almost_empty信号的产生 always@(posedge rd_clk or negedge rd_reset) begin if(rd_reset) almost_empty&lt;=0; else if(ra_gap&lt;ALMOST_EMPTY_GAP)// almost_empty&lt;=1; else almost_empty&lt;=0; end //empty信号的产生 always@(posedge rd_clk or negedge rd_reset) begin if(rd_reset) empty&lt;=0; else if(rd_en&amp;&amp;rd_gap==1) empty&lt;=1; else empty&lt;=0; 4、Fifo深度" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/01dfba5695b9307a00c671d0917d1aba/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-05-22T22:24:03+08:00" />
+<meta property="article:modified_time" content="2021-05-22T22:24:03+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">FIFO（原理、框图、代码、深度计算）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>Fifo分为同步fifo和异步fifo。同步fifo是指读写时钟是同一个时钟，异步fifo是指读写时钟不是同一个时钟。不管事同步fifo还是异步fifo都能起到数据缓存的作用。Fifo有一个特征：地址是顺序+1的。<br> <strong>1、异步框图</strong><br> <img src="https://images2.imgbox.com/3f/92/PVLOdZy0_o.png" alt="在这里插入图片描述"><br> 图片来源于《FPGA深度解析》<br> <strong>2、原理：</strong><br> 异步fifo的设计思想：核心是状态信号的产生和跨时钟域的转换及同步<br> 异步fifo如上图所示，主要包含写控制逻辑、写地址、状态产生、读控制逻辑产生、读地址、格雷码同步。其中状态产生分为空信号、将空信号、满信号、将满信号。格雷码同步分为写地址格雷码从写时钟域到读时钟域的同步、读地址格雷码从读时钟域到写时钟域的同步。<br> （1）格雷码同步<br> 格雷码同步在异步fifo中的作用：用于状态产生。<br> 格雷码实现多比特跨时钟域转换的原理：因为fifo中地址是逐次+1的，而格雷码相邻两位数据一次只有一位数据发生变化。因此，将写地址（读地址）变换成格雷码，虽然地址是多比特的，但是每次变化只有1bit发生变化。这就是将二进制的地址转换成格雷码的好处了。<br> 如果是将写地址变成格雷码，转换完以后再进行垮时钟域到读时钟域去就能最大限度的降低垮时钟域带来的风险（亚稳态）。（敲黑板：先转换成格雷码再跨时钟域）<br> <img src="https://images2.imgbox.com/31/02/grAhFCY6_o.png" alt="在这里插入图片描述"><br> 二进制到格雷码：<br> 二进制右移一位后与原来的二进制按位异或=格雷码<br> 格雷码转二进制：<br> 格雷码的最高位作为二进制的最高位，然后将二进制的最高位和格雷码的次高位异或作为二进制的次高位，依次类推。<br> （2）空满状态的判断<br> 要判断fifo的状态，就需要知道读写地址。通过判断读写地址的差值来判断状态。其中存在一直特殊情况：读写地址指针指向同一个地址，但是可能是满，也可能是空。<br> 具体分析：因为fifo是回卷式的写和读，这也就是说如果fifo深度为1023，如果写地址在1023，写地址指针会重新回到0地址，如果此时读地址还在地址0，就会存在读写地址都在地址0。而空的时候，读写地址也存在都在0地址的问题。<br> <img src="https://images2.imgbox.com/08/08/tTRKz4L4_o.png" alt="在这里插入图片描述"><br> 这就带来了一个问题，当读地址和写地址都在0的时候，可能是空，也可能是满。怎么区分是满和空呢？<br> 那就是将读写地址扩展一位，当读写地址的值相等时，为空；读写地址除最高位不同，其余相同为满。<br> <strong>3、关键部分代码</strong><br> 关键部分的代码也主要来源于《FPGA深度解析》，我最开始不能理解的就是gap计算部分，这部分我附图进行说明了。</p> 
+<pre><code>
+//写地址使能
+assign wen=wr_en&amp;&amp;(!full);
+
+//写地址二进制到格雷码的转换
+always@(posedge wr_clk or negedge wr_reset)
+	if(wr_reset)
+		waddr_gray&lt;={(ADDR_WIDTH+1){1'b0}};
+	else waddr_gray&lt;=waddr^{1'b0,[waddr[ADDR_WIDTH:1]]};//相当于右移一位后与原来的二进制异或
+	
+//读地址格雷码转换为二进制码
+always@(*)
+		begin
+			raddr_gray2bin={raddr_gray_sync_d[4],
+			raddr_gray_sync_d[4]^raddr_gray_sync_d[3],
+			raddr_gray_sync_d[4]^raddr_gray_sync_d[3]^raddr_gray_sync_d[2],
+			raddr_gray_sync_d[4]^raddr_gray_sync_d[3]^raddr_gray_sync_d[2]^raddr_gray_sync_d[1],
+			raddr_gray_sync_d[4]^raddr_gray_sync_d[3]^raddr_gray_sync_d[2]^raddr_gray_sync_d[1]^raddr_gray_sync_d[0]
+			};
+	
+		End
+
+
+</code></pre> 
+<p><img src="https://images2.imgbox.com/d3/b8/n7m2RMSo_o.png" alt="在这里插入图片描述"><br> 这个图片可以帮助理解rd_gap和wr_gap计算的原因：</p> 
+<pre><code>/状态生成/
+//写指针与读指针间隔计算，在写时钟域的情况,判断满信号full和将满信号almost full的产生
+always@(*)//地址宽度为4bit，扩展一位后为5bit
+	begin
+		if(waddr[4]^raddr_gray2bin[4])//相同为0，相异为1；需要判断还有多少空格，看看啥时候写满
+			wr_gap=raddr_gray2bin[3:0]-waddr[3:0];//最高位不相同的情况
+		else 
+			wr_gap=FIFO_DEEP+raddr_gray2bin-waddr;//最高位相同的情况
+			
+	end
+//almost_full信号的产生
+always@(posedge wr_clk or wr_reset)
+	begin
+		if(wr_reset)
+			almost_full&lt;=1'b0;
+		else if(wr_gap&lt;ALMOST_FULL_GAP)//空格子比规定的格子少了
+			almost_full&lt;=1'b1;
+		else almost_full&lt;=1'b0;
+	
+	end
+	
+	//full信号的产生
+always@(posedge wr_clk or wr_reset)
+	begin
+		if(wr_reset)
+			full&lt;=1'b0;
+		else if(wr_gap==1&amp;&amp;wen)
+			full&lt;=1'b1;
+		else full&lt;=1'b0;
+		
+	end
+	
+	
+	
+//读指针和写指针的间隔，在读时钟域，读空，计算的是还有几个格子不是空的
+always@(posedge rd_clk or negedge rd_reset)
+begin
+	if(rd_reset)
+		ra_gap&lt;=0;
+	else ra_gap&lt;=waddr_gray2bin-raddr;
+	
+
+
+end
+
+//almost_empty信号的产生
+always@(posedge rd_clk or negedge rd_reset)
+begin
+	if(rd_reset)
+		almost_empty&lt;=0;
+	else if(ra_gap&lt;ALMOST_EMPTY_GAP)//
+		almost_empty&lt;=1;
+	else almost_empty&lt;=0;
+		
+end
+//empty信号的产生
+always@(posedge rd_clk or negedge rd_reset)
+begin
+	if(rd_reset)
+		empty&lt;=0;
+	else if(rd_en&amp;&amp;rd_gap==1)
+		empty&lt;=1;
+	else empty&lt;=0;
+
+</code></pre> 
+<p><strong>4、Fifo深度</strong><br> Fifo的最小深度是指写入数据的个数减去读出数据后得到的fifo需要暂存的数据个数。<br> 讨论fifo深度有一个隐含的条件：fifo写和读的吞吐量要相同。<br> <img src="https://images2.imgbox.com/24/73/oOxtgych_o.png" alt="在这里插入图片描述"><br> 每X个时钟读出Y个数据。</p> 
+<p>FIFO深度可以去看《FPGA深度解析》上面详细有具体例子讲解fifo深度的计算。<br> <img src="https://images2.imgbox.com/f3/02/2m35GY7w_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/76/20/Jaj2mgnx_o.png" alt="在这里插入图片描述"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4f85439bd8f814e0d21404f693445608/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">达梦数据库通过Shell脚本定时备份模式（vmware凝思磐石6.0）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/47f8ed44b3e4987612085f9053aac780/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">从零开始的临时会话WEB项目（基于SSM框架）（一）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

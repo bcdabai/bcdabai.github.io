@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Unity FXAA Edge Blending细节分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Unity FXAA Edge Blending细节分析" />
+<meta property="og:description" content="最近看了文章FXAA和FXAA算法演义 - 知乎，对Edge Blending有些迷糊，做分析记录一下。
+Edge Blending目的是为了解决类似下面图1和图2展示的阶梯形走样，图1是原始的结果，图2是对上面的图做了双线性差值的结果。具体看渲染过程是不是使用了Bilinear的中间颜色缓存，FXAA前会做后处理，一般都会使用Bilinear，所以大多数是图2的情况。
+图1
+图2
+两者的差别是，第一种FXAA边缘厚度是2，第二种因为多了一个中间层厚度是3。为了方便，下面都是基于无中间层的情况分析。 惯例先给出FXAA基于图1处理的结果，效果还是比较明显的。
+这是用来分析的图片，红色是三角形的采样点，蓝色是背景采样点，绿色表示像素的边缘，青色为三角形的边缘线。
+我们要分析Edge Blending，以下图中的123三个红点做参考，这三个点形成了明显的走样。
+显然123点的Blend方向是向下，按照FXAA的方法，123点依次向下移动0.5个像素到中间位置然后做采样，其实就是123和下面对应的蓝点取平均值。
+这里提一个坑的地方，我在自己的电脑上直接采样中间点，结果却和手动采样两次求平均值差不少（差值在0.1范围内），如果你有出现相同问题的话，建议手动采样两次求平均值，这样可以减少误差效果好一些。（这个问题已经找到原因和解决方法，参考我的另一篇博客Unity Editor绘制时分辨率减一_paserity的博客-CSDN博客）
+线性差值采样中间点，和手动采样两个边界点求平均值的差值
+我们考虑平均后的结果是什么。为了分析方便，不妨设红点数值为1，蓝点数值为0。上面的5个采样点依次标记为0,1,2,3,4,5，那么易知从左到右求得的平均值分别为1,0.5,0.5,0.5,0。
+理想情况下我们想要的目标，是可以根据上下两点分别占边缘两侧的区域来决定BlendFactor。计算方法可以参考下图，同样是红点和蓝点，黄色的是边缘线。边缘线和像素边界将两个像素分成了4块区域，设其面积为S1~S4, 红点和蓝点数值分别为R和G，那么红点处计算应该是，蓝点处是。
+这样我们得到123点的BlendFactor大概是1，0.8，0.6，这样也就理解了为什么只要权重超过了0.5，就会切换到另一种颜色，因为这时边缘线肯定过像素中心了。
+然后看看面积是怎么计算的，以红点为例，S4等于，显然不是线性关系。
+假设α=45度，做出面积变化曲线如下，可以看出用线性拟合差别不大（实际上要精确计算也是不可能的，因为α是未知的）
+那么如何做线性拟合呢？FXAA使用的方法是沿着边缘方向找到边界点，然后跟当前采样点根据位置Blend。这里最左边的0点是1，中间三个点都是0.5，最右边是0，很显然边界点就是0和5。然后根据中间的相对位置来计算。
+再看下混合式，R代表红点颜色值，B代表蓝点颜色值，f为最终的颜色
+当BlendFactor为0.5时，f=0.5(R&#43;B)，就是平均值，BlendFactor越小，R占的权重就越大。所以123点的BlendFactor应该是递增的（0~0.5）。当然这实际上是因为现在的边缘方向是斜上方的，如果边缘是朝斜下方，那么BlendFactor就应该是递减（0.5~0）。
+要怎么确定边缘方向呢？FXAA里给的方法是判断终点是不是和当前点在同一个区域，比如这里都从左侧的红点向右查找终点，就会发现根据倾斜方向不同终点位于红色或者蓝色区域：
+判断终点区域是否相同具体实现是计算(起点值-中间值)，然后计算(终点值-中间值)，判断这两者符号是不是相同，如果符号相同，代表终点没有区域变化（左图的情况），否则代表右图的情况。简单理解就是看终点值和起点值颜色是不是一样。
+另外需要注意的一点是，我们之前都是在考虑红点，实际上蓝点也会做类似的计算，只是混合方向相反。
+有了以上的铺垫，FXAA计算BlendFactor的算法流程如下图所示，s代表查找起点，e代表终点，中间的1234四个点需要计算BlendFactor：
+1点距离起点长度1，距离终点长度4，距离最近的是起点s，起点没有区域变化，返回0；
+2点距离起点长度2，距离终点长度3，距离最近的是起点s，起点没有区域变化，返回0；
+3点距离起点长度3，距离终点长度2，距离最近的是终点e，终点有区域变化，返回2/5=0.4；
+4点距离起点长度4，距离终点长度1，距离最近的是终点e，终点有区域变化，返回1/5=0.2；
+我们来分析一下为什么这个流程可以解决正确计算出BlendFactor：
+首先为什么3点有BlendFactor而2没有呢？这是因为2点像素范围内还没有接触到蓝色区域，而到3点时才开始有。接触到蓝色区域可以简化为像素范围有没有越过水平的中线，就是上图中灰色的线条，灰色线条既是像素的中线，同时也是s~e区域范围内黄色边缘线的水平中线（根据对称性），那么很显然s和e的中间位置（(s&#43;e)/2）就是判断像素范围开始接触到蓝色区域的临界点。所以在s和e中间的点中，必定一半需要Blend，一半不需要。
+那要怎么判断是哪边需要Blend呢？如果我们计算出离这些点最近的边界点记作t（s或者e），需要Blend的点一定和t位于不同的区域，例如上面的3和4。这是因为这些点更接近边界点，肯定更加需要Blend），至于怎么判断终点属于不同的区域，前面已经给了方法。之后把上一步计算出来的BlendFactor处理一下，0.5-BlendFactor就是最终的BlendFactor了。
+还有一点是判断Blend方向的计算，FXAA判断垂直方向的权重是：
+abs(lumaW &#43; lumaE - 2 * lumaM) 为什么不用简单的abs(lumaW-lumaE)呢？我们分别用0和1代表luma值，不考虑等价情况，那么左中右三个点有这些情况：
+000，001，010
+其中000和001用abs(lumaW-lumaE)是可以得到一样的结果的，差异就在010，这种情况出现在中间点像素值和左右不同的情况，会导致出现异常噪点，是我们需要消除的。所以这种情况下需要让中间值跟两侧值做Blend，所以权重不能为0。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/66351489ef6fc400d21025f0a856c773/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-05-17T22:01:39+08:00" />
+<meta property="article:modified_time" content="2023-05-17T22:01:39+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Unity FXAA Edge Blending细节分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>         最近看了文章<a href="https://catlikecoding.com/unity/tutorials/custom-srp/fxaa/" rel="nofollow" title="FXAA">FXAA</a>和<a href="https://zhuanlan.zhihu.com/p/373379681" rel="nofollow" title="FXAA算法演义 - 知乎">FXAA算法演义 - 知乎</a>，对Edge Blending有些迷糊，做分析记录一下。</p> 
+<p>        Edge Blending目的是为了解决类似下面图1和图2展示的阶梯形走样，图1是原始的结果，图2是对上面的图做了双线性差值的结果。具体看渲染过程是不是使用了Bilinear的中间颜色缓存，FXAA前会做后处理，一般都会使用Bilinear，所以大多数是图2的情况。</p> 
+<p class="img-center"><img alt="" height="70" src="https://images2.imgbox.com/48/da/bgDGDLQv_o.png" width="694"></p> 
+<p style="text-align:center;">图1</p> 
+<p class="img-center"><img alt="" height="75" src="https://images2.imgbox.com/6b/12/Oijhd5zL_o.png" width="790"></p> 
+<p style="text-align:center;">图2</p> 
+<p>        两者的差别是，第一种FXAA边缘厚度是2，第二种因为多了一个中间层厚度是3。为了方便，下面都是基于无中间层的情况分析。 </p> 
+<p>        惯例先给出FXAA基于图1处理的结果，效果还是比较明显的。</p> 
+<p class="img-center"><img alt="" height="75" src="https://images2.imgbox.com/02/1b/A2WtNBBC_o.png" width="669"></p> 
+<p>        这是用来分析的图片，红色是三角形的采样点，蓝色是背景采样点，绿色表示像素的边缘，青色为三角形的边缘线。</p> 
+<p class="img-center"><img alt="" height="467" src="https://images2.imgbox.com/2c/6c/Y9gQe8SB_o.png" width="554"></p> 
+<p>        我们要分析Edge Blending，以下图中的123三个红点做参考，这三个点形成了明显的走样。</p> 
+<p class="img-center"><img alt="" height="463" src="https://images2.imgbox.com/12/cf/bm8hTiB7_o.png" width="548"></p> 
+<p>        显然123点的Blend方向是向下，按照FXAA的方法，123点依次向下移动0.5个像素到中间位置然后做采样，其实就是123和下面对应的蓝点取平均值。</p> 
+<p class="img-center"><img alt="" height="108" src="https://images2.imgbox.com/9d/c0/JYJlce4X_o.png" width="243"></p> 
+<p>        这里提一个坑的地方，我在自己的电脑上直接采样中间点，结果却和手动采样两次求平均值差不少（差值在0.1范围内），如果你有出现相同问题的话，建议手动采样两次求平均值，这样可以减少误差效果好一些。（这个问题已经找到原因和解决方法，参考我的另一篇博客<a href="https://blog.csdn.net/paserity/article/details/129543859" title="Unity Editor绘制时分辨率减一_paserity的博客-CSDN博客">Unity Editor绘制时分辨率减一_paserity的博客-CSDN博客</a>）</p> 
+<p class="img-center"><img alt="" height="271" src="https://images2.imgbox.com/28/62/U01Ncgle_o.png" width="491"></p> 
+<p style="text-align:center;">线性差值采样中间点，和手动采样两个边界点求平均值的差值</p> 
+<p>        我们考虑平均后的结果是什么。为了分析方便，不妨设红点数值为1，蓝点数值为0。上面的5个采样点依次标记为0,1,2,3,4,5，那么易知从左到右求得的平均值分别为1,0.5,0.5,0.5,0。</p> 
+<p class="img-center"><img alt="" height="108" src="https://images2.imgbox.com/9f/f2/eqRaIkf0_o.png" width="243"></p> 
+<p>        理想情况下我们想要的目标，是可以根据上下两点分别占边缘两侧的区域来决定BlendFactor。计算方法可以参考下图，同样是红点和蓝点，黄色的是边缘线。边缘线和像素边界将两个像素分成了4块区域，设其面积为S1~S4, 红点和蓝点数值分别为R和G，那么红点处计算应该是<img alt="R * S1+B*S4" class="mathcode" src="https://images2.imgbox.com/60/32/dSu0QyUo_o.png">，蓝点处是<img alt="R*S2+B*S3" class="mathcode" src="https://images2.imgbox.com/f0/cc/xXBk6y3R_o.png">。</p> 
+<p class="img-center"><img alt="" height="311" src="https://images2.imgbox.com/44/69/E8bf13TS_o.png" width="534"></p> 
+<p>        这样我们得到123点的BlendFactor大概是1，0.8，0.6，这样也就理解了为什么只要权重超过了0.5，就会切换到另一种颜色，因为这时边缘线肯定过像素中心了。</p> 
+<p>        然后看看面积是怎么计算的，以红点为例，S4等于<img alt="\frac{1}{2}*tan(\alpha )*x^{2}" class="mathcode" src="https://images2.imgbox.com/43/81/JvQCxlqy_o.png">，显然不是线性关系。</p> 
+<p class="img-center"><img alt="" height="122" src="https://images2.imgbox.com/28/75/vGs5Jrmq_o.png" width="270"></p> 
+<p>        假设α=45度，做出面积变化曲线如下，可以看出用线性拟合差别不大（实际上要精确计算也是不可能的，因为α是未知的）</p> 
+<p class="img-center"><img alt="" height="257" src="https://images2.imgbox.com/fd/00/qmMh0dmO_o.png" width="512"></p> 
+<p>        那么如何做线性拟合呢？FXAA使用的方法是沿着边缘方向找到边界点，然后跟当前采样点根据位置Blend。这里最左边的0点是1，中间三个点都是0.5，最右边是0，很显然边界点就是0和5。然后根据中间的相对位置来计算。</p> 
+<p class="img-center"><img alt="" height="108" src="https://images2.imgbox.com/3f/9c/PLs7yeyW_o.png" width="243"></p> 
+<p>        再看下混合式，R代表红点颜色值，B代表蓝点颜色值，f为最终的颜色</p> 
+<p class="img-center"><img alt="f=R+(B-R)*BlendFactor=R(1-BlendFactor)+B*BlendFactor" class="mathcode" src="https://images2.imgbox.com/d4/73/HFZf41cw_o.png"></p> 
+<p>        当BlendFactor为0.5时，f=0.5(R+B)，就是平均值，BlendFactor越小，R占的权重就越大。所以123点的BlendFactor应该是递增的（0~0.5）。当然这实际上是因为现在的边缘方向是斜上方的，如果边缘是朝斜下方，那么BlendFactor就应该是递减（0.5~0）。</p> 
+<p>         要怎么确定边缘方向呢？FXAA里给的方法是判断终点是不是和当前点在同一个区域，比如这里都从左侧的红点向右查找终点，就会发现根据倾斜方向不同终点位于红色或者蓝色区域：</p> 
+<p class="img-center"><img alt="" height="130" src="https://images2.imgbox.com/52/a0/PNE9rGvR_o.png" width="308"></p> 
+<p class="img-center"><img alt="" height="132" src="https://images2.imgbox.com/18/71/4TZJIK2K_o.png" width="307"></p> 
+<p>        判断终点区域是否相同具体实现是计算(起点值-中间值)，然后计算(终点值-中间值)，判断这两者符号是不是相同，如果符号相同，代表终点没有区域变化（左图的情况），否则代表右图的情况。简单理解就是看终点值和起点值颜色是不是一样。</p> 
+<p>        另外需要注意的一点是，我们之前都是在考虑红点，实际上蓝点也会做类似的计算，只是混合方向相反。</p> 
+<p>        有了以上的铺垫，FXAA计算BlendFactor的算法流程如下图所示，s代表查找起点，e代表终点，中间的1234四个点需要计算BlendFactor：</p> 
+<p>        1点距离起点长度1，距离终点长度4，距离最近的是起点s，起点没有区域变化，返回0；</p> 
+<p>        2点距离起点长度2，距离终点长度3，距离最近的是起点s，起点没有区域变化，返回0；</p> 
+<p>        3点距离起点长度3，距离终点长度2，距离最近的是终点e，终点有区域变化，返回2/5=0.4；</p> 
+<p>        4点距离起点长度4，距离终点长度1，距离最近的是终点e，终点有区域变化，返回1/5=0.2；</p> 
+<p style="text-align:center;"><img alt="" height="160" src="https://images2.imgbox.com/eb/eb/qz7wDIWr_o.png" width="443"></p> 
+<p></p> 
+<p>        我们来分析一下为什么这个流程可以解决正确计算出BlendFactor：</p> 
+<p>       首先为什么3点有BlendFactor而2没有呢？这是因为2点像素范围内还没有接触到蓝色区域，而到3点时才开始有。接触到蓝色区域可以简化为像素范围有没有越过水平的中线，就是上图中灰色的线条，灰色线条既是像素的中线，同时也是s~e区域范围内黄色边缘线的水平中线（根据对称性），那么很显然s和e的中间位置（(s+e)/2）就是判断像素范围开始接触到蓝色区域的临界点。所以在s和e中间的点中，必定一半需要Blend，一半不需要。</p> 
+<p>        那要怎么判断是哪边需要Blend呢？如果我们计算出离这些点最近的边界点记作t（s或者e），需要Blend的点一定和t位于不同的区域，例如上面的3和4。这是因为这些点更接近边界点，肯定更加需要Blend），至于怎么判断终点属于不同的区域，前面已经给了方法。之后把上一步计算出来的BlendFactor处理一下，0.5-BlendFactor就是最终的BlendFactor了。</p> 
+<p>        还有一点是判断Blend方向的计算，FXAA判断垂直方向的权重是：</p> 
+<pre><code>abs(lumaW + lumaE - 2 * lumaM)</code></pre> 
+<p>        为什么不用简单的abs(lumaW-lumaE)呢？我们分别用0和1代表luma值，不考虑等价情况，那么左中右三个点有这些情况：</p> 
+<p>        000，001，010</p> 
+<p>        其中000和001用abs(lumaW-lumaE)是可以得到一样的结果的，差异就在010，这种情况出现在中间点像素值和左右不同的情况，会导致出现异常噪点，是我们需要消除的。所以这种情况下需要让中间值跟两侧值做Blend，所以权重不能为0。</p> 
+<p></p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/2c041fe599b0827f935746f5cdf78639/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【计算机毕设】基于SringBoot&#43;Vue的校园二手交易平台（含支付）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/90ca99d5446750a47dc36995257d3055/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">jQuery动画</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

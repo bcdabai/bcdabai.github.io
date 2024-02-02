@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Linux Mii management/mdio子系统分析之六 fixed-mii_bus分析（mac2mac分析） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Linux Mii management/mdio子系统分析之六 fixed-mii_bus分析（mac2mac分析）" />
+<meta property="og:description" content="（转载）原文链接：[https://blog.csdn.net/u014044624/article/details/130674908]
+(https://blog.csdn.net/u014044624/article/details/130674908)
+前面几章我们介绍了MDIO模块的大部分内容，针对mii_bus、mdio_bus、phy_device、phy_driver相关的注册、注销均进行了介绍。基本上把mdio模块的内容介绍完了，而本篇介绍的内容，主要是针对虚拟mii_bus实现，并将虚拟phy_device注册至该mii_bus上。（本次分析内容基于LINUX3.10的内核）
+那fixed-mii_bus起到什么作用呢？其应用场景如下（示意图如下）：
+两个cpu间的mac通过rgmii/sgmii等直接相连（不需要phy device），这两块核心板存在于一块单板上，无须使用phy芯片。cpu与fpga间的mac通过rgmii/sgmii等直接相连（不需要phy device），这两块核心板存在于一块单板上，无须使用phy芯片。 针对这两种应用场景，均没有使用phy芯片，但mac的驱动程序为保持通用性还是需要进行mii_bus注册以及net-device与phy-device的connect。因此mdio模块设计了一个虚拟的mii_bus（命名为fixed-mii_bus），用于mac芯片无需连接phy芯片的情况。针对上述情况而言，因两个mac间直接通过数据总线（rgmii/sgmii/qsgmii等）相连，因此需要手动配置mac芯片的模式（全双工）、速率（千兆/百兆/万兆等）。
+fixed_mii_bus相关的数据结构说明 主要定义了struct fixed_mdio_bus、struct fixed_phy两个结构体。其中struct fixed_mdio_bus中包含了
+struct mii_bus类型的成员；而struct fixed_phy包含了struct phydev类型的成员。
+struct fixed_mdio_bus 该结构体表征一个虚拟mii_bus，并包含了fixed相关的信息，其中：
+链表头phys用于将所有注册至fixed_mii_bus上的逻辑phy device链接在一起；irqs表示每一个虚拟phy对应的中断（基本上很少有使用该变量的，在mii_bus介绍章节中也说了，该中断可实现对phy devic link up/down的中断触发。在此处基本用不到） struct fixed_mdio_bus {
+int irqs[PHY_MAX_ADDR];
+struct mii_bus *mii_bus;
+struct list_head phys;
+};
+struct fixed_phy 该结构体表征一个虚拟phy设备，其中:
+id表示phy的addr,范围[0-31];regs表示该虚拟phy设备的寄存器值（因是一个虚拟phy，因此该虚拟phy的寄存器值由fxied_phy_status中的值决定）status中定义了该虚拟phy设备的各状态值，主要包括link状态、speed、duplex、pause、asym_pause等，而regs中的值即根据该变量中的内容进行设置；link_update接口用于更新虚拟phy的link状态。该接口类似于struct phydev中的adjust_link。它们之间的区别是： adjust_link接口根据phy device的link状态，对net_device的link状态进行更新；link_update接口则是根据net_device的link状态，对虚拟phy设备的link 状态进行更新。 针对该接口指针，基本上不需要使用，若需要使用，则在创建虚拟phy设备时，赋值即可。
+node主要用于将该结构体链接至fixed_mdio_bus的的phys链表上。 struct fixed_phy {
+int id;
+u16 regs[MII_REGS_NUM];
+struct phy_device *phydev;
+struct fixed_phy_status status;
+int (*link_update)(struct net_device *, struct fixed_phy_status *);
+struct list_head node;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/ac1f6ad9c06014671e4366316d2c9d44/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-16T17:39:53+08:00" />
+<meta property="article:modified_time" content="2024-01-16T17:39:53+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Linux Mii management/mdio子系统分析之六 fixed-mii_bus分析（mac2mac分析）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>（转载）原文链接：[https://blog.csdn.net/u014044624/article/details/130674908]</p> 
+<hr> 
+<p>(https://blog.csdn.net/u014044624/article/details/130674908)</p> 
+<div id="article_content" class="article_content clearfix"> 
+ <div id="content_views" class="htmledit_views"> 
+  <div> 
+   <div> 
+    <div> 
+     <p>     前面几章我们介绍了<a href="https://so.csdn.net/so/search?q=MDIO&amp;spm=1001.2101.3001.7020" target="_blank" class="hl hl-1" rel="noopener noreferrer">MDIO</a>模块的大部分内容，针对mii_bus、mdio_bus、phy_device、phy_driver相关的注册、注销均进行了介绍。基本上把mdio模块的内容介绍完了，而本篇介绍的内容，主要是针对虚拟mii_bus实现，并将虚拟phy_device注册至该mii_bus上。（本次分析内容基于LINUX3.10的内核）</p> 
+     <p> </p> 
+     <p>那fixed-mii_bus起到什么作用呢？其应用场景如下（示意图如下）：</p> 
+     <ol><li>两个cpu间的mac通过rgmii/sgmii等直接相连（不需要phy device），这两块核心板存在于一块单板上，无须使用phy芯片。</li><li>cpu与fpga间的mac通过rgmii/sgmii等直接相连（不需要phy device），这两块核心板存在于一块单板上，无须使用phy芯片。</li></ol> 
+     <p> </p> 
+     <p><img alt="" height="565" src="https://images2.imgbox.com/db/14/wi0LQhQj_o.png" width="911"></p> 
+     <p> </p> 
+     <p> </p> 
+     <p>      针对这两种应用场景，均没有使用<a href="https://so.csdn.net/so/search?q=phy&amp;spm=1001.2101.3001.7020" target="_blank" class="hl hl-1" rel="noopener noreferrer">phy</a>芯片，但mac的驱动程序为保持通用性还是需要进行mii_bus注册以及net-device与phy-device的connect。因此mdio模块设计了一个虚拟的mii_bus（命名为fixed-mii_bus），用于mac芯片无需连接phy芯片的情况。针对上述情况而言，因两个mac间直接通过数据总线（rgmii/sgmii/qsgmii等）相连，因此需要手动配置mac芯片的模式（全双工）、速率（千兆/百兆/万兆等）。</p> 
+     <p> </p> 
+     <h3>fixed_mii_bus相关的数据结构说明</h3> 
+     <p>主要定义了struct fixed_mdio_bus、struct fixed_phy两个结构体。其中struct fixed_mdio_bus中包含了</p> 
+     <p>struct mii_bus类型的成员；而struct fixed_phy包含了struct phydev类型的成员。</p> 
+     <h4>struct fixed_mdio_bus</h4> 
+     <p>该结构体表征一个虚拟mii_bus，并包含了fixed相关的信息，其中：</p> 
+     <ol><li>链表头phys用于将所有注册至fixed_mii_bus上的逻辑phy device链接在一起；</li><li>irqs表示每一个虚拟phy对应的中断（基本上很少有使用该变量的，在mii_bus介绍章节中也说了，该中断可实现对phy devic link up/down的中断触发。在此处基本用不到）</li></ol> 
+     <p>struct fixed_mdio_bus {<!-- --></p> 
+     <p>int irqs[PHY_MAX_ADDR];</p> 
+     <p>struct mii_bus *mii_bus;</p> 
+     <p>struct list_head phys;</p> 
+     <p>};</p> 
+     <p> </p> 
+     <h4>struct fixed_phy</h4> 
+     <p>该结构体表征一个虚拟phy设备，其中:</p> 
+     <ol><li>id表示phy的addr,范围[0-31];</li><li>regs表示该虚拟phy设备的寄存器值（因是一个虚拟phy，因此该虚拟phy的寄存器值由fxied_phy_status中的值决定）</li><li>status中定义了该虚拟phy设备的各状态值，主要包括link状态、speed、duplex、pause、asym_pause等，而regs中的值即根据该变量中的内容进行设置；</li><li>link_update接口用于更新虚拟phy的link状态。该接口类似于struct phydev中的adjust_link。它们之间的区别是： 
+       <ol><li>adjust_link接口根据phy device的link状态，对net_device的link状态进行更新；</li><li>link_update接口则是根据net_device的link状态，对虚拟phy设备的link 状态进行更新。</li></ol></li></ol> 
+     <p>  针对该接口指针，基本上不需要使用，若需要使用，则在创建虚拟phy设备时，赋值即可。</p> 
+     <ol><li>node主要用于将该结构体链接至fixed_mdio_bus的的phys链表上。</li></ol> 
+     <p> </p> 
+     <p>struct fixed_phy {<!-- --></p> 
+     <p>int id;</p> 
+     <p>u16 regs[MII_REGS_NUM];</p> 
+     <p>struct phy_device *phydev;</p> 
+     <p>struct fixed_phy_status status;</p> 
+     <p>int (*link_update)(struct net_device *, struct fixed_phy_status *);</p> 
+     <p>struct list_head node;</p> 
+     <p>};</p> 
+     <p> </p> 
+     <p>struct fixed_phy_status {<!-- --></p> 
+     <p>int link;</p> 
+     <p>int speed;</p> 
+     <p>int duplex;</p> 
+     <p>int pause;</p> 
+     <p>int asym_pause;</p> 
+     <p>};</p> 
+     <p> </p> 
+     <p> </p> 
+     <p> </p> 
+     <h3>fixed_mii_bus的实现流程</h3> 
+     <p> </p> 
+     <p>在《<a href="https://so.csdn.net/so/search?q=LINUX&amp;spm=1001.2101.3001.7020" target="_blank" class="hl hl-1" rel="noopener noreferrer noopener noreferrer">LINUX</a> MDIO模块分析（三）mii_bus注册、注销及其驱动开发流程》中，我们已经叙述了如何开发一个mii_bus驱动，此处引用一下：</p> 
+     <p>      mii_bus结构体的定义如下，我们实现一个mii_bus驱动也就是实现该结构体类型的变量，并调用上述的mdiobus_register接口，即可完成mii_bus的注册。具体步骤如下：</p> 
+     <ol><li>需设置该mii_bus的名称与id，而在系统中可根据该id值搜索一个mii_bus；</li><li>完成read、write、reset方法，其中read、write主要用于与该mii_bus下的设备进行命令的交互；而reset方法主要用于对mii_bus的reset，关于这三个方法的实现，驱动开发人员可根据具体mac芯片的手册说明进行相应的开发操作。</li><li>phy_mask主要用于设置需要忽略的phy addr，如我们需要忽略对phy addr 0的查找，则将phy_mask设置为0x01即可。</li><li>而irq主要指向一个数组，该数组中存储了每一个phy addr对应的irq，主要用于为每一个 phy addr对应的中断，该中断主要用于link up/down，针对该部分内容主要涉及到phy state machine，我们在后续章节中会详述该部分（大部分的mii_bus一般不提供该irq，但phy state machine提供了phy_poll机制，即是没有该irq，也可以进行phy link up/down，类似于mmc子模块中mmc card的poll机制）。</li></ol> 
+     <p> </p> 
+     <p>而fixed_mii_bus的实现流程也大致如此。下面我们借助mii_bus的实现流程来分析fixed_mii_bus。</p> 
+     <ol><li>fixed_mii_bus的名称为fixed-0；</li><li>提供了read、write方法（比不需要实现reset方法，其实write方法也没有实现，因为挂载在该mii_bus上的均为虚拟phy设备，不需要进行设置操作）。read接口的功能为根据phy addr在fixed_mii_bus的phys链表中找到对应的虚拟phy设备，并根据该虚拟phy设备的struct fixed_phy_status类型的成员，更新其寄存器的值，并返回。</li><li>fixed_mii_bus在初始化时，并没有设置需要忽略的phy addr；</li><li>将struct fixed_mdio_bus类型的全局变量platform_fmb中的irq数组赋值给platform_fmb.mii_bus-&gt;irq。</li><li>调用mdiobus_register完成fixed_mii_bus的注册。</li></ol> 
+     <p>     fixed_mii_bus基本上严格按照我们上一篇文章中介绍的流程创建的mii_bus。而针对虚拟phy设备而言，需要各模块自行进行虚拟设备的添加，因此fixed_mii_bus模块提供了添加接口fixed_phy_add（在3.10的内核中，仅提供了该接口，这限制了fixed_mii_bus的虚拟phy设备的添加时机，后面详述。而在linux4.x以上的内核增加了接口fixed_phy_register）。</p> 
+     <p> </p> 
+     <h4>fixed_mdio_bus_init接口分析</h4> 
+     <p>该接口主要实现上述所说的fixed_mii_bus的实现流程：</p> 
+     <ol><li>为fixed_mii_bus申请对应的mii_bus，并设置其read、write、irq变量；</li><li>调用mdiobus_register接口，注册fixed_mii_bus。此处我们也多说一下： 
+       <ol><li>mdiobus_register接口我们在之前已经介绍过程，其会为phy addr范围为[0-31]的phy设备，调用mdiobus_scan进行phy device的搜索，若搜索到即为该虚拟phy设备创建phy_device，并注册到mdio_bus中（在搜索phy device时，即会调用fixed_mii_bus的read接口，若虚拟phy设备已添加到fixed_mii_bus中，则返回的phyid即为该虚拟phy设备的addr值，因此即会调用phy_device_create接口创建phy device，并注册至mdio_bus中。因此若在fixed_mdio_bus_init调用之前，未将虚拟phy设备添加至fixed_mii_bus上，则进行mdiobus_register时，搜索不到该虚拟phy设备）。</li></ol></li></ol> 
+     <p> </p> 
+     <p> </p> 
+     <p><img alt="" height="782" src="https://images2.imgbox.com/9f/39/EkFPxZl1_o.png" width="790"></p> 
+     <p> </p> 
+     <p> </p> 
+     <p> </p> 
+     <h4>fixed_mdio_read接口分析</h4> 
+     <p>      该接口用于获取一个虚拟phy设备的寄存器值，而针对虚拟phy设备，其各寄存器的值即根据fixed_phy的struct fixed_phy_status 类型的成员变量status进行设置（即根据在虚拟phy设备的添加时，会通过struct fixed_phy_status 类型的变量，设置该虚拟phy设备的工作模式等信息）。该接口的实现流程图如下，主要功能为：</p> 
+     <ol><li>根据输入的phy addr，查找该phy addr对应的虚拟设备是否已添加至fixed_mii_bus，若没有则返回失败；否则进入步骤b；</li><li>若查找的fixed_phy提供link_update接口，则调用该接口更新该fixed_phy-&gt;status变量中各成员的值；</li><li>调用fixed_phy_update_regs接口，根据fixed_phy-&gt;status更新该fixed_phy各寄存器的值；</li><li>返回该fixed_phy对应寄存器的值。</li></ol> 
+     <p> </p> 
+     <p><img alt="" height="1076" src="https://images2.imgbox.com/b1/8b/DhHMbeJa_o.png" width="405"></p> 
+     <p> </p> 
+     <p> </p> 
+     <h4>fixed_phy_add接口分析</h4> 
+     <p>该接口主要将一个fixed_phy添加至fixed_mii_bus中，该接口的实现流程如下所示。主要功能：</p> 
+     <ol><li>申请struct fixed_phy类型大小的内存空间；</li><li>若申请成功，则设置该fixed_phy的status成员,并更新其regs值；</li><li>将该fixed_phy添加至fixed_mii_bus的成员phys链表中。</li></ol> 
+     <p> </p> 
+     <p>       该接口主要是将一个fixed_phy添加至fixed_mii_bus的成员phys中，并没有为之创建对应的phy_device。而针对fixed_mii_bus上的成员phys链表上的fixed_phy链表成员，仅在fixed_mdio_bus_init中注册fixed_mii_bus时，通过mdiobus_register时，完成将该链表上的所有链表成员，均为其注册对应的phy_device至mdio_bus上。因此若各驱动模块想通过fixed_phy_add接口添加一个fixed_phy，则必须保证其在接口fixed_mdio_bus_init调用之前被调用到，否则该添加操作不起作用（因没有创建对应的phy_device）。而在linux3.10中，仅提供了这一个接口进行fixed_phy的添加。这也是这个接口的缺陷，即必须保证调用该接口（fixed_phy_add）的代码片段在fixed_mdio_bus_init执行之前调用。</p> 
+     <p> </p> 
+     <p><img alt="" height="1199" src="https://images2.imgbox.com/bc/1f/hnARcTK2_o.png" width="369"></p> 
+     <p> </p> 
+     <h4>fixed_phy_register接口分析</h4> 
+     <p>     上面分析fixed_phy_add接口的调用有所限制，必须保证其在fixed_mdio_bus_init执行之前调用。因此在 linux4.x的内核中，增加了接口fixed_phy_register，该接口弥补了fixed_phy_add的不足。接口fixed_phy_register在调用fixed_phy_add之后，调用phy_register，实现phy_device的注册，弥补了fixed_phy_add的不足。该接口的实现流程图如下：</p> 
+     <ol><li>获取一个可用的phy addr，若获取不到返回失败；</li><li>调用fixed_phy_add将该fixed_phy添加至fixed_mii_bus；</li><li>调用phy_register将该phy_device注册至mdio_bus上。</li></ol> 
+     <p> </p> 
+     <p><img alt="" height="1200" src="https://images2.imgbox.com/fd/14/ChQdyjbP_o.png" width="594"></p> 
+     <p> </p> 
+     <p> </p> 
+     <p>        在linux3.10及之前的版本，并没有提供该接口，若要使用则可以自己添加该接口。以上基本上完成了fixed_mii_bus模块相关接口的介绍，下面我们主要介绍如何使用fixed_mii_bus的接口。</p> 
+     <p> </p> 
+     <h3>Mac2mac驱动程序修改流程</h3> 
+     <p>上面介绍了fixed_mii_bus模块的接口，下面我们说明一下如何修改一个mac的驱动，实现对fixed_phy的支持。我们从两方面说明（支持设备树、不支持设备树）</p> 
+     <p> </p> 
+     <h4>不支持设备树模式的修改流程</h4> 
+     <ol><li>在mac驱动对应的platform driver的probe接口中，调用fixed_phy_register，完成fixed_phy的注册；</li><li>在该net_device的ndo_open接口中，调用phy_connect接口进行phy_device、net_device的绑定时，可根据"fixed-0:phy_addr"，在mdio_bus上查找对应的phy_device，从而完成phy_device与net_device的绑定。</li></ol> 
+     <p> </p> 
+     <p> </p> 
+     <p> </p> 
+     <h4>支持设备树模式的修改流程</h4> 
+     <p> </p> 
+     <ol><li>在mac驱动对应的platform driver的probe接口中，通过获取设备树中针对phy-device的定义（如定义了fixed-link，则说明使用fixed_phy，则调用fixed_phy_register，完成fixed_phy的注册；在4.x的内核提供了接口of_phy_register_fixed_link进行fixed_phy的注册）；</li><li>在在该net_device的ndo_open接口中，调用phy_connect接口进行phy_device、net_device的绑定时，可根据"fixed-0:phy_addr"，在mdio_bus上查找对应的phy_device，从而完成phy_device与net_device的绑定。</li></ol> 
+     <p> </p> 
+     <p>通过进行以上的修改，即可让mac驱动支持fixed-phy的支持。</p> 
+     <p> </p> 
+     <p>     本章完成了fixed-phy的分析，也基本上完成了mdio子系统的介绍，我们分析了mii_bus相关的实现流程以及具体mii_bus驱动的实现步骤；也分析了phy_device、phy_driver、mdio_bus的实现流程，以及net_device与phy_device的绑定（phy_connect）；介绍了phy_device的状态机流转相关的内容；fixed_mii_bus与fixed_phy的实现以及如何修改mac驱动支持fixed_phy。</p> 
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+ <div> 
+  <div></div> 
+ </div> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/595cb28247d0b8194d7f70a23b58b6b6/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">详解SpringCloud微服务技术栈：Nacos配置管理</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/1c8fa48059850eddc722a8b86363b43c/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">STM32 IAP远程程序升级（基于HTTP）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>E3--FPGA实现LVDS收发实例和原理2022-12-03 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="E3--FPGA实现LVDS收发实例和原理2022-12-03" />
+<meta property="og:description" content="1.什么是LVDS 一个新东西来的时候，人们总是希望能够宏观的定性的认识它。一个问题是，手机上用的“软件”该如何定义呢？来自百度百科的定义是，软件是指一系列按照特定顺序组织的计算机数据和指令的集合，如果你是非专业人员，第一次听说“软件”并听到这样的定义应该不会有好的感知。另外一种回答是，类似手机里“微信”的就是一个软件，虽然仍然不知道软件如何标准定义，但这个回答显然能让更容易的感知“软件”这个名词。生活中往往需要从另外一个事物A认识事物B，这个A可能和B存在某种关系，由于A很简单从而对B有了宏观的感知。生活如此，学习一个新的技术也是如此，或者说，学技术如此，生活也是如此。那该如何宏观感知LVDS呢？
+LVDS的标准定义是Low-Voltage Diffferential Signaling低电压差分信号，为了克服以TTL电平方式传输宽带高码率数据时功耗大，电磁干扰大等缺点出现了LVDS技术，它具有低功耗、低误码率、低串扰和低辐射等特点。LVDS接口使用1.2V 偏置电压作为基准（共模直流电压），其正负端的摆幅大约为350mV，即所谓的差模电压。在网络上检索LVDS会出现各种说法，LVDS接口、LVDS电平、LVDS协议、LVDS技术，到底该如何理解呢？从电气标准的角度，LVDS是一种电平标准，其他常见的电平标准还有TTL、LVTTL、SSTL、LVCMOS、RS232、RS485等，不同电平标准有不同的场景应用。在Xilinx的FPGA中，支持这个电平标准，并且有LVDS_25\LVDS\LVDS33等，后续会介绍xilinx LVDS使用注意事项。从接口的角度看，LVDS可以称作接口，侠义的接口例如USB接口，千兆网口，麦克接口都是指某个物理硬件，可以连接起来。而广义的接口包括API、Sockets、弱函数、虚函数等软件上的接口，二者有一个共同的特点就是要在接口两端实现信息的传递，从这个意义上讲，LVDS是一个侠义的硬件接口。关于LVDS技术，这个说法主要是指LVDS接收器和收发器的硬件上的组成部分，大多数低速数字逻辑电平（如TTL、CMOS）是以电压对参考地的幅值来判断是高电平还是低电平， LVDS却完全不一样，它是通过数据接收器同相端与反相端的电压相对大小判断高低电平的，而不是通过同相端或反相端对公共地（GND）。通过恒流源和全桥开关电路不同晶体管的通断形成电压摆幅。关于LVDS协议，这种说法应该是不对的，通常协议是指规定两个或多个通信实体之间进行交换的报文格式和次序，LVDS并没有做这些规定。因此当设备与控制芯片（如FPGA）通过LVDS接口相连时，如何正确传输数据，这是控制芯片去适配设备接口属性的，这也是本篇要解决的问题，即实现FPGA上的LVDS与外部设备通信，实例中用到的外部设备也是FPGA。同样这也是LVDS的本质意义，即如何通过硬件电路LVDS接口实现通信。文末附本例源码。
+2.LVDS传输模型 如上图所示，LVDS是典型的源同步传输模型，除此以外还有即将被淘汰的系统同步模型和现在应用广泛的自同步模型。源同步模型由数据线和时钟线组成，LVDS传输支持速率一般在155Mbps（大约为77MHZ）以上，推荐最大速率为655Mbps，理论极限速率为1.923Gbps。这里的时钟通常称之为随路时钟，并没有规定这个随路时钟的时钟频率是多少，但通常是并行时钟或者串行时钟（SDR）或串行时钟除以2（DDR模式）。它存在的意义便是帮助接收端恢复数据。恢复的过程是同步于随路时钟，发送一个双方约定好的Pattern，当接收端恢复出pattern时，认为通道可以传输有效数据。当通信速率较小的源同步模型，例如cypressUSB3.0方案中，可以通过将随路时钟相移的方法满足cypress芯片的时序参数要求。但LVDS的线速度是比较高的，需要通过逻辑代码中微调来找到数据采样的中心点。
+关于LVDS接口通信的其他概念结合上图阐释，截图出自xapp585-lvds-source-synch-serdes-clock-multiplication.pdf，可以看到随路时钟采用的是并行时钟，一共有五个LVDS传输线同步于此时钟，此外还有通道的概念，通常是一个通道有一个单独的随路时钟，通道内有几个LVDS传输线。图中随路时钟的占空比并不均匀，在一个传输线高电平期间传输3bit，在低电平期间传输4bit，一个并行时钟周期单个传输线上传输的bit个数称为串化因子，图中串化因子是7。SDR模式和DDR模式是相对于串行时钟说的，DDR就是在串行时钟的上升沿和下降沿都发出数据。因此，一个并行周期将传输 7bit*5lines=35bit数据。上述提及的各个LVDS通信中的概念应该是通信双方已知的，就像串口传输通信双方应该协调好波特率等参数。
+LVDS传输模型常用于液晶屏的信号接收端口，ADC转接芯片的数据输出端口，CMOS图像数据输出接口等场景。
+3.LVDS硬件设计注意事项 1.不同型号的FPGA对于LVDS的速度支持是不同的，选型时需要注意。以下截图出自xilinx A7 datasheet。
+2.应该确认Bank类型，HR bank只有在供电电压是2.5V的时候才可以使用内部电阻，当bank电压为其他值时，此时只能作为输入管脚且不能使用内部电阻。对于HP bank标准电压是1.8v，当bank电压是1.8v时可以使用内部电阻，当bank电压为其他值时，此时只能作为输入管脚且不能使用内部电阻。可在UG475中查看当前Bank是HR还是HP。
+3.LVDS_25和LVDS（指1.8V）是可以互相通信的，这是因为他俩的直流特性是一样的。即设备之间通信也是，LVDS与LVDS_25可以相互通信，但要确保Vdiff和Vcm是兼容的。以下截图来自于xilinx官方回复，HR bank使用内部的终端电阻的时候，必须配置为LVDS_25,即bank电压为2.5v；当作为输入管脚，且不使用内部电阻，可以配置成其他电压；LVDS与LVDS_25可以相互通信，但要确保Vdiff和Vcm是兼容的（可在Datasheet中查看该属性）。第二张图是为了更好的说明了LVDS使用的问题。
+4.最后是7系列不在支持LVDS_33，原因如图所示。 4.发送端LVDS程序设计 根据前三节的描述，搭建LVDS发送端程序首先要明确以下三个事项，①明确属性，包括通道个数，LVDS传输线个数，串化因子的大小，训练数据pattern值，以及SDR或DDR模式，随路时钟的大小；②明确当前硬件环境，随路时钟应该接MRCC或者SRCC管脚，否则vivado编译会不通过；差分数据管脚应该连接在FPGA上的PN差分对，并要确认好管脚所在bank的供电电压；还应该查看FPGA芯片数据手册判断是否支持需求的传输速率。③根据应用场景，例如LVDS发送端发送数据到LVDS液晶显示屏，则要遵守液晶显示屏时序的相关要求。在上述事项明确的前提下，LVDS发送端要解决的问题便是，将来自其他模块的应用数据按照既定的传输模型并转串后，接入到FPGA内部的LVDS发送器完成数据的发送。为此，xilinx 7系列提供了OBUFDS原语实现单端信号转LVDS差分信号的转换（可理解为该原语指向FPGA内部的LVDS发送器），提供了OSERDES2原语实现逻辑中应用并行数据的串行化处理。
+本次实例拟8位传化因子，1个通道，2个LVDS，DDR模式，随路时钟为200MHz，并行时钟为50MHz,pattern值为0xe9，LVDS相关引脚连接某A7芯片Bank16，bank电压为2.5V。所发送的应用数据为测试数据为1-255自增，发送端逻辑框图如下
+5.接收端LVDS程序设计 5.1接收端概述 接收端的传输模型各个属性应该与LVDS发送端各属性一致，例如，如果用于接收CMOS图像传感器的图像数据，则接收端程序的串化因子、通道个数等将要与设备一致。在硬件设计上，LVDS时钟线和LVDS数据线应该等长设计，但由于布线制板工艺的影响，难免数据线和时钟线无法同时到达接收端，在传输速度快时，微乎其微的偏差都可能让数据出错，这就是LVDS接收端要解决的问题，即在数据稳定窗口的中心采样，保持数据的稳定，这个动作称之为位对齐。此外，当在数据线上重复发送ABCDEFGH（假设一个字母代表一个bit），有可能接收到的是BCDEFGHA产生字偏移，通过ISERDES2的bitslip可以完成数据的平移，这个动作称之为“字对齐”。接收端通过IBUFDS进行差分转单端信号便于逻辑处理，将lvds传输线上的串行数据经过IDELAY2进行位对齐操作，随后利用ISERDES2将该串行数据并行化即字对齐操作，将发送端的数据恢复。其难点就在于如何实现字对齐和位对齐操作。Xilinx提供了多个例程适用于不同系列的FPGA，如xapp860和xapp855适于V5，xapp585适用于7系列，还有适用于ultrascale的例程。本例程基于xapp855修改使之适配7系列并满足既定传输模型属性要求。
+5.2逻辑框图 以下框图截取自xapp855，与示例程序并不一致。数据差分信号经IBUFDS转化为单端信号，进入IDELAY2（由于xapp855适用于V5，而当前程序适用于7系列，因此原语的名称有所不同）将数据位对齐后进入ISEDERS2转换成并行数据；时钟差分信号经过IBUFDS转化成单端信号，进入IDELAY2（此处为0，以时钟到达为基准）由BUFR倍频出并行时钟，经BUFIO产生串行时钟。此外，使用IDELAY必须要使用IDELAYCTRL，输入200MHz作为参考时钟。还有两个逻辑模块一个是Bit Align Machine实现位对齐字对齐，产生ISERDES2和IDELAY2所需的信号，完成当前LVDS传输线的对齐操作。Resource sharing control实现通道切换，和训练完成的指示。
+5.3xapp855训练代码解读 通道选择模块较为简单，主要介绍Bit Align Machine模块是如何完成单通道的数据训练操作。将ISERDES2模块传入的并行数据A打一拍得到B，当A不等于B的时候，认为此时遇到了亚稳态，即建立时间或者保持时间不满足要求的情况。当连续几个周期B等于pattern数据时，认为此时的采样点可用，字对齐也完成。完成数据训练的主要思路是，先使用IDEALY延迟直到找见一个亚稳态的点，未找见就延迟加1，然后继续增加延迟并加入字节对齐的判断直到找到Pattern数据，认为此时找到了数据窗口的左值，继续增加延时值，直到找见下一个亚稳态的采样点。从第一个pattern数据出现，增加延时值到下一个亚稳态的出现之间就是数据有效窗口，然后通过减去延迟值找到采样中心点，此后再次判断字对齐的情况，当字对齐结束后认为此LVDS传输线数据训练完成。由Resource sharing control控制开始训练下一个LVDS传输线。 以上截图出自xapp855的解释说明，步骤①即是假定数据和时钟到达时二者的相对位置关系。步骤②是经过延时找到了第一个亚稳态窗口（Transition），图中斜线部分代表此时数据采样不稳定。步骤③是通过延时和bitslip寻找到数据有效窗口的左值（Eye）。步骤④是通过延时找到下一个亚稳态窗口，由此在③和④之间便是数据有效的窗口。步骤⑤是将采样点控制到数据有效窗口的中心位置。需要注意，IDELAY2总共只有32个阶，当参考时钟是200MHz时，每一阶延时78ps，即总共可延时32*78=2496ps=2.5ns。因此数据传输的线速率不能太低，线速率太低时需要采用别的方法或者调整该状态机，否则会错误的找到最佳采样点，出现不稳定的情况，因此使用该程序，其线数据传输速率建议大于400Mbps。
+下面对该模块中状态机简单分析便于理解。 00000不动（指各计数模块，idelay、bitslip均不做操作，后同），保证不与通道切换指令冲突。00001不动 比较前一个后一个，不相等认为找见第一个亚稳态窗口。01000 SAMPLE（指代码中信号含SAMPLE的128bit计数器，后同）计数器加1，连续抓15次判断是否为亚稳态窗口。01011 IDELAY延时加1，两个计数器清0。00100 SAMPLE控制7个周期后判断是否亚稳态，如此循环直到找到亚稳态窗口，即进入01111状态。（上述五个步骤必定能找见亚稳态窗口）01111 SAMPLE清0 IDEALAY加1 准备寻找pattern。01101 SAMPLE加1 JC添加8周期等待 找等于check pattern 找见就准备记录 重复上述步骤，直到找见稳态check pattern即渡过第一个窗口 bitslip=1。01100 SAMPLE清0 （进入IDLE状态）。10000 第二个idle 不动作。00010再次确认是否退出了窗口 如果没有退出，重复上述步骤直到退出。01110 确认跳出第一个亚稳态窗口，该状态CNT开始计数，找左值。01001 idelay值加1 CNT开始计数(记录的是数据有效窗口的大小，CNT指代码中不含SAMPLE的128计数器) 找下一个亚稳态区域。00011 SAMPLE计数控制8周期后比较数据，复制当前的CNT中的计数值，找见第二个就退出，找不见就重复上面步骤。10010 计数器全部清0 无动作跳转。01010 idelay减一减到有效采样的中间处即可，清0CNT。思考，假如taps的值不够用怎么办（即前文提到线数据速率不能太慢，否则会出现这种情况）。00101 CNT控制延时，再次确认是否word对齐，默认当前已经到了采样中心点 word对齐则进入成功完成数据训练状态，word没有对齐就再次进入word对齐状态00110 bitslip一次00111 指示当前通道训练完成，准备切换到下一个通道，重复上述步骤进行训练 6." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/baf3387fd80ffaed1a924a725eacbca2/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-12-03T16:25:50+08:00" />
+<meta property="article:modified_time" content="2022-12-03T16:25:50+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">E3--FPGA实现LVDS收发实例和原理2022-12-03</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2 style="margin-left:0px;text-align:justify;">1.什么是LVDS</h2> 
+<p style="margin-left:.0001pt;text-align:justify;">一个新东西来的时候，人们总是希望能够宏观的定性的认识它。一个问题是，手机上用的“软件”该如何定义呢？来自百度百科的定义是，软件是指一系列按照特定顺序组织的计算机数据和指令的集合，如果你是非专业人员，第一次听说“软件”并听到这样的定义应该不会有好的感知。另外一种回答是，类似手机里“微信”的就是一个软件，虽然仍然不知道软件如何标准定义，但这个回答显然能让更容易的感知“软件”这个名词。生活中往往需要从另外一个事物A认识事物B，这个A可能和B存在某种关系，由于A很简单从而对B有了宏观的感知。生活如此，学习一个新的技术也是如此，或者说，学技术如此，生活也是如此。那该如何宏观感知LVDS呢？</p> 
+<p style="margin-left:.0001pt;text-align:justify;">LVDS的标准定义是Low-Voltage Diffferential Signaling低电压差分信号，为了克服以TTL电平方式传输宽带高码率数据时功耗大，电磁干扰大等缺点出现了LVDS技术，它具有低功耗、低误码率、低串扰和低辐射等特点。LVDS接口使用1.2V 偏置电压作为基准（共模直流电压），其正负端的摆幅大约为350mV，即所谓的差模电压。在网络上检索LVDS会出现各种说法，LVDS接口、LVDS电平、LVDS协议、LVDS技术，到底该如何理解呢？从电气标准的角度，LVDS是一种电平标准，其他常见的电平标准还有TTL、LVTTL、SSTL、LVCMOS、RS232、RS485等，不同电平标准有不同的场景应用。在Xilinx的FPGA中，支持这个电平标准，并且有LVDS_25\LVDS\LVDS33等，后续会介绍xilinx LVDS使用注意事项。从接口的角度看，LVDS可以称作接口，侠义的接口例如USB接口，千兆网口，麦克接口都是指某个物理硬件，可以连接起来。而广义的接口包括API、Sockets、弱函数、虚函数等软件上的接口，二者有一个共同的特点就是要在接口两端实现信息的传递，从这个意义上讲，LVDS是一个侠义的硬件接口。关于LVDS技术，这个说法主要是指LVDS接收器和收发器的硬件上的组成部分，大多数低速数字逻辑电平（如TTL、CMOS）是以电压对参考地的幅值来判断是高电平还是低电平， LVDS却完全不一样，它是通过数据接收器同相端与反相端的电压相对大小判断高低电平的，而不是通过同相端或反相端对公共地（GND）。通过恒流源和全桥开关电路不同晶体管的通断形成电压摆幅。关于LVDS协议，这种说法应该是不对的，通常协议是指规定两个或多个通信实体之间进行交换的报文格式和次序，LVDS并没有做这些规定。因此当设备与控制芯片（如FPGA）通过LVDS接口相连时，如何正确传输数据，这是控制芯片去适配设备接口属性的，这也是本篇要解决的问题，即实现FPGA上的LVDS与外部设备通信，实例中用到的外部设备也是FPGA。同样这也是LVDS的本质意义，即如何通过硬件电路LVDS接口实现通信。文末附本例源码。</p> 
+<h2 style="margin-left:0;text-align:justify;">2.LVDS传输模型</h2> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/93/f6/t1gnR0vS_o.png"></p> 
+<p> 如上图所示，LVDS是典型的源同步传输模型，除此以外还有即将被淘汰的系统同步模型和现在应用广泛的自同步模型。源同步模型由数据线和时钟线组成，LVDS传输支持速率一般在155Mbps（大约为77MHZ）以上，推荐最大速率为655Mbps，理论极限速率为1.923Gbps。这里的时钟通常称之为随路时钟，并没有规定这个随路时钟的时钟频率是多少，但通常是并行时钟或者串行时钟（SDR）或串行时钟除以2（DDR模式）。它存在的意义便是帮助接收端恢复数据。恢复的过程是同步于随路时钟，发送一个双方约定好的Pattern，当接收端恢复出pattern时，认为通道可以传输有效数据。当通信速率较小的源同步模型，例如cypressUSB3.0方案中，可以通过将随路时钟相移的方法满足cypress芯片的时序参数要求。但LVDS的线速度是比较高的，需要通过逻辑代码中微调来找到数据采样的中心点。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/a1/98/gF6S9j6v_o.png"></p> 
+<p style="margin-left:.0001pt;text-align:justify;">关于LVDS接口通信的其他概念结合上图阐释，截图出自xapp585-lvds-source-synch-serdes-clock-multiplication.pdf，可以看到随路时钟采用的是并行时钟，一共有五个LVDS传输线同步于此时钟，此外还有通道的概念，通常是一个通道有一个单独的随路时钟，通道内有几个LVDS传输线。图中随路时钟的占空比并不均匀，在一个传输线高电平期间传输3bit，在低电平期间传输4bit，一个并行时钟周期单个传输线上传输的bit个数称为串化因子，图中串化因子是7。SDR模式和DDR模式是相对于串行时钟说的，DDR就是在串行时钟的上升沿和下降沿都发出数据。因此，一个并行周期将传输 7bit*5lines=35bit数据。上述提及的各个LVDS通信中的概念应该是通信双方已知的，就像串口传输通信双方应该协调好波特率等参数。</p> 
+<p style="margin-left:.0001pt;text-align:justify;">LVDS传输模型常用于液晶屏的信号接收端口，ADC转接芯片的数据输出端口，CMOS图像数据输出接口等场景。</p> 
+<h2 style="margin-left:0;text-align:justify;">3.LVDS硬件设计注意事项</h2> 
+<p style="margin-left:.0001pt;text-align:justify;">1.不同型号的FPGA对于LVDS的速度支持是不同的，选型时需要注意。以下截图出自xilinx A7 datasheet。</p> 
+<p style="margin-left:.0001pt;text-align:center;"><img alt="" src="https://images2.imgbox.com/ce/07/X4bERnWv_o.png"></p> 
+<p>2.应该确认Bank类型，HR bank只有在供电电压是2.5V的时候才可以使用内部电阻，当bank电压为其他值时，此时只能作为输入管脚且不能使用内部电阻。对于HP bank标准电压是1.8v，当bank电压是1.8v时可以使用内部电阻，当bank电压为其他值时，此时只能作为输入管脚且不能使用内部电阻。可在UG475中查看当前Bank是HR还是HP。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/9e/64/45afW2ku_o.png"></p> 
+<p>3.LVDS_25和LVDS（指1.8V）是可以互相通信的，这是因为他俩的直流特性是一样的。即设备之间通信也是，LVDS与LVDS_25可以相互通信，但要确保Vdiff和Vcm是兼容的。以下截图来自于xilinx官方回复，HR bank使用内部的终端电阻的时候，必须配置为LVDS_25,即bank电压为2.5v；当作为输入管脚，且不使用内部电阻，可以配置成其他电压；LVDS与LVDS_25可以相互通信，但要确保Vdiff和Vcm是兼容的（可在Datasheet中查看该属性）。第二张图是为了更好的说明了LVDS使用的问题。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/02/0b/T7H55mJt_o.png"></p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/92/ec/vxkIe1sP_o.png"></p> 
+<p>4.最后是7系列不在支持LVDS_33，原因如图所示。 </p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/44/25/vmZ00K5C_o.png"></p> 
+<h2 style="margin-left:0;text-align:justify;">4.发送端LVDS程序设计</h2> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="color:#0d0016;">根据前三节的描述，搭建LVDS发送端程序首先要明确以下三个事项，①明确属性，包括通道个数，LVDS传输线个数，串化因子的大小，训练数据pattern值，以及SDR或DDR模式，随路时钟的大小；②明确当前硬件环境，随路时钟应该接MRCC或者SRCC管脚，否则vivado编译会不通过；差分数据管脚应该连接在FPGA上的PN差分对，并要确认好管脚所在bank的供电电压；还应该查看FPGA芯片数据手册判断是否支持需求的传输速率。③根据应用场景，例如LVDS发送端发送数据到LVDS液晶显示屏，则要遵守液晶显示屏时序的相关要求。在上述事项明确的前提下，LVDS发送端要解决的问题便是，将来自其他模块的应用数据按照既定的传输模型并转串后，接入到FPGA内部的LVDS发送器完成数据的发送。为此，xilinx 7系列提供了OBUFDS原语实现单端信号转LVDS差分信号的转换（可理解为该原语指向FPGA内部的LVDS发送器），提供了OSERDES2原语实现逻辑中应用并行数据的串行化处理。</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="color:#0d0016;">本次实例拟8位传化因子，1个通道，2个LVDS，DDR模式，随路时钟为200MHz，并行时钟为50MHz,pattern值为0xe9，LVDS相关引脚连接某A7芯片Bank16，bank电压为2.5V。所发送的应用数据为测试数据为1-255自增，发送端逻辑框图如下</span></p> 
+<p style="text-align:center;"><span style="color:#0d0016;"> <img alt="" src="https://images2.imgbox.com/1c/01/VtH9tfDP_o.png"></span></p> 
+<p></p> 
+<h2 style="margin-left:0;text-align:justify;">5.接收端LVDS程序设计</h2> 
+<h3 style="margin-left:0px;text-align:justify;"><span style="color:#0d0016;">5.1接收端概述</span></h3> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="color:#0d0016;">接收端的传输模型各个属性应该与LVDS发送端各属性一致，例如，如果用于接收CMOS图像传感器的图像数据，则接收端程序的串化因子、通道个数等将要与设备一致。在硬件设计上，LVDS时钟线和LVDS数据线应该等长设计，但由于布线制板工艺的影响，难免数据线和时钟线无法同时到达接收端，在传输速度快时，微乎其微的偏差都可能让数据出错，这就是LVDS接收端要解决的问题，即在数据稳定窗口的中心采样，保持数据的稳定，这个动作称之为位对齐。此外，当在数据线上重复发送ABCDEFGH（假设一个字母代表一个bit），有可能接收到的是BCDEFGHA产生字偏移，通过ISERDES2的bitslip可以完成数据的平移，这个动作称之为“字对齐”。接收端通过IBUFDS进行差分转单端信号便于逻辑处理，将lvds传输线上的串行数据经过IDELAY2进行位对齐操作，随后利用ISERDES2将该串行数据并行化即字对齐操作，将发送端的数据恢复。其难点就在于如何实现字对齐和位对齐操作。Xilinx提供了多个例程适用于不同系列的FPGA，如xapp860和xapp855适于V5，xapp585适用于7系列，还有适用于ultrascale的例程。本例程基于xapp855修改使之适配7系列并满足既定传输模型属性要求。</span></p> 
+<h3 style="margin-left:0;text-align:justify;"><span style="color:#0d0016;">5.2逻辑框图</span></h3> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="color:#0d0016;">       以下框图截取自xapp855，与示例程序并不一致。数据差分信号经IBUFDS转化为单端信号，进入IDELAY2（由于xapp855适用于V5，而当前程序适用于7系列，因此原语的名称有所不同）将数据位对齐后进入ISEDERS2转换成并行数据；时钟差分信号经过IBUFDS转化成单端信号，进入IDELAY2（此处为0，以时钟到达为基准）由BUFR倍频出并行时钟，经BUFIO产生串行时钟。此外，使用IDELAY必须要使用IDELAYCTRL，输入200MHz作为参考时钟。还有两个逻辑模块一个是Bit Align Machine实现位对齐字对齐，产生ISERDES2和IDELAY2所需的信号，完成当前LVDS传输线的对齐操作。Resource sharing control实现通道切换，和训练完成的指示</span><span style="color:#4472c4;"><strong>。</strong></span></p> 
+<p style="margin-left:.0001pt;text-align:center;"><span style="color:#4472c4;"><strong><img alt="" src="https://images2.imgbox.com/f2/1b/W3RlMwRq_o.png"></strong></span></p> 
+<h3 style="margin-left:0;text-align:justify;"><span style="color:#0d0016;">5.3xapp855训练代码解读</span></h3> 
+<p><span style="color:#0d0016;">       通道选择模块较为简单，主要介绍Bit Align Machine模块是如何完成单通道的数据训练操作。将ISERDES2模块传入的并行数据A打一拍得到B，当A不等于B的时候，认为此时遇到了亚稳态，即建立时间或者保持时间不满足要求的情况。当连续几个周期B等于pattern数据时，认为此时的采样点可用，字对齐也完成。完成数据训练的主要思路是，先使用IDEALY延迟直到找见一个亚稳态的点，未找见就延迟加1，然后继续增加延迟并加入字节对齐的判断直到找到Pattern数据，认为此时找到了数据窗口的左值，继续增加延时值，直到找见下一个亚稳态的采样点。从第一个pattern数据出现，增加延时值到下一个亚稳态的出现之间就是数据有效窗口，然后通过减去延迟值找到采样中心点，此后再次判断字对齐的情况，当字对齐结束后认为此LVDS传输线数据训练完成。由Resource sharing control控制开始训练下一个LVDS传输线。 </span></p> 
+<p style="text-align:center;"> <img alt="" src="https://images2.imgbox.com/64/26/n2tIpw6v_o.png"></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="color:#0d0016;">以上截图出自xapp855的解释说明，步骤①即是假定数据和时钟到达时二者的相对位置关系。步骤②是经过延时找到了第一个亚稳态窗口（Transition），图中斜线部分代表此时数据采样不稳定。步骤③是通过延时和bitslip寻找到数据有效窗口的左值（Eye）。步骤④是通过延时找到下一个亚稳态窗口，由此在③和④之间便是数据有效的窗口。步骤⑤是将采样点控制到数据有效窗口的中心位置。需要注意，IDELAY2总共只有32个阶，当参考时钟是200MHz时，每一阶延时78ps，即总共可延时32*78=2496ps=2.5ns。因此数据传输的线速率不能太低，线速率太低时需要采用别的方法或者调整该状态机，否则会错误的找到最佳采样点，出现不稳定的情况，因此使用该程序，其线数据传输速率建议大于400Mbps。</span></p> 
+<p><span style="color:#0d0016;">       下面对该模块中状态机简单分析便于理解。 </span></p> 
+<ol><li style="text-align:left;">00000不动（指各计数模块，idelay、bitslip均不做操作，后同），保证不与通道切换指令冲突。</li><li style="text-align:left;">00001不动 比较前一个后一个，不相等认为找见第一个亚稳态窗口。</li><li style="text-align:left;">01000 SAMPLE（指代码中信号含SAMPLE的128bit计数器，后同）计数器加1，连续抓15次判断是否为亚稳态窗口。</li><li style="text-align:left;">01011 IDELAY延时加1，两个计数器清0。</li><li style="text-align:left;">00100 SAMPLE控制7个周期后判断是否亚稳态，如此循环直到找到亚稳态窗口，即进入01111状态。（上述五个步骤必定能找见亚稳态窗口）</li><li style="text-align:left;">01111 SAMPLE清0 IDEALAY加1 准备寻找pattern。</li><li style="text-align:left;">01101 SAMPLE加1 JC添加8周期等待 找等于check pattern 找见就准备记录 重复上述步骤，直到找见稳态check pattern即渡过第一个窗口 bitslip=1。</li><li style="text-align:left;">01100 SAMPLE清0 （进入IDLE状态）。</li><li style="text-align:left;">10000 第二个idle 不动作。</li><li style="text-align:left;">00010再次确认是否退出了窗口 如果没有退出，重复上述步骤直到退出。</li><li style="text-align:left;">01110 确认跳出第一个亚稳态窗口，该状态CNT开始计数，找左值。</li><li style="text-align:left;">01001 idelay值加1 CNT开始计数(记录的是数据有效窗口的大小，CNT指代码中不含SAMPLE的128计数器) 找下一个亚稳态区域。</li><li style="text-align:left;">00011 SAMPLE计数控制8周期后比较数据，复制当前的CNT中的计数值，找见第二个就退出，找不见就重复上面步骤。</li><li style="text-align:left;">10010 计数器全部清0 无动作跳转。</li><li style="text-align:left;">01010 idelay减一减到有效采样的中间处即可，清0CNT。思考，假如taps的值不够用怎么办（即前文提到线数据速率不能太慢，否则会出现这种情况）。</li><li style="text-align:left;">00101 CNT控制延时，再次确认是否word对齐，默认当前已经到了采样中心点 word对齐则进入成功完成数据训练状态，word没有对齐就再次进入word对齐状态</li><li style="text-align:left;">00110 bitslip一次</li><li style="text-align:left;">00111 指示当前通道训练完成，准备切换到下一个通道，重复上述步骤进行训练</li></ol> 
+<h2 style="margin-left:0;text-align:justify;">6. 接收端发送端联调</h2> 
+<p style="margin-left:.0001pt;text-align:justify;">将发送端和接收端写在一个工程里，验证LVDS的收发，其结果如下,可以看到发送端发送的数据与接收的数据一致，data_aglin信号拉高，代表数据训练完成。</p> 
+<p style="margin-left:.0001pt;text-align:center;"><img alt="" src="https://images2.imgbox.com/d9/33/kigkl9ol_o.jpg"></p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/5d/83/CurS6uys_o.png"> </p> 
+<p> </p> 
+<h2 style="margin-left:0;text-align:justify;">7.总结</h2> 
+<p style="margin-left:.0001pt;text-align:left;"><a class="link-info" href="https://download.csdn.net/download/weixin_40615338/87238714" title="本例源码，参考资料">本例源码，参考资料</a></p> 
+<p style="margin-left:.0001pt;text-align:left;">①本文只是提供了众多实现lvds收发方法中的一种，例如，可以使用ODDR原语产生差分信号；IDELAY有四种模式，本文使用VARIABLE模式，还可以尝试VAR_LOAD模式；xilinx提供了一个名为SelectIO Interface Wizard的ip核其中涵盖了LVDS收发使用的全部selectio资源，在领悟本例精神后可以用其练手。</p> 
+<p style="margin-left:.0001pt;text-align:left;">②寻找数据中心的方式也是可以灵活多变的。</p> 
+<p style="margin-left:.0001pt;text-align:left;">③xapp855的代码结构以及代码风格可以提供一种新的思考，包括通道与训练的管理，计数器的服用，以及状态指示训练完成的写法都值得学习和总结。</p> 
+<p style="margin-left:.0001pt;text-align:left;">④Xapp585提供了基于7系列的原语设计，便于工程的移植和扩展，另外其位对齐和字对齐分开实现，是数据训练的另外一种思路。</p> 
+<p style="margin-left:.0001pt;text-align:left;">⑤关于文中提到的原语的使用可返回目录查看对应文章。</p> 
+<p style="margin-left:.0001pt;text-align:left;">⑥7系列的iserdes2原语要求bitslip后三个周期才能下一次bitslip，因此在LVDS收发程序中加入了这里的控制。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/8d92480dc99e56b58fc06d5e7c8f7797/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【SQL教程｜01】SQL简介——什么是SQL</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/7deb9d37b15ffe5c616c7825fd1687f2/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Java输入一元二次方程的三个系数求一元二次方程的根</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

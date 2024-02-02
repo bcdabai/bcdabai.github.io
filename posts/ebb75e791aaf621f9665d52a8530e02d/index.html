@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【Kubernetes运维篇】ingress-nginx实现业务灰度发布详解 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【Kubernetes运维篇】ingress-nginx实现业务灰度发布详解" />
+<meta property="og:description" content="文章目录 一、理论：实现灰度发布的几种场景1、场景一：将新版本灰度给部分用户2、场景二：按照比例流程给新版本3、实现灰度发布字段解释 二、实践：1、实验前提环境2、基于Request Header(请求头)进行流量分割3、基于Cookie进行流量切分4、基于服务权重进行流量切分 一、理论：实现灰度发布的几种场景 1、场景一：将新版本灰度给部分用户 假设线上运行了一套对外提供 7 层服务的 Service A 服务，后来开发了个新版本 Service AA需要上线，但不想直接替换掉原来的 Service A，希望先灰度一小部分用户，等运行一段时间足够稳定了再逐渐全量上线新版本，最后平滑下线旧版本。
+这个时候就可以利用 Nginx Ingress 基于 Header 或 Cookie 进行流量切分的策略来发布，业务使用 Header 或 Cookie 来标识不同类型的用户，我们通过配置 Ingress 来实现让带有指定 Header 或 Cookie 的请求被转发到新版本，其它的仍然转发到旧版本，从而实现将新版本灰度给部分用户。
+2、场景二：按照比例流程给新版本 假设线上运行了一套对外提供 7 层服务的 Service B 服务，后来修复了一些问题，需要灰度上线一个新版本 Service BB，但又不想直接替换掉原来的 Service B而是让先切 10% 的流量到新版本。
+等观察一段时间稳定后再逐渐加大新版本的流量比例直至完全替换旧版本，最后再滑下线旧版本，从而实现切一定比例的流量给新版本。
+3、实现灰度发布字段解释 Ingress-Nginx是一个K8S ingress工具，支持配置Ingress Annotations来实现不同场景下的灰度发布和测试。 Nginx Annotations 支持以下几种Canary规则：
+假设我们现在部署了两个版本的服务，老版本和canary版本
+nginx.ingress.kubernetes.io/canary-by-header：基于Request Header的流量切分，适用于灰度发布以及 A/B 测试。当Request Header 设置为 always时，请求将会被一直发送到 Canary 版本；当 Request Header 设置为 never时，请求不会被发送到 Canary 入口。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/ebb75e791aaf621f9665d52a8530e02d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-25T19:04:26+08:00" />
+<meta property="article:modified_time" content="2023-07-25T19:04:26+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Kubernetes运维篇】ingress-nginx实现业务灰度发布详解</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><ul><li><a href="#_1" rel="nofollow">一、理论：实现灰度发布的几种场景</a></li><li><ul><li><a href="#1_3" rel="nofollow">1、场景一：将新版本灰度给部分用户</a></li><li><a href="#2_12" rel="nofollow">2、场景二：按照比例流程给新版本</a></li><li><a href="#3_21" rel="nofollow">3、实现灰度发布字段解释</a></li></ul> 
+   </li><li><a href="#_37" rel="nofollow">二、实践：</a></li><li><ul><li><a href="#1_39" rel="nofollow">1、实验前提环境</a></li><li><a href="#2Request_Header_231" rel="nofollow">2、基于Request Header(请求头)进行流量分割</a></li><li><a href="#3Cookie_318" rel="nofollow">3、基于Cookie进行流量切分</a></li><li><a href="#4_375" rel="nofollow">4、基于服务权重进行流量切分</a></li></ul> 
+  </li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h3><a id="_1"></a>一、理论：实现灰度发布的几种场景</h3> 
+<h4><a id="1_3"></a>1、场景一：将新版本灰度给部分用户</h4> 
+<p>假设线上运行了一套对外提供 7 层服务的 Service A 服务，后来开发了个新版本 Service AA需要上线，但不想直接替换掉原来的 Service A，希望先灰度一小部分用户，等运行一段时间足够稳定了再逐渐全量上线新版本，最后平滑下线旧版本。</p> 
+<p>这个时候就可以利用 Nginx Ingress 基于 Header 或 Cookie 进行流量切分的策略来发布，业务使用 Header 或 Cookie 来标识不同类型的用户，我们通过配置 Ingress 来实现让带有指定 Header 或 Cookie 的请求被转发到新版本，其它的仍然转发到旧版本，从而实现将新版本灰度给部分用户。</p> 
+<p><img src="https://images2.imgbox.com/89/bc/szJJEuUi_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-YovV1ZHC-1690282841190)(D:\MD归档文档\IMG\image-20230723212305644.png)]"></p> 
+<h4><a id="2_12"></a>2、场景二：按照比例流程给新版本</h4> 
+<p>假设线上运行了一套对外提供 7 层服务的 Service B 服务，后来修复了一些问题，需要灰度上线一个新版本 Service BB，但又不想直接替换掉原来的 Service B而是让先切 10% 的流量到新版本。</p> 
+<p>等观察一段时间稳定后再逐渐加大新版本的流量比例直至完全替换旧版本，最后再滑下线旧版本，从而实现切一定比例的流量给新版本。</p> 
+<p><img src="https://images2.imgbox.com/34/51/gWf28ua4_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-1e0djcFR-1690282841192)(D:\MD归档文档\IMG\image-20230723212449420.png)]"></p> 
+<h4><a id="3_21"></a>3、实现灰度发布字段解释</h4> 
+<p>Ingress-Nginx是一个K8S ingress工具，支持配置Ingress Annotations来实现不同场景下的灰度发布和测试。 Nginx Annotations 支持以下几种Canary规则：</p> 
+<p>假设我们现在部署了两个版本的服务，老版本和canary版本</p> 
+<ul><li> <p><strong>nginx.ingress.kubernetes.io/canary-by-header</strong>：基于Request Header的流量切分，适用于灰度发布以及 A/B 测试。当Request Header 设置为 always时，请求将会被一直发送到 Canary 版本；当 Request Header 设置为 never时，请求不会被发送到 Canary 入口。</p> </li><li> <p><strong>nginx.ingress.kubernetes.io/canary-by-header-value</strong>：要匹配的 Request Header 的值，用于通知 Ingress 将请求路由到 Canary Ingress 中指定的服务。当 Request Header 设置为此值时，它将被路由到 Canary 入口。</p> </li><li> <p><strong>nginx.ingress.kubernetes.io/canary-weight</strong>：基于服务权重的流量切分，适用于蓝绿部署，权重范围 0 - 100 按百分比将请求路由到 Canary Ingress 中指定的服务。权重为 0 意味着该金丝雀规则不会向 Canary 入口的服务发送任何请求。权重为60意味着60%流量转到canary。权重为 100 意味着所有请求都将被发送到 Canary 入口。</p> </li><li> <p><strong>nginx.ingress.kubernetes.io/canary-by-cookie</strong>：基于 Cookie 的流量切分，适用于灰度发布与 A/B 测试。用于通知 Ingress 将请求路由到 Canary Ingress 中指定的服务的cookie。当 cookie 值设置为 always时，它将被路由到 Canary 入口；当 cookie 值设置为 never时，请求不会被发送到 Canary 入口。</p> </li></ul> 
+<h3><a id="_37"></a>二、实践：</h3> 
+<h4><a id="1_39"></a>1、实验前提环境</h4> 
+<p>1、增加V1环境：</p> 
+<pre><code class="prism language-yaml">cat v1.yaml 
+<span class="token punctuation">---</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> apps/v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Deployment
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>v1
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">replicas</span><span class="token punctuation">:</span> <span class="token number">1</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">matchLabels</span><span class="token punctuation">:</span>
+      <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+      <span class="token key atrule">version</span><span class="token punctuation">:</span> v1
+  <span class="token key atrule">template</span><span class="token punctuation">:</span>
+    <span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+      <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+        <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+        <span class="token key atrule">version</span><span class="token punctuation">:</span> v1
+    <span class="token key atrule">spec</span><span class="token punctuation">:</span>
+      <span class="token key atrule">containers</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx
+        <span class="token key atrule">image</span><span class="token punctuation">:</span> <span class="token string">"openresty/openresty:centos"</span>
+        <span class="token key atrule">imagePullPolicy</span><span class="token punctuation">:</span> IfNotPresent
+        <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+        <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> http
+          <span class="token key atrule">protocol</span><span class="token punctuation">:</span> TCP
+          <span class="token key atrule">containerPort</span><span class="token punctuation">:</span> <span class="token number">80</span>
+        <span class="token key atrule">volumeMounts</span><span class="token punctuation">:</span>    <span class="token comment"># 挂载卷</span>
+        <span class="token punctuation">-</span> <span class="token key atrule">mountPath</span><span class="token punctuation">:</span> /usr/local/openresty/nginx/conf/nginx.conf
+          <span class="token key atrule">name</span><span class="token punctuation">:</span> config
+          <span class="token key atrule">subPath</span><span class="token punctuation">:</span> nginx.conf
+      <span class="token key atrule">volumes</span><span class="token punctuation">:</span>          <span class="token comment"># 定义卷,引用configMap</span>
+      <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> config
+        <span class="token key atrule">configMap</span><span class="token punctuation">:</span>
+          <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>v1
+<span class="token punctuation">---</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> ConfigMap
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+    <span class="token key atrule">version</span><span class="token punctuation">:</span> v1
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>v1
+<span class="token key atrule">data</span><span class="token punctuation">:</span>
+  <span class="token key atrule">nginx.conf</span><span class="token punctuation">:</span> <span class="token punctuation">|</span><span class="token punctuation">-</span>
+    worker_processes  1;
+    events <span class="token punctuation">{<!-- --></span>
+        accept_mutex on;
+        multi_accept on;
+        use epoll;
+        worker_connections  1024;
+    <span class="token punctuation">}</span>
+    http <span class="token punctuation">{<!-- --></span>
+        ignore_invalid_headers off;
+        server <span class="token punctuation">{<!-- --></span>
+            listen 80;
+            location / <span class="token punctuation">{<!-- --></span>
+                access_by_lua '
+                    local header_str = ngx.say("nginx<span class="token punctuation">-</span>v1")
+                ';
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">---</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Service
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>v1
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">type</span><span class="token punctuation">:</span> ClusterIP
+  <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">80</span>
+    <span class="token key atrule">protocol</span><span class="token punctuation">:</span> TCP
+    <span class="token key atrule">name</span><span class="token punctuation">:</span> http
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+    <span class="token key atrule">version</span><span class="token punctuation">:</span> v1
+</code></pre> 
+<p>2、增加V2环境：</p> 
+<pre><code class="prism language-yaml">cat v2.yaml 
+<span class="token punctuation">---</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> apps/v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Deployment
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>v2
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">replicas</span><span class="token punctuation">:</span> <span class="token number">1</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">matchLabels</span><span class="token punctuation">:</span>
+      <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+      <span class="token key atrule">version</span><span class="token punctuation">:</span> v2
+  <span class="token key atrule">template</span><span class="token punctuation">:</span>
+    <span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+      <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+        <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+        <span class="token key atrule">version</span><span class="token punctuation">:</span> v2
+    <span class="token key atrule">spec</span><span class="token punctuation">:</span>
+      <span class="token key atrule">containers</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx
+        <span class="token key atrule">image</span><span class="token punctuation">:</span> <span class="token string">"openresty/openresty:centos"</span>
+        <span class="token key atrule">imagePullPolicy</span><span class="token punctuation">:</span> IfNotPresent
+        <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+        <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> http
+          <span class="token key atrule">protocol</span><span class="token punctuation">:</span> TCP
+          <span class="token key atrule">containerPort</span><span class="token punctuation">:</span> <span class="token number">80</span>
+        <span class="token key atrule">volumeMounts</span><span class="token punctuation">:</span>
+        <span class="token punctuation">-</span> <span class="token key atrule">mountPath</span><span class="token punctuation">:</span> /usr/local/openresty/nginx/conf/nginx.conf
+          <span class="token key atrule">name</span><span class="token punctuation">:</span> config
+          <span class="token key atrule">subPath</span><span class="token punctuation">:</span> nginx.conf
+      <span class="token key atrule">volumes</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> config
+        <span class="token key atrule">configMap</span><span class="token punctuation">:</span>
+          <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>v2
+<span class="token punctuation">---</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> ConfigMap
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+    <span class="token key atrule">version</span><span class="token punctuation">:</span> v2
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>v2
+<span class="token key atrule">data</span><span class="token punctuation">:</span>
+  <span class="token key atrule">nginx.conf</span><span class="token punctuation">:</span> <span class="token punctuation">|</span><span class="token punctuation">-</span>
+    worker_processes  1;
+    events <span class="token punctuation">{<!-- --></span>
+        accept_mutex on;
+        multi_accept on;
+        use epoll;
+        worker_connections  1024;
+    <span class="token punctuation">}</span>
+    http <span class="token punctuation">{<!-- --></span>
+        ignore_invalid_headers off;
+        server <span class="token punctuation">{<!-- --></span>
+            listen 80;
+            location / <span class="token punctuation">{<!-- --></span>
+                access_by_lua '
+                    local header_str = ngx.say("nginx<span class="token punctuation">-</span>v2")
+                ';
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">---</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Service
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>v2
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">type</span><span class="token punctuation">:</span> ClusterIP
+  <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">80</span>
+    <span class="token key atrule">protocol</span><span class="token punctuation">:</span> TCP
+    <span class="token key atrule">name</span><span class="token punctuation">:</span> http
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">app</span><span class="token punctuation">:</span> nginx
+    <span class="token key atrule">version</span><span class="token punctuation">:</span> v2
+</code></pre> 
+<p>3、执行YAML文件</p> 
+<pre><code class="prism language-bash">kubectl apply <span class="token parameter variable">-f</span> v1.yaml 
+kubectl apply <span class="token parameter variable">-f</span> v2.yaml 
+</code></pre> 
+<p>4、验证Pod是启动</p> 
+<pre><code class="prism language-bash">kubectl get pods <span class="token parameter variable">-o</span> wide
+</code></pre> 
+<p><img src="https://images2.imgbox.com/5e/f9/2kT0F9Cj_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-lFyIkrU2-1690282841192)(D:\MD归档文档\IMG\image-20230725170445927.png)]"></p> 
+<p>5、验证，请求Pod内容</p> 
+<pre><code class="prism language-bash"><span class="token function">curl</span> http://10.244.247.2
+<span class="token function">curl</span> http://10.244.84.134
+</code></pre> 
+<p><img src="https://images2.imgbox.com/ab/d3/8Q4k7RUU_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-2zh1NApP-1690282841193)(D:\MD归档文档\IMG\image-20230725170540411.png)]"></p> 
+<p>如上图，请求不同版本的环境，返回不同版本号，表示无误。</p> 
+<h4><a id="2Request_Header_231"></a>2、基于Request Header(请求头)进行流量分割</h4> 
+<p>1、创建v1版本的ingress规则</p> 
+<pre><code class="prism language-yaml">cat v1<span class="token punctuation">-</span>ingress.yaml 
+<span class="token punctuation">---</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> networking.k8s.io/v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Ingress
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>v1
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">ingressClassName</span><span class="token punctuation">:</span> nginx
+  <span class="token key atrule">rules</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">host</span><span class="token punctuation">:</span> qinzt.ingress.com
+    <span class="token key atrule">http</span><span class="token punctuation">:</span>
+      <span class="token key atrule">paths</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> <span class="token key atrule">path</span><span class="token punctuation">:</span> /  <span class="token comment">#配置访问路径,如果通过url进行转发,需要修改;空默认为访问的路径为"/"</span>
+        <span class="token key atrule">pathType</span><span class="token punctuation">:</span>  Prefix
+        <span class="token key atrule">backend</span><span class="token punctuation">:</span>  <span class="token comment">#配置后端服务</span>
+         <span class="token key atrule">service</span><span class="token punctuation">:</span>
+           <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>v1
+           <span class="token key atrule">port</span><span class="token punctuation">:</span>
+            <span class="token key atrule">number</span><span class="token punctuation">:</span> <span class="token number">80</span>
+</code></pre> 
+<p>执行YAML文件：</p> 
+<pre><code class="prism language-bash">kubectl apply <span class="token parameter variable">-f</span> v1-ingress.yaml
+</code></pre> 
+<p>访问验证一下：<code>16.32.15.201:30080</code>是我ingress-nginx访问地址</p> 
+<pre><code class="prism language-bash"><span class="token function">curl</span> <span class="token parameter variable">-H</span> <span class="token string">"Host: qinzt.ingress.com"</span> http://16.32.15.201:30080
+nginx-v1
+</code></pre> 
+<p>2、创建ingress规则，基于Request Header进行流量分割</p> 
+<pre><code class="prism language-bash"><span class="token function">cat</span> v2-request.yaml 
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/canary: <span class="token string">"true"</span>
+    nginx.ingress.kubernetes.io/canary-by-header: <span class="token string">"Region"</span> <span class="token comment">#基于Request Header的流量切分</span>
+    nginx.ingress.kubernetes.io/canary-by-header-pattern: <span class="token string">"cd|sz"</span> <span class="token comment">#Header信息中带有 Region=cd,Region=sz的转发到此ingress</span>
+  name: nginx-request-v2
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: qinzt.ingress.com
+    http:
+      paths:
+      - path: /  <span class="token comment">#配置访问路径，如果通过url进行转发，需要修改；空默认为访问的路径为"/"</span>
+        pathType:  Prefix
+        backend:  <span class="token comment">#配置后端服务</span>
+         service:
+           name: nginx-v2
+           port:
+            number: <span class="token number">80</span>
+</code></pre> 
+<p>执行YAML文件：</p> 
+<pre><code class="prism language-bash">kubectl apply <span class="token parameter variable">-f</span> v2-request.yaml
+</code></pre> 
+<p>访问验证一下：<code>16.32.15.201:30080</code>是我ingress-nginx访问地址</p> 
+<pre><code class="prism language-bash"><span class="token function">curl</span> <span class="token parameter variable">-H</span> <span class="token string">"Host: qinzt.ingress.com"</span> <span class="token parameter variable">-H</span> <span class="token string">"Region: cd"</span> http://16.32.15.201:30080
+<span class="token function">curl</span> <span class="token parameter variable">-H</span> <span class="token string">"Host: qinzt.ingress.com"</span> <span class="token parameter variable">-H</span> <span class="token string">"Region: sz"</span> http://16.32.15.201:30080
+</code></pre> 
+<p><img src="https://images2.imgbox.com/89/31/vzS8UOce_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-OJ252M5a-1690282841193)(D:\MD归档文档\IMG\image-20230725173228547.png)]"></p> 
+<p>OK,可以看到上图，携带<code>Region: cd</code>、<code>Region: sz</code>请求头消息，会转发到V2环境。</p> 
+<h4><a id="3Cookie_318"></a>3、基于Cookie进行流量切分</h4> 
+<p>与前面 Header 类似，不过使用 Cookie 就无法自定义 value 了，这里以模拟灰度成都地域用户为例，仅将带有名为 <code>user_from_cd</code> 的 cookie 的请求转发给当前V2环境 。</p> 
+<p>1、先删除前面基于 Header 的流量切分的 Ingress</p> 
+<pre><code class="prism language-bash">kubectl delete <span class="token parameter variable">-f</span> v2-request.yaml
+</code></pre> 
+<p>2、创建基于cookie 转发的ingress规则</p> 
+<pre><code class="prism language-yaml">cat v2<span class="token punctuation">-</span>cookie.yaml 
+<span class="token punctuation">---</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> networking.k8s.io/v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Ingress
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">annotations</span><span class="token punctuation">:</span>
+    <span class="token key atrule">nginx.ingress.kubernetes.io/canary</span><span class="token punctuation">:</span> <span class="token string">"true"</span>
+    <span class="token key atrule">nginx.ingress.kubernetes.io/canary-by-cookie</span><span class="token punctuation">:</span> <span class="token string">"user_from_cd"</span> <span class="token comment"># 匹配cookie携带user_from_cd,使用此ingress规则</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>cookie<span class="token punctuation">-</span>v2
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">ingressClassName</span><span class="token punctuation">:</span> nginx
+  <span class="token key atrule">rules</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">host</span><span class="token punctuation">:</span> qinzt.ingress.com
+    <span class="token key atrule">http</span><span class="token punctuation">:</span>
+      <span class="token key atrule">paths</span><span class="token punctuation">:</span>
+      <span class="token punctuation">-</span> <span class="token key atrule">path</span><span class="token punctuation">:</span> /  <span class="token comment">#配置访问路径，如果通过url进行转发，需要修改；空默认为访问的路径为"/"</span>
+        <span class="token key atrule">pathType</span><span class="token punctuation">:</span>  Prefix
+        <span class="token key atrule">backend</span><span class="token punctuation">:</span>  <span class="token comment">#配置后端服务</span>
+         <span class="token key atrule">service</span><span class="token punctuation">:</span>
+           <span class="token key atrule">name</span><span class="token punctuation">:</span> nginx<span class="token punctuation">-</span>v2
+           <span class="token key atrule">port</span><span class="token punctuation">:</span>
+            <span class="token key atrule">number</span><span class="token punctuation">:</span> <span class="token number">80</span>
+</code></pre> 
+<p>执行YAML文件</p> 
+<pre><code class="prism language-bash">kubectl apply <span class="token parameter variable">-f</span> v2-cookie.yaml 
+</code></pre> 
+<p>3、测试验证，<code>http://16.32.15.201:30080</code>是我ingress nginx地址</p> 
+<pre><code class="prism language-bash"><span class="token function">curl</span> <span class="token parameter variable">-s</span> <span class="token parameter variable">-H</span> <span class="token string">"Host: qinzt.ingress.com"</span> <span class="token parameter variable">--cookie</span> <span class="token string">"user_from_cd=always"</span> http://16.32.15.201:30080
+nginx-v2
+
+<span class="token function">curl</span> <span class="token parameter variable">-s</span> <span class="token parameter variable">-H</span> <span class="token string">"Host: qinzt.ingress.com"</span> <span class="token parameter variable">--cookie</span> <span class="token string">"user_from_bj=always"</span> http://16.32.15.201:30080
+nginx-v1
+</code></pre> 
+<p>可以看到只有cookie=<code>user_from_cd</code>的才会转发到V2的ingress</p> 
+<h4><a id="4_375"></a>4、基于服务权重进行流量切分</h4> 
+<p>基于服务权重的直接定义需要导入的流量比例，这里以导入 10% 流量到 v2 环境版本为。</p> 
+<p>1、删除上面基于cookie的ingress规则</p> 
+<pre><code class="prism language-bash">kubectl delete <span class="token parameter variable">-f</span> v2-cookie.yaml
+</code></pre> 
+<p>2、创建基于权重流量分配的ingress规则</p> 
+<pre><code class="prism language-bash"><span class="token function">cat</span> v2-weight.yaml 
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/canary: <span class="token string">"true"</span>
+    nginx.ingress.kubernetes.io/canary-weight: <span class="token string">"10"</span>
+  name: nginx-weight-v2
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: qinzt.ingress.com
+    http:
+      paths:
+      - path: /  <span class="token comment">#配置访问路径，如果通过url进行转发，需要修改；空默认为访问的路径为"/"</span>
+        pathType:  Prefix
+        backend:  <span class="token comment">#配置后端服务</span>
+         service:
+           name: nginx-v2
+           port:
+            number: <span class="token number">80</span>
+</code></pre> 
+<p>执行YAML文件：</p> 
+<pre><code class="prism language-bash">kubectl apply <span class="token parameter variable">-f</span> v2-weight.yaml
+</code></pre> 
+<p>3、测试验证</p> 
+<pre><code class="prism language-bash"><span class="token keyword">for</span> <span class="token for-or-select variable">i</span> <span class="token keyword">in</span> <span class="token punctuation">{<!-- --></span><span class="token number">1</span><span class="token punctuation">..</span><span class="token number">10</span><span class="token punctuation">}</span><span class="token punctuation">;</span> <span class="token keyword">do</span> <span class="token function">curl</span> <span class="token parameter variable">-H</span> <span class="token string">"Host: qinzt.ingress.com"</span> http://16.32.15.201:30080<span class="token punctuation">;</span> <span class="token keyword">done</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/c7/93/T3dtpBR0_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-XaTyjsQD-1690282841194)(D:\MD归档文档\IMG\image-20230725183809515.png)]"></p> 
+<p>OK，如上图大约10%的记录会请求到V2环境上面</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ddfaa274448572b0fdd555175c5188c5/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">vue项目中使用m3u8格式播放大视频</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8ef40e74e65dd8514489d304894ee82c/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【Matlab】Matlab_simulink绘制伯德图从选型到出图</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

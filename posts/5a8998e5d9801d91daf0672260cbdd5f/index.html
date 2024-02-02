@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>CentOS7部署lsyncd&#43;rsync实现服务器文件实时同步 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="CentOS7部署lsyncd&#43;rsync实现服务器文件实时同步" />
+<meta property="og:description" content="文章z转自：https://blog.51cto.com/qiangsh/2459022
+Lsyncd是什么？
+Github：axkibe/lsyncd
+官方文档：Lsyncd – Live Syncing (Mirror) Daemon
+Lysncd即Live Syncing Daemon，它是开源的数据实时同步工具(后台进程)，基于inotify和rsync。
+Lsyncd是一个辅助文件同步工具。它通过监听系统的文件变化事件，调用rsync进行同步。注意“辅助”二字，辅助的意思是：同步文件本身并不是由lsyncd来实现，它只负责监测哪些文件改变了，进而调用rsync来完成同步，真正同步文件的是rsync，如果你不知道什么是rsync，请查看使用sersync &#43;rsync进行实时文件同步中的rsync部分。
+Lsyncd的三种同步模式
+default.rsyncdefault.rsyncsshdefault.direct 为了方便，我们直接把它们称为rsync、rsyncssh、direct。
+1. rsync同步模式 首先，你需要知道rsync的基本用法，以下的rsync命令就可以把文件从本地的“/data/wwwroot”目录推送到远程的“remote@192.168.1.6::wwwroot/”目录中，运行在“rsync同步模式”的lsyncd正是通过组装类似这样的命令来同步文件的：
+rsync -avz --partial --delete /data/wwwroot remote@192.168.1.6::wwwroot/ --password-file=/etc/rsyncd.password 有人可能会疑惑，既然rsync本身就可以同步，那要lsyncd干嘛？有两个原因： 实时同步。 减少rsync扫描文件带来的延时和性能损耗。 rsync无法知道“什么时候同步”，因为rsync只有执行同步命令的时候，才会去扫描文件判断哪些文件被修改了，只能建立一个定时任务，每隔一定的时间（比如5分钟，10分钟等等）去执行一次同步，这样虽然能同步，但却“不实时”。lsyncd就可以监听文件的修改，换句话说，某个文件修改了，lsyncd会得到通知(原理是使用linux系统的inotify/fsevents功能)，得到通知之后，再去调用rsync把修改的文件进行同步(即组装一句rsync同步语句并执行)，达到“实时同步”的效果。
+-lsyncd调用rsync同步命令的时候，会用rsync的–include-from=FILE之类的选项来指定要同步哪些文件，这样可以达到“减少rsync扫描文件带来的延时和性能损耗”。为什么这么说呢？因为如果让rsync自己去查询哪些文件改变了，需要消耗较多的时间和服务器资源，试想一下，在100万个文件中，有一个文件添加了一个英文的句号.，如果没有lsyncd告诉rsync改变的是这个文件，那rsync就要去扫描100万个文件来找出这个仅仅多了一个.的文件，虽然rsync的查找效率很高，但这个查找是非常没有必要的，这就是为什么lsyncd能“减少rsync扫描文件带来的延时和性能损耗”。 2. rsyncssh同步模式 明白了rsync同步模式，就不难明白rsyncssh模式，因为rsync本身就是有ssh模式的，lsyncd同样是负责监听哪些文件变化了，然后组装rsync同步命令进行同步。
+rsync的ssh模式，主要的好处是用于文件移动的时候
+1.假设我现在有两台机A和B，A中的test目录文件变化会自动同步到B中的test目录，现在A、B的test目录文件如下：
+├── dir1 │ ├── aa.txt │ ├── bb.txt │ └── cc.txt └── dir2 └── dd.txt 2.假设现在把A机的bb.txt和cc.txt从dir1移动到dir2，即变成如下所示的状态：
+├── dir1 │ └── aa.txt └── dir2 ├── bb.txt ├── cc.txt └── dd.txt 假设使用普通的rsync模式，那么rsync会先删除B机中的dir1中的bb.txt和cc.txt，并把A机中的bb.txt和cc.txt文件上传到B机中的dir2目录，达到同步的效果。但如果你rsync运行在ssh模式，那么它会直接在B机中把dir1中的bb.txt和cc.txt用mv命令直接移动到dir2目录，A机没有向B机传任何数据，效率显而易见(特别是移动的数据特别多的时候更明显)。这样看，rsyncssh模式应该是最好的，但它却有一个缺点，就是同步进程只能是单进程(maxProcesses=1)，而rsync模式是可以多进程同步的(速度快)。 3. direct同步模式 这个模式用于本地的两个目录之间同步，不用于远程服务器同步。lsyncd同样是监听文件变化事件，然后把变化的文件从源目录同步到目标目录，同步的命令，就是linux系统本身的命令，比如cp、rm、mv，增加了文件用cp拷过去，删除了文件，那边也用rm删除，移动了文件，那边也用mv移动。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/5a8998e5d9801d91daf0672260cbdd5f/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-11-03T17:16:49+08:00" />
+<meta property="article:modified_time" content="2020-11-03T17:16:49+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">CentOS7部署lsyncd&#43;rsync实现服务器文件实时同步</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>文章z转自：https://blog.51cto.com/qiangsh/2459022<br> Lsyncd是什么？<br> Github：axkibe/lsyncd<br> 官方文档：Lsyncd – Live Syncing (Mirror) Daemon</p> 
+<p>Lysncd即Live Syncing Daemon，它是开源的数据实时同步工具(后台进程)，基于inotify和rsync。<br> Lsyncd是一个辅助文件同步工具。它通过监听系统的文件变化事件，调用rsync进行同步。注意“辅助”二字，辅助的意思是：同步文件本身并不是由lsyncd来实现，它只负责监测哪些文件改变了，进而调用rsync来完成同步，真正同步文件的是rsync，如果你不知道什么是rsync，请查看使用sersync +rsync进行实时文件同步中的rsync部分。<br> Lsyncd的三种同步模式</p> 
+<ul><li>default.rsync</li><li>default.rsyncssh</li><li>default.direct</li></ul> 
+<p>为了方便，我们直接把它们称为rsync、rsyncssh、direct。</p> 
+<h3><a id="1_rsync_15"></a>1. rsync同步模式</h3> 
+<p>首先，你需要知道rsync的基本用法，以下的rsync命令就可以把文件从本地的“/data/wwwroot”目录推送到远程的“remote@192.168.1.6::wwwroot/”目录中，运行在“rsync同步模式”的lsyncd正是通过组装类似这样的命令来同步文件的：</p> 
+<pre><code>rsync -avz --partial --delete /data/wwwroot remote@192.168.1.6::wwwroot/ --password-file=/etc/rsyncd.password
+
+</code></pre> 
+<pre><code>有人可能会疑惑，既然rsync本身就可以同步，那要lsyncd干嘛？有两个原因：
+
+实时同步。
+减少rsync扫描文件带来的延时和性能损耗。
+</code></pre> 
+<ul><li>rsync无法知道“什么时候同步”，因为rsync只有执行同步命令的时候，才会去扫描文件判断哪些文件被修改了，只能建立一个定时任务，每隔一定的时间（比如5分钟，10分钟等等）去执行一次同步，这样虽然能同步，但却“不实时”。</li><li>lsyncd就可以监听文件的修改，换句话说，某个文件修改了，lsyncd会得到通知(原理是使用linux系统的inotify/fsevents功能)，得到通知之后，再去调用rsync把修改的文件进行同步(即组装一句rsync同步语句并执行)，达到“实时同步”的效果。<br> -lsyncd调用rsync同步命令的时候，会用rsync的–include-from=FILE之类的选项来指定要同步哪些文件，这样可以达到“减少rsync扫描文件带来的延时和性能损耗”。</li><li>为什么这么说呢？因为如果让rsync自己去查询哪些文件改变了，需要消耗较多的时间和服务器资源，试想一下，在100万个文件中，有一个文件添加了一个英文的句号.，如果没有lsyncd告诉rsync改变的是这个文件，那rsync就要去扫描100万个文件来找出这个仅仅多了一个.的文件，虽然rsync的查找效率很高，但这个查找是非常没有必要的，这就是为什么lsyncd能“减少rsync扫描文件带来的延时和性能损耗”。</li></ul> 
+<h3><a id="2_rsyncssh_35"></a>2. rsyncssh同步模式</h3> 
+<p>明白了rsync同步模式，就不难明白rsyncssh模式，因为rsync本身就是有ssh模式的，lsyncd同样是负责监听哪些文件变化了，然后组装rsync同步命令进行同步。<br> rsync的ssh模式，主要的好处是用于文件移动的时候<br> 1.假设我现在有两台机A和B，A中的test目录文件变化会自动同步到B中的test目录，现在A、B的test目录文件如下：</p> 
+<pre><code>├── dir1
+│   ├── aa.txt
+│   ├── bb.txt
+│   └── cc.txt
+└── dir2
+└── dd.txt
+</code></pre> 
+<p>2.假设现在把A机的bb.txt和cc.txt从dir1移动到dir2，即变成如下所示的状态：</p> 
+<pre><code>├── dir1
+│   └── aa.txt
+└── dir2
+├── bb.txt
+├── cc.txt
+└── dd.txt
+</code></pre> 
+<ul><li>假设使用普通的rsync模式，那么rsync会先删除B机中的dir1中的bb.txt和cc.txt，并把A机中的bb.txt和cc.txt文件上传到B机中的dir2目录，达到同步的效果。</li><li>但如果你rsync运行在ssh模式，那么它会直接在B机中把dir1中的bb.txt和cc.txt用mv命令直接移动到dir2目录，A机没有向B机传任何数据，效率显而易见(特别是移动的数据特别多的时候更明显)。</li><li>这样看，rsyncssh模式应该是最好的，但它却有一个缺点，就是同步进程只能是单进程(maxProcesses=1)，而rsync模式是可以多进程同步的(速度快)。</li></ul> 
+<h3><a id="3_direct_62"></a>3. direct同步模式</h3> 
+<p>这个模式用于本地的两个目录之间同步，不用于远程服务器同步。lsyncd同样是监听文件变化事件，然后把变化的文件从源目录同步到目标目录，同步的命令，就是linux系统本身的命令，比如cp、rm、mv，增加了文件用cp拷过去，删除了文件，那边也用rm删除，移动了文件，那边也用mv移动。</p> 
+<h3><a id="_65"></a>简述如何同步</h3> 
+<p>假设有A和B两台机，A同步到B，则：</p> 
+<ul><li>A：安装lsyncd+rsync，并运行lsyncd服务；</li><li>B：只需要安装rsync，并运行rsyncd服务；<br> A中的lsyncd监听到文件变化后，调用A中的rsync向B推送文件，B因为运行有一个rsyncd服务，所以可以接收这个推送，从而完成文件的同步。</li></ul> 
+<p>另外还可以有C、D、E、F、……，它们都与B相同，只要运行rsyncd服务即可，A上可配置一次性推送向多台机器。</p> 
+<h3><a id="lsyncd_74"></a>安装lsyncd</h3> 
+<p>CentOS用yum、其他的用各自的包管理软件，比如Ubuntu用apt-get，Mac用brew install：</p> 
+<pre><code>yum -y install rsync lsyncd
+</code></pre> 
+<p>Lsyncd安装好之后，默认的配置文件在/etc/lsyncd.conf，另外还有些配置的例子在/usr/share/doc/lsyncd-2.2.2/examples下：</p> 
+<pre><code>/usr/share/doc/lsyncd-2.2.2/examples/
+├── lalarm.lua
+├── lbash.lua
+├── lecho.lua
+├── lftp.lua
+├── lgforce.lua
+├── limagemagic.lua
+├── lpostcmd.lua
+├── lrsync.lua
+├── lrsyncssh.lua
+└── lsayirc.lua
+
+0 directories, 10 files
+</code></pre> 
+<p>/etc/lsyncd.conf也可以写成/etc/lsyncd.lua，它本身就是用lua(一种脚本语言)写配置的。</p> 
+<h3><a id="Lsyncd_99"></a>Lsyncd配置文件详解</h3> 
+<p>配置文件是使用lua语言写的，所以注释要用lua语言的注释符号，即两个横杠–。</p> 
+<p>配置文件主要有三部分：</p> 
+<ul><li> <p>settings：lsyncd本身的一些设置，比如日志文件路径，同步进程数，是否后台运行等等。</p> </li><li> <p>sync：同步相关的设置，比如从哪同步到哪，要忽略哪些文件，多久同步一次等等</p> </li><li> <p>rsync：这部分是在sync里面的，它主要配置rsync本身的一些选项。<br> 以下是两个官方的配置文档：</p> </li><li> <p>配置Settings：The Configuration File</p> </li><li> <p>配置sync和rsync：Config Layer 4: Default Config<br> /etc/lsyncd.conf中的默认内容没什么价值，可以全部删除，下边我们来讲解配置文件要怎么写。</p> </li></ul> 
+<p>default.rsync模式配置文件：<br> – 由于该配置文件实际上是lua语言的语法，所以写注释要用–，--是lua语言的注释符号<br> – Lsyncd本身的配置</p> 
+<pre><code>settings {
+    -- 指定日志文件位置
+    logfile = "/var/log/lsyncd/lsyncd.log",
+
+    -- 指定状态文件位置
+    statusFile = "/var/log/lsyncd/lsyncd.status",
+
+     -- 是否以后台的方式运行，注意它是nodaemon，所以是双重否定，如果填false，意思就是“不要不后台运行”(即后台运行)，非后台运行一般用于调试，把rsync的verbose也设置为true，这样会把同步的细节输出到控制台，方便调试
+    nodaemon = false,
+
+    -- 系统inotify指定监听的变化，什么事件才同步。CloseWrite表示文件关闭的时候同步(创建文件，修改文件后保存都会触发CloseWrite事件),可以是"Modify"、"CloseWrite" (默认) 或"CloseWrite or Modify"。
+    inotifyMode = "CloseWrite",
+
+    -- 最大同步进程数(default.rsyncssh模式，则必须设置为1，这就是rsyncssh模式的缺点了，如果是default.rsync模式则可以设置大于1，这样会有多个同步进程，速度更快)
+    maxProcesses = 8,
+    -- maxProcesses = 1,
+
+    -- 配合下面的delay选项使用，delay单位是秒，当delay时间到了，不管maxDelays设置多少，都会同步，同样，当maxDelays达到了设定值，不管是否到delay时间，都会同步，即两个选项有一个满足即会触发同步，为了实时同&gt;步，我们一般设置为1，表示即使只有一个文件改变也同步
+    maxDelays = 1,
+}
+
+---- 同步配置default.rsync模式(比如配置从哪同步到哪，忽略哪些文件，多久同步一次等)，可以有多个sync模块，每个模块用于设置一台目标机器
+sync {
+    -- 有default.rsync/default.direct/default.rsyncssh三种模式，我们默认都用default.rsync即可。
+    default.rsync,
+
+    -- 同步源目录(本机某个目录)
+    source = "/data/wwwroot",
+
+    -- 同步目标地址，不同同步模式有不同写法，由于绝大多数情况都采用rsync同步，所以这里写的是rsync的同步地址
+    target = "remote@192.168.1.6::wwwroot",
+
+    -- 默认true，允许删除目录服务器中的某些文件(即删除“那些在源服务器中不存在的文件”)，可选值有: true/false/startup/running，startup就是只在启动lsyncd服务的时候判断目标服务器中有哪些文件在源服务器中没有，然后把这些文件删除，但启动之后如果目标服务器又新增了文件，这些文件即使在源服务器不存在，也不会被删除；而running与startup正好相反，是在启动的时候不会删除，启动之后会删除，true=running+startup，false相当于running和startup都不做。
+    -- delete = true,
+
+    -- 哪些文件不同步(可用正则))
+    exclude = {
+        '.**',
+        '.git/**',
+        '*.bak',
+        '*.tmp',
+       'runtime/**',
+       'cache/**'
+    },
+
+    -- 与上边的maxDelays配合，maxDelays是累计事件数(单位：个)，delay是时间(单位：秒)，这两个只要有一个符合条件就会同步一次，但为了确保实时同步，maxDelays我们一般设置为1，也就是只要有一个文件变化事件，就会同步一次，而delay是比较大的，默认是15。当然，假如我们把maxDelays设置为100，那可能15秒到了也没有达到100个文件变化，但由于到达时间了，它也会同步。
+    delay = 15,
+
+    -- 当init = false时只同步进程启动以后发生改动事件的文件，原有的目录即使有差异也不会同步，如果为true，则启动后如果源目录与目标目录的文件有差异都会同步，默认为true。
+    -- init = false,
+
+    -- rsync的配置（这是default.rsync模式，如果是default.rsyncssh模式，该模块的配置会有所不同）
+    rsync = {
+        -- rsync可执行文件的绝对路径
+        binary = "/usr/bin/rsync",
+
+        -- 密码文件路径(default.rsyncssh模式不需要该项)
+        password_file = "/etc/rsyncd.password",
+
+        -- 打包后再同步(注意，打包不等于压缩，打包即可以压缩也可以不压缩)
+        archive = true,
+
+        -- 压缩后再同步
+        compress = false,
+
+        -- 输出同步信息(由于是后台执行，所以没必要输出，如果非后台执行可以设置为true，非后台执行主要用于调试)
+        verbose  = false,
+
+        -- 由于rsync有非常多的选项(请自己rsync --help查看)，部分非主要选项可以用_extra的方式指定，双引号引住，逗号分隔(bwlimit中的bw是bandwith，即带宽，整个意思是带宽限制，omit-link-times忽略符号链接的修改时间)
+        _extra = {"--bwlimit=200", "--omit-link-times"}
+    }
+}
+</code></pre> 
+<h3><a id="_192"></a>解释几个选项：</h3> 
+<ul><li>target = “remote@192.168.1.6::wwwroot”，192.168.1.6是rsync服务器端的ip，remote是服务器端配置的用户名，wwwroot是服务器端的模块名。</li><li>password_file = “/etc/rsyncd.password”， rsyncd.password中的内容就是一个字符串(比如：123456，你也不用写password=123456)，是服务器端的密码(rsync服务器端可以配置账号和密码)，需使用命令chmod赋予文件400权限。<br> exclude再可以用excludeFrom来代替，这样就可以在外部文件单独写要排除同步的文件：</li></ul> 
+<pre><code>excludeFrom = "/etc/lsyncd_exclude.lst",
+
+</code></pre> 
+<p>外部排除同步文件/etc/lsyncd_exclude.lst的写法：</p> 
+<pre><code>.svn
+Runtime/*
+Uploads/*
+</code></pre> 
+<p>若某个事件的路径中的某些片段匹配这些文本，那么排除。比如/bin/foo/bar匹配规则foo。<br> – 如果规则以/开始，那么只匹配路径的开始<br> 如果规则以/结束，那么只匹配路径的结束<br> – ? 匹配任何不是/的字符<br> – *匹配0或多次非/字符<br> – **匹配任何字符0或多次。</p> 
+<h3><a id="rsync_215"></a>rsync服务器端配置</h3> 
+<p>文章开头已经说过A、B两台机各自要安装什么，现在A机的操作前面已经讲过了，B机的操作，由于之前写过文章，这里就不再重复，请直接看：<a href="https://www.xiebruce.top/753.html#rsync" rel="nofollow">rsync的使用</a>。</p> 
+<p><strong>开放端口</strong><br> rsync的默认端口是873，如果你是CentOS7的firewalld防火墙，可以用以下方法允许873端口：</p> 
+<pre><code>firewall-cmd --zone=public --add-port=873/tcp --permanent
+firewall-cmd --reload
+</code></pre> 
+<p>如果你是本地做实验觉得防火墙麻烦，也可关闭防火墙：<br> systemctl stop firewalld</p> 
+<p><strong>启动lsync服务</strong><br> 如何启动的官方文档：<a href="https://axkibe.github.io/lsyncd/manual/invoking/" rel="nofollow">Invoking</a>。<br> lsync配置文件写好后，就可以启动它了，由于我们有配置文件，所以启动方式是：</p> 
+<pre><code>lsyncd -log Exec /etc/lsyncd.conf
+
+
+</code></pre> 
+<p>-log Exec表示记录所有进程的日志(因为如果maxProcesses大于1就会有多个同步进程)<br> 启动后，它只输出了：</p> 
+<pre><code>21:46:54 Normal: --- Startup, daemonizing ---
+</code></pre> 
+<p>查看是否启动成功：</p> 
+<pre><code>ps aux | grep lsyncd
+</code></pre> 
+<p>如何进程正常运行，可以看到：</p> 
+<pre><code>root 5238 7.7 0.6 13348 3340 ? Ss 21:46 0:15 lsyncd /etc/lsyncd.conf
+</code></pre> 
+<p>查看log文件，你会看到已经同步了很多文件</p> 
+<pre><code>tail -100f /var/log/lsyncd/lsyncd.log
+</code></pre> 
+<p>但其实在CentOS7系统中，我们一般不直接启动，而是用systemctl命令来启动：</p> 
+<pre><code>systemctl start lsyncd
+</code></pre> 
+<p>查看启动状态：</p> 
+<pre><code>systemctl status lsyncd
+</code></pre> 
+<p>停止：</p> 
+<pre><code>systemctl stop lsyncd
+</code></pre> 
+<p>重启：</p> 
+<pre><code>systemctl restart lsyncd
+</code></pre> 
+<p>设置开机自启动：</p> 
+<pre><code>systemctl enable lsyncd
+</code></pre> 
+<h3><a id="defaultrsyncssh_284"></a>default.rsyncssh模式配置文件：</h3> 
+<p><strong>相比rsync，主要修改的有以下几点：</strong><br> 1.settings中的maxProcesses必须为1，否则无法启动，并报以下错误：<br> Error: error preparing /etc/lsyncd.conf: /etc/lsyncd.conf:69: default.rsyncssh must have maxProcesses set to 1.<br> 2.rsync中的password_file去掉(或注释掉)，因为ssh已经不需要用rsync的password来验证了。<br> 3.sync添加一个host，格式就是ssh登录的格式(即：username@&lt;ip_addr&gt;这样的格式)<br> 4.把target改成targetdir，值的格式就是目标服务器的绝对地址，比如：/data/wwwroot/(最后一个斜杠可要可不要，最好要，因为这样一看就知道是目录)。<br> 5.host指定的ssh登录用户需要具有targetdir指定的目录的权限，如果启动不了请尝试用root，并且设置该用户免密登录：Linux-使用ssh免密码登录，不配置免密码登录将会无法启动。<br> 6.免密码登录需要注意：假设你A机使用root启动lsyncd(其实基本上都得用root)，而你host=zhangsan@12.34.56.78(B机)，那么你必须保证A机能在root用户下ssh 到B机。<br> 7.host指定ssh用户，必须与目标文件夹需要的用户相同，比如很多时候，wwwroot网站目录我们都使用www:www这样的用户和组，所以你就必须用这个用户来同步，否则同步后创建出来的文件并不是这个权限，权限不对则网站可能会出问题。</p> 
+<pre><code>-- 由于该配置文件实际上是lua语言的语法，所以写注释要用--，--是lua语言的注释符号
+-- Lsyncd本身的配置
+settings {
+    -- 指定日志文件位置
+    logfile = "/var/log/lsyncd/lsyncd.log",
+
+    -- 指定状态文件位置
+    statusFile = "/var/log/lsyncd/lsyncd.status",
+
+    -- inotify事件模式，什么事件才同步，CloseWrite表示文件关闭的时候同步(创建文件，修改文件后再关闭(如vim的:wq)都会触发CloseWrite事件)
+    inotifyMode = "CloseWrite",
+
+    -- 最大同步进程数(default.rsyncssh模式必须设置为1，否则无法启动，default.rsync模式可以设置大于1)
+    maxProcesses = 1,
+
+    -- 配合下面的delay选项使用，delay单位是秒，当delay时间到了，不管maxDelays设置多少，都会同步，同样，当maxDelays达到了设定值，不管是否到delay时间，都会同步，即两个选项有一个满足即会触发同步，为了实时同&gt;步，我们一般设置为1，表示即使只有一个文件改变也同步
+    maxDelays = 1,
+
+    -- 是否以后台的方式运行，注意它是nodaemon，所以是双重否定，如果填false，意思就是“不要不后台运行”(即后台运行)，非后台运行一般用于调试，把rsync的verbose也设置为true，这样会把同步的细节输出到控制台，方便调试
+    nodaemon = false,
+}
+
+-- 同步配置default.rsync模式(比如配置从哪同步到哪，要忽略哪些文件，多久同步一次等)，可以有多个sync模块，每个模块用于设置一台目标机器
+sync {
+    -- 有default.rsync/default.direct/default.rsyncssh三种模式，我们默认都用default.rsyncssh方式，因为这种方式其实是最好的。
+    default.rsyncssh,
+
+    -- 同步源目录(本机某个目录)
+    source = "/data/wwwroot/",
+
+    -- 同步目标地址，rsyncssh模式写法
+    host="192.168.1.6",
+    targetdir="/data/wwwroot/",
+
+    -- 默认true，允许删除目录服务器中的某些文件(即删除“那些在源服务器中不存在的文件”)，可选值有: true/false/startup/running，startup就是只在启动lsyncd服务的时候判断目标服务器中有哪些文件在源服务器中没有，然后把这些文件删除，但启动之后如果目标服务器又新增了文件，这些文件即使在源服务器不存在，也不会被删除；而running与startup正好相反，是在启动的时候不会删除，启动之后会删除，true=running+startup，false相当于running和startup都不做。
+    -- delete = true,
+
+    -- 哪些文件不同步(可用正则))
+    exclude = {
+        '.**',
+        '.git/**',
+        '*.bak',
+        '*.tmp',
+       'runtime/**',
+       'cache/**'
+    },
+    -- 忽略文件路径规则也可用外部配置文件
+    -- excludeFrom = "/etc/lsyncd_exclude.lst",
+
+    -- 与上边的maxDelays配合，maxDelays是累计事件数(单位：个)，delay是时间(单位：秒)，这两个只要有一个符合条件就会同步一次，但为了确保实时同步，maxDelays我们一般设置为1，也就是只要有一个文件变化事件，就会同步一次，而delay是比较大的，默认是15。当然，假如我们把maxDelays设置为100，那可能15秒到了也没有达到100个文件变化，但由于到达时间了，它也会同步。
+    delay = 15,
+
+    -- 当init = false时只同步进程启动以后发生改动事件的文件，原有的目录即使有差异也不会同步，如果为true，则启动后如果源目录与目标目录的文件有差异，就会同步，我们当然要设置为true，默认为true，所以这个设置可以不写，写在这里是为了解释它。
+    -- init = false,
+
+    -- rsyncssh的配置（这是default.rsyncssh模式，如果是default.rsyncssh模式，该模块的配置会有所不同）
+    rsync = {
+        -- rsync可执行文件的绝对路径
+        binary = "/usr/bin/rsync",
+
+        -- 密码文件路径(rsync模式用该配置，rsyncssh模式不需要该项)
+        -- password_file = "/etc/rsyncd.password",
+
+        -- 打包后再同步(注意，打包不等于压缩，打包即可以压缩也可以不压缩)
+        archive = true,
+
+        -- 压缩后再同步
+        compress = true,
+
+        -- 同步符号链接文件
+        copy_links = true,
+
+        -- 同步符号链接目录
+        copy_dirlinks = true,
+
+        -- 输出同步信息(由于是后台执行，所以没必要输出，如果非后台执行可以设置为true，非后台执行主要用于调试)
+        verbose  = false,
+
+        -- 由于rsync有非常多的选项(请自己rsync --help查看)，部分非主要选项可以用_extra的方式指定，双引号引住，逗号分隔(bwlimit中的bw是bandwith，即带宽，整个意思是带宽限制，omit-link-times忽略符号链接的修改时间)
+        _extra = {"--bwlimit=200", "--omit-link-times"},
+
+        -- 指定ssh相关参数选项
+        rsh = "/usr/bin/ssh -l xiebruce -i /root/.ssh/id_rsa -o StrictHostKeyChecking=no"
+    }
+}
+</code></pre> 
+<p><strong>其中这一句就是用来通过ssh登录到服务器的：</strong></p> 
+<pre><code>rsh = "/usr/bin/ssh -l xiebruce -i /root/.ssh/id_rsa -o StrictHostKeyChecking=no"
+
+
+</code></pre> 
+<ul><li>你平时使用ssh登录服务器，也许用的是ssh zhangsan@192.168.1.6，最多再加个-p指定一下端口，但其实ssh还有很多选项，比如ssh -l test root@192.168.1.6就表示，我虽然是用root去登录，但用-l(login的缩写)指定了登录的用户，所以最终会以test用户进行登录，而-i(identify的缩写)则表示指定私钥(身份认证文件)，通常是为了免密码登录服务器，原因很简单，这个同步不可能每次让你输入密码，所以需要免密码登录。</li><li>而-o(option的缩写)表示选项，ssh有很多选项，可以用man ssh查到，而每个选项是什么意思需要用man ssh_config来查看，“StrictHostKeyChecking”表示严格检查主机的key fingerprint(指纹密钥)，当你首次登录一台服务器的时候，它总会有这个提示：</li></ul> 
+<pre><code>The authenticity of host '192.168.1.6 (192.168.1.6)' can't be established.
+ECDSA key fingerprint is SHA256:xcDUp3zNlJvhY4fwfwDH1pgOyc5p8Vsr2OjopanEQBw.
+Are you sure you want to continue connecting (yes/no)?
+</code></pre> 
+<p>如果你输入no那就不会登录，如果你输入yes，就会登录，并且把这个“key fingerprint”(指纹密钥)添加到你终端的ssh配置目录下的known_hosts文件中，这个文件的位置，对于Mac/Linux电脑，是在~/.ssh/known_hosts，Windows的话则是在C:\Users\用户名\目录下。<br> 同理，现在是rsync登录你的ssh，所以rsync也会存储这样的指纹密钥，如果“StrictHostKeyChecking”设置为yes，就意味着每次都要严格检查密钥(就相当于你用终端登录时，每次都要你输入一遍yes)，这样显然是没必要的，所以我们要把它设置为“StrictHostKeyChecking=no”。</p> 
+<p>default.direct模式：该模式我没有测试</p> 
+<pre><code>sync {
+    default.direct,
+    source  = "/home/user/src/",
+    target  = "/home/user/trg/"
+}
+</code></pre> 
+<h3><a id="_410"></a>同时同步到多台机</h3> 
+<p>格式如下，每台目标服务器一个sync模块即可，每个sync模块都像上边说的那样写就行，其实就只是ip不同，其他都一样：</p> 
+<pre><code>settings {
+    logfile = "/var/log/lsyncd/lsyncd.log",
+    inotifyMode = "CloseWrite or Modify",
+    -- statusFile = "/var/log/lsyncd/lsyncd.status",
+}
+
+--  B服务器配置
+sync {
+    default.rsync,
+    source = "/etc/nginx/",
+    target = "rsync://rsync@192.168.1.6:1873/nginx/",
+    exclude = { ".*", "*.tmp", "*.swp", "*.bak", "*.log", "*.swx", "*~", "sets/config.json", "listen_local_*" },
+    delay = 2,
+    init = false,
+    rsync = {
+        password_file = "/etc/rsyncd.passwd",
+        archive = true,
+        compress = true,
+        verbose = true,
+        checksum = true,
+        ignore_times = true
+    }
+}
+
+--  C服务器配置
+sync {
+    default.rsync,
+    source = "/data/web/",
+    target = "rsync://rsync@192.168.1.11:1873/web/",
+    exclude = { ".*", "*.tmp", "*.swp", "*.bak", "*.log", "*.out", "*/logs/*", "*.swx", "*~" },
+    delay = 120,
+    init = false,
+    rsync = {
+        password_file = "/etc/rsyncd.passwd",
+        archive = true,
+        compress = true,
+        verbose = true,
+        checksum = true,
+        ignore_times = true
+    }
+}
+
+--  D服务器配置
+sync {
+    default.rsync,
+    source = "/data/script/",
+    target = "rsync://rsync@192.168.1.100:1873/script/",
+    exclude = { ".*", "*.tmp", "*.swp", "*.bak", "*.log", "*.out", "*/logs/*", "*.swx", "*~" },
+    delay = 2,
+    init = false,
+    rsync = {
+        password_file = "/etc/rsyncd.passwd",
+        archive = true,
+        compress = true,
+        verbose = true,
+        checksum = true,
+        ignore_times = true
+    }
+}
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4e35f5aeff68577677edb402e5308d70/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Scala连接mysql的方法</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/d4073c027e3cd8a8463f6b5b0a97961d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">ubuntu/deepin准备java开发环境</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

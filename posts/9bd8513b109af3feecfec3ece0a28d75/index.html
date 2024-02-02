@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【转载】腾讯音乐技术团队：QQ音乐Android编译提速之路 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【转载】腾讯音乐技术团队：QQ音乐Android编译提速之路" />
+<meta property="og:description" content="介绍QQ音乐团队在增量编译组件研发上的探索与实践。
+原文地址：https://juejin.cn/post/6891957803813584909
+文章目录 1. 序言2. 问题分析3. 优化思路4. 增量编译的诞生5. 核心原理5.1 代码编译（1）获取改动文件并进行编译（2）进行代码依赖分析 5.2 资源编译（1）资源增量（2）资源ID固定 5.3 动态加载（1）代码注入（2）资源注入 6. 结语 1. 序言 工程编译，是Android应用开发工作中的重要一环。而随着工程代码量膨胀，编译耗时也越来越长，拖慢了开发效率。
+这个问题在中大型团队中并不少见。以QQ音乐为例，Android工程代码量达到120万行以上，每修改一行代码，都要等待4分钟以上才能在手机上看到改动效果。
+为了应对这个问题，我们自研推出了一款增量编译组件。经过一年时间的不断优化，组件已经可以支撑团队内的日常开发工作，有效提升了本地开发场景下的编译效率。
+本文将会介绍QQ音乐团队在增量编译组件研发上的探索与实践历程。
+2. 问题分析 本地开发过程中，我们会不断重复 修改代码-编译工程-安装APK-运行验证 这一过程。
+因此，可以从编译与安装两个纬度来分析编译慢的原因。
+首先是编译阶段。 其主要流程是，先收集工程中的所有资源文件进行编译，得到资源包以及资源索引类。随后资源索引类会跟随工程的所有代码文件，一起被编译为字节码文件，字节码文件还需要被进一步编译为Dex文件，这样才能被Android虚拟机所识别。
+待资源包和Dex文件都准备好后，会被打包压缩到一起，执行签名、对齐等流程，最终完成编译，得到一个APK安装包。
+在这个过程中，不论是资源编译还是代码编译，耗时都是与待编译的文件数量成正比的。我们在开发过程中，一般只会改动极少数的代码文件，然后触发编译。理想的情况是，编译工具应当只编译这些被改动的文件。但是由于代码的依赖关系，这在原生工具下很难实现。
+Android Gradle Plugin自3.0版本开始，开始废弃compile关键字，并引入implementation关键字来声明依赖，是希望可以从module的粒度，去加快大型项目的编译速度。不过对于一些并未拆分多module的单一工程项目来说，使用效果并不理想。
+再来看安装阶段。 安装包首先需要通过ADB工具传输到手机上，然后系统对其进行签名校验。校验成功后，还需要进行一系列文件解压、拷贝的操作。例如拷贝Dex文件、so文件等。
+此外，如果是在系统版本为5.0、6.0的手机上，由于系统采用了AOT机制，安装过程中会进行预编译，将Dex中的字节码变成机器码，以提高应用运行时的效率，这就导致了安装耗时进一步被拉长。
+可以看到，安装包体积、手机系统版本，都会影响到安装阶段的耗时。
+3. 优化思路 根据上述分析，主要有三类解决方案。
+构建工具 欲善其事，必先利其器，首先可以尝试对工程的构建工具链进行优化。
+常见的方式是升级Android Gradle Plugin、Gradle等工具的版本、调整构建参数等。不过实践后发现，他们带来的优化效果并不理想。
+当然，除了Gradle构建工具外，也可以考虑使用Facebook的Buck作为构建工具。根据官方介绍， 它利用多模块、多任务并行编译的思想，可以大幅度缩短编译耗时。
+不过对于大型项目来说，要迁移构建工具，成本是极高的。目前使用的众多插件、周边开发工具链，都是基于Gradle体系的，迁移的话就会失去这些功能的支持；此外，如果工程还涉及到其他团队、项目的协作，构建方案也是无法随意更换的。
+工程代码优化 另外一种思路是，对工程代码进行优化，尽可能减少参与编译的代码数量。
+这里可以做的事情很多，比如梳理业务删除冗余代码、进行多工程拆分、实施组件化（模块化）改造等；但是，由于代码耦合深、开发节奏紧等客观因素的存在，代码优化的难度通常比较大，各个方案的实施周期会比较长。所以并不能在短期内，快速解决编译缓慢的问题。
+增量编译工具 那么，能不能提供一个编译工具：在本地开发期间，每次仅编译被改动过的少量代码，而且最好可以跳过APK的安装过程，仅推送与加载新改动的代码。这样就可以从编译与安装两个纬度，去大幅缩减编译耗时。
+这其实就是增量编译工具的核心思想。对于工具的接入方来说，不需要大刀阔斧地升级工具链或者进行工程改造，即可在较低的成本下，快速提高本地开发效率。
+截止目前，业界主要有两款方案可以参考。
+Instrant Run Instant Run是Google推出的第一代增量编译方案。不过在大型项目中，它带来的提速效果并不明显，甚至在某些场景下会让构建时间变得更长。
+首先，在Gradle 4.6以前，如果项目中使用了注解处理器，那么每次代码修改都要进行全量编译。此外，若是修改的类中，包含有公有静态常量，那么也同样会导致本次修改需要进行全量编译。
+Instant Run在使用过程中，有时也会遇到一些兼容性问题，但由于它是集成在Android Studio内部的，对于我们来说是一个黑盒，无法自行定位解决问题，只能被动地反馈问题与等待新版本发布。所以综合来看，这个方案并不合适引入。
+在最新的Android Studio中，Instant Run已经被废弃，取而代之的，是Apply Changes方案，它是基于JVMTI技术来实现的。不过仅支持 Android 8." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/9bd8513b109af3feecfec3ece0a28d75/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-08-07T17:52:41+08:00" />
+<meta property="article:modified_time" content="2023-08-07T17:52:41+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【转载】腾讯音乐技术团队：QQ音乐Android编译提速之路</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <blockquote> 
+ <p>介绍QQ音乐团队在增量编译组件研发上的探索与实践。<br> 原文地址：<a href="https://juejin.cn/post/6891957803813584909" rel="nofollow">https://juejin.cn/post/6891957803813584909</a></p> 
+</blockquote> 
+<p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><a href="#1__5" rel="nofollow">1. 序言</a></li><li><a href="#2__15" rel="nofollow">2. 问题分析</a></li><li><a href="#3__41" rel="nofollow">3. 优化思路</a></li><li><a href="#4__88" rel="nofollow">4. 增量编译的诞生</a></li><li><a href="#5__112" rel="nofollow">5. 核心原理</a></li><li><ul><li><a href="#51__114" rel="nofollow">5.1 代码编译</a></li><li><ul><li><a href="#1_116" rel="nofollow">（1）获取改动文件并进行编译</a></li><li><a href="#2_130" rel="nofollow">（2）进行代码依赖分析</a></li></ul> 
+   </li><li><a href="#52__167" rel="nofollow">5.2 资源编译</a></li><li><ul><li><a href="#1_169" rel="nofollow">（1）资源增量</a></li><li><a href="#2ID_195" rel="nofollow">（2）资源ID固定</a></li></ul> 
+   </li><li><a href="#53__230" rel="nofollow">5.3 动态加载</a></li><li><ul><li><a href="#1_232" rel="nofollow">（1）代码注入</a></li><li><a href="#2_295" rel="nofollow">（2）资源注入</a></li></ul> 
+  </li></ul> 
+  </li><li><a href="#6__299" rel="nofollow">6. 结语</a></li></ul> 
+</div> 
+<p></p> 
+<h2><a id="1__5"></a>1. 序言</h2> 
+<p>工程编译，是Android应用开发工作中的重要一环。而随着工程代码量膨胀，编译耗时也越来越长，拖慢了开发效率。</p> 
+<p>这个问题在中大型团队中并不少见。以QQ音乐为例，<strong>Android工程代码量达到120万行以上，每修改一行代码，都要等待4分钟以上才能在手机上看到改动效果。</strong></p> 
+<p>为了应对这个问题，我们自研推出了一款<strong>增量编译</strong>组件。经过一年时间的不断优化，组件已经可以支撑团队内的日常开发工作，有效提升了<strong>本地开发场景下的编译效率</strong>。</p> 
+<p>本文将会介绍QQ音乐团队在增量编译组件研发上的探索与实践历程。</p> 
+<h2><a id="2__15"></a>2. 问题分析</h2> 
+<p>本地开发过程中，我们会不断重复 <strong>修改代码-编译工程-安装APK-运行验证</strong> 这一过程。</p> 
+<p>因此，可以从<code>编译</code>与<code>安装</code>两个纬度来分析编译慢的原因。</p> 
+<p><img src="https://images2.imgbox.com/e5/30/IAsUs1JK_o.png" alt=""></p> 
+<ul><li>首先是<code>编译</code>阶段。</li></ul> 
+<p>其主要流程是，先收集工程中的所有<code>资源文件</code>进行编译，得到<code>资源包以及资源索引类</code>。随后资源索引类会跟随工程的所有<code>代码文件</code>，一起被编译为<code>字节码文件</code>，<code>字节码文件</code>还需要被进一步编译为<code>Dex文件</code>，这样才能被Android虚拟机所识别。</p> 
+<p>待资源包和Dex文件都准备好后，会被打包压缩到一起，执行<code>签名、对齐</code>等流程，最终完成编译，得到一个APK安装包。</p> 
+<p>在这个过程中，不论是<code>资源编译</code>还是<code>代码编译</code>，耗时都是与待编译的文件数量成正比的。我们在开发过程中，一般只会改动极少数的代码文件，然后触发编译。理想的情况是，编译工具应当只编译这些被改动的文件。但是由于代码的依赖关系，这在原生工具下很难实现。</p> 
+<p>Android Gradle Plugin自3.0版本开始，开始废弃<code>compile</code>关键字，并引入<code>implementation</code>关键字来声明依赖，是希望可以从<code>module</code>的粒度，去加快大型项目的编译速度。不过对于一些并未拆分多module的单一工程项目来说，使用效果并不理想。</p> 
+<ul><li>再来看安装阶段。</li></ul> 
+<p>安装包首先需要通过ADB工具<code>传输</code>到手机上，然后系统对其进行<code>签名校验</code>。校验成功后，还需要进行一系列文件<code>解压、拷贝</code>的操作。例如拷贝Dex文件、so文件等。</p> 
+<p>此外，如果是在系统版本为5.0、6.0的手机上，由于系统采用了AOT机制，安装过程中会进行<code>预编译</code>，<code>将Dex中的字节码变成机器码</code>，以提高应用运行时的效率，这就导致了安装耗时进一步被拉长。</p> 
+<p>可以看到，安装包体积、手机系统版本，都会影响到安装阶段的耗时。</p> 
+<h2><a id="3__41"></a>3. 优化思路</h2> 
+<p>根据上述分析，主要有三类解决方案。</p> 
+<ul><li>构建工具</li></ul> 
+<p>欲善其事，必先利其器，首先可以尝试对工程的构建工具链进行优化。</p> 
+<p>常见的方式是<code>升级Android Gradle Plugin、Gradle等工具的版本、调整构建参数</code>等。不过实践后发现，他们带来的优化效果并不理想。</p> 
+<p>当然，除了Gradle构建工具外，也可以考虑使用<code>Facebook的Buck作为构建工具</code>。根据官方介绍， 它利用多模块、多任务并行编译的思想，可以大幅度缩短编译耗时。</p> 
+<p>不过对于大型项目来说，要<strong>迁移构建工具，成本是极高的</strong>。目前使用的众多插件、周边开发工具链，都是基于Gradle体系的，迁移的话就会失去这些功能的支持；此外，如果工程还涉及到其他团队、项目的协作，构建方案也是无法随意更换的。</p> 
+<ul><li>工程代码优化</li></ul> 
+<p>另外一种思路是，对工程代码进行优化，<strong>尽可能减少参与编译的代码数量</strong>。</p> 
+<p>这里可以做的事情很多，比如梳理业务删除冗余代码、进行多工程拆分、实施组件化（模块化）改造等；但是，由于代码耦合深、开发节奏紧等客观因素的存在，代码优化的难度通常比较大，各个方案的实施周期会比较长。所以并<strong>不能在短期内，快速解决编译缓慢的问题</strong>。</p> 
+<ul><li>增量编译工具</li></ul> 
+<p>那么，能不能提供一个编译工具：在本地开发期间，每次仅编译被改动过的少量代码，而且最好可以跳过APK的安装过程，仅推送与加载新改动的代码。这样就可以从编译与安装两个纬度，去大幅缩减编译耗时。</p> 
+<p>这其实就是<strong>增量编译工具的核心思想</strong>。对于工具的接入方来说，不需要大刀阔斧地升级工具链或者进行工程改造，即可在较低的成本下，快速提高本地开发效率。</p> 
+<p>截止目前，业界主要有两款方案可以参考。</p> 
+<ul><li> 
+  <ul><li>Instrant Run</li></ul> </li></ul> 
+<p><code>Instant Run</code>是Google推出的第一代增量编译方案。不过在大型项目中，它带来的提速效果并不明显，甚至在某些场景下会让构建时间变得更长。</p> 
+<p>首先，在Gradle 4.6以前，如果项目中使用了注解处理器，那么每次代码修改都要进行全量编译。此外，若是修改的类中，包含有公有静态常量，那么也同样会导致本次修改需要进行全量编译。</p> 
+<p>Instant Run在使用过程中，有时也会遇到一些兼容性问题，但由于它是集成在Android Studio内部的，对于我们来说是一个黑盒，无法自行定位解决问题，只能被动地反馈问题与等待新版本发布。所以综合来看，这个方案并不合适引入。</p> 
+<p>在最新的Android Studio中，<strong>Instant Run已经被废弃，取而代之的，是Apply Changes方案</strong>，它是基于JVMTI技术来实现的。不过仅支持 Android 8.0 或者更高版本的手机，实测在工程中带来的提速效果也不明显。</p> 
+<ul><li> 
+  <ul><li>Freeline<br> 另一个就是阿里推出的<code>Freeline</code>方案了，它可以充分利用缓存文件，在几秒钟内迅速地对代码的改动进行编译并部署到设备上，提速效果十分明显。</li></ul> </li></ul> 
+<p>不过它同样存在着一些不可忽视的问题。首先是<strong>不支持Kotlin</strong>，这在Kotlin已经被谷歌官宣为Android开发首选语言的今天，是比较致命的。另外，<strong>不支持删除带id的资源</strong>，否则可能导致资源编译流程出错。</p> 
+<p>另外一个潜在的问题是，<strong>为了确保编译速度，Freeline是牺牲了一部分正确性的</strong>。例如，在改动公有静态常量的时候，只会编译对应的类文件，而引用到该常量的其他类，并不会参与编译的。由于常量内联优化的存在，就可能导致这些类在运行时，使用的仍然是旧的值，进而出现改动不生效的问题。</p> 
+<p>综合上述，目前业界已有的解决方案，并不能满足我们的需求。所以在2019年初，我们开启了增量编译组件的自研之路。</p> 
+<h2><a id="4__88"></a>4. 增量编译的诞生</h2> 
+<p>在2019年6月份，增量编译组件完成了首版开发，开始正式接入QQ音乐工程。</p> 
+<p>接入后，对于本地开发的提速效果是比较明显的。据团队实际数据统计，进行一次全量编译的耗时约为418秒，而增量编译单次耗时仅需13秒。以天为单位计算，每个人花在工程编译上的总时长，由3.95小时，降低至了1.02小时，效率提升达到<strong>74%</strong>。</p> 
+<p><img src="https://images2.imgbox.com/33/4b/g7aM6Nkk_o.png" alt=""></p> 
+<p><code>增量编译组件</code>完全基于Gradle标准，实现为一个<strong>Gradle插件</strong>，具备良好的<strong>多平台兼容性</strong>，而且对于目标工程的<strong>侵入性极低</strong>。使用者只需要接入我们的Gradle插件，即可通过执行特定的Gradle任务，进入增量编译模式。</p> 
+<p><strong>在功能的支持上，组件支持Java、Kotlin等代码文件以及所有类型资源文件的快速编译。</strong> 在今年年初，加入了DataBinding的增量支持。而且，为了进一步减少使用成本，我们还在最新版本中提供了配套的<strong>Android Studio插件</strong>，开发者可以通过可视化的方式，更方便的使用组件功能。</p> 
+<p>下图描述了组件的<strong>整体原理</strong>，我们将开发周期分为<code>编译期</code>和<code>运行期</code>。</p> 
+<p><code>首次编译（亦可称全量编译）</code>，需要完整编译工程，得到原始安装包，耗时与原生的打包任务持平。</p> 
+<p>后续再触发编译，将会进入耗时极短的<code>增量编译模式</code>，组件会负责收集改动过的代码进行编译，得到增量产物，并推送到手机上。</p> 
+<p><code>运行期</code>则负责将手机上的增量产物进行动态加载运行。</p> 
+<p><img src="https://images2.imgbox.com/65/b1/65ijLtHG_o.png" alt=""></p> 
+<p>在本文的后续内容中，将介绍几个重点模块的实现。</p> 
+<h2><a id="5__112"></a>5. 核心原理</h2> 
+<h3><a id="51__114"></a>5.1 代码编译</h3> 
+<h4><a id="1_116"></a>（1）获取改动文件并进行编译</h4> 
+<p>首先需要考虑的问题是，如何识别出用户改动了哪些文件？</p> 
+<p>我们的做法是，在每次编译成功后，<code>收集</code>所有工程文件的最<code>后修改时间</code>，保存为一份<code>文件快照</code>。在下次编译开始时，组件会生成最新的文件快照，与上一次的文件快照进行<code>比对</code>，就可以收集到用户改动过的文件了。</p> 
+<p>为了能够单独编译这些文件，还需要解决类引用的问题。</p> 
+<p>在首次完整编译工程时，组件会收集所有生成的<code>class</code>文件，放到<code>缓存目录</code>中。</p> 
+<p>在编译被改动的文件时，会调用原生的<code>javac</code>或者是<code>kotlinc</code>程序，将刚才的<code>缓存目录</code>作为<code>classpath</code>传递进去，就可以解决编译时代码引用的问题了。</p> 
+<p><img src="https://images2.imgbox.com/e6/35/eRbzboG0_o.png" alt=""></p> 
+<h4><a id="2_130"></a>（2）进行代码依赖分析</h4> 
+<p>上文中，提供<code>classpath</code>可以使编译阶段成功执行，却无法确保运行期的代码逻辑是正确的。</p> 
+<p>举个例子，某个类修改了某个方法的参数列表，那么除了这个类需要被编译外，依赖这个类的其他类，也是需要重新编译的。否则，就会在运行期，出现<code>NoSuchMethodException</code>。</p> 
+<p><img src="https://images2.imgbox.com/8a/73/KtjrY7iP_o.png" alt=""></p> 
+<p>因此，由于代码之间相互依赖关系的存在，仅仅收集被用户改动的代码来编译，是不够的。还可能需要找出它的子依赖集，纳入编译范围。</p> 
+<p>沿着这个思路，还需要考虑两个问题：</p> 
+<ul><li><strong>如何得到改动类的变化类型？</strong><br> 修改方法内部实现等类型的改动，是不会影响到其子依赖集的。在确保编译正确的前提下，为了尽可能地减少参与编译的代码数量，我们需要得到被改动类的变化类型，才能够决定是否需要将其子依赖集重新进行编译。</li><li><strong>如何得到改动类的子依赖集？</strong><br> 这个很好理解，只有计算出某个类的子依赖集，组件才能知道要编译什么。</li></ul> 
+<p>想获取这两项信息，都需要对类的内部结构进行分析，提取出类名、类的修饰符、成员变量、方法等数据。我们的做法是，引入<code>ASM</code>工具对<code>class</code>文件进行解析，然后将解析出来的信息，保存到自定义的<code>ResolvedClass</code>数据结构中。</p> 
+<p><img src="https://images2.imgbox.com/de/28/mVjBnicn_o.png" alt=""></p> 
+<p>接下来的解决方案是这样的：</p> 
+<ol><li> <p>在<code>全量编译期间</code>，组件会同步启动一个独立的进程，对所有的class文件进行遍历分析，得到对应的<code>ResolvedClass</code>信息，并保存在本地文件中。其中，如果发现某个类引用了另一个类，那么就会把当前类的类名，添加到被引用类的子依赖集列表中（resolvedBy字段）。</p> </li><li> <p>触发<code>增量编译</code>后，组件首先编译改动类，得到新的<code>class</code>文件。然后启动代码依赖分析流程，解析出新的<code>ResolvedClass</code>，将其与全量编译期解析出来的旧<code>ResolvedClass</code>进行比对，就可以得到这个类的改动类型了。</p> </li></ol> 
+<p><img src="https://images2.imgbox.com/dc/12/aHA4GoK4_o.png" alt=""></p> 
+<p>当发现当前类的改动类型在下表中，组件才会获取其子依赖集，启动第二轮编译，得到子依赖集对应的class文件。</p> 
+<p><img src="https://images2.imgbox.com/a2/c8/sE0K4OZE_o.png" alt=""></p> 
+<p>通过上面的方式，我们在确保编译正确的前提下，尽可能地减少了需要编译的代码数量。</p> 
+<p>随后，增量编译期间生成的所有<code>class</code>文件，会被<code>dx工具</code>进一步地编译为<code>Dex</code>文件，然后通过<code>ADB</code>推送到手机上，等待被<code>动态加载</code>。</p> 
+<h3><a id="52__167"></a>5.2 资源编译</h3> 
+<h4><a id="1_169"></a>（1）资源增量</h4> 
+<p>这一块的基本思路，与代码增量是类似的。即先<code>收集</code>被改动的资源，然后进行<code>编译</code>。</p> 
+<p>原生的资源编译流程主要采用的是<code>aapt</code>，或者是<code>aapt2</code> 。</p> 
+<p>一开始，我们工程使用的仍然是<code>aapt</code>，基于它去资源增量的难度相对较大。因为<strong>aapt工具是不支持单个资源编译的。</strong><code>Freeline</code>通过修改<code>aapt</code>的源码，实现了单个资源的增量功能。不过他们的这部分方案没有开源，并且改动后仍然不支持带ID资源的删除，所以没有考虑在组件中引入。</p> 
+<p>再来看看<code>aapt2</code>。<strong>与aapt最大的不同在于，它是天然支持单个资源编译的。</strong> 其内部把资源的打包分成了 <code>编译（compile）</code>与<code>链接（link）</code> 两步，</p> 
+<ul><li>在<code>编译阶段</code>，负责将单个或者多个资源<code>编译</code>为二进制文件；</li><li><code>链接阶段</code>，则负责<code>合并</code>所有二进制文件再<code>打包</code>。</li></ul> 
+<p><img src="https://images2.imgbox.com/80/c4/yrqtW9T2_o.png" alt=""></p> 
+<p>于是，我们首先升级工程的工具链，引入了<code>aapt2</code>，然后组件也基于此重新设计了资源增量方案。</p> 
+<p>在工程<code>首次编译</code>结束之后，组件会将所有<code>编译好的资源二进制文件</code>都收集到一个<code>缓存目录</code>中。</p> 
+<p>后续改动资源时，会先调用<code>aapt2</code>的编译功能，将改动的资源编译成为<code>二进制文件</code>。然后将新的二进制文件<code>拷贝</code>到<code>资源缓存目录</code>中，<code>覆盖</code>掉同名文件。</p> 
+<p>接着，会针对这个目录，采用<code>aapt2</code>的<code>链接</code>功能，<code>打包</code>生成最后的<code>增量资源包</code>，并推送到手机上，等待被<code>动态加载</code>。</p> 
+<p><img src="https://images2.imgbox.com/88/59/YAKI4RAV_o.png" alt=""></p> 
+<p>通过这样改造后，<strong>QQ音乐工程中资源增量编译阶段的耗时，由原来的32秒降低到了12秒</strong>，效率得到进一步提升。</p> 
+<h4><a id="2ID_195"></a>（2）资源ID固定</h4> 
+<p>资源编译过程中，有一个文件是需要特别关注的：<code>R.java</code>文件。</p> 
+<p>为了让开发者能够在代码中引用资源，资源编译器会在编译的过程中，为每一个资源分配索引<code>ID</code>，并以公有静态常量的方式保存在<code>R.java</code>文件中。开发者只需要在代码中通过<code>R.color.text</code>等形式，即可引用到对应的资源。</p> 
+<p>而编译器编译源代码时，如果发现某处代码引用了常量（同时使用<code>static</code>和<code>final</code>两个关键字来修饰），且该常量为字面值形式的原始数据类型或字符串时，编译器就会将此处的常量引用<strong>替换为常量值</strong>。</p> 
+<p>也就是说，代码中类似<code>R.color.text</code>的引用，在<code>class</code>文件中都会被替换成为对应的数字。</p> 
+<p><img src="https://images2.imgbox.com/0a/47/mwqVNy99_o.png" alt=""></p> 
+<p><strong>资源编译的过程中，资源是按照名称排序后，按序递增分配索引的。如果新增或者删除资源，会导致其后续资源的索引出现错位。</strong></p> 
+<p><img src="https://images2.imgbox.com/60/2d/lEDpYGMw_o.png" alt=""></p> 
+<p>在这种场景下，如果某个类引用到索引变化了的资源，就需要重新参与编译。否则，就会在运行时遇到资源引用错乱的问题。</p> 
+<p>但是这就会导致<strong>大量的类</strong>需要在增量过程中参与编译，和我们的初衷是相违背的。</p> 
+<p>所以，需要将<code>R.java</code>中的<code>ID</code>进行<code>固定</code>。简单来说，就是使得两次编译之间，对于同一个资源，分配到的ID是不变的。其实在热修复场景下，也具有相同的诉求。对于补丁包，是有严格的大小要求的。如果我们要对资源进行热修复，不可能把所有用到该资源的代码都重新编译纳入补丁包中下发，所以也需要进行资源ID固定。</p> 
+<p>相对应的解决方案也是业界比较通用的。若尝试输出aapt2命令行工具的帮助文档，可以发现有两个参数：</p> 
+<ul><li> <p><strong>–stable-ids：</strong> File containing a list of name to ID mapping.<br> 一个包含名称到ID映射的文件。</p> </li><li> <p><strong>–emit-ids ：</strong> Emit a file at the given path with a list of name to ID mappings, suitable for use with --stable-ids.<br> 使用给定路径在文件中生成一个名称到ID映射的列表，适用于与 --stable-ids 一起使用。</p> </li></ul> 
+<p>因此，我们可以在编译资源的时候，给<code>aapt2</code>注入<code>emit-ids</code>参数，在指定文件中输出资源名称到资源ID之间的映射关系。并在下次启动<code>aapt2</code>时，通过s<code>table-ids</code>传入刚才的映射关系，达到资源ID固定的效果。</p> 
+<h3><a id="53__230"></a>5.3 动态加载</h3> 
+<h4><a id="1_232"></a>（1）代码注入</h4> 
+<p><code>编译</code>完成后，可以得到若干个<code>增量Dex包</code>，并推送到手机的特定目录下。</p> 
+<p>那么在<code>运行期</code>，我们需要做的，是干涉原生的类加载流程，使被改动的代码<strong>优先被加载</strong>，达到改动生效的目的。</p> 
+<p>先来看看Android原生的类加载流程。</p> 
+<p>在应用程序启动后，会采用名为<code>PathClassLoader</code>的类加载器，去加载安装包中的<code>Dex文件</code>。需要加载某个类的时候，系统会<code>从前往后</code>依次<code>遍历</code>Dex数组，直到找到对应的类。</p> 
+<p><img src="https://images2.imgbox.com/4a/f6/BRIA23SC_o.png" alt=""></p> 
+<p>基于此，增量组件会在应用启动的时候，将<code>增量Dex文件</code>，通过<code>反射</code>手段插入<code>Dex数组</code>的<code>最前面</code>。后续需要加载某个类的时候，由于系统机制会<code>从前往后遍历</code>，因此会优先从增量的Dex中查找并命中改动后的类。</p> 
+<p>需要说明的是，所有<code>增量的Dex</code>，会按照<code>生成的时间</code>，<strong>倒序</strong>插入到Dex数组中，如inc_3.dex、inc_2.dex、inc_1.dex，这样就可以确保一个类被多次增量修改后，被加载到的总是其最新实现。</p> 
+<p><img src="https://images2.imgbox.com/c4/9b/QbOTrkvs_o.png" alt=""></p> 
+<p><strong>类改动不生效问题的处理</strong></p> 
+<p>在第一个版本发布后，我们收到同事的反馈，在Android 7.0或者更高版本的系统上，会偶现代码改动不生效的问题。经过分析，可以确保增量的代码是编译成功的，问题是出现在运行时类加载阶段。</p> 
+<p>这是由于从Android 7.0开始，虚拟机的代码编译策略，发生了变化。</p> 
+<p>Dex中的指令，首先需要被翻译成为<code>机器码</code>，才能被执行。随着系统版本的更迭，对于 Dex字节码的编译策略，也有着不同的表现。</p> 
+<p><img src="https://images2.imgbox.com/6c/48/EJxC9UvF_o.png" alt=""></p> 
+<p>在<code>5.0以下</code>的系统中，使用的是<code>Dalvik虚拟机</code>。</p> 
+<p>在应用运行时，每当遇到一个新类，<code>JIT编译器</code>就会对这个类进行即时编译，经过编译后的代码，会被优化成相当精简的原生型指令码，这样在下次执行到相同逻辑的时候，速度会更快。不过由于编译工作是在应用运行过程中进行的，且没有缓存，这就使得应用启动速度较慢，运行效率受到影响，而且耗电较多。</p> 
+<p>因此，在<code>Android 5.0开始</code>，Google采用<code>ART虚拟机</code>来替代了<code>Dalvik虚拟机</code>。</p> 
+<p>和Dalvik最大的区别在于，ART虚拟机采用的是<code>AOT提前编译机制</code>。</p> 
+<p>系统在安装应用的时候，会使用自带的<code>dex2oat</code>工具，把安装包中的所有Dex文件进行一次<code>预编译</code>，生成一个可以在本地机器上运行的<code>oat文件</code>。这样后续应用每次运行时，就不需要执行编译了，应用的启动与运行的效率也得到了极大的提升。但是AOT每次执行的时间太长了，给用户直观感受就是安装极慢。</p> 
+<p>所以，从Android 7.0开始，采用了<code>Hybrid Mode的ART虚拟机</code>，它同时支持<code>Interpreter、JIT、AOT</code>三种模式。他们的交替使用，可以达到安装时间、内存占用、电池消耗和性能之间最好的平衡。</p> 
+<p>在应用运行时，虚拟机会先使用<code>Interpreter</code>去解释与执行代码。如果发现热点函数，会启用<code>JIT编译器</code>，并将编译结果存储在本地<code>profile</code>文件中；当Android设备空闲或者是充电时，系统会在后台定期针对profile文件执行<code>AOT编译</code>，得到一份<code>“热代码”</code>；</p> 
+<p>在下一次应用重启时，系统会将编译好的<code>热代码</code>，一次性地插入到<code>类加载器的缓存ClassTable</code>中。后续类加载的过程中，会先从<code>ClassTable</code>中寻找是否有缓存，有的话则直接返回，跳过后续的类查找流程。</p> 
+<p><img src="https://images2.imgbox.com/88/2e/TJ5y6cNW_o.png" alt=""></p> 
+<p>到这里，我们就可以解释，为什么混合编译会引起偶现的增量代码改动不生效问题了。</p> 
+<p>若要加载增量改动过的A类，会分为两种情况：</p> 
+<ol><li>热代码中<strong>不包含</strong><code>A类</code>：这种情况是比较理想的，系统由于在<code>ClassTable</code>中无法命中，就会到<code>增量Dex</code>中查找<code>A类</code>，此时增量代码是可以生效的。</li><li>热代码中<strong>包含</strong>A类：系统在类加载过程中，会在ClassTable中优先命中改动前的A类，从而导致<strong>增量不生效</strong>的问题。</li></ol> 
+<p><img src="https://images2.imgbox.com/89/4e/AdgFBkY6_o.png" alt=""></p> 
+<p>针对这个问题，<code>Tinker</code>的解决方案是，首先<code>复制</code>原生类加载器的<code>Dex数组</code>，去完全新建一个<code>自定义的类加载器</code>。然后把应用进程引用的所有类加载器，都指向自定义的类加载器，负责后续的所有类加载以及补丁代码注入行为。</p> 
+<p>因为热代码不会被插入到自定义类加载器的ClassTable缓存中，因此后续的补丁代码加载，就不会受到热代码干扰，可以正常生效了。</p> 
+<p><img src="https://images2.imgbox.com/46/a6/z0BD7OPe_o.png" alt=""></p> 
+<p>不过，增量编译组件是面向本地开发的<code>debug</code>包，所以，也可以采用更为简单的方案：由组件自动在<code>AndroidManifest.xml</code>中指定<code>android:vmSafeMode="true"</code> 即可。这个开关会<code>停用AOT编译器</code>。热代码不能生成，也就不会遇到上述问题了。</p> 
+<h4><a id="2_295"></a>（2）资源注入</h4> 
+<p>资源的动态加载则相对简单。主要是参考<code>Instant Run</code>，通过反射调用<code>AssetsManager</code>的<code>addAssets</code>方法，将增量资源包加载到内存中来，得到新的<code>Resources</code>对象，然后替换掉<code>ActivityThread</code>等所有持有<code>Resources</code>的地方即可。这也是大部分热修复框架中的基本思路。</p> 
+<h2><a id="6__299"></a>6. 结语</h2> 
+<p>回顾增量编译组件的实践之路，其实是对于Android应用<code>编译、热修复、字节码插桩、Gradle</code>等技术的综合运用。对于大型工程说，可以快速低成本的实现本地开发效率的提升。</p> 
+<p>同时，对于编译速度的优化，我们还有几个建议。</p> 
+<p>首先是建议<strong>及时升级最新的编译工具链</strong>，沿用官方最新的优化成果。并使用Gradle提供的<code>profile</code>构建分析工具，进行针对性的任务分析，解决脚本中一些不合理的耗时。</p> 
+<p>同时，也建议同步进行<code>模块化改造</code>，进行<code>代码分拆</code>等。这一步持续的时间可能较长，但是后期收益不仅仅是编译效率上的提升，还有业务模块级别的代码复用能力提升。</p> 
+<p>目前组件已经接入QQ音乐、全民K歌等团队中应用，并已在公司范围内进行开源。增量编译组件还有部分特性需要进一步开发。如四大组件增量支持、Module增量支持等。同时，我们也正在通过实际开发工作场景中暴露出来的问题，不断去优化组件。</p> 
+<p>待进一步完善后，将会执行组件<strong>外部开源</strong>计划。我们期望在开源后，可以帮助更多有需要的团队，能够做到无缝集成，无需考虑细节实现，即可轻松提升开发效率。</p> 
+<blockquote> 
+ <p>QQ音乐招聘Android/iOS客户端开发，点击 <a href="https://link.juejin.cn?target=https%3A%2F%2Fjoin.tencentmusic.com%2Fjobs%2Fdetails%3Fid%3D10697%26refer_code%3D070C95E8ED9C09F0A4E1D64BF8660649" rel="nofollow" title="https://join.tencentmusic.com/jobs/details?id=10697&amp;refer_code=070C95E8ED9C09F0A4E1D64BF8660649">这里</a> 投递简历～<br> 也可将简历发送至邮箱：<code>tmezp@tencent.com</code></p> 
+</blockquote>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e46a08361b31cc38f7bd6d236c3a6dda/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">vue &#43; elementUI 实现下拉树形结构选择部门，支持多选，支持检索</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8697782d6064ffbbd17bbe0d14616178/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">使用 RKE 方式搭建 K8s 集群并部署 NebulaGraph</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

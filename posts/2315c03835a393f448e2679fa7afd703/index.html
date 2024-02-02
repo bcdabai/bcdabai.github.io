@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【异步FIFO的一些小事·1】空满判断与格雷码 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【异步FIFO的一些小事·1】空满判断与格雷码" />
+<meta property="og:description" content="今天经过与HR的交谈意识到自己对于异步FIFO的理解还不深，因此回来之后又其结构进行了一些理解，于此分享。
+异步FIFO的设计：http://blog.csdn.net/moon9999/article/details/77822606
+疑问1：进行数据空满的对比时，读写时钟域都有读写指针，此时应该怎么对比？为什么？
+另外一篇博客中有这样的话：
+同步rd_cntr至clk_write时钟域，再与wr_cntr进行对比来决定FIFO是否满；（判断满是wr_cntr - rd_cntr）
+同步wr_cntr至clk_read时钟域，再与rd_cntr进行对比来决定FIFO是否空；（判断空是rd_cntr == wr_cntr）
+这是结论，那现在我们必须要仔细的思考这句话为什么是这么做的。
+首先画个示意图。
+那现在我们来设想各种情况下会发生什么，在此我们暂时不考虑亚稳态的事情，认为信号通过同步模块都被采到了但是会有信号丢失。
+第一种情况我们假定写时钟特别快，读时钟都采不齐写指针。
+那么此时空逻辑会不会出错呢？假设写指针已经跑了1 2 3 4 5 6 7 8 9，而读时钟采到了1 2 6 8；那么如果此时读指针就在8，两边一对比发现一样（当然了这只是假设的一种情况）则会报“空”！那么实际空没空呢，没有因为我写到9了写进去了一个数，不过没关系之后必然会采到9（或者采到10一类的），状态会很快恢复正常，或者说没有空而报了空我们还可以接受，因为这样对于一个将要空的FIFO会停止读数旋即恢复正常，不会使其数据发生紊乱。那会不会有空了而报不空使得读出数据出现问题的情况呢？不会的，你想想看写指针跑的比你采样的快，是趋向与“不空”（越写数据越多嘛）的，因此不会出现这样的错误。
+读指针被同步到写时钟域本身不会出现漏采的情况，因此“满”逻辑的判断不会出现问题。
+第二种情况我们假定读时钟域特别快，写时钟都采不齐读指针。
+此时的满逻辑会出错么？我们来看下。我们同样假设读指针从1跑到了9，而只被采样到了7。如果此时写指针也写到了7，那么二者一比较发现写“满”了，实际呢没有满，不过此时也会停止外部写入（传出了满的信号），这是不会对FIFO中的数据产生影响的，并且很快会恢复到“不满”。如果此时写指针到了5，那么二者对比会得出“不满”的逻辑传出，真实情况呢同样是不满，因为读到7就已经不满了真实情况读到了9自然更加“不满”。这样就解释清楚了。
+写指针被同步到读时钟域本身不会出现漏采的情况，因此“空”逻辑的判断不会出现问题。
+受到HR的点播或许我们可以选择一种记法：
+“满”逻辑是要给谁的——给写信号告诉他你别写了——那么写指针能多跑出去么？跑多了不就把数据覆盖了！——所以必须在写时钟域进行对比；
+“空”逻辑是要给谁的——给读信号告诉他你别读了——那么读指针能多跑出去么？跑多了不就读出来错误的数了！——所以在读时钟域进行对比；
+我现在先理解到这一步吧。
+疑问2：为什么要用格雷码进行同步传输？
+我觉得使用格雷码的优势体现在读写时钟差异不是特别大的时候，不能一个是1000M一个是10M那谁也救不了了，无限加长FIFO深度吧。那么我们假定读写时钟频率差异没有过大，例如一个133M一个100M这样的。
+我们要知道这个异步时钟采样，再不经过特殊处理的情况下采错了是在所难免的。单个信号可能采错或者没采到，那多个信号的读写指针就更加有可能出问题了。我们来看下如果此时的指针是1011（二进制=2），那么在向1100（2）跳变时候，由于信号走的距离不一样啦触发事件或者逻辑门延时不同啦等等原因，在另外一段时钟域就可能采出多种情况例如1011（2）、1110（2）、1101（2）等，总之每个信号都可能是正确值或者未跳变时候的值。那么在得到“空”“满”逻辑时候很大可能概率会出错，这个我们不能忍。过程如下图所示。
+所以说我们就要选择格雷码了，来看下格雷码发生了什么事。1011（2）=1110（g）,1100（2）=1010（g），因此格雷码跳变为1110（g）-&gt;1010(g)。同样考虑采样出问题了，由于我们提前说好了读写时钟频率差距不是太大，因此采样可能得到两种情况：1110（g）和1010（g），到另外的时钟域后会转换为二进制的1011（2）和1100（2）。看到这里是不是想到了什么！你看如果得到的是1100那没问题呀，这就是真是的值。如果是得到1011呢？我实际跑到了1100你采到了1011是不是类似于上一个问题的“指针实际已经跑到了9而你只采到了7，会不会出问题”，答案是不会呀！原因就在于我们进行对比时时钟域的选择已经解决了这个问题。因此可知使用格雷码即时出现了采样错误的情况，也不会时“空满”判定出现问题。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/2315c03835a393f448e2679fa7afd703/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2017-09-12T17:57:13+08:00" />
+<meta property="article:modified_time" content="2017-09-12T17:57:13+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【异步FIFO的一些小事·1】空满判断与格雷码</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>今天经过与HR的交谈意识到自己对于异步FIFO的理解还不深，因此回来之后又其结构进行了一些理解，于此分享。</p> 
+<p>异步FIFO的设计：http://blog.csdn.net/moon9999/article/details/77822606</p> 
+<p></p> 
+<p><strong>疑问1：进行数据空满的对比时，读写时钟域都有读写指针，此时应该怎么对比？为什么？</strong></p> 
+<p></p> 
+<p>另外一篇博客中有这样的话：</p> 
+<p><strong>同步rd_cntr至clk_write时钟域，再与wr_cntr进行对比来决定FIFO是否满；（判断满是wr_cntr - rd_cntr）<br> 同步wr_cntr至clk_read时钟域，再与rd_cntr进行对比来决定FIFO是否空；（判断空是rd_cntr == wr_cntr）</strong></p> 
+<p>这是结论，那现在我们必须要仔细的思考这句话为什么是这么做的。</p> 
+<p>首先画个示意图。</p> 
+<p><img alt="" src="https://images2.imgbox.com/a5/db/Bi4EwBrF_o.jpg"></p> 
+<p>那现在我们来设想各种情况下会发生什么，在此我们暂时不考虑亚稳态的事情，认为信号通过同步模块都被采到了但是会有信号丢失。</p> 
+<p><strong>第一种情况我们假定写时钟特别快，读时钟都采不齐写指针。</strong></p> 
+<p></p> 
+<p>那么此时空逻辑会不会出错呢？假设写指针已经跑了1 2 3 4 5 6 7 8 9，而读时钟采到了1 2 6 8；那么如果此时读指针就在8，两边一对比发现一样（当然了这只是假设的一种情况）则会报“空”！那么实际空没空呢，没有因为我写到9了写进去了一个数，不过没关系之后必然会采到9（或者采到10一类的），状态会很快恢复正常，或者说没有空而报了空我们还可以接受，因为这样对于一个将要空的FIFO会停止读数旋即恢复正常，不会使其数据发生紊乱。那会不会有空了而报不空使得读出数据出现问题的情况呢？不会的，你想想看写指针跑的比你采样的快，是趋向与“不空”（越写数据越多嘛）的，因此不会出现这样的错误。</p> 
+<p></p> 
+<p>读指针被同步到写时钟域本身不会出现漏采的情况，因此“满”逻辑的判断不会出现问题。</p> 
+<p></p> 
+<p><strong>第二种情况我们假定读时钟域特别快，写时钟都采不齐读指针。</strong></p> 
+<p></p> 
+<p>此时的满逻辑会出错么？我们来看下。我们同样假设读指针从1跑到了9，而只被采样到了7。如果此时写指针也写到了7，那么二者一比较发现写“满”了，实际呢没有满，不过此时也会停止外部写入（传出了满的信号），这是不会对FIFO中的数据产生影响的，并且很快会恢复到“不满”。如果此时写指针到了5，那么二者对比会得出“不满”的逻辑传出，真实情况呢同样是不满，因为读到7就已经不满了真实情况读到了9自然更加“不满”。这样就解释清楚了。</p> 
+<p></p> 
+<p>写指针被同步到读时钟域本身不会出现漏采的情况，因此“空”逻辑的判断不会出现问题。</p> 
+<p></p> 
+<p>受到HR的点播或许我们可以选择一种记法：</p> 
+<p><strong>“满”逻辑是要给谁的——给写信号告诉他你别写了——那么写指针能多跑出去么？跑多了不就把数据覆盖了！——所以必须在写时钟域进行对比；</strong></p> 
+<p><strong>“空”逻辑是要给谁的——给读信号告诉他你别读了——那么读指针能多跑出去么？跑多了不就读出来错误的数了！——所以在读时钟域进行对比；</strong></p> 
+<p>我现在先理解到这一步吧。</p> 
+<p></p> 
+<p><strong>疑问2：为什么要用格雷码进行同步传输？</strong></p> 
+<p></p> 
+<p>我觉得使用格雷码的优势体现在读写时钟差异不是特别大的时候，不能一个是1000M一个是10M那谁也救不了了，无限加长FIFO深度吧。那么我们假定读写时钟频率差异没有过大，例如一个133M一个100M这样的。</p> 
+<p></p> 
+<p>我们要知道这个异步时钟采样，再不经过特殊处理的情况下采错了是在所难免的。单个信号可能采错或者没采到，那多个信号的读写指针就更加有可能出问题了。我们来看下如果此时的指针是1011（二进制=2），那么在向1100（2）跳变时候，由于信号走的距离不一样啦触发事件或者逻辑门延时不同啦等等原因，在另外一段时钟域就可能采出多种情况例如1011（2）、1110（2）、1101（2）等，总之每个信号都可能是正确值或者未跳变时候的值。那么在得到“空”“满”逻辑时候很大可能概率会出错，这个我们不能忍。过程如下图所示。</p> 
+<p></p> 
+<p>所以说我们就要选择格雷码了，来看下格雷码发生了什么事。1011（2）=1110（g）,1100（2）=1010（g），因此格雷码跳变为1110（g）-&gt;1010(g)。同样考虑采样出问题了，由于我们提前说好了读写时钟频率差距不是太大，因此采样可能得到两种情况：1110（g）和1010（g），到另外的时钟域后会转换为二进制的1011（2）和1100（2）。看到这里是不是想到了什么！你看如果得到的是1100那没问题呀，这就是真是的值。如果是得到1011呢？我实际跑到了1100你采到了1011是不是类似于上一个问题的“指针实际已经跑到了9而你只采到了7，会不会出问题”，答案是不会呀！原因就在于我们进行对比时时钟域的选择已经解决了这个问题。因此可知使用格雷码即时出现了采样错误的情况，也不会时“空满”判定出现问题。</p> 
+<p><img alt="" src="https://images2.imgbox.com/7e/32/klF5Fo9e_o.png"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/8d545d4bf5512ce0b3cb2fc223a35411/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">数据结构 第3讲 顺序表</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/052cb0a7f44b887737bb12a65a4e16fb/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">vim：学习资料——把vim打造成 IDE</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>a2dp播放流程源码分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="a2dp播放流程源码分析" />
+<meta property="og:description" content="之前分析了a2dp profile 的初始化的流程，这篇文章分析一下，音频流在bluedroid中的处理流程。
+上层的音频接口是调用a2dp hal 里面的接口来进行命令以及数据的发送的。
+关于控制通道的初始化以及建立的过程，这里就不分析了，我们主要看数据的流向和处理。我们从控制通道的最后一个命令start 开始分析流程。
+我们直接看a2dp hal 中out_write的实现： static ssize_t out_write(struct audio_stream_out *stream, const void* buffer, size_t bytes) { struct a2dp_stream_out *out = (struct a2dp_stream_out *)stream; int sent; ... if (out-&gt;common.state == AUDIO_A2DP_STATE_SUSPENDED) { DEBUG(&#34;stream suspended&#34;); pthread_mutex_unlock(&amp;out-&gt;common.lock); return -1; } /* only allow autostarting if we are in stopped or standby */ if ((out-&gt;common.state == AUDIO_A2DP_STATE_STOPPED) || (out-&gt;common.state == AUDIO_A2DP_STATE_STANDBY)) { if (start_audio_datapath(&amp;out-&gt;common) &lt; 0)//新建audio patch { /* emulate time this write represents to avoid very fast write failures during transition periods or remote suspend */ int us_delay = calc_audiotime(out-&gt;common." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/fb1bb8ec68a5d4ff8c29965aefc1a3e3/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-07-14T16:26:46+08:00" />
+<meta property="article:modified_time" content="2020-07-14T16:26:46+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">a2dp播放流程源码分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>之前分析了a2dp profile 的初始化的流程，这篇文章分析一下，音频流在bluedroid中的处理流程。</p> 
+<p>上层的音频接口是调用a2dp hal 里面的接口来进行命令以及数据的发送的。</p> 
+<p>关于控制通道的初始化以及建立的过程，这里就不分析了，我们主要看数据的流向和处理。我们从控制通道的最后一个命令start 开始分析流程。</p> 
+<p>我们直接看a2dp hal 中out_write的实现： </p> 
+<pre>static ssize_t out_write(struct audio_stream_out *stream, const void* buffer,
+                         size_t bytes)
+{
+    struct a2dp_stream_out *out = (struct a2dp_stream_out *)stream;
+    int sent;
+...
+    if (out-&gt;common.state == AUDIO_A2DP_STATE_SUSPENDED)
+    {
+        DEBUG("stream suspended");
+        pthread_mutex_unlock(&amp;out-&gt;common.lock);
+        return -1;
+    }
+
+    /* only allow autostarting if we are in stopped or standby */
+    if ((out-&gt;common.state == AUDIO_A2DP_STATE_STOPPED) ||
+        (out-&gt;common.state == AUDIO_A2DP_STATE_STANDBY))
+    {
+        if (start_audio_datapath(&amp;out-&gt;common) &lt; 0)//新建audio patch
+        {
+            /* emulate time this write represents to avoid very fast write
+               failures during transition periods or remote suspend */
+
+            int us_delay = calc_audiotime(out-&gt;common.cfg, bytes);
+
+            DEBUG("emulate a2dp write delay (%d us)", us_delay);
+
+            usleep(us_delay);
+            pthread_mutex_unlock(&amp;out-&gt;common.lock);
+            return -1;
+        }
+    }
+    else if (out-&gt;common.state != AUDIO_A2DP_STATE_STARTED)
+    {
+        ERROR("stream not in stopped or standby");
+        pthread_mutex_unlock(&amp;out-&gt;common.lock);
+        return -1;
+    }
+
+    pthread_mutex_unlock(&amp;out-&gt;common.lock);
+    sent = skt_write(out-&gt;common.audio_fd, buffer,  bytes);//发送数据到audio patch
+
+    if (sent == -1)
+    {
+ /*错误处理*/
+    }
+    return sent;
+}</pre> 
+<p> 当a2dp 刚连接的时候，这边的out-&gt;common.state 还是standby 状态，那么首先要进行a2dp data patch的建立：</p> 
+<pre>static int start_audio_datapath(struct a2dp_stream_common *common)
+{
+...
+
+    int oldstate = common-&gt;state;
+    common-&gt;state = AUDIO_A2DP_STATE_STARTING;//设置新的状态
+
+    int a2dp_status = a2dp_command(common, A2DP_CTRL_CMD_START);//向socket里面写数据，在bluedroid：btif_media_task.c里面的btif_recv_ctrl_data将处理该指令
+...
+
+    /* connect socket if not yet connected */
+    if (common-&gt;audio_fd == AUDIO_SKT_DISCONNECTED)
+    {
+        common-&gt;audio_fd = skt_connect(A2DP_DATA_PATH, common-&gt;buffer_sz);//之前已经在uipc_open里面先新建了socket的服务器端，现在可以连接
+        ...
+        common-&gt;state = AUDIO_A2DP_STATE_STARTED;
+    }
+
+    return 0;
+}</pre> 
+<p> </p> 
+<p>这里主要做了两件事：</p> 
+<ol><li>a2dp_command(common, A2DP_CTRL_CMD_START)</li><li>skt_connect(A2DP_DATA_PATH, common-&gt;buffer_sz);</li></ol> 
+<p>我们分别看看，前者就是下发了 A2DP_CTRL_CMD_START这个命令，对应hci log 中的：</p> 
+<p><img alt="" src="https://images2.imgbox.com/5d/c8/ZDnXMZ8Q_o.png"></p> 
+<p>后者的作用是建立socket连接，供后续的数据的传输。</p> 
+<p>我们先看 第一个流程：</p> 
+<pre>static int a2dp_command(struct a2dp_stream_common *common, char cmd)
+{
+    char ack;
+
+    DEBUG("A2DP COMMAND %s", dump_a2dp_ctrl_event(cmd));
+
+    /* send command */
+    if (send(common-&gt;ctrl_fd, &amp;cmd, 1, MSG_NOSIGNAL) == -1)//发送到这个socket，btif_media_task这个线程去处理
+    {
+...
+    }
+
+    /* wait for ack byte */
+    if (a2dp_ctrl_receive(common, &amp;ack, 1) &lt; 0)//接收返回的消息
+        return -1;
+...
+    return 0;
+}</pre> 
+<p> </p> 
+<p> 就是往之前建立好的  控制通道里面 写数据进去。该command 由谁来处理呢？答案 是btif_a2dp_ctrl_cb ，我们看看在btif_media_thread_init 做的事情：</p> 
+<pre>static void btif_media_thread_init(UNUSED_ATTR void *context) {
+  memset(&amp;btif_media_cb, 0, sizeof(btif_media_cb));
+  UIPC_Init(NULL);
+
+#if (BTA_AV_INCLUDED == TRUE)
+  UIPC_Open(UIPC_CH_ID_AV_CTRL , btif_a2dp_ctrl_cb);//注册了 btif_a2dp_ctrl_cb为控制通道的处理函数
+#endif
+
+  raise_priority_a2dp(TASK_HIGH_MEDIA);
+  media_task_running = MEDIA_TASK_STATE_ON;
+}</pre> 
+<p> </p> 
+<p>接下来我们看看  btif_a2dp_ctrl_cb 对于A2DP_CTRL_CMD_START的处理：</p> 
+<p>在UIPC的机制中，有数据来就会携带UIPC_RX_DATA_READY_EVT：</p> 
+<pre>static void btif_a2dp_ctrl_cb(tUIPC_CH_ID ch_id, tUIPC_EVENT event)
+{
+    UNUSED(ch_id);
+
+    switch(event)
+    {
+        case UIPC_OPEN_EVT:
+...
+            break;
+
+        case UIPC_CLOSE_EVT:
+...
+            break;
+
+        case UIPC_RX_DATA_READY_EVT:
+            btif_recv_ctrl_data();
+            break;
+
+        default :
+            APPL_TRACE_ERROR("### A2DP-CTRL-CHANNEL EVENT %d NOT HANDLED ###", event);
+            break;
+    }
+}</pre> 
+<p> </p> 
+<p> 确定是控制数据之后，路由到btif_recv_ctrl_data来处理：</p> 
+<pre>static void btif_recv_ctrl_data(void)
+{
+    UINT8 cmd = 0;
+    int n;
+    n = UIPC_Read(UIPC_CH_ID_AV_CTRL, NULL, &amp;cmd, 1);//先把数据读出来
+...
+    btif_media_cb.a2dp_cmd_pending = cmd;
+
+    switch(cmd)
+    {
+        case A2DP_CTRL_CMD_CHECK_READY:
+...
+            break;
+
+        case A2DP_CTRL_CMD_START:
+            /* Don't sent START request to stack while we are in call.
+               Some headsets like the Sony MW600, don't allow AVDTP START
+               in call and respond BAD_STATE. */
+            if (!btif_hf_is_call_idle())//如果正在打电话，不发起连接
+            {
+                a2dp_cmd_acknowledge(A2DP_CTRL_ACK_INCALL_FAILURE);
+                break;
+            }
+
+            if (btif_av_stream_ready() == TRUE)//如果已经准备好就 就进行socket 以及一些audio的处理
+            {
+                /* setup audio data channel listener */
+                UIPC_Open(UIPC_CH_ID_AV_AUDIO, btif_a2dp_data_cb);
+
+                /* post start event and wait for audio path to open */
+                btif_dispatch_sm_event(BTIF_AV_START_STREAM_REQ_EVT, NULL, 0);
+
+#if (BTA_AV_SINK_INCLUDED == TRUE)
+                if (btif_media_cb.peer_sep == AVDT_TSEP_SRC)
+                    a2dp_cmd_acknowledge(A2DP_CTRL_ACK_SUCCESS);
+#endif
+            }
+            else if (btif_av_stream_started_ready())
+            {
+                /* already started, setup audio data channel listener
+                   and ack back immediately */
+                UIPC_Open(UIPC_CH_ID_AV_AUDIO, btif_a2dp_data_cb);
+
+                a2dp_cmd_acknowledge(A2DP_CTRL_ACK_SUCCESS);
+            }
+            else
+            {
+                a2dp_cmd_acknowledge(A2DP_CTRL_ACK_FAILURE);
+                break;
+            }
+            break;
+
+        case A2DP_CTRL_CMD_STOP:
+...
+            break;
+
+        case A2DP_CTRL_CMD_SUSPEND:
+            /* local suspend */
+            if (btif_av_stream_started_ready())
+            {
+                btif_dispatch_sm_event(BTIF_AV_SUSPEND_STREAM_REQ_EVT, NULL, 0);
+            }
+            else
+            {
+                /* if we are not in started state, just ack back ok and let
+                   audioflinger close the channel. This can happen if we are
+                   remotely suspended, clear REMOTE SUSPEND Flag */
+                btif_av_clear_remote_suspend_flag();
+                a2dp_cmd_acknowledge(A2DP_CTRL_ACK_SUCCESS);
+            }
+            break;
+
+        case A2DP_CTRL_GET_AUDIO_CONFIG:
+        {
+...
+            break;
+        }
+
+        default:
+            APPL_TRACE_ERROR("UNSUPPORTED CMD (%d)", cmd);
+            a2dp_cmd_acknowledge(A2DP_CTRL_ACK_FAILURE);
+            break;
+    }
+    APPL_TRACE_DEBUG("a2dp-ctrl-cmd : %s DONE", dump_a2dp_ctrl_event(cmd));
+}</pre> 
+<p> 当前是A2DP_CTRL_CMD_START 这个命令：</p> 
+<p>如果当前正在打电话，那么就不会发起连接。接下来就做两件事：</p> 
+<ol><li>建立起socket的服务端，等待连接。</li><li>发送BTIF_AV_START_STREAM_REQ_EVT这个事件到状态机等待音频通道打开。</li></ol> 
+<p>我们先看第一个：</p> 
+<p>　　UIPC_Open(UIPC_CH_ID_AV_AUDIO, btif_a2dp_data_cb);</p> 
+<pre>BOOLEAN UIPC_Open(tUIPC_CH_ID ch_id, tUIPC_RCV_CBACK *p_cback)
+{
+...
+    switch(ch_id)
+    {
+       case UIPC_CH_ID_AV_AUDIO:
+            uipc_setup_server_locked(ch_id, A2DP_DATA_PATH, p_cback);//先把socket的服务器端建立起来
+            break;
+...</pre> 
+<p> </p> 
+<p> 主要就是建立 socket的服务器端：并把服务器的socket fd 放入到uipc_main.ch[UIPC_CH_ID_AV_AUDIO].srvfd</p> 
+<pre>    fd = create_server_socket(name);
+
+    uipc_main.ch[ch_id].srvfd = fd;
+    uipc_main.ch[ch_id].cback = cback;
+    uipc_main.ch[ch_id].read_poll_tmo_ms = DEFAULT_READ_POLL_TMO_MS;</pre> 
+<p> </p> 
+<p> </p> 
+<p>下面我们 看看</p> 
+<p>btif_dispatch_sm_event(BTIF_AV_START_STREAM_REQ_EVT, NULL, 0);</p> 
+<pre>/* used to pass events to AV statemachine from other tasks */
+void btif_dispatch_sm_event(btif_av_sm_event_t event, void *p_data, int len)
+{
+    /* Switch to BTIF context */
+    btif_transfer_context(btif_av_handle_event, event,
+                          (char*)p_data, len, NULL);
+}</pre> 
+<p> </p> 
+<p>把事件pass 到AV statemachine，</p> 
+<pre>static void btif_av_handle_event(UINT16 event, char* p_param)
+{
+    btif_sm_dispatch(btif_av_cb.sm_handle, event, (void*)p_param);
+    btif_av_event_free_data(event, p_param);
+}</pre> 
+<p> </p> 
+<p>我们看一下状态机的轮转：</p> 
+<pre>static const btif_sm_handler_t btif_av_state_handlers[] =
+{
+    btif_av_state_idle_handler,
+    btif_av_state_opening_handler,
+    btif_av_state_opened_handler,
+    btif_av_state_started_handler,
+    btif_av_state_closing_handler
+};</pre> 
+<p> </p> 
+<p>当前的状态是 opend 的状态，处理的handle 是btif_av_state_opened_handler：</p> 
+<p>看看其对于事件的处理：</p> 
+<pre> case BTIF_AV_START_STREAM_REQ_EVT:
+            if (btif_av_cb.peer_sep != AVDT_TSEP_SRC)
+                btif_a2dp_setup_codec();
+            BTIF_TRACE_EVENT("BTIF_AV_START_STREAM_REQ_EVT begin BTA_AvStart libs_liu");
+            BTA_AvStart();
+            BTIF_TRACE_EVENT("BTIF_AV_START_STREAM_REQ_EVT end BTA_AvStart libs_liu");
+            btif_av_cb.flags |= BTIF_AV_FLAG_PENDING_START;
+            break;</pre> 
+<p> </p> 
+<p>首先保存并设置了codec的参数，然后BTA_AvStart（发送BTA_AV_API_START_EVT 消息），并设置btif_av_cb.flags |= BTIF_AV_FLAG_PENDING_START，标记为pending start 状态。</p> 
+<p>这里主要分析一下BTA_AvStart的流程：</p> 
+<pre>void BTA_AvStart(void)
+{
+    BT_HDR  *p_buf;
+
+    if ((p_buf = (BT_HDR *) GKI_getbuf(sizeof(BT_HDR))) != NULL)
+    {
+        p_buf-&gt;event = BTA_AV_API_START_EVT;
+        bta_sys_sendmsg(p_buf);
+    }
+}</pre> 
+<p> </p> 
+<p>发送了BTA_AV_API_START_EVT（0x1238），他是由bta_av_nsm_act来处理：</p> 
+<pre>    bta_av_api_to_ssm,      /* BTA_AV_API_START_EVT */</pre> 
+<p> </p> 
+<p>我们发现执行到steam state machine里面了：</p> 
+<pre>/*******************************************************************************
+**
+** Function         bta_av_api_to_ssm
+**
+** Description      forward the API request to stream state machine
+**
+**
+** Returns          void
+**
+*******************************************************************************/
+static void bta_av_api_to_ssm(tBTA_AV_DATA *p_data)
+{
+    int xx;
+    UINT16 event = p_data-&gt;hdr.event - BTA_AV_FIRST_A2S_API_EVT + BTA_AV_FIRST_A2S_SSM_EVT;
+
+    for(xx=0; xx&lt;BTA_AV_NUM_STRS; xx++)/* maximum number of streams created: 1 for audio, 1 for video */
+    {
+        bta_av_ssm_execute(bta_av_cb.p_scb[xx], event, p_data);//肯定是有 一个没有注册  因为 是video
+    }
+}</pre> 
+<p> </p> 
+<p>这里就进入到stream statemachine的状态机了，</p> 
+<pre>AV Sevent(0x41)=0x120b(AP_START) state=3(OPEN)</pre> 
+<p> </p> 
+<p>当前的stream 的状态机是 open 状态。</p> 
+<pre>/* AP_START_EVT */          {BTA_AV_DO_START,       BTA_AV_SIGNORE,        BTA_AV_OPEN_SST },</pre> 
+<p> </p> 
+<p>执行的action 是BTA_AV_DO_START，下一个状态依然是open状态，我们看一下这个函数的实现：</p> 
+<pre>/*******************************************************************************
+**
+** Function         bta_av_do_start
+**
+** Description      Start stream.
+**
+** Returns          void
+**
+*******************************************************************************/
+void bta_av_do_start (tBTA_AV_SCB *p_scb, tBTA_AV_DATA *p_data)
+{
+    UINT8 policy = HCI_ENABLE_SNIFF_MODE;
+    UINT8       cur_role;
+...
+
+    if ((p_scb-&gt;started == FALSE) &amp;&amp; ((p_scb-&gt;role &amp; BTA_AV_ROLE_START_INT) == 0))
+    {
+        p_scb-&gt;role |= BTA_AV_ROLE_START_INT;
+        bta_sys_busy(BTA_ID_AV, bta_av_cb.audio_open_cnt, p_scb-&gt;peer_addr);
+
+        AVDT_StartReq(&amp;p_scb-&gt;avdt_handle, 1);//avdt start
+    }
+    else if (p_scb-&gt;started)
+    {
+    ...
+    }
+}</pre> 
+<p> </p> 
+<p>上面avdt start的过程就对应于hci log 中的<img alt="" src="https://images2.imgbox.com/93/3d/B5X1jz2u_o.png"></p> 
+<p> 到这里上面的start_audio_datapath中的第一点a2dp_command(common, A2DP_CTRL_CMD_START)  已经基本分析完了，接下来我们看看skt_connect(A2DP_DATA_PATH, common-&gt;buffer_sz);的流程,当然这个流程就简单很多，他是做了一个socket的连接。连接的patch 是/data/misc/bluedroid/.a2dp_data ，</p> 
+<pre>common-&gt;audio_fd = skt_connect(A2DP_DATA_PATH, common-&gt;buffer_sz);</pre> 
+<p>那后续 audio 传下来的数据只要写到common-&gt;audio_fd就可以了。</p> 
+<p>那关于  a2dp的数据通道的打开，这里就分析结束了。</p> 
+<p> 接下来我们看看音频数据流：</p> 
+<p>当上面的socket连接上之后，第一件事就是 发送UIPC_OPEN_EVT和UIPC_RX_DATA_READY_EVT事件：</p> 
+<pre>static int uipc_check_fd_locked(tUIPC_CH_ID ch_id)
+{
+    if (SAFE_FD_ISSET(uipc_main.ch[ch_id].srvfd, &amp;uipc_main.read_set))
+    {
+        BTIF_TRACE_EVENT("INCOMING CONNECTION ON CH %d", ch_id);
+        uipc_main.ch[ch_id].fd = accept_server_socket(uipc_main.ch[ch_id].srvfd);
+...
+        if (uipc_main.ch[ch_id].cback)
+            uipc_main.ch[ch_id].cback(ch_id, UIPC_OPEN_EVT);//发送通道打开的通知
+    }
+
+    if (SAFE_FD_ISSET(uipc_main.ch[ch_id].fd, &amp;uipc_main.read_set))
+    {
+        BTIF_TRACE_EVENT("INCOMING DATA ON CH %d", ch_id);
+
+        if (uipc_main.ch[ch_id].cback)
+            uipc_main.ch[ch_id].cback(ch_id, UIPC_RX_DATA_READY_EVT);//有数据过来
+    }
+    return 0;
+}</pre> 
+<p> </p> 
+<p> 我们先看看UIPC_OPEN_EVT的处理流程：</p> 
+<p>首先这里的callback 就是btif_a2dp_data_cb，</p> 
+<pre>static void btif_a2dp_data_cb(tUIPC_CH_ID ch_id, tUIPC_EVENT event)
+{
+    switch(event)
+    {
+        case UIPC_OPEN_EVT:
+
+            /*  read directly from media task from here on (keep callback for
+                connection events */
+            UIPC_Ioctl(UIPC_CH_ID_AV_AUDIO, UIPC_REG_REMOVE_ACTIVE_READSET, NULL);//将uipc_main.ch[ch_id].fd移出uipc_main.active_set
+            UIPC_Ioctl(UIPC_CH_ID_AV_AUDIO, UIPC_SET_READ_POLL_TMO,
+                       (void *)A2DP_DATA_READ_POLL_MS);//设置uipc_main.ch[ch_id].read_poll_tmo_ms = 10，这里是uipc poll的超时时间
+
+            if (btif_media_cb.peer_sep == AVDT_TSEP_SNK) {
+
+                /* Start the media task to encode SBC */
+                btif_media_task_start_aa_req();//给media task 发送BTIF_MEDIA_START_AA_TX
+
+                /* make sure we update any changed sbc encoder params */
+                btif_a2dp_encoder_update();//更新sbc 参数相关
+            }
+            btif_media_cb.data_channel_open = TRUE;
+
+            /* ack back when media task is fully started */
+            break;
+
+        case UIPC_CLOSE_EVT:
+            a2dp_cmd_acknowledge(A2DP_CTRL_ACK_SUCCESS);
+            btif_audiopath_detached();
+            btif_media_cb.data_channel_open = FALSE;
+            break;
+
+        default :
+            APPL_TRACE_ERROR("### A2DP-DATA EVENT %d NOT HANDLED ###", event);
+            break;
+    }
+}</pre> 
+<p> </p> 
+<p> 我们发现上面的函数竟然没有UIPC_RX_DATA_READY_EVT的处理流程，为什么呢？因为在UIPC_OPEN_EVT的处理中已经把这uipc_main.ch[ch_id].fd移出uipc_main.active_set</p> 
+<p> UIPC_OPEN_EVT的处理中接着又设置了定时器，等用到的时候我们再分析。下面我们看看其给media task 发送BTIF_MEDIA_START_AA_TX的流程：</p> 
+<pre>BOOLEAN btif_media_task_start_aa_req(void)
+{
+    BT_HDR *p_buf;
+    if (NULL == (p_buf = GKI_getbuf(sizeof(BT_HDR))))
+    {
+        APPL_TRACE_EVENT("GKI failed");
+        return FALSE;
+    }
+
+    p_buf-&gt;event = BTIF_MEDIA_START_AA_TX;
+
+    fixed_queue_enqueue(btif_media_cmd_msg_queue, p_buf);//放到队列，media task 会自动处理
+    return TRUE;
+}</pre> 
+<p> </p> 
+<p>在btif_a2dp_start_media_task 中，我们已经绑定了media task 线程和队列以及消息处理函数：</p> 
+<pre>    fixed_queue_register_dequeue(btif_media_cmd_msg_queue,
+        thread_get_reactor(worker_thread),
+        btif_media_thread_handle_cmd,
+        NULL);</pre> 
+<p> </p> 
+<p> 看看其处理：</p> 
+<pre>static void btif_media_thread_handle_cmd(fixed_queue_t *queue, UNUSED_ATTR void *context)
+{
+    BT_HDR *p_msg = (BT_HDR *)fixed_queue_dequeue(queue);
+    LOG_VERBOSE("btif_media_thread_handle_cmd : %d %s", p_msg-&gt;event,
+             dump_media_event(p_msg-&gt;event));
+
+    switch (p_msg-&gt;event)
+    {
+#if (BTA_AV_INCLUDED == TRUE)
+    case BTIF_MEDIA_START_AA_TX:
+        btif_media_task_aa_start_tx();
+        break;</pre> 
+<p> </p> 
+<p> 继续看：</p> 
+<pre>/*******************************************************************************
+ **
+ ** Function         btif_media_task_aa_start_tx
+ **
+ ** Description      Start media task encoding
+ **
+ ** Returns          void
+ **
+ *******************************************************************************/
+static void btif_media_task_aa_start_tx(void)
+{
+
+    /* Use a timer to poll the UIPC, get rid of the UIPC call back */
+
+    btif_media_cb.is_tx_timer = TRUE;
+    last_frame_us = 0;
+
+    /* Reset the media feeding state */
+    btif_media_task_feeding_state_reset();
+
+    btif_media_cb.media_alarm = alarm_new();
+
+    alarm_set_periodic(btif_media_cb.media_alarm, BTIF_MEDIA_TIME_TICK, btif_media_task_alarm_cb, NULL);
+
+}</pre> 
+<p> </p> 
+<p>这边设置了一个定时器，#define BTIF_MEDIA_TIME_TICK                     (20 * BTIF_MEDIA_NUM_TICK)</p> 
+<p>每20ms 去读一次数据，而不是通过UIPC的回调函数来操作。</p> 
+<p> 我们继续看看 定时器的函数实现：</p> 
+<pre>static void btif_media_task_alarm_cb(UNUSED_ATTR void *context) {
+  thread_post(worker_thread, btif_media_task_aa_handle_timer, NULL);//media task 线程中执行
+}</pre> 
+<p> </p> 
+<p> </p> 
+<pre>static void btif_media_task_aa_handle_timer(UNUSED_ATTR void *context)
+{
+    log_tstamps_us("media task tx timer");
+
+#if (BTA_AV_INCLUDED == TRUE)
+    if(btif_media_cb.is_tx_timer == TRUE)//前面已经标记这个位
+    {
+        btif_media_send_aa_frame();//函数名send，但是应该包含先包含读audio数据的操作
+    }
+    else
+    {
+        APPL_TRACE_ERROR("ERROR Media task Scheduled after Suspend");
+    }
+#endif
+}</pre> 
+<p> </p> 
+<p> 下面我们分析一下btif_media_send_aa_frame：</p> 
+<pre>/*******************************************************************************
+ **
+ ** Function         btif_media_send_aa_frame
+ **
+ ** Description
+ **
+ ** Returns          void
+ **
+ *******************************************************************************/
+static void btif_media_send_aa_frame(void)
+{
+    UINT8 nb_frame_2_send;
+
+    /* get the number of frame to send */
+    nb_frame_2_send = btif_get_num_aa_frame();//计算出应该获取的frame的数量，是根据时间间隔来计算的
+
+    if (nb_frame_2_send != 0)
+    {
+        /* format and Q buffer to send */
+        btif_media_aa_prep_2_send(nb_frame_2_send);//读取数据，并放置到队列里面
+    }
+
+    /* send it */
+    LOG_VERBOSE("btif_media_send_aa_frame : send %d frames", nb_frame_2_send);
+    bta_av_ci_src_data_ready(BTA_AV_CHNL_AUDIO);//发送数据
+}</pre> 
+<p> 这里重点分析一下btif_media_aa_prep_2_send和bta_av_ci_src_data_ready</p> 
+<h4><a name="t0"></a>btif_media_aa_prep_2_send</h4> 
+<pre>/*******************************************************************************
+ **
+ ** Function         btif_media_aa_prep_2_send
+ **
+ ** Description
+ **
+ ** Returns          void
+ **
+ *******************************************************************************/
+
+static void btif_media_aa_prep_2_send(UINT8 nb_frame)
+{
+    // Check for TX queue overflow，队列btif_media_cb.TxAaQ数据太多就会丢弃一些
+    while (GKI_queue_length(&amp;btif_media_cb.TxAaQ) &gt; (MAX_OUTPUT_A2DP_FRAME_QUEUE_SZ - nb_frame))
+        GKI_freebuf(GKI_dequeue(&amp;(btif_media_cb.TxAaQ)));
+
+    // Transcode frame
+
+    switch (btif_media_cb.TxTranscoding)
+    {
+    case BTIF_MEDIA_TRSCD_PCM_2_SBC:
+        btif_media_aa_prep_sbc_2_send(nb_frame);
+        break;
+
+    default:
+...
+    }
+}</pre> 
+<p>我们继续看btif_media_aa_prep_sbc_2_send的实现：</p> 
+<pre>/*******************************************************************************
+ **
+ ** Function         btif_media_aa_prep_sbc_2_send
+ **
+ ** Description
+ **
+ ** Returns          void
+ **
+ *******************************************************************************/
+static void btif_media_aa_prep_sbc_2_send(UINT8 nb_frame)
+{
+    BT_HDR * p_buf;
+    UINT16 blocm_x_subband = btif_media_cb.encoder.s16NumOfSubBands *
+                             btif_media_cb.encoder.s16NumOfBlocks;
+
+    while (nb_frame)
+    {
+        if (NULL == (p_buf = GKI_getpoolbuf(BTIF_MEDIA_AA_POOL_ID)))
+        {
+...
+            return;
+        }
+
+        /* Init buffer */
+        p_buf-&gt;offset = BTIF_MEDIA_AA_SBC_OFFSET;
+        p_buf-&gt;len = 0;
+        p_buf-&gt;layer_specific = 0;
+
+        do
+        {
+            /* Write @ of allocated buffer in encoder.pu8Packet */
+            btif_media_cb.encoder.pu8Packet = (UINT8 *) (p_buf + 1) + p_buf-&gt;offset + p_buf-&gt;len;
+            /* Fill allocated buffer with 0 */
+            memset(btif_media_cb.encoder.as16PcmBuffer, 0, blocm_x_subband
+                    * btif_media_cb.encoder.s16NumOfChannels);
+
+            /* Read PCM data and upsample them if needed */
+            if (btif_media_aa_read_feeding(UIPC_CH_ID_AV_AUDIO))//读audio的数据
+            {
+                /* SBC encode and descramble frame */
+                SBC_Encoder(&amp;(btif_media_cb.encoder));//sbc 编码相关
+                A2D_SbcChkFrInit(btif_media_cb.encoder.pu8Packet);
+                A2D_SbcDescramble(btif_media_cb.encoder.pu8Packet, btif_media_cb.encoder.u16PacketLength);
+                /* Update SBC frame length */
+                p_buf-&gt;len += btif_media_cb.encoder.u16PacketLength;
+                nb_frame--;//frame numb --
+                p_buf-&gt;layer_specific++;
+            }
+            else//没有读到数据
+            {
+                APPL_TRACE_WARNING("btif_media_aa_prep_sbc_2_send underflow %d, %d",
+                    nb_frame, btif_media_cb.media_feeding_state.pcm.aa_feed_residue);
+               /*需要把应该发送的数据量+回来*/
+                btif_media_cb.media_feeding_state.pcm.counter += nb_frame *
+                     btif_media_cb.encoder.s16NumOfSubBands *
+                     btif_media_cb.encoder.s16NumOfBlocks *
+                     btif_media_cb.media_feeding.cfg.pcm.num_channel *
+                     btif_media_cb.media_feeding.cfg.pcm.bit_per_sample / 8;
+                /* no more pcm to read */
+                nb_frame = 0;
+...
+            }
+
+        } while (((p_buf-&gt;len + btif_media_cb.encoder.u16PacketLength) &lt; btif_media_cb.TxAaMtuSize)
+                &amp;&amp; (p_buf-&gt;layer_specific &lt; 0x0F) &amp;&amp; nb_frame);
+
+        if(p_buf-&gt;len)
+        {
+            /* timestamp of the media packet header represent the TS of the first SBC frame
+               i.e the timestamp before including this frame */
+            *((UINT32 *) (p_buf + 1)) = btif_media_cb.timestamp;
+
+            btif_media_cb.timestamp += p_buf-&gt;layer_specific * blocm_x_subband;
+...
+            /* Enqueue the encoded SBC frame in AA Tx Queue */
+            GKI_enqueue(&amp;(btif_media_cb.TxAaQ), p_buf);//加入到队列
+        }
+        else
+        {
+            GKI_freebuf(p_buf);
+        }
+    }
+}</pre> 
+<p> 我们现在分析一下btif_media_aa_read_feeding(UIPC_CH_ID_AV_AUDIO) 的流程：</p> 
+<pre>/*******************************************************************************
+ **
+ ** Function         btif_media_aa_read_feeding
+ **
+ ** Description
+ **
+ ** Returns          void
+ **
+ *******************************************************************************/
+
+BOOLEAN btif_media_aa_read_feeding(tUIPC_CH_ID channel_id)
+{
+    UINT16 event;
+    UINT16 blocm_x_subband = btif_media_cb.encoder.s16NumOfSubBands * \
+                             btif_media_cb.encoder.s16NumOfBlocks;
+    UINT32 read_size;
+    UINT16 sbc_sampling = 48000;
+    UINT32 src_samples;
+    UINT16 bytes_needed = blocm_x_subband * btif_media_cb.encoder.s16NumOfChannels * \
+                          btif_media_cb.media_feeding.cfg.pcm.bit_per_sample / 8;
+    static UINT16 up_sampled_buffer[SBC_MAX_NUM_FRAME * SBC_MAX_NUM_OF_BLOCKS
+            * SBC_MAX_NUM_OF_CHANNELS * SBC_MAX_NUM_OF_SUBBANDS * 2];
+    static UINT16 read_buffer[SBC_MAX_NUM_FRAME * SBC_MAX_NUM_OF_BLOCKS
+            * SBC_MAX_NUM_OF_CHANNELS * SBC_MAX_NUM_OF_SUBBANDS];
+    UINT32 src_size_used;
+    UINT32 dst_size_used;
+    BOOLEAN fract_needed;
+    INT32   fract_max;
+    INT32   fract_threshold;
+    UINT32  nb_byte_read;
+
+    /* Get the SBC sampling rate */
+    switch (btif_media_cb.encoder.s16SamplingFreq)
+    {
+    case SBC_sf48000:
+        sbc_sampling = 48000;
+        break;
+    case SBC_sf44100:
+        sbc_sampling = 44100;
+        break;
+    case SBC_sf32000:
+        sbc_sampling = 32000;
+        break;
+    case SBC_sf16000:
+        sbc_sampling = 16000;
+        break;
+    }
+
+    if (sbc_sampling == btif_media_cb.media_feeding.cfg.pcm.sampling_freq) {//btif_a2dp_setup_codec中设置media_feeding.cfg.pcm.sampling_freq = 44.1
+        read_size = bytes_needed - btif_media_cb.media_feeding_state.pcm.aa_feed_residue;
+        nb_byte_read = UIPC_Read(channel_id, &amp;event,
+                  ((UINT8 *)btif_media_cb.encoder.as16PcmBuffer) +
+                  btif_media_cb.media_feeding_state.pcm.aa_feed_residue,
+                  read_size);
+        if (nb_byte_read == read_size) {
+            btif_media_cb.media_feeding_state.pcm.aa_feed_residue = 0;
+            return TRUE;
+        } else {//没有读到预期的数据，打印underflow
+            APPL_TRACE_WARNING("### UNDERFLOW :: ONLY READ %d BYTES OUT OF %d ###",
+                nb_byte_read, read_size);
+            btif_media_cb.media_feeding_state.pcm.aa_feed_residue += nb_byte_read;
+            return FALSE;
+        }
+    }
+
+  ...</pre> 
+<p> </p> 
+<p> btif_media_cb.encoder.s16SamplingFreq这里注意到是用btif_media_cb.encoder.s16SamplingFreq 来调节sbc_sampling 的大小的，那么btif_media_cb.encoder.s16SamplingFreq又是哪里设置的呢？</p> 
+<p>我们先看看btif_media_cb.media_feeding.cfg.pcm.sampling_freq的设置：</p> 
+<p> </p> 
+<pre>void btif_a2dp_setup_codec(void)
+{
+    tBTIF_AV_MEDIA_FEEDINGS media_feeding;
+    tBTIF_STATUS status;
+
+    APPL_TRACE_EVENT("## A2DP SETUP CODEC ##");
+
+    GKI_disable();
+
+    /* for now hardcode 44.1 khz 16 bit stereo PCM format */
+    media_feeding.cfg.pcm.sampling_freq = 44100;//直接设置
+    media_feeding.cfg.pcm.bit_per_sample = 16;</pre> 
+<p>  btif_media_cb.encoder.s16SamplingFreq的设置</p> 
+<pre>/*******************************************************************************
+ **
+ ** Function         btif_media_task_pcm2sbc_init
+ **
+ ** Description      Init encoding task for PCM to SBC according to feeding
+ **
+ ** Returns          void
+ **
+ *******************************************************************************/
+static void btif_media_task_pcm2sbc_init(tBTIF_MEDIA_INIT_AUDIO_FEEDING * p_feeding)
+{
+    BOOLEAN reconfig_needed = FALSE;
+
+    APPL_TRACE_DEBUG("PCM feeding:");
+    APPL_TRACE_DEBUG("sampling_freq:%d", p_feeding-&gt;feeding.cfg.pcm.sampling_freq);
+    APPL_TRACE_DEBUG("num_channel:%d", p_feeding-&gt;feeding.cfg.pcm.num_channel);
+    APPL_TRACE_DEBUG("bit_per_sample:%d", p_feeding-&gt;feeding.cfg.pcm.bit_per_sample);
+
+    /* Check the PCM feeding sampling_freq */
+    switch (p_feeding-&gt;feeding.cfg.pcm.sampling_freq)//根据feeding.cfg.pcm.sampling_freq的值来设置btif_media_cb.encoder.s16SamplingFreq
+    {
+        case  8000:
+        case 12000:
+        case 16000:
+        case 24000:
+        case 32000:
+        case 48000:
+            /* For these sampling_freq the AV connection must be 48000 */
+            if (btif_media_cb.encoder.s16SamplingFreq != SBC_sf48000)
+            {
+                /* Reconfiguration needed at 48000 */
+                APPL_TRACE_DEBUG("SBC Reconfiguration needed at 48000");
+                btif_media_cb.encoder.s16SamplingFreq = SBC_sf48000;
+                reconfig_needed = TRUE;
+            }
+            break;
+
+        case 11025:
+        case 22050:
+        case 44100:
+            /* For these sampling_freq the AV connection must be 44100 */
+            if (btif_media_cb.encoder.s16SamplingFreq != SBC_sf44100)
+            {
+                /* Reconfiguration needed at 44100 */
+                APPL_TRACE_DEBUG("SBC Reconfiguration needed at 44100");
+                btif_media_cb.encoder.s16SamplingFreq = SBC_sf44100;
+                reconfig_needed = TRUE;
+            }
+            break;
+        default:
+            APPL_TRACE_DEBUG("Feeding PCM sampling_freq unsupported");
+            break;
+    }</pre> 
+<p> </p> 
+<p> 关于采样率关系：根据feeding.cfg.pcm.sampling_freq的值来设置btif_media_cb.encoder.s16SamplingFreq，encoder的参数也就是sbc的参数。那么也就是说在协议栈中，feeding.cfg.pcm.sampling_freq的值是具体决定性的，其设置在btif_a2dp_setup_codec 中。</p> 
+<p>关于btif_media_aa_prep_2_send的分析就到这里，现在我们接着分析bta_av_ci_src_data_ready的流程:</p> 
+<h4><a name="t1"></a>bta_av_ci_src_data_ready</h4> 
+<p> </p> 
+<pre>/*******************************************************************************
+**
+** Function         bta_av_ci_src_data_ready
+**
+** Description      This function sends an event to the AV indicating that
+**                  the phone has audio stream data ready to send and AV
+**                  should call bta_av_co_audio_src_data_path() or
+**                  bta_av_co_video_src_data_path().
+**
+** Returns          void
+**
+*******************************************************************************/
+void bta_av_ci_src_data_ready(tBTA_AV_CHNL chnl)
+{
+    BT_HDR  *p_buf;
+
+    if ((p_buf = (BT_HDR *) GKI_getbuf(sizeof(BT_HDR))) != NULL)
+    {
+        p_buf-&gt;layer_specific   = chnl;
+        p_buf-&gt;event = BTA_AV_CI_SRC_DATA_READY_EVT;
+        bta_sys_sendmsg(p_buf);
+    }
+}</pre> 
+<p>执行的函数：</p> 
+<pre>    bta_av_ci_data,         /* BTA_AV_CI_SRC_DATA_READY_EVT */</pre> 
+<p> </p> 
+<p> </p> 
+<pre>/*******************************************************************************
+**
+** Function         bta_av_ci_data
+**
+** Description      forward the BTA_AV_CI_SRC_DATA_READY_EVT to stream state machine
+**
+**
+** Returns          void
+**
+*******************************************************************************/
+static void bta_av_ci_data(tBTA_AV_DATA *p_data)
+{
+    tBTA_AV_SCB *p_scb;
+    int     i;
+    UINT8   chnl = (UINT8)p_data-&gt;hdr.layer_specific;
+
+    for( i=0; i &lt; BTA_AV_NUM_STRS; i++ )
+    {
+        p_scb = bta_av_cb.p_scb[i];
+
+        if(p_scb &amp;&amp; p_scb-&gt;chnl == chnl)
+        {
+            bta_av_ssm_execute(p_scb, BTA_AV_SRC_DATA_READY_EVT, p_data);
+        }
+    }
+}</pre> 
+<p> </p> 
+<p>这里bta_av_ssm_execute(p_scb, BTA_AV_SRC_DATA_READY_EVT, p_data); 看看其流程：</p> 
+<pre>AV Sevent(0x41)=0x1211(SRC_DATA_READY) state=3(OPEN)</pre> 
+<pre>/* SRC_DATA_READY_EVT */    {BTA_AV_DATA_PATH,      BTA_AV_SIGNORE,        BTA_AV_OPEN_SST },</pre> 
+<p> </p> 
+<p>执行的action是BTA_AV_DATA_PATH，具体函数如下：</p> 
+<pre>/*******************************************************************************
+**
+** Function         bta_av_data_path
+**
+** Description      Handle stream data path.
+**
+** Returns          void
+**
+*******************************************************************************/
+void bta_av_data_path (tBTA_AV_SCB *p_scb, tBTA_AV_DATA *p_data)
+{
+    BT_HDR  *p_buf = NULL;
+    UINT32  data_len;
+    UINT32  timestamp;
+    BOOLEAN new_buf = FALSE;
+    UINT8   m_pt = 0x60 | p_scb-&gt;codec_type;
+    tAVDT_DATA_OPT_MASK     opt;
+    UNUSED(p_data);
+
+    //Always get the current number of bufs que'd up
+    p_scb-&gt;l2c_bufs = (UINT8)L2CA_FlushChannel (p_scb-&gt;l2c_cid, L2CAP_FLUSH_CHANS_GET);
+
+    if (!list_is_empty(p_scb-&gt;a2d_list)) {
+        p_buf = (BT_HDR *)list_front(p_scb-&gt;a2d_list);
+        list_remove(p_scb-&gt;a2d_list, p_buf);
+         /* use q_info.a2d data, read the timestamp */
+        timestamp = *(UINT32 *)(p_buf + 1);
+    }
+    else
+    {
+        new_buf = TRUE;
+        /* a2d_list empty, call co_data, dup data to other channels */
+        p_buf = (BT_HDR *)p_scb-&gt;p_cos-&gt;data(p_scb-&gt;codec_type, &amp;data_len,
+                                         &amp;timestamp);//组件数据准备发送
+
+        if (p_buf)
+        {
+            /* use the offset area for the time stamp */
+            *(UINT32 *)(p_buf + 1) = timestamp;
+...
+        }
+    }
+
+    if(p_buf)
+    {
+        if(p_scb-&gt;l2c_bufs &lt; (BTA_AV_QUEUE_DATA_CHK_NUM))
+        {
+            /* there's a buffer, just queue it to L2CAP */
+            /*  There's no need to increment it here, it is always read from L2CAP see above */
+            /* p_scb-&gt;l2c_bufs++; */
+            /*
+            APPL_TRACE_ERROR("qw: %d", p_scb-&gt;l2c_bufs);
+            */
+
+            /* opt is a bit mask, it could have several options set */
+            opt = AVDT_DATA_OPT_NONE;
+            if (p_scb-&gt;no_rtp_hdr)
+            {
+                opt |= AVDT_DATA_OPT_NO_RTP;
+            }
+
+            AVDT_WriteReqOpt(p_scb-&gt;avdt_handle, p_buf, timestamp, m_pt, opt);//真正发送
+            p_scb-&gt;cong = TRUE;
+        }
+        else
+        {
+            /* there's a buffer, but L2CAP does not seem to be moving data */
+            if(new_buf)
+            {
+                /* just got this buffer from co_data,
+                 * put it in queue */
+                list_append(p_scb-&gt;a2d_list, p_buf);
+            }
+            else
+            {
+                /* just dequeue it from the a2d_list */
+                if (list_length(p_scb-&gt;a2d_list) &lt; 3) {
+                    /* put it back to the queue */
+                    list_prepend(p_scb-&gt;a2d_list, p_buf);
+                }
+                else
+                {
+                    /* too many buffers in a2d_list, drop it. */
+                    bta_av_co_audio_drop(p_scb-&gt;hndl);
+                    GKI_freebuf(p_buf);
+                }
+            }
+        }
+    }
+}</pre> 
+<p> </p> 
+<p>这里主要分析p_scb-&gt;p_cos-&gt;data(p_scb-&gt;codec_type, &amp;data_len,&amp;timestamp);的流程。</p> 
+<pre>/* the call out functions for audio stream */
+const tBTA_AV_CO_FUNCTS bta_av_a2d_cos =
+{
+    bta_av_co_audio_init,
+    bta_av_co_audio_disc_res,
+    bta_av_co_audio_getconfig,
+    bta_av_co_audio_setconfig,
+    bta_av_co_audio_open,
+    bta_av_co_audio_close,
+    bta_av_co_audio_start,
+    bta_av_co_audio_stop,
+    bta_av_co_audio_src_data_path,
+    bta_av_co_audio_delay
+};</pre> 
+<p> </p> 
+<p>执行的函数是</p> 
+<pre>/*******************************************************************************
+ **
+ ** Function         bta_av_co_audio_src_data_path
+ **
+ ** Description      This function is called to manage data transfer from
+ **                  the audio codec to AVDTP.
+ **
+ ** Returns          Pointer to the GKI buffer to send, NULL if no buffer to send
+ **
+ *******************************************************************************/
+void * bta_av_co_audio_src_data_path(tBTA_AV_CODEC codec_type, UINT32 *p_len,
+                                     UINT32 *p_timestamp)
+{
+    BT_HDR *p_buf;
+    UNUSED(p_len);
+
+    FUNC_TRACE();
+
+    p_buf = btif_media_aa_readbuf();// return GKI_dequeue(&amp;(btif_media_cb.TxAaQ));
+    if (p_buf != NULL)
+    {
+        switch (codec_type)
+        {
+        case BTA_AV_CODEC_SBC:
+            /* In media packet SBC, the following information is available:
+             * p_buf-&gt;layer_specific : number of SBC frames in the packet
+             * p_buf-&gt;word[0] : timestamp
+             */
+            /* Retrieve the timestamp information from the media packet */
+            *p_timestamp = *((UINT32 *) (p_buf + 1));
+
+            /* Set up packet header */
+            bta_av_sbc_bld_hdr(p_buf, p_buf-&gt;layer_specific);
+            break;
+
+
+        default:
+            APPL_TRACE_ERROR("bta_av_co_audio_src_data_path Unsupported codec type (%d)", codec_type);
+            break;
+        }
+    }
+    return p_buf;
+}</pre> 
+<p> </p> 
+<p>这里我们主要是明白最终数据是从btif_media_cb.TxAaQ 中取出来了，然后经过AVDT_WriteReqOpt 发送到设备。</p> 
+<p> 做个简单总结，主要有如下的要点：</p> 
+<ol><li>通过audio 的控制通道发送A2DP_CTRL_CMD_START 命令</li><li>打开数据通道： UIPC_Open(UIPC_CH_ID_AV_AUDIO, btif_a2dp_data_cb);</li><li>通过socket 连接上数据通道：common-&gt;audio_fd = skt_connect(A2DP_DATA_PATH, common-&gt;buffer_sz);</li><li>平台audio 往socket：common-&gt;audio_fd 发送数据</li><li>设置定时器，每隔20ms 去读audio的数据alarm_set_periodic(btif_media_cb.media_alarm, BTIF_MEDIA_TIME_TICK, btif_media_task_alarm_cb, NULL)，并发送到设备</li></ol> 
+<p> 那到这里a2dp的数据发送的过程就分析完了。</p> 
+<p> </p> 
+<p>转载于:https://www.cnblogs.com/libs-liu/p/9606179.html</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/49d0437b19538f025b2224bf0f5c23a2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">git 日常操作</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/3dce23a994c8136bbf755b24ac5f6f64/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Hive中的四种排序方式（order by,sort by,distribute by,cluster by）使用与区别详解</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

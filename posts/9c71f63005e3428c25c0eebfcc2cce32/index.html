@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>rust嵌入式开发补充 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="rust嵌入式开发补充" />
+<meta property="og:description" content="本文是对rust嵌入式开发的补充，就当时遗留的一些问题进行增补与修正。
+RTIC中的任务处理 在上篇文章中还不是很理解rtic的工作机制。但写东东进行总结的好处就体现出来了，在上篇文章中提到了rtic的app入口本就是一个进程宏，所以在写完文章后就想，那就看看这个宏到底干了些什么吧。
+想到就干。执行：
+cargo expand &gt; src/app.rs 然后在main.rs中引用一下【这样在vscode中读代码的时候，就可以随时跳转来来看源码】：
+mode app; 经过对扩展了宏之后的代码的研读，搞清楚了几个问题：
+RTIC的任务分发 rtic不是一个RTOS，它只是一个基于中断的任务分发系统。
+所以，上篇文章中有很多概念就都错了，因为那还是基于一个OS中多任务【或线程】的认识。
+在rtic中，不管是中断处理，还是用户的任务函数，如live、mytask等，在rtic中都是一视同仁：全部都是在中断响应函数调用我们自己编写的任务函数。
+而rtic所提供的标准的中断响应函数都是一样的：
+设置优先级，由程序员以priority指定为用户任务函数准备参数，核心就是local和shared两个结构调用程序员所写的用户任务函数 所以，dispatchers的作用就是选一个没有实际使用到的硬件中断源，然后在实际的硬件中断响应函数中调用用户任务函数的spawn()时，rtic就会将这个调用放入到一个任务队列中，然后以软件触发的方式触发这个中断。
+同时，rtic会接管这个硬件中断的响应函数，然后在这个中断响应函数中从任务队列中逐次提取相应的用户任务函数来执行。
+所以，使用了rtic后根本不需要再自己实现时钟任务或空闲任务队列，来自己做多任务的调度了。只需要和硬件中断一样，编写好自己的用户任务，然后在相应的硬件中断响应任务中spawn()即可。
+所以，如上篇文章中，就需要三个用户任务函数，分别在两个硬件中断中进行触发：
+tick函数【TIM1_UP硬件中断的响应函数】中触发mytask和live： //用户任务 mytask::spawn().unwrap(); //用板载led做个呼吸灯，直观表示还活着 live::spawn().unwrap(); uart1函数【USART1硬件中断的响应函数】中触发uart1_recv： //串口1接收到数据 if new_data { //将接收到的数据放入用户空间 cx.shared.buff_uart1_recv.lock(|buff_uart1_recv| { *buff_uart1_recv = Some(buff); }); uart1_recv::spawn().unwrap(); } 也就是说，rtic中有两种任务，一种是硬件中断的处理函数，由rtic内置的硬件中断响应函数进行触发；一种是用户的任务处理函数，必须在前一种的硬件中断处理函数中以spawn()进行触发，然后rtic以软中断的方式触发dispatchers的中断，然后在此中断的响应函数中进行调度来执行用户的任务处理函数。
+即，rtic中的任务其最终来源都是指定的硬件中断。
+RTIC的任务处理 rtic中所有的任务函数，都等价于硬件中断响应函数。所以就有两个问题需要考虑：中断处理，数据安全。
+中断处理 由于所有的任务函数都是中断响应函数，所以我们不得不研究一下rtic中对中断的处理方式。回答是：没有任何特殊的处理，主要依靠MCU芯片的中断处理机制。
+arm芯片本身有其强大的中断处理机制，简单的说就是高优先级的中断可以抢占低优先级的中断。其也没有核心数据的概念，也就不需要特殊的中断保护机制。
+所以rtic的中断处理非常简单：
+在初始化时，只允许用户绑定的那几个硬件中断，以及作为dispatchers源的那个硬件中断，其它中断全部关闭所有的任务函数，全部根据优先级由MCU芯片来执行中断的响应调度rtic唯一要做的就是在用户任务spawn()时按优先级排队放入任务队列，然后在dispatchers时依次调度 数据安全 arm不管有没有核心数据，只根据优先级进行中断处理函数的抢占与调度。但rtic则必须提供相应的数据安全保护。
+因此，在rtic视角就存在三种数据：
+rtic系统数据，用于保存所有的系统数据和用户数据任务的本地数据，只用于某个任务函数的数据任务的共享数据，可在两个以上的任务函数间共享的数据 由于rust有强大的借用约束，所以系统数据和任务数据的隔离非常简单：所有的数据都由rtic拥有并管理，在需要调度任务函数执行【不管是硬件中断函数还是用户任务函数】时，rtic从用户数据区中引用【借出】该函数所指定的数据，然后创建相应的上下文，然后作为参数交给该函数执行。
+也就是说，任务函数所需要的数据，不管是local的还是shared的，都来自rtic数据区中相应数据的引用【借用】，然后创建一个局部的上下文，将这些数据引用复制进来。
+这也是rtic中的闭包无法跨线程使用的原因，因为rtic任务函数中的上下文是一个栈上的局部变量，其将随着任务函数的执行结束而被销毁，所以想如java或go中以闭包的方式将一些处理推入任务队列以在时钟任务队列或空闲任务队列中异步执行，是根本不可能的！
+展开说，即java或go中可将闭包所使用的数据不从栈上分配，而是在堆中分配，则当闭包执行完毕时，对这块数据区的引用为0，就可以通过gc进行回收了。
+但rust没有这样的机制，如果引用了上下文中的数据，就需要将这些数据自己copy到堆上，即创建一个Box，然后将上下文中的数据保存进去，然后将相应的函数指针和Box一起保存到时钟任务队列上，然后在需要的时候调用。但又何必使用闭包呢？！
+而这，正好也就是rtic对local和shared两种数据的处理方式：在栈上创建对应的上下文数据结构，然后从保存到堆上的rtic的系统数据空间中复制需要的数据引用【借用】，再将上下文提供给任务函数使用。
+当然，只用于某个任务函数的local数据这么处理没问题，但共享数据就不可以了，因为任务函数的调度是可以被更高优先级的任务函数抢占的。
+这样一来，如果低优先级的任务函数正在使用共享数据，就可能导致错误。
+rtic对此的处理是互斥，即共享数据都需要以加锁的方式才能使用，以保证共享数据的安全。
+但这很容易就有一个困惑：如果低优先级的任务函数加锁后被高优先级任务函数抢占，其也要使用共享数据，那是否会导致死锁？！！
+这是我们使用惯了OS或高级编程语言的习惯性认知。但rust嵌入式，起码在STMS32F103芯片上，它是一个单核的、没有运行时提供的阻塞任务队列来支持Mutex原语。
+所以rtic对共享数据的加锁非常简单，每次加锁时，设置一个优先级天花板：
+当这个天花板是MCU的最高优先级【STMS32F103特性时是16】时，则函数执行前会关闭中断，函数执行完毕再打开中断否则，会临时把MCU的中断响应水平提升到天花板，低于或等于这个天花板的中断就暂时不响应了，等任务函数执行完再恢复【请注意，中断抢占可以嵌套，也就是说，这个屏蔽中断的天花板可以一步步提高，然后再一步步恢复】 rtic一般会把这个天花板设为需要加锁的任务函数的优先级。
+也就是说，共享数据的锁，只对低于或等于该任务函数的其它函数起作用【其实，由于那些任务函数的优先级低，其也根本不会来抢占本函数的执行】，对于高优先级的任务函数是不起作用的！" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/9c71f63005e3428c25c0eebfcc2cce32/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-13T22:11:14+08:00" />
+<meta property="article:modified_time" content="2024-01-13T22:11:14+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">rust嵌入式开发补充</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>本文是对<a href="https://blog.csdn.net/jxandrew/article/details/135507224">rust嵌入式开发</a>的补充，就当时遗留的一些问题进行增补与修正。</p> 
+<h4><a id="RTIC_2"></a>RTIC中的任务处理</h4> 
+<p>在上篇文章中还不是很理解rtic的工作机制。但写东东进行总结的好处就体现出来了，在上篇文章中提到了rtic的app入口本就是一个进程宏，所以在写完文章后就想，那就看看这个宏到底干了些什么吧。</p> 
+<p>想到就干。执行：</p> 
+<pre><code>cargo expand &gt; src/app.rs
+</code></pre> 
+<p>然后在main.rs中引用一下【这样在vscode中读代码的时候，就可以随时跳转来来看源码】：</p> 
+<pre><code>mode app;
+</code></pre> 
+<p>经过对扩展了宏之后的代码的研读，搞清楚了几个问题：</p> 
+<h5><a id="RTIC_16"></a>RTIC的任务分发</h5> 
+<p>rtic不是一个RTOS，它只是一个<strong>基于中断的任务分发系统</strong>。</p> 
+<p>所以，上篇文章中有很多概念就都错了，因为那还是基于一个OS中多任务【或线程】的认识。</p> 
+<p>在rtic中，不管是中断处理，还是用户的任务函数，如live、mytask等，在rtic中都是一视同仁：全部都是在中断响应函数调用我们自己编写的任务函数。</p> 
+<p>而rtic所提供的标准的中断响应函数都是一样的：</p> 
+<ul><li>设置优先级，由程序员以priority指定</li><li>为用户任务函数准备参数，核心就是local和shared两个结构</li><li>调用程序员所写的用户任务函数</li></ul> 
+<p>所以，dispatchers的作用就是选一个没有实际使用到的硬件中断源，然后在实际的硬件中断响应函数中调用用户任务函数的spawn()时，rtic就会将这个调用放入到一个任务队列中，然后以软件触发的方式触发这个中断。</p> 
+<p>同时，rtic会接管这个硬件中断的响应函数，然后在这个中断响应函数中从任务队列中逐次提取相应的用户任务函数来执行。</p> 
+<p>所以，使用了rtic后根本不需要再自己实现时钟任务或空闲任务队列，来自己做多任务的调度了。只需要和硬件中断一样，编写好自己的用户任务，然后在相应的硬件中断响应任务中spawn()即可。</p> 
+<p>所以，如上篇文章中，就需要三个用户任务函数，分别在两个硬件中断中进行触发：</p> 
+<pre><code>tick函数【TIM1_UP硬件中断的响应函数】中触发mytask和live：
+//用户任务
+mytask::spawn().unwrap();
+//用板载led做个呼吸灯，直观表示还活着
+live::spawn().unwrap();
+
+uart1函数【USART1硬件中断的响应函数】中触发uart1_recv：
+//串口1接收到数据
+if new_data {
+	//将接收到的数据放入用户空间
+	cx.shared.buff_uart1_recv.lock(|buff_uart1_recv| {
+		*buff_uart1_recv = Some(buff);
+	});
+	uart1_recv::spawn().unwrap();
+}
+</code></pre> 
+<p>也就是说，rtic中有两种任务，一种是硬件中断的处理函数，由rtic内置的硬件中断响应函数进行触发；一种是用户的任务处理函数，必须在前一种的硬件中断处理函数中以spawn()进行触发，然后rtic以软中断的方式触发dispatchers的中断，然后在此中断的响应函数中进行调度来执行用户的任务处理函数。</p> 
+<p>即，rtic中的任务其最终来源都是指定的硬件中断。</p> 
+<h5><a id="RTIC_58"></a>RTIC的任务处理</h5> 
+<p>rtic中所有的任务函数，都等价于硬件中断响应函数。所以就有两个问题需要考虑：中断处理，数据安全。</p> 
+<h5><a id="_62"></a>中断处理</h5> 
+<p>由于所有的任务函数都是中断响应函数，所以我们不得不研究一下rtic中对中断的处理方式。回答是：没有任何特殊的处理，主要依靠MCU芯片的中断处理机制。</p> 
+<p>arm芯片本身有其强大的中断处理机制，<strong>简单的说就是高优先级的中断可以抢占低优先级的中断</strong>。其也没有核心数据的概念，也就不需要特殊的中断保护机制。</p> 
+<p>所以rtic的中断处理非常简单：</p> 
+<ul><li>在初始化时，只允许用户绑定的那几个硬件中断，以及作为dispatchers源的那个硬件中断，其它中断全部关闭</li><li>所有的任务函数，全部根据优先级由MCU芯片来执行中断的响应调度</li><li>rtic唯一要做的就是在用户任务spawn()时按优先级排队放入任务队列，然后在dispatchers时依次调度</li></ul> 
+<h5><a id="_74"></a>数据安全</h5> 
+<p>arm不管有没有核心数据，只根据优先级进行中断处理函数的抢占与调度。但rtic则必须提供相应的数据安全保护。</p> 
+<p>因此，在rtic视角就存在三种数据：</p> 
+<ul><li>rtic系统数据，用于保存所有的系统数据和用户数据</li><li>任务的本地数据，只用于某个任务函数的数据</li><li>任务的共享数据，可在两个以上的任务函数间共享的数据</li></ul> 
+<p>由于rust有强大的借用约束，所以系统数据和任务数据的隔离非常简单：所有的数据都由rtic拥有并管理，在需要调度任务函数执行【不管是硬件中断函数还是用户任务函数】时，rtic从用户数据区中引用【借出】该函数所指定的数据，然后创建相应的上下文，然后作为参数交给该函数执行。</p> 
+<p>也就是说，任务函数所需要的数据，不管是local的还是shared的，都来自rtic数据区中相应数据的引用【借用】，然后创建一个局部的上下文，将这些数据引用复制进来。</p> 
+<p>这也是rtic中的闭包无法跨线程使用的原因，因为rtic任务函数中的上下文是一个栈上的局部变量，其将随着任务函数的执行结束而被销毁，所以想如java或go中以闭包的方式将一些处理推入任务队列以在时钟任务队列或空闲任务队列中异步执行，是根本不可能的！</p> 
+<p>展开说，即java或go中可将闭包所使用的数据不从栈上分配，而是在堆中分配，则当闭包执行完毕时，对这块数据区的引用为0，就可以通过gc进行回收了。</p> 
+<p>但rust没有这样的机制，如果引用了上下文中的数据，就需要将这些数据自己copy到堆上，即创建一个Box，然后将上下文中的数据保存进去，然后将相应的函数指针和Box一起保存到时钟任务队列上，然后在需要的时候调用。但又何必使用闭包呢？！</p> 
+<p>而这，正好也就是rtic对local和shared两种数据的处理方式：在栈上创建对应的上下文数据结构，然后从保存到堆上的rtic的系统数据空间中复制需要的数据引用【借用】，再将上下文提供给任务函数使用。</p> 
+<p>当然，只用于某个任务函数的local数据这么处理没问题，但共享数据就不可以了，因为任务函数的调度是可以被更高优先级的任务函数抢占的。</p> 
+<p>这样一来，如果低优先级的任务函数正在使用共享数据，就可能导致错误。</p> 
+<p>rtic对此的处理是互斥，即共享数据都需要以加锁的方式才能使用，以保证共享数据的安全。</p> 
+<p>但这很容易就有一个困惑：如果低优先级的任务函数加锁后被高优先级任务函数抢占，其也要使用共享数据，那<strong>是否会导致死锁</strong>？！！</p> 
+<p>这是我们使用惯了OS或高级编程语言的习惯性认知。但rust嵌入式，起码在STMS32F103芯片上，它是一个单核的、没有运行时提供的阻塞任务队列来支持Mutex原语。</p> 
+<p>所以rtic对共享数据的加锁非常简单，每次加锁时，设置一个优先级天花板：</p> 
+<ul><li>当这个天花板是MCU的最高优先级【STMS32F103特性时是16】时，则函数执行前会关闭中断，函数执行完毕再打开中断</li><li>否则，会临时把MCU的中断响应水平提升到天花板，低于或等于这个天花板的中断就暂时不响应了，等任务函数执行完再恢复【请注意，中断抢占可以嵌套，也就是说，这个屏蔽中断的天花板可以一步步提高，然后再一步步恢复】</li></ul> 
+<p>rtic一般会把这个天花板设为需要加锁的任务函数的优先级。</p> 
+<p>也就是说，共享数据的锁，只对低于或等于该任务函数的其它函数起作用【其实，由于那些任务函数的优先级低，其也根本不会来抢占本函数的执行】，对于高优先级的任务函数是不起作用的！</p> 
+<p>所以呢，上篇文章中串口接收中断中对发送端口加锁的做法是没有任何意义的，因为串口发送时其所在的live和mytask任务函数的优先级只有1，而串口接收中断的优先级是3，其会抢占串口发送的执行，只有当串口接收完毕后，才会继续串口的发送。</p> 
+<p>也就是说，在当前的配置下，串口本就工作于单工模式，且串口发送的优先级是低于串口接收的，只有为串口配置了DMA模式，其才会处于双工模式。</p> 
+<p>我们搞清楚了rtic的共享数据加锁机制，自然也就明白了一个关键原则：<strong>如果需要在两个任务函数间共享某个数据，则这两个任务函数必须设为同一个优先级，否则就必须考虑高优先级函数的抢占会破坏低优先级任务函数的工作</strong>！</p> 
+<h4><a id="_121"></a>总结</h4> 
+<p>优先级是rtic正常工作的关键，建议应设置自己的一套优先级标准。笔者目前的考虑是：</p> 
+<ul><li>所有的用户任务函数，都是统一的最低优先级：1</li><li>任何硬件中断响应函数之间不应共享数据</li><li>用户任务对于从硬件中断响应函数共享来的数据应尽快消费，即必须考虑任务的实时性，如果实时性无法保证，则必须考虑使用缓存，然后和硬件中断响应函数之间商定一个消费协议【如设置标记、留存大小等】</li></ul> 
+<p>至此，回看上篇文章中对串口接收的处理，还是受了rtt等RTOS的影响，所以自作聪明的增加了所谓上半程、下半程的多余设计：如果在串口接收处理还没有消费完接收到的数据时，又有新的数据进入，则之前提交给串口接收处理函数的共享数据【buff_uart1_recv】依然要被接收中断修改。我现在对rust的经验还不够，还无法说清楚具体会发生什么，但显然，系统崩溃、业务错误的风险肯定出现了。</p> 
+<p>所以，合理的设计应该是设置一个未消费标识，阻止接收中断在之前接收到的数据消费完毕之前接收新的数据。当然，由于我们给的串口缓存足够的大，更好的选择是实现环形接收缓存。</p> 
+<p>当然，哪怕串口的波特率被设为了115200，但触发一个接收数据中断的时间起码也需要：236微秒。在STM32F103工作在36M频率时，也足以执行8500多条指令，只要整个应用系统不是太复杂，没有非常多的功能或非常高频的其它外部中断，暂时还是不太需要担心消费不过来的。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f7eb875c4c93018619bf2c90acc88674/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">关于java继承知识点总结</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b4b3de5bb593cdd0241882a904251632/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">vue3-计算属性</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

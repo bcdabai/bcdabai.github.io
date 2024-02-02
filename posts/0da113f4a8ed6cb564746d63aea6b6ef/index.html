@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Apisix的ext-plugin-pre-req 中的trace 关联zipkin插件的trace - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Apisix的ext-plugin-pre-req 中的trace 关联zipkin插件的trace" />
+<meta property="og:description" content="背景 项目上基于apisix-runner，我们自己写了一些插件，执行点为ext-plugin-pre-req，按照apisix的官方文档上我们知道ext-plugin-req 的执行顺序是在大多数 APISIX built-in plugins之前；但是实际apisix的插件的执行点在阶段（phase）来说上划分的更为细化。
+💡 ext-plugin-pre-req: executed during handling the request, before most of the APISIX built-in plugins (Lua language plugins)
+问题 遇到的问题：在做链路追踪时，需要将zipkin插件的span和ext-*中的自定义插件的span关联
+解决 按照ext-plugin-pre-req的定义，执行顺序是优先于大多数的apisix内置插件的，但是不包括zipkin,根据apisix的官方文档介绍，在相同的执行阶段，优先级高的先执行。
+Plugin Develop | Apache APISIX® – Cloud-Native API Gateway
+在conf/config-default.yaml配置中定义了plugins的优先级
+plugins: # plugin list (sorted by priority) - real-ip # priority: 23000 - client-control # priority: 22000 - proxy-control # priority: 21990 - zipkin # priority: 12011 #- skywalking # priority: 12010 #- opentelemetry # priority: 12009 - ext-plugin-pre-req # priority: 12000 - request-id # priority: 11010 - fault-injection # priority: 11000 - mocking # priority: 10900 - serverless-pre-function # priority: 10000 #- batch-requests # priority: 4010 - cors # priority: 4000 - ip-restriction # priority: 3000 - ua-restriction # priority: 2999 - referer-restriction # priority: 2990 - csrf # priority: 2980 - uri-blocker # priority: 2900 - request-validation # priority: 2800 - openid-connect # priority: 2599 ." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/0da113f4a8ed6cb564746d63aea6b6ef/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-09-20T20:31:16+08:00" />
+<meta property="article:modified_time" content="2022-09-20T20:31:16+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Apisix的ext-plugin-pre-req 中的trace 关联zipkin插件的trace</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>背景</h2> 
+<p>项目上基于apisix-runner，我们自己写了一些插件，执行点为ext-plugin-pre-req，按照apisix的官方文档上我们知道ext-plugin-req 的执行顺序是在大多数 APISIX built-in plugins之前；但是实际apisix的插件的执行点在阶段（phase）来说上划分的更为细化。</p> 
+<p>💡 ext-plugin-pre-req: executed during handling the request, before most of the APISIX built-in plugins (Lua language plugins)</p> 
+<h2><a id="_7"></a>问题</h2> 
+<p>遇到的问题：在做链路追踪时，需要将zipkin插件的span和ext-*中的自定义插件的span关联</p> 
+<h2><a id="_11"></a>解决</h2> 
+<p>按照ext-plugin-pre-req的定义，执行顺序是优先于大多数的apisix内置插件的，但是不包括zipkin,根据apisix的官方文档介绍，在相同的执行阶段，优先级高的先执行。</p> 
+<p><a href="https://apisix.apache.org/docs/apisix/plugin-develop/" rel="nofollow">Plugin Develop | Apache APISIX® – Cloud-Native API Gateway</a></p> 
+<p>在conf/config-default.yaml配置中定义了plugins的优先级</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">plugins</span><span class="token punctuation">:</span>                          <span class="token comment"># plugin list (sorted by priority)</span>
+  <span class="token punctuation">-</span> real<span class="token punctuation">-</span>ip                        <span class="token comment"># priority: 23000</span>
+  <span class="token punctuation">-</span> client<span class="token punctuation">-</span>control                 <span class="token comment"># priority: 22000</span>
+  <span class="token punctuation">-</span> proxy<span class="token punctuation">-</span>control                  <span class="token comment"># priority: 21990</span>
+  <span class="token punctuation">-</span> zipkin                         <span class="token comment"># priority: 12011</span>
+  <span class="token comment">#- skywalking                    # priority: 12010</span>
+  <span class="token comment">#- opentelemetry                 # priority: 12009</span>
+  <span class="token punctuation">-</span> ext<span class="token punctuation">-</span>plugin<span class="token punctuation">-</span>pre<span class="token punctuation">-</span>req             <span class="token comment"># priority: 12000</span>
+  <span class="token punctuation">-</span> request<span class="token punctuation">-</span>id                     <span class="token comment"># priority: 11010</span>
+  <span class="token punctuation">-</span> fault<span class="token punctuation">-</span>injection                <span class="token comment"># priority: 11000</span>
+  <span class="token punctuation">-</span> mocking                        <span class="token comment"># priority: 10900</span>
+  <span class="token punctuation">-</span> serverless<span class="token punctuation">-</span>pre<span class="token punctuation">-</span>function        <span class="token comment"># priority: 10000</span>
+  <span class="token comment">#- batch-requests                # priority: 4010</span>
+  <span class="token punctuation">-</span> cors                           <span class="token comment"># priority: 4000</span>
+  <span class="token punctuation">-</span> ip<span class="token punctuation">-</span>restriction                 <span class="token comment"># priority: 3000</span>
+  <span class="token punctuation">-</span> ua<span class="token punctuation">-</span>restriction                 <span class="token comment"># priority: 2999</span>
+  <span class="token punctuation">-</span> referer<span class="token punctuation">-</span>restriction            <span class="token comment"># priority: 2990</span>
+  <span class="token punctuation">-</span> csrf                           <span class="token comment"># priority: 2980</span>
+  <span class="token punctuation">-</span> uri<span class="token punctuation">-</span>blocker                    <span class="token comment"># priority: 2900</span>
+  <span class="token punctuation">-</span> request<span class="token punctuation">-</span>validation             <span class="token comment"># priority: 2800</span>
+  <span class="token punctuation">-</span> openid<span class="token punctuation">-</span>connect                 <span class="token comment"># priority: 2599</span>
+ <span class="token punctuation">...</span>
+</code></pre> 
+<aside>
+  💡 注意这里的priority 在apisix的lua 源码中是写死的 
+</aside> 
+<p>apisix的lua脚本执行阶段根据源码，基本分为rewrite、access、header_filter，log</p> 
+<p><img src="https://images2.imgbox.com/8d/20/MAxsTcjK_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-wOERB69p-1663676661932)(https://s3-us-west-2.amazonaws.com/secure.notion-static.com/641625f2-a1a1-47a7-90c8-8ea115e38b99/Untitled.png)]"></p> 
+<p>根据优先级来看zipkin 高于 ext-plugin-pre-req;</p> 
+<p>通过查看lua源码看到，在rewrite阶段，先执行了zipkin,后执行ext-plugin-pre-req;</p> 
+<pre><code class="prism language-lua"><span class="token comment">-- apisix/apisix/plugins/zipkin.lua</span>
+<span class="token comment">-- span/v2中的“apisix.proxy”span 开启后，结束于header_filter阶段，而head中写入b3是发生在access阶段;</span>
+<span class="token comment">-- 这也就导致了我们ext-plugin-pre-req  context中无法获取到span</span>
+<span class="token comment">-- 所以需要在rewrite阶段就写入b3</span>
+<span class="token keyword">function</span> _M<span class="token punctuation">.</span><span class="token function">rewrite</span><span class="token punctuation">(</span>plugin_conf<span class="token punctuation">,</span> ctx<span class="token punctuation">)</span>
+		<span class="token punctuation">....</span>
+		<span class="token keyword">local</span> request_span <span class="token operator">=</span> ctx<span class="token punctuation">.</span>opentracing<span class="token punctuation">.</span>request_span
+    <span class="token keyword">if</span> conf<span class="token punctuation">.</span>span_version <span class="token operator">==</span> ZIPKIN_SPAN_VER_1 <span class="token keyword">then</span>
+        ctx<span class="token punctuation">.</span>opentracing<span class="token punctuation">.</span>rewrite_span <span class="token operator">=</span> request_span<span class="token punctuation">:</span><span class="token function">start_child_span</span><span class="token punctuation">(</span><span class="token string">"apisix.rewrite"</span><span class="token punctuation">,</span>
+            start_timestamp<span class="token punctuation">)</span>
+
+        ctx<span class="token punctuation">.</span>REWRITE_END_TIME <span class="token operator">=</span> tracer<span class="token punctuation">:</span><span class="token function">time</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+        ctx<span class="token punctuation">.</span>opentracing<span class="token punctuation">.</span>rewrite_span<span class="token punctuation">:</span><span class="token function">finish</span><span class="token punctuation">(</span>ctx<span class="token punctuation">.</span>REWRITE_END_TIME<span class="token punctuation">)</span>
+    <span class="token keyword">else</span>
+        ctx<span class="token punctuation">.</span>opentracing<span class="token punctuation">.</span>proxy_span <span class="token operator">=</span> request_span<span class="token punctuation">:</span><span class="token function">start_child_span</span><span class="token punctuation">(</span><span class="token string">"apisix.proxy"</span><span class="token punctuation">,</span>
+            start_timestamp<span class="token punctuation">)</span>
+    <span class="token keyword">end</span>
+<span class="token keyword">end</span>
+
+<span class="token keyword">function</span> _M<span class="token punctuation">.</span><span class="token function">access</span><span class="token punctuation">(</span>conf<span class="token punctuation">,</span> ctx<span class="token punctuation">)</span>
+   <span class="token punctuation">....</span>
+
+    <span class="token comment">-- send headers to upstream</span>
+    <span class="token keyword">local</span> outgoing_headers <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+    tracer<span class="token punctuation">:</span><span class="token function">inject</span><span class="token punctuation">(</span>opentracing<span class="token punctuation">.</span>proxy_span<span class="token punctuation">,</span> <span class="token string">"http_headers"</span><span class="token punctuation">,</span> outgoing_headers<span class="token punctuation">)</span>
+    <span class="token keyword">for</span> k<span class="token punctuation">,</span> v <span class="token keyword">in</span> <span class="token function">pairs</span><span class="token punctuation">(</span>outgoing_headers<span class="token punctuation">)</span> <span class="token keyword">do</span>
+        core<span class="token punctuation">.</span>request<span class="token punctuation">.</span><span class="token function">set_header</span><span class="token punctuation">(</span>ctx<span class="token punctuation">,</span> k<span class="token punctuation">,</span> v<span class="token punctuation">)</span>
+    <span class="token keyword">end</span>
+<span class="token keyword">end</span>
+
+<span class="token keyword">function</span> _M<span class="token punctuation">.</span><span class="token function">header_filter</span><span class="token punctuation">(</span>conf<span class="token punctuation">,</span> ctx<span class="token punctuation">)</span>
+   <span class="token punctuation">....</span>
+    <span class="token keyword">if</span> conf<span class="token punctuation">.</span>span_version <span class="token operator">==</span> ZIPKIN_SPAN_VER_1 <span class="token keyword">then</span>
+        <span class="token keyword">if</span> opentracing<span class="token punctuation">.</span>proxy_span <span class="token keyword">then</span>
+            opentracing<span class="token punctuation">.</span>body_filter_span <span class="token operator">=</span> opentracing<span class="token punctuation">.</span>proxy_span<span class="token punctuation">:</span><span class="token function">start_child_span</span><span class="token punctuation">(</span>
+                <span class="token string">"apisix.body_filter"</span><span class="token punctuation">,</span> end_time<span class="token punctuation">)</span>
+        <span class="token keyword">end</span>
+    <span class="token keyword">else</span>
+        opentracing<span class="token punctuation">.</span>proxy_span<span class="token punctuation">:</span><span class="token function">finish</span><span class="token punctuation">(</span>end_time<span class="token punctuation">)</span>
+        opentracing<span class="token punctuation">.</span>response_span <span class="token operator">=</span> opentracing<span class="token punctuation">.</span>request_span<span class="token punctuation">:</span><span class="token function">start_child_span</span><span class="token punctuation">(</span>
+            <span class="token string">"apisix.response_span"</span><span class="token punctuation">,</span> end_time<span class="token punctuation">)</span>
+    <span class="token keyword">end</span>
+<span class="token keyword">end</span>
+</code></pre> 
+<p>apisix/apisix/plugins/zipkin.lua 修改后代码</p> 
+<pre><code class="prism language-lua"><span class="token keyword">function</span> _M<span class="token punctuation">.</span><span class="token function">rewrite</span><span class="token punctuation">(</span>plugin_conf<span class="token punctuation">,</span> ctx<span class="token punctuation">)</span>
+		<span class="token punctuation">....</span>
+		<span class="token keyword">local</span> request_span <span class="token operator">=</span> ctx<span class="token punctuation">.</span>opentracing<span class="token punctuation">.</span>request_span
+		    <span class="token keyword">if</span> conf<span class="token punctuation">.</span>span_version <span class="token operator">==</span> ZIPKIN_SPAN_VER_1 <span class="token keyword">then</span>
+		        ctx<span class="token punctuation">.</span>opentracing<span class="token punctuation">.</span>rewrite_span <span class="token operator">=</span> request_span<span class="token punctuation">:</span><span class="token function">start_child_span</span><span class="token punctuation">(</span><span class="token string">"apisix.rewrite"</span><span class="token punctuation">,</span>
+		            start_timestamp<span class="token punctuation">)</span>
+		
+		        ctx<span class="token punctuation">.</span>REWRITE_END_TIME <span class="token operator">=</span> tracer<span class="token punctuation">:</span><span class="token function">time</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+		        ctx<span class="token punctuation">.</span>opentracing<span class="token punctuation">.</span>rewrite_span<span class="token punctuation">:</span><span class="token function">finish</span><span class="token punctuation">(</span>ctx<span class="token punctuation">.</span>REWRITE_END_TIME<span class="token punctuation">)</span>
+		    <span class="token keyword">else</span>
+		        ctx<span class="token punctuation">.</span>opentracing<span class="token punctuation">.</span>proxy_span <span class="token operator">=</span> request_span<span class="token punctuation">:</span><span class="token function">start_child_span</span><span class="token punctuation">(</span><span class="token string">"apisix.proxy"</span><span class="token punctuation">,</span>
+		            start_timestamp<span class="token punctuation">)</span>
+		
+		        <span class="token comment">-- send headers to upstream</span>
+		        <span class="token keyword">local</span> outgoing_headers <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+		        tracer<span class="token punctuation">:</span><span class="token function">inject</span><span class="token punctuation">(</span>ctx<span class="token punctuation">.</span>opentracing<span class="token punctuation">.</span>proxy_span<span class="token punctuation">,</span> <span class="token string">"http_headers"</span><span class="token punctuation">,</span> outgoing_headers<span class="token punctuation">)</span>
+		        <span class="token keyword">for</span> k<span class="token punctuation">,</span> v <span class="token keyword">in</span> <span class="token function">pairs</span><span class="token punctuation">(</span>outgoing_headers<span class="token punctuation">)</span> <span class="token keyword">do</span>
+		            core<span class="token punctuation">.</span>request<span class="token punctuation">.</span><span class="token function">set_header</span><span class="token punctuation">(</span>ctx<span class="token punctuation">,</span> k<span class="token punctuation">,</span> v<span class="token punctuation">)</span>
+		        <span class="token keyword">end</span>
+		    <span class="token keyword">end</span>
+		<span class="token keyword">end</span>
+</code></pre> 
+<p>在我们ext-plugin-pre-req 插件中关联“apisix-proxy” span</p> 
+<pre><code class="prism language-go"><span class="token keyword">func</span> <span class="token punctuation">(</span>t <span class="token operator">*</span>Token<span class="token punctuation">)</span> <span class="token function">Filter</span><span class="token punctuation">(</span>conf <span class="token keyword">interface</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">,</span> w http<span class="token punctuation">.</span>ResponseWriter<span class="token punctuation">,</span> r pkgHTTP<span class="token punctuation">.</span>Request<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">var</span> span opentracing<span class="token punctuation">.</span>Span
+
+	carrier <span class="token operator">:=</span> opentracing<span class="token punctuation">.</span><span class="token function">HTTPHeadersCarrier</span><span class="token punctuation">(</span>r<span class="token punctuation">.</span><span class="token function">Header</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">View</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+	clientContext<span class="token punctuation">,</span> err <span class="token operator">:=</span> utils<span class="token punctuation">.</span>Trace<span class="token punctuation">.</span><span class="token function">Extract</span><span class="token punctuation">(</span>opentracing<span class="token punctuation">.</span>HTTPHeaders<span class="token punctuation">,</span> carrier<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		log<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"trace err:"</span><span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+		span <span class="token operator">=</span> utils<span class="token punctuation">.</span>Trace<span class="token punctuation">.</span><span class="token function">StartSpan</span><span class="token punctuation">(</span>t<span class="token punctuation">.</span><span class="token function">Name</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+		span <span class="token operator">=</span> utils<span class="token punctuation">.</span>Trace<span class="token punctuation">.</span><span class="token function">StartSpan</span><span class="token punctuation">(</span>
+			t<span class="token punctuation">.</span><span class="token function">Name</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+			opentracing<span class="token punctuation">.</span><span class="token function">ChildOf</span><span class="token punctuation">(</span>clientContext<span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token keyword">defer</span> span<span class="token punctuation">.</span><span class="token function">Finish</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+	<span class="token operator">...</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2><a id="httpsimgblogcsdnimgcn5d4ac8816264404090ab9c6b866d9ddfpng_152"></a>效果<img src="https://images2.imgbox.com/b4/61/yzYe3FsR_o.png" alt="在这里插入图片描述"></h2>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/db7bd08bd113e5a15c619139fa920c87/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Java动态规划算法——背包问题，最大子序和问题</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/0adadfa2964916b629783d962050613b/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">php foreach变量引用的问题</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

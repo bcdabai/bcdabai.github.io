@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>C# 唯品会JIT&amp;JITX对接 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="C# 唯品会JIT&amp;JITX对接" />
+<meta property="og:description" content="前言：其实唯品会的接口使用还是非常简单，开发者可能有疑问还是他们的接口流程问题和如何与自家的ERP对接起来。这篇文章是在记录自己对接唯品会的过程的理解，也因为是第一次接触唯品会，刚开始疑问还挺多的，网上也没啥这类问题的解答，都得自己去研究实验，有需要的可参考参考。
+PS：唯品会的开放平台文档N久没更新，有些地方说的已经不存在或者已经变更为其他方式，总之就是看文档会让你产生很多误区，但是你也没地方有资料看了。另外他们的沙箱，提供的数据是全是死的不变的，而且跟实际数据会差很远，我是按自己的理解纯码代码上正式测的。(今年更新了，我这是去年对接的，今年SDK为应对新型肺炎疫情 新增了一些字段，没更新的同志们要注意了)
+一、准备工作-秘钥的获取
+1.创建应用：这很简单注册成为开发者，供应商认证成功过后就可以创建应用，我创建的是 自研应用 。这里要说明一下，创建应用时填写的选项也是有学问的：
+合作类型 -- JIT和直发：
+JIT模式：我是服装公司（唯品会称呼我为供应商），客户下单了，由唯品会下指要供应商发货，发到唯品会他们自己的指另的仓库，然后由唯品会的人发货给客户，所以快递费要我们自己出。
+直发：客户下单了，由我（供应商）直接发货给客户。PS：这块的接口他们已经弃用了，但是开发者平台没更新。这块的业务已经改为JITX业务了，接口也是另一套。这里也要说明一下：即使是我们自己发货，但你也不要以为你就拥有了自己的这一批客户源，唯品会对用户信息保密异常严格，只有他们自己知道用户信息。我们供应商拿到的全是加密的。
+JITX业务说明：因为是由我们直接发货给客户，并且用户信息是保密的，所以承运商&#43;快递单号&#43;快递费 全是由唯品承担。关于退货，这也跟淘宝天猫不一样，商家也不需要处理那些繁杂的退货申请，客户退货也是直接退给唯品的仓库，然后他们处理之后再发回给商家这里。所以 是没有 退货申请 接口的。
+PS:关于退货这块，我咨询过公司的业务人员，说是唯品后台会有财务报表，这些报表就是最终生效的订单，我们的业务人员会定期筛选出来导入到我们的ERP系统，这才跟ERP的销售那块的账对上，所以换句话说不用技术人员 再去另外弄销售单。这里不能一概而论所有公司都这样做，还是得看各个公司的业务模式咋样才能决定自家要怎么处理这块。
+回调URL：这个就是正式上使用接口必要的参数：access_token，就是需要通过这个获取到。这里要说下，access_token有效期3个月，你只能单独通过https://auth.vip.com/oauth2/authorize?client_id=appKey&amp;response_type=code&amp;redirect_uri=回调URL
+这个链接输入VOP系统的账号密码授权之后，唯品会通过你设置的回调地址，将access_token和refresh_token,expires_in,refresh_expires_time返回给你，你需要记录下来，配置到系统中的某个地方，调唯品的接口的时候就用它。那3个月过期之后呢，要么在通过refresh_token（有效期1年）调用唯品的刷新access_token的接口，要么就再一次通过授权这个方式获取token。1年之后吧，就真的需要在一次通过授权去获取access_token了，这就需要你及时更新到才行。
+2.拿取 App Key&#43;App Secret
+3.配置白名单：即你调用唯品接口的程序发布的服务器IP，
+二、码代码
+1.0 先从官方将唯品的sdk下载下来，他们封装好了所有接口的请求（包括model,request），链接
+JIT和JITX是可以同时跑的，我是先把JIT的对接好了之后，再去对接JITX的。先上JIT的代码吧，因为JITX的稍微要麻烦点，而且JITX的运行跟商家的运营政策不同而编写规则也不同，毕竟 这是要对接自家的ERP系统的。
+PS:这里注意，唯品的接口会时不时来个超时，所以要避免这种情况的发生导致我们错过点拉不到数据或拉不全 1.1 唯品的接口里有自己的一套仓库编码和快递承运商编码，我们使用人家的接口的时候 传递的参数值 也必须是 唯品规定的一套枚举值。所以若是 要和自家的ERP关联起来，就要 配置与 唯品一样的或者能2边关联上的 仓库编码和承运商编码
+获取承运商的接口 ：vipapis.delivery.JitDeliveryService-1.0.0#getCarrierList
+在官网里的这个接口的下面就有仓库的枚举值列表
+1.2 先上每个接口必须要用到的公共方法和配置参数：
+//这些使用唯品接口必要的参数，我是配置在config里；分别对应 上一节说的 应用的key， 秘钥 ，商户ID ，唯品接口运行地址 private string AppKey = System.Configuration.ConfigurationManager.AppSettings[&#34;VPH_AppKey&#34;].ToString(); private string AppSecret = System.Configuration.ConfigurationManager.AppSettings[&#34;VPH_AppSecret&#34;].ToString(); private string VendorId = System.Configuration.ConfigurationManager.AppSettings[&#34;VPH_VendorId&#34;].ToString(); private string AppUrl = System." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/2f60249e217bb7c949b40f53521cfa4c/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-03-18T15:46:56+08:00" />
+<meta property="article:modified_time" content="2020-03-18T15:46:56+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">C# 唯品会JIT&amp;JITX对接</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>前言：其实唯品会的接口使用还是非常简单，开发者可能有疑问还是他们的接口流程问题和如何与自家的ERP对接起来。这篇文章是在记录自己对接唯品会的过程的理解，也因为是第一次接触唯品会，刚开始疑问还挺多的，网上也没啥这类问题的解答，都得自己去研究实验，有需要的可参考参考。</p> 
+<p>PS：唯品会的开放平台文档N久没更新，有些地方说的已经不存在或者已经变更为其他方式，总之就是看文档会让你产生很多误区，但是你也没地方有资料看了。另外他们的沙箱，提供的数据是全是死的不变的，而且跟实际数据会差很远，我是按自己的理解纯码代码上正式测的。(<span style="color:#f33b45;">今年更新了，我这是去年对接的，今年SDK为应对新型肺炎疫情 新增了一些字段，没更新的同志们要注意了</span>)</p> 
+<p><strong>一、准备工作-秘钥的获取</strong></p> 
+<p>       1.创建应用：这很简单注册成为开发者，供应商认证成功过后就可以创建应用，我创建的是 自研应用 。这里要说明一下，创建应用时填写的选项也是有学问的：</p> 
+<p style="text-align:center;"><img alt="" class="has" src="https://images2.imgbox.com/d8/4f/HvEFYoP1_o.png"></p> 
+<p>     合作类型 -- JIT和直发：</p> 
+<p>            JIT模式：我是服装公司（唯品会称呼我为供应商），客户下单了，由唯品会下指要供应商发货，发到唯品会他们自己的指另的仓库，然后由唯品会的人发货给客户，所以<span style="color:#f33b45;">快递费要我们自己出</span>。</p> 
+<p>            直发：客户下单了，由我（供应商）直接发货给客户。<span style="color:#f33b45;">PS：这块的接口他们已经弃用了，但是开发者平台没更新。</span>这块的业务已经改为JITX业务了，接口也是另一套。这里也要说明一下：<span style="color:#f33b45;">即使是我们自己发货，但你也不要以为你就拥有了自己的这一批客户源，唯品会对用户信息保密异常严格，只有他们自己知道用户信息。我们供应商拿到的全是加密的。</span></p> 
+<p><span style="color:#f33b45;">            </span>JITX业务说明：因为是由我们直接发货给客户，并且用户信息是保密的，所以<span style="color:#f33b45;">承运商+快递单号+快递费 全是由唯品承担</span>。关于退货，这也跟淘宝天猫不一样，商家也不需要处理那些繁杂的退货申请，客户退货也是直接退给唯品的仓库，然后他们处理之后再发回给商家这里。所以 是没有 退货申请 接口的。</p> 
+<p>            <span style="color:#ffbb66;">PS:关于退货这块，我咨询过公司的业务人员，说是唯品后台会有财务报表，这些报表就是最终生效的订单，我们的业务人员会定期筛选出来导入到我们的ERP系统，这才跟ERP的销售那块的账对上，所以换句话说不用技术人员 再去另外弄销售单。这里不能一概而论所有公司都这样做，还是得看各个公司的业务模式咋样才能决定自家要怎么处理这块。</span></p> 
+<p>     回调URL：这个就是正式上使用接口必要的参数：access_token，就是需要通过这个获取到。这里要说下，access_token有效期3个月，你只能单独通过<a href="https://auth.vip.com/oauth2/authorize?client_id=appKey&amp;response_type=code&amp;redirect_uri=%E5%9B%9E%E8%B0%83URL" rel="nofollow">https://auth.vip.com/oauth2/authorize?client_id=appKey&amp;response_type=code&amp;redirect_uri=回调URL</a></p> 
+<p>这个链接输入VOP系统的账号密码<span style="color:#f33b45;">授权</span>之后，唯品会通过你设置的回调地址，将access_token和refresh_token,expires_in,refresh_expires_time返回给你，你需要记录下来，配置到系统中的某个地方，调唯品的接口的时候就用它。那3个月过期之后呢，要么在通过refresh_token（有效期1年）调用唯品的刷新access_token的接口，要么就再一次通过授权这个方式获取token。1年之后吧，就真的需要在一次通过授权去获取access_token了，这就需要你及时更新到才行。</p> 
+<p>      2.拿取 App Key+App Secret</p> 
+<p>     <img alt="" height="410" src="https://images2.imgbox.com/17/03/XblJGPBO_o.png" width="828"></p> 
+<p>     3.配置白名单：即你调用唯品接口的程序发布的服务器IP，</p> 
+<p>       <img alt="" height="416" src="https://images2.imgbox.com/3e/95/pk02M9s5_o.png" width="782"></p> 
+<p><strong>二、码代码</strong></p> 
+<p><strong>  </strong>   1.0 先从官方将唯品的sdk下载下来，他们封装好了所有接口的请求（包括model,request），<a href="https://vop.vip.com/sdk/download/cs/cs-sdk-20200225140941.zip" rel="nofollow">链接</a></p> 
+<p> <img alt="" height="286" src="https://images2.imgbox.com/6a/67/GI6iF2ci_o.png" width="848"></p> 
+<p>     JIT和JITX是可以同时跑的，我是先把JIT的对接好了之后，再去对接JITX的。先上JIT的代码吧，因为JITX的稍微要麻烦点，而且JITX的运行跟商家的运营政策不同而编写规则也不同，毕竟 这是要对接自家的ERP系统的。</p> 
+<p>     <span style="color:#f33b45;">PS:这里注意，唯品的接口会时不时来个超时，所以要避免这种情况的发生导致我们错过点拉不到数据或拉不全 </span></p> 
+<p> </p> 
+<p>1.1 唯品的接口里有自己的一套仓库编码和快递承运商编码，我们使用人家的接口的时候 传递的参数值 也必须是 唯品规定的一套枚举值。所以若是 要和自家的ERP关联起来，就要 配置与 唯品一样的或者能2边关联上的  仓库编码和承运商编码</p> 
+<p>  获取承运商的接口  ：vipapis.delivery.JitDeliveryService-1.0.0#getCarrierList</p> 
+<p>  在官网里的这个接口的下面就有仓库的枚举值列表</p> 
+<p> </p> 
+<p>1.2 先上每个接口必须要用到的公共方法和配置参数：</p> 
+<pre><code class="language-cs">//这些使用唯品接口必要的参数，我是配置在config里；分别对应 上一节说的 应用的key， 秘钥 ，商户ID ，唯品接口运行地址        
+private string AppKey = System.Configuration.ConfigurationManager.AppSettings["VPH_AppKey"].ToString();
+private string AppSecret = System.Configuration.ConfigurationManager.AppSettings["VPH_AppSecret"].ToString();
+private string VendorId = System.Configuration.ConfigurationManager.AppSettings["VPH_VendorId"].ToString();
+private string AppUrl = System.Configuration.ConfigurationManager.AppSettings["VPH_AppUrl"].ToString();</code></pre> 
+<pre><code class="language-cs"> #region 拿Token
+
+        //令牌信息，token3个月过期，中间一年可通过refresh_token拿取新的token,一年之后就要重新授权
+        private static AccessToken _token;
+        public class AccessToken
+        {
+            public AccessToken(string code, DateTime time, string rcode, DateTime rTime)
+            {
+                this.Access_Token = code;
+                this.Time = time;
+                this.Refresh_Token_Time = rTime;
+                this.Refresh_Token = rcode;
+            }
+            public string Access_Token { get; set; }
+
+            public DateTime Time { get; set; }
+
+            public string Refresh_Token { get; set; }
+
+            public DateTime Refresh_Token_Time { get; set; }
+        }
+
+        private string GetAccessToken()
+        {
+            if (_token == null)
+            {
+                var token = System.Configuration.ConfigurationManager.AppSettings["VPH_AccessToken"].ToString();//AccessToken授权拿到的记录在config中
+                var outTime = System.Configuration.ConfigurationManager.AppSettings["VPH_AccessToken_OutTime"].ToString();//AccessToken过期时间授权拿到的记录在config中
+                var reToken = System.Configuration.ConfigurationManager.AppSettings["VPH_ReAccessToken"].ToString();//refresh_token授权拿到的记录在config中
+                var reOutTime = System.Configuration.ConfigurationManager.AppSettings["VPH_ReAccessToken_OutTime"].ToString();//refresh_expires_time授权拿到的记录在config中
+                _token = new AccessToken(token, Convert.ToDateTime(outTime), reToken, Convert.ToDateTime(reOutTime));
+            }
+
+            var time = _token.Time;
+            if (time != null &amp;&amp; time &gt; DateTime.Now.AddDays(1))
+            {
+                return _token.Access_Token;
+            }
+            else if (_token.Refresh_Token_Time &gt; DateTime.Now.AddDays(1))
+            {
+                OauthServiceClient client = new OauthServiceClient();
+                try
+                {
+                    ClientInvocationContext instance = new ClientInvocationContext();
+                    instance.SetAppKey(AppKey);
+                    instance.SetAppSecret(AppSecret);
+                    instance.SetAppURL(AppUrl);
+                    instance.SetAccessToken(_token.Access_Token);
+                    client.SetClientInvocationContext(instance);
+
+                    vipapis.oauth.RefreshTokenRequest request = new vipapis.oauth.RefreshTokenRequest();
+                    request.SetRefresh_token(_token.Refresh_Token);
+                    request.SetClient_id(AppKey);
+                    request.SetClient_secret(AppSecret);
+                    var ip = System.Configuration.ConfigurationManager.AppSettings["VPH_WhiteIP"].ToString();//上一节里配置的IP白名单
+                    request.SetRequest_client_ip(ip);
+                    vipapis.oauth.RefreshTokenResponse token = client.refreshToken(request);
+
+                    _token.Access_Token = token.GetAccess_token();
+                    _token.Time = (DateTime)token.GetExpires_time();
+                    _token.Refresh_Token = token.GetRefresh_token();
+                    _token.Refresh_Token_Time = (DateTime)token.GetRefresh_expires_time();
+                    return _token.Access_Token;
+                }
+                catch (OspException e)
+                {
+                    //LogHelper.WriteLog(new Exception("Token拿取失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "GetAccessToken");
+                    throw e;
+                }
+            }
+            else
+            {
+                //已过期需要用户手动授权拿到初始化值更新AccessToken的默认值之后才能用
+                //LogHelper.WriteLog(new Exception("Token拿取失败：已完全过期，需要用户手动授权"), "GetAccessToken");
+                throw new OspException("Token已完全过期", new Exception());
+            }
+        }
+
+        #endregion</code></pre> 
+<p>   </p> 
+<p>1.3  JIT：唯品会会分几个档次下发发货指令（唯品称为：PO单），我们这是每天定时2个点上午和下午，所以我的代码每天在这指令的2个点各跑一次就行。</p> 
+<p>       在唯品接口里执行 【拉取PO单，生成拣货单】2个接口，然后根据当前生成的拣货单 在我们的ERP中生成对应的配货单，即通知我们（商家）的仓库那边，有多少个单需要发什么货。这些事物我在一个接口里写完了</p> 
+<pre><code class="language-cs">//DBHelper 类，封装好的执行数据库的类，可以自己写，这很简单
+//LogHelper 类，封装好的日志记录的类
+public HttpResponseMessage VOP_JIT_GetPoList()
+{
+	JitDeliveryServiceClient client = new JitDeliveryServiceClient();
+	try
+	{
+		ClientInvocationContext instance = new ClientInvocationContext();
+		instance.SetAppKey(AppKey);
+		instance.SetAppSecret(AppSecret);
+		instance.SetAppURL(AppUrl);
+		instance.SetAccessToken(GetAccessToken());
+		client.SetClientInvocationContext(instance);
+
+		//获取未拣货订单,然后生成拣货单 
+		int page = 1;
+		while (true)
+		{
+			#region 获取PO单,超时时最多执行3次
+			int p_tryTimes = 1;
+			vipapis.delivery.GetPoListResponse unPickList = null;
+			while (true)
+			{
+				try
+				{
+					unPickList = client.getPoList(null, null, null, null, null, VendorId, null, null, null, null, page, 100, null, null);
+					break;
+				}
+				catch (OspException e)
+				{
+					if (p_tryTimes &lt; 3)
+					{
+						p_tryTimes++;
+						continue;
+					}
+					else
+					{
+						//LogHelper.WriteLog(new Exception("3次-拉取PO单失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "VOP_JIT_CreatePick");
+						throw e;
+					}
+				}
+			}
+			#endregion
+
+			//根据拉取的PO单，创建拣货单
+			foreach (var item in unPickList.GetPurchase_order_list())
+			{
+				if (Convert.ToInt32(item.GetNot_pick()) &gt; 0)
+				{
+					#region 接口超时时可设置再次尝试执行三次
+					int tryTimes = 1;
+					while (true)
+					{
+						try
+						{
+							var re = client.createPick(item.GetPo_no(), Convert.ToInt32(VendorId), null, null, null);
+							break;
+						}
+						catch (OspException e)
+						{
+							if (tryTimes &lt; 3)
+							{
+								tryTimes++;
+								continue;
+							}
+							else
+							{
+								//LogHelper.WriteLog(new Exception("3次-生成拣货单失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "VOP_JIT_CreatePick");
+								throw e;
+							}
+						}
+					}
+					#endregion
+				}
+			}
+
+			if (unPickList.GetTotal() == null || unPickList.GetTotal() &lt;= (page * 100))
+			{
+				break;
+			}
+			page++;
+		}
+
+		//获取拣货单列表
+		int page_pick = 1;
+		while (true)
+		{
+			#region 拉取现有拣货单，接口超时时可设置再次尝试执行三次
+			vipapis.delivery.GetPickListResponse pickList = null;
+			int tryTimes = 1;
+			while (true)
+			{
+				try
+				{
+					pickList = client.getPickList(Convert.ToInt32(VendorId), null, null, null, null, null, null, null, null, null, null, null, null, page_pick, 100, null);
+					break;
+				}
+				catch (OspException e)
+				{
+					if (tryTimes &lt; 3)
+					{
+						tryTimes++;
+						continue;
+					}
+					else
+					{
+						//LogHelper.WriteLog(new Exception("3次-获取拣货单失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "VOP_JIT_CreatePick");
+						throw e;
+					}
+				}
+			}
+			#endregion
+
+			var pickData = pickList.GetPicks().Where(w =&gt; w.GetDelivery_status() == 0).OrderBy(s =&gt; Convert.ToDateTime(s.GetCreate_time()));//0状态为未送货,1已发货
+			foreach (var pick in pickData)
+			{
+				//判断ERP是否已配货：VPH_JITNOTICETOPICK，ERP中我自己建好的表，装在JIT订单的记录的表，这里你自己参考就好，不必纠结这里
+				int count1 = Convert.ToInt32(DBHelper.OracleExecuteScalar("select count(0) from VPH_JITNOTICETOPICK where PICKNO = '" + pick.GetPick_no() + "'", DBHelper.ConString));
+				if (count1 &gt; 0)
+				{
+					//LogHelper.WriteLog(new Exception("PICK单：" + pick.GetPick_no() + "已存在ERP系统"), "VOP_JIT_GetPoList");
+					continue;
+				}
+				//拿明细，组装数据
+				var resultData = new List&lt;dynamic&gt;();
+				var goodsData = new List&lt;dynamic&gt;();
+				var pickDetail = new List&lt;vipapis.delivery.PickProduct&gt;();
+				var isNormalPick = true;
+				int page_pickDetail = 1;
+				while (true)
+				{
+					#region 拉取拣货单明细数据，接口超时时可设置再次尝试执行三次
+					vipapis.delivery.PickDetail detail = null;
+					int p_tryTimes = 1;
+					while (true)
+					{
+						try
+						{
+							detail = client.getPickDetail(pick.GetPo_no(), Convert.ToInt32(VendorId), pick.GetPick_no(), page_pickDetail, 100, null);
+							break;
+						}
+						catch (OspException e)
+						{
+							if (p_tryTimes &lt; 3)
+							{
+								p_tryTimes++;
+								continue;
+							}
+							else
+							{
+								//LogHelper.WriteLog(new Exception("3次-获取拣货单明细失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "VOP_JIT_CreatePick");
+								throw;
+							}
+						}
+					}
+					#endregion
+					
+					resultData.AddRange(detail.GetPick_product_list());
+					if (detail.GetTotal() == null || detail.GetTotal() &lt;= (page_pickDetail * 100))
+					{
+						break;
+					}
+					page_pickDetail++;
+				}
+				
+				if (resultData.Count() &gt; 0)
+				{
+					//拿取拣货单的明细数据，接下来就是在我们的ERP中进行操作了
+				    //1.生成配货单，同时将此单推送给仓库（发货端同事），每个拣货单对应一个配货单，我设计的VPH_JITNOTICETOPICK 表中存的就是 配货单与拣货单的关联数据
+				}
+			}
+
+			if (pickList.GetTotal() == null || pickList.GetTotal() &lt;= (page_pick * 100))
+			{
+				break;
+			}
+			page_pick++;
+		}
+
+		return new HttpResponseMessage()
+		{
+			Content = new StringContent(JsonConvert.SerializeObject(new { code = "0", msg = "请求成功！" }), Encoding.UTF8, "application/json"),
+		};
+	}
+	catch (OspException e)
+	{
+		//LogHelper.WriteLog(new Exception("拉取PO单生成配单失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "VOP_JIT_GetPoList");
+		return new HttpResponseMessage()
+		{
+			Content = new StringContent(JsonConvert.SerializeObject(new { code = "1", msg = "请求失败！" }), Encoding.UTF8, "application/json"),
+		};
+	}
+}</code></pre> 
+<p>JIT的对接我到此就做完了，后面其实还有 发货 要做，但是这里我没有继续做下去了。一因为  JIT的单据一天不会有几个，每个档期一天2个点，我们这只有7个仓库，每个仓库一个拣货单。一天一个档期也就最多14个单。加上 由于货品库存的问题，会经常调整最终 发给唯品的货品清单，所以这里下面就没对接自动发货的接口了。每个公司业务不一样，实现的逻辑和步骤不一样。</p> 
+<p>1.4  JITX ，这个得分2块来操作，</p> 
+<p>        第一块：获取带寻仓订单-&gt;反馈寻仓结果-&gt;获取JITX订单拉到ERP中，占库存生成对应的配货单</p> 
+<p>                     这一步我这边因为是 <span style="color:#f33b45;">单渠道 </span>发货所以没有对接这一块，唯品那边若是单渠道的就会自动给分配好发货仓库。若是需要做多渠道发货的，那可真就有点儿麻烦。下面就是这一块的流程图</p> 
+<p><img alt="" height="581" src="https://images2.imgbox.com/ce/4e/WsR0du1S_o.png" width="568"></p> 
+<pre><code class="language-cs"> //拉取待寻仓单，确定哪个仓库发货
+public ActionResult VOP_JITX_Delivery()
+{
+	JitXServiceClient client = new JitXServiceClient();
+	try
+	{
+		ClientInvocationContext instance = new ClientInvocationContext();
+		instance.SetAppKey(AppKey);
+		instance.SetAppSecret(AppSecret);
+		instance.SetAppURL(AppUrl);
+		instance.SetAccessToken(GetAccessToken());
+		client.SetClientInvocationContext(instance);
+
+		int page = 1;
+		int pageSize = 50;
+		while (true)
+		{
+			//获取待寻仓列表
+			var oparam = new vipapis.jitx.GetDeliveryOrdersRequest();
+			oparam.SetVendor_id(Convert.ToInt32(VendorId));
+			DateTime dateStart = new DateTime(1970, 1, 1, 8, 0, 0);
+			oparam.SetStart_time(Convert.ToInt32((DateTime.Now.AddMinutes(-31) - dateStart).TotalSeconds));
+			oparam.SetEnd_time(Convert.ToInt32((DateTime.Now.AddMinutes(-1) - dateStart).TotalSeconds));
+			var status = new List&lt;string&gt;();
+			status.Add("NEW");
+			oparam.SetStatus_list(status);
+			oparam.SetLimit(pageSize);
+			oparam.SetPage(page);
+			
+			
+			#region 接口超时时可设置再次尝试执行三次
+			int tryTimes = 1;
+			vipapis.jitx.GetDeliveryOrdersResponse dOrder = null;
+			while (true)
+			{
+				try
+				{
+					dOrder = client.getDeliveryOrders(oparam);
+					break;
+				}
+				catch (OspException e)
+				{
+					if (tryTimes &lt; 3)
+					{
+						tryTimes++;
+						continue;
+					}
+					else
+					{
+						throw e;
+					}
+				}
+			}
+		    #endregion
+		
+
+			//--------------反馈寻仓结果--------------------
+			var orders = dOrder.GetDelivery_orders();
+			List&lt;vipapis.jitx.FeedbackDeliveryResult&gt; fbkResult = new List&lt;vipapis.jitx.FeedbackDeliveryResult&gt;();//一次只能50个
+			foreach (var o in orders)
+			{
+				if (o.GetStatus() == "NEW")
+				{
+					var sendwarehouse = o.GetAvailable_warehouses().FirstOrDefault();//这里要注意，若是你公司是多渠道发货的话，这里可供分配发货的仓库就会有多个，这里的逻辑看自家公司业务上要怎么决定发货制度。我这里默认选择第一个渠道，因为我们这是单渠道的发货
+					if (sendwarehouse == null)
+					{
+						//LogHelper.WriteLog(new Exception("唯品JITX寻仓配仓失败：" + o.GetOrder_sn() + "订单没有可分配的仓！"), "VOP_JITX_Delivery");
+						continue;
+					}
+					var fdk = new vipapis.jitx.FeedbackDeliveryResult();
+					fdk.SetOrder_sn(o.GetOrder_sn());
+					fdk.SetFeedback_status("SUCCESS");
+					fdk.SetWarehouse(sendwarehouse);//我们只有一个仓库，那就默认选取第一个
+					fbkResult.Add(fdk);
+				}
+			}
+
+			var fparam = new vipapis.jitx.FeedbackDeliveryResultRequest();
+			fparam.SetVendor_id(Convert.ToInt32(VendorId));
+			fparam.SetResults(fbkResult);
+			
+			#region 接口超时时可设置再次尝试执行三次
+			int tryTimes_fd = 1;
+			while (true)
+			{
+				try
+				{
+					var fdbresult = client.feedbackDeliveryResult(fparam);//获取反馈结果
+					break;
+				}
+				catch (OspException e)
+				{
+					if (tryTimes_fd &lt; 3)
+					{
+						tryTimes_fd++;
+						continue;
+					}
+					else
+					{
+						throw e;
+					}
+				}
+			}
+		    #endregion
+
+			if (dOrder.GetTotal() == null || dOrder.GetTotal().Value &lt;= (page * pageSize))
+			{
+				break;
+			}
+			page++;
+		}
+
+		return Json(new { code = 0, msg = "请求成功" });
+	}
+	catch (OspException e)
+	{
+		//LogHelper.WriteLog(new Exception("唯品JITX寻仓配仓失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "VOP_JITX_Delivery");
+		return Json(new { code = 1, msg = "请求失败" });
+	}
+	finally
+	{
+		if (conn != null) conn.Dispose();
+	}
+}
+
+//获取JITX订单，拉到ERP中，并生成ERP中的配货单之类的单据，推到仓库那边的系统，他们就能按照这些单据来扫面出库
+public HttpResponseMessage VOP_JITX_Order()
+{
+	JitXServiceClient client = new JitXServiceClient();
+	try
+	{
+		ClientInvocationContext instance = new ClientInvocationContext();
+		instance.SetAppKey(AppKey);
+		instance.SetAppSecret(AppSecret);
+		instance.SetAppURL(AppUrl);
+		instance.SetAccessToken(GetAccessToken());
+		client.SetClientInvocationContext(instance);
+		var oparam = new vipapis.jitx.GetOrdersRequest();
+		oparam.SetVendor_id(Convert.ToInt32(VendorId));
+		var status = new List&lt;string&gt;();
+		status.Add("10");//未发货  97_10未发已取消
+		oparam.SetOrder_status(status);
+		DateTime dateStart = new DateTime(1970, 1, 1, 8, 0, 0);
+
+
+        //唯品的接口要求查询时间间隔不能超过30分钟
+		oparam.SetStart_time(Convert.ToInt32((DateTime.Now.AddMinutes(-31) - dateStart).TotalSeconds));
+		oparam.SetEnd_time(Convert.ToInt32((DateTime.Now.AddMinutes(-1) - dateStart).TotalSeconds));
+
+		#region 接口超时时可设置再次尝试执行三次
+		int tryTimes = 1;
+		vipapis.jitx.GetOrdersResponse dOrder = null;
+		while (true)
+		{
+			try
+			{
+				dOrder = client.getOrders(oparam);
+				break;
+			}
+			catch (OspException e)
+			{
+				if (tryTimes &lt; 3)
+				{
+					tryTimes++;
+					continue;
+				}
+				else
+				{
+					//LogHelper.WriteLog(new Exception("3次-拉取JITX订单失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "VOP_JITX_Order");
+					throw e;
+				}
+			}
+		}
+		#endregion
+
+		//
+		foreach (var item in dOrder.GetOrders())
+		{
+			//生成配货单，要判断货品是否在ERP中存在与否
+			
+		}
+
+		return new HttpResponseMessage()
+		{
+			Content = new StringContent(JsonConvert.SerializeObject(new { code = "0", msg = "请求成功！" }), Encoding.UTF8, "application/json"),
+		};
+	}
+	catch (OspException e)
+	{
+		//LogHelper.WriteLog(new Exception("唯品JITX拉单配货失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "VOP_JITX_Order");
+		return new HttpResponseMessage()
+		{
+			Content = new StringContent(JsonConvert.SerializeObject(new { code = "1", msg = "请求失败！" }), Encoding.UTF8, "application/json"),
+		};
+	}
+}</code></pre> 
+<p>       第二块：发货模块</p> 
+<p>          我主要是对接了这一方面的，要实现自动发货，首先程序就要知道哪个订单已经打包发出去了，程序才能通过唯品接口更新唯品那边的订单发货状态。我这边有一套单据回传逻辑，若是仓库那边已扫描出单，就会到ERP这边回传状态回来，然后我就是 定时轮查 那些在ERP中未发货订单状态是不是 已打包发货，然后筛选出来之后 就通过vipapis.jitx.JitXService-1.0.0#ship 接口更新唯品系统上订单的发货状态。</p> 
+<p>          这一块上面说了，<span style="color:#f33b45;">邮费是唯品出的</span>，所以面单什么的也必须按照他们的模板打印，最好的最方便发货人员操作的就是 在发货人员一边按单扫面出库的时候，可以同时点打印面单。你可以自己组装模板，通过vipapis.jitx.JitXService-1.0.0#getPrintTemplate这个接口拿取订单的快递字段，我想唯品的人会发你各种快递的模板的。不想自己组装的话那就是用vipapis.jitx.JitXService-1.0.0#getOrderLabel 获取 html面单。</p> 
+<pre><code class="language-cs">//JITX自动发货
+public HttpResponseMessage VOP_JITX_Ship()
+{
+	JitXServiceClient client = new JitXServiceClient();
+	try
+	{
+		ClientInvocationContext instance = new ClientInvocationContext();
+		instance.SetAppKey(AppKey);
+		instance.SetAppSecret(AppSecret);
+		instance.SetAppURL(AppUrl);
+		instance.SetAccessToken(GetAccessToken());
+		client.SetClientInvocationContext(instance);
+
+		//拿取ERP中所有未发货的订单，这里不要照抄啊，每家ERP公司都不一样的数据，我这里只是我这边的情况，程序员搬砖也要会举一反三
+		List&lt;dynamic&gt; listData = DBHelper.OracleExecuteRead(@"", DBHelper.ConString);
+
+		//第一步：先通过从唯品线上查出这些订单,有没有被客户取消的，若取消了则作废ERP配货单+同时作废仓库系统的对应订单
+		var unsendparam = new vipapis.jitx.GetOrdersByOrderSnRequest();
+		unsendparam.SetVendor_id(Convert.ToInt32(VendorId));
+		var unOds = listData.Where(a =&gt; a.SENDGUID == null || a.SENDGUID == "").Select(s =&gt; new { ORDERSN = (string)s.ORDERSN, SENDNOTICEGUID = (string)s.SENDNOTICEGUID, SENDNOTICENO = (string)s.SENDNOTICENO }).OrderBy(a =&gt; a.ORDERSN);
+		if (unOds.Count() &gt; 0)
+		{
+			var times = Math.Floor(unOds.Count() / 500.0);
+			for (int i = 0; i &lt;= times; i++)
+			{
+				var os = unOds.Select(a =&gt; a.ORDERSN).Skip(500 * i).Take(500).ToList&lt;string&gt;();
+				unsendparam.SetOrder_sns(os);//不能超过500个
+				vipapis.jitx.GetOrdersResponse unsendOrder = null;
+				#region 拉取订单-接口超时时可设置再次尝试执行三次
+				int tryTimes_un = 1;
+				while (true)
+				{
+					try
+					{
+						unsendOrder = client.getOrdersByOrderSn(unsendparam);
+						break;
+					}
+					catch (OspException e)
+					{
+						if (tryTimes_un &lt; 3)
+						{
+							tryTimes_un++;
+							continue;
+						}
+						else
+						{
+							//LogHelper.WriteLog(new Exception("3次-请求getOrdersByOrderSn接口失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "VOP_JITX_Ship");
+							break;
+						}
+					}
+				}
+				#endregion
+				if (unsendOrder != null)
+				{
+					var canselOrder = unsendOrder.GetOrders().Where(a =&gt; a.GetOrder_status() == "97_10").Select(d =&gt; d.GetOrder_sn());
+					var canselOrder_T = unOds.Where(a =&gt; canselOrder.Contains(a.ORDERSN));
+
+					foreach (var item in canselOrder_T)
+					{
+						//LogHelper.WriteLog(new Exception(item.SENDNOTICENO + " 请求取消订单"), "VOP_JITX_Ship");
+
+						//作废ERP配货单+同时作废仓库系统的对应订单
+					}
+				}
+			}
+		}
+
+
+		//第二步：仓库已配完货的，则更新唯品的发货状态
+		var sendData = listData.Where(a =&gt; a.SENDGUID != null &amp;&amp; a.SENDGUID != "");
+		foreach (var item in sendData)
+		{
+			try
+			{
+				//拉取唯品单据的最新状态
+				var oparam = new vipapis.jitx.GetOrdersByOrderSnRequest();
+				oparam.SetVendor_id(Convert.ToInt32(VendorId));
+				var ods = new List&lt;string&gt;();
+				ods.Add(item.ORDERSN);
+				oparam.SetOrder_sns(ods);
+				vipapis.jitx.GetOrdersResponse dOrder = null;
+
+				#region 拉取当前订单-接口超时时可设置再次尝试执行三次
+				int tryTimes = 1;
+				while (true)
+				{
+					try
+					{
+						dOrder = client.getOrdersByOrderSn(oparam);
+						break;
+					}
+					catch (OspException e)
+					{
+						if (tryTimes &lt; 3)
+						{
+							tryTimes++;
+							continue;
+						}
+						else
+						{
+							//LogHelper.WriteLog(new Exception("3次-请求getOrdersByOrderSn接口失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "VOP_JITX_Ship");
+							break;
+						}
+					}
+				}
+				#endregion
+				if (dOrder == null)
+				{
+					continue;
+				}
+
+				var order = dOrder.GetOrders().FirstOrDefault();
+				if (order.GetOrder_status() == "10")//未发货10，即可进行发货
+				{
+					var sparam = new vipapis.jitx.ShipRequest();
+					sparam.SetVendor_id(Convert.ToInt32(VendorId));
+					var ship = new List&lt;vipapis.jitx.Ship&gt;();
+
+					var sigelship = new vipapis.jitx.Ship();
+					sigelship.SetOrder_sn(item.ORDERSN);
+					sigelship.SetDelivery_warehouse(order.GetDelivery_warehouse());
+					sigelship.SetTotal_package(1);
+
+					string detailSql = string.Format(@"", item.SENDGUID);//查询发货单的明细
+					var detailList = DBHelper.OracleExecuteRead(detailSql, DBHelper.ConString);
+
+					var developer = System.Configuration.ConfigurationManager.AppSettings["VPH_Developer"].ToString();
+					var f360Detail = detailList.Select(a =&gt; a.BARCODE + "-" + a.QTY);
+					var vphDetail = order.GetOrder_goods().Select(a =&gt; a.GetBarcode() + "-" + a.GetQuantity());
+					if (f360Detail.Count() != vphDetail.Count())
+					{
+						string sql_ = string.Format(@"insert into J_Transfer_Notice(Type,Code,Date,SendUser,Send,SendText,Modify) select '唯品配货通知',replace(newid(), '-', ''),Getdate(),'" + developer + "',0,'{0}',Getdate() ", item.ORDERSN + "唯品JITX发货失败：发货明细与唯品订单明细不一致");
+						DBHelper.ExecuteNonQuery(sql_, DBHelper.BusinessConection);
+						LogHelper.WriteLog(new Exception(item.ORDERSN + "唯品JITX发货失败：发货明细与唯品订单明细不一致"), "VOP_JITX_Ship");
+						continue;
+					}
+					var verfityData = f360Detail.Union(vphDetail);
+					if (verfityData.Count() != vphDetail.Count())
+					{
+						string sql_ = string.Format(@"insert into J_Transfer_Notice(Type,Code,Date,SendUser,Send,SendText,Modify) select '唯品配货通知',replace(newid(), '-', ''),Getdate(),'" + developer + "',0,'{0}',Getdate() ", item.ORDERSN + "唯品JITX发货失败：发货明细与唯品订单明细不一致");
+						DBHelper.ExecuteNonQuery(sql_, DBHelper.BusinessConection);
+						LogHelper.WriteLog(new Exception(item.ORDERSN + "唯品JITX发货失败：发货明细与唯品订单明细不一致"), "VOP_JITX_Ship");
+						continue;
+					}
+					#endregion
+
+					var detail = new List&lt;vipapis.jitx.Package&gt;();
+					var p = new vipapis.jitx.Package();
+					p.SetBox_no(1);
+					DateTime dateStart = new DateTime(1970, 1, 1, 8, 0, 0);
+					p.SetOqc_date(Convert.ToInt32((Convert.ToDateTime(item.CREATEDDATE) - dateStart).TotalSeconds));
+					p.SetTransport_no(order.GetTransport_no());
+					p.SetPackage_no(item.SENDSHEETID);
+					List&lt;vipapis.jitx.PackageDetail&gt; goods = detailList.Select(a =&gt;
+					{
+						var temp = new vipapis.jitx.PackageDetail();
+						temp.SetBarcode(a.BARCODE);
+						temp.SetQuantity((int)a.QTY);
+						return temp;
+					}).ToList&lt;vipapis.jitx.PackageDetail&gt;();
+					p.SetDetails(goods);
+					detail.Add(p);
+
+					sigelship.SetPackages(detail);
+					ship.Add(sigelship);
+					sparam.SetShips(ship);
+
+					vipapis.jitx.ShipResponse re = null;
+					#region 发货-接口超时时可设置再次尝试执行三次
+					int tryTimes_ship = 1;
+					while (true)
+					{
+						try
+						{
+							re = client.ship(sparam);
+							break;
+						}
+						catch (OspException e)
+						{
+							if (tryTimes_ship &lt; 3)
+							{
+								tryTimes_ship++;
+								continue;
+							}
+							else
+							{
+								//LogHelper.WriteLog(new Exception("3次-请求ship接口失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "VOP_JITX_Ship");
+								break;
+							}
+						}
+					}
+					#endregion
+					if (re == null)
+					{
+						continue;
+					}
+
+					if (re.GetSuccess_num() &gt; 0)
+					{
+						//发货成功，则更新ERP对应订单的状态
+					}
+					else
+					{
+						string error = "唯品订单号:" + item.ORDERSN + " 发货单号：" + item.SENDSHEETID + " 更新唯品订单发货状态失败：" + re.GetFailed_list().FirstOrDefault().GetMsg();
+						//LogHelper.WriteLog(new Exception("唯品JITX发货失败：" + error), "VOP_JITX_Ship");
+					}
+				}
+				else if (order.GetOrder_status() == "97_10")//未发取消，已配完货客户取消
+				{
+                     //这里上面也说了，其实要是已出库了，就只能在重新做入库了，这个得由发货人员去手动入单，因为实物在他们那边，系统若是做自动入库，很容易造成库存差异
+				}
+			}
+			catch (Exception ex)
+			{
+				string error = "唯品订单号:" + item.ORDERSN + " 发货单号：" + item.SENDSHEETID + " 错误信息：" + ex.Message;
+				//LogHelper.WriteLog(new Exception("唯品JITX发货失败：" + error), "VOP_JITX_Ship");
+				continue;
+			}
+		}
+
+		return new HttpResponseMessage()
+		{
+			Content = new StringContent(JsonConvert.SerializeObject(new { code = "0", msg = "请求成功！" }), Encoding.UTF8, "application/json"),
+		};
+	}
+	catch (OspException e)
+	{
+		//LogHelper.WriteLog(new Exception("唯品JITX发货失败：" + "错误编号：" + e.GetReturnCode() + " 返回信息：" + e.GetReturnMessage() + " 系统错误信息：" + e.Message + " 最近一次调用的sign:" + (client.GetClientInvocationContext() == null ? "" : client.GetClientInvocationContext().GetLastInvocation().GetSign())), "VOP_JITX_Ship");
+		return new HttpResponseMessage()
+		{
+			Content = new StringContent(JsonConvert.SerializeObject(new { code = "1", msg = "请求失败！" }), Encoding.UTF8, "application/json"),
+		};
+	}
+}</code></pre> 
+<p>到此，唯品的JIT和JITX都对接完了，<span style="color:#f33b45;">再次申明：关于与ERP方面的对接仅限于参考，我提供我这边的实际情况对接出来的经验与思路。同志们你们要自己做自家公司的对接请按实际情况修改代码。</span></p> 
+<p> </p> 
+<p>总结：其实使用唯品的接口还是异常简单的，真的简单，我这是从没在唯品上买过东西的人，有时候会把淘宝的逻辑套在他们身上想，发现很多时候都会想多了，毕竟是2个不同的平台。先试着问唯品的技术人员，然后再来自己实际尝试，才会得出能解释的答案，也不要一不懂就问，先自己尝试之后再去问，毕竟人家也很忙，若是发现自己问了个弱智白痴问题，那就尴尬了。</p> 
+<p><span style="color:#ffbb66;"><em><u>以上纯属个人独自研究成果，仅供参考，转载请注明出处</u></em></span></p> 
+<p><span style="color:#f33b45;">   </span></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/41bd36469294dc5ff042b0c0093937f2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">navicat 连接postgresql 报错 pg_hba.conf</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/52726dfe00c3fa153ab69967df9eaea4/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">psql按年月天小时分钟秒汇总数据</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

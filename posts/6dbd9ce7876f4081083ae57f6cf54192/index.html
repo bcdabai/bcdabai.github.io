@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>搭建VS2017&#43;WDK10&#43;WinDBG双机调试Win7环境过程遇到的坑与解决（WinDBG找不到串口、security_cookie导致的蓝屏、看不到调试消息等） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="搭建VS2017&#43;WDK10&#43;WinDBG双机调试Win7环境过程遇到的坑与解决（WinDBG找不到串口、security_cookie导致的蓝屏、看不到调试消息等）" />
+<meta property="og:description" content="一直使用Visual Studio &#43; WDK的方式开发Windows驱动，最近想在VS2017下安装WDK10开发驱动，结果遇到问题了，首先是没法实现双机调试，然后是编译出来的驱动在Win7平台下一加载就蓝屏，定位到是security_cookie的问题，紧接着又是生成的驱动与老版本Window兼容性的问题，最后是KdPrint消息看不到的问题。本文主要对遇到的这些问题和解决办法进行记录，主语虚拟机中Win7的安装等常规操作则略过，安装好后的配置，搜一下“虚拟机win7 双机调试”也都能解决。
+搭建双机调试环境时的坑 WinDBG提示找不到对应串口，需将虚拟机中的打印机删除，该打印机默认占用了COM1口：
+对应WinDBG参数为：
+&#34;C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\windbg.exe&#34; -b -k com:pipe,port=\\.\pipe\com_1,resets=0,reconnect -y SRV*E:\DBGSymbols*E:\MySymbols*http://msdl.microsoft.com/download/symbols 解决由于Security Cookie初始算法不兼容导致的加载时蓝屏 用VS2017配合WDK10搭了个驱动开发环境，用其中的WDM模板写了个NT式的HelloWorld驱动，编译后拖到测试机里运行居然蓝屏了。故障定位是/GS机制造成的：
+这个问题有两种解决方案，第一种算是官方途径，建议大家在没有其他特殊需求的情况下采用这种方案。
+方案一：更改目标平台 建议首选此方法：在驱动工程属性中，找到“Driver Settings”项，然后将其“General”子项中的“Target OS Version”设置成Windows 7即可，如下图所示。
+方案二：修改链接到的KernelBufferOverflowLib库 将产生故障的代码放到IDA里仔细看看：
+很明显，这里就和0x0BB40E64E这个魔数杠上了，只要二者相等就直接蓝屏。当然，直接关闭/GS这个编译开关肯定能解决，但也就意味着程序可能被栈溢出攻击。其主要问题是在Win7下，Loader将__security_cookie就是初始化成了这个值！将这个16进制数搜一下，第一篇链接就解答了我们的疑惑。
+WDM驱动针对Win8前后系统的兼容性问题(张佩)
+为不同版本的 Windows 构建驱动程序
+同时也给出了解决方案：
+手动编译，手动设定KernelBufferOverflowLib的路径： &gt;msbuild /p:KernelBufferOverflowLib=&#34;C:\Program Files (x86)\Windows Kits\8.1\Lib\win8\km\x64\BufferOverflowK.lib&#34; /p:platform=x64 /p:Configuration=&#34;Win8 Release&#34; myDriver.sln 用记事本打开驱动项目的工程文件（.vcproj）并添加下面的内容： &lt;KernelBufferOverflowLib&gt;$(DDK_LIB_PATH)\BufferOverflowK.lib&lt;KernelBufferOverflowLib&gt; 然而我们是在VS下编译，应该可以直接设置lib库的路径，试了一下，果然可以：
+再看看生成的驱动程序中cookie初始化部分：
+INIT:00404010 ; =============== S U B R O U T I N E ======================================= INIT:00404010 INIT:00404010 ; Attributes: library function bp-based frame INIT:00404010 INIT:00404010 ___security_init_cookie proc near ; CODE XREF: GsDriverEntry(x,x)&#43;5↑p INIT:00404010 INIT:00404010 InitialSeed = _LARGE_INTEGER ptr -8 INIT:00404010 INIT:00404010 mov edi, edi INIT:00404012 push ebp INIT:00404013 mov ebp, esp INIT:00404015 push ecx INIT:00404016 push ecx INIT:00404017 mov eax, ___security_cookie INIT:0040401C mov ecx, 0BB40E64Eh INIT:00404021 test eax, eax INIT:00404023 jz short loc_404029 INIT:00404025 cmp eax, ecx INIT:00404027 jnz short loc_40403E INIT:00404029 INIT:00404029 loc_404029: ; CODE XREF: ___security_init_cookie&#43;13↑j INIT:00404029 rdtsc INIT:0040402B xor eax, offset ___security_cookie INIT:00404030 mov ___security_cookie, eax INIT:00404035 jnz short loc_40403E INIT:00404037 mov eax, ecx INIT:00404039 mov ___security_cookie, eax INIT:0040403E INIT:0040403E loc_40403E: ; CODE XREF: ___security_init_cookie&#43;17↑j INIT:0040403E ; ___security_init_cookie&#43;25↑j INIT:0040403E not eax INIT:00404040 mov ___security_cookie_complement, eax INIT:00404045 mov esp, ebp INIT:00404047 pop ebp INIT:00404048 retn INIT:00404048 ___security_init_cookie endp INIT:00404048 INIT:00404048 ; --------------------------------------------------------------------------- 这个流程就比较正常了，如果和魔数值相等，就将当前时间和魔数异或，然后取反作为初始种子。再测试一下，没问题了。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/6dbd9ce7876f4081083ae57f6cf54192/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-07-24T18:50:20+08:00" />
+<meta property="article:modified_time" content="2018-07-24T18:50:20+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">搭建VS2017&#43;WDK10&#43;WinDBG双机调试Win7环境过程遇到的坑与解决（WinDBG找不到串口、security_cookie导致的蓝屏、看不到调试消息等）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-github-gist">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>一直使用Visual Studio + WDK的方式开发Windows驱动，最近想在VS2017下安装WDK10开发驱动，结果遇到问题了，首先是没法实现双机调试，然后是编译出来的驱动在Win7平台下一加载就蓝屏，定位到是security_cookie的问题，紧接着又是生成的驱动与老版本Window兼容性的问题，最后是KdPrint消息看不到的问题。本文主要对遇到的这些问题和解决办法进行记录，主语虚拟机中Win7的安装等常规操作则略过，安装好后的配置，搜一下“虚拟机win7 双机调试”也都能解决。</p> 
+<h2><a id="_1"></a>搭建双机调试环境时的坑</h2> 
+<p>WinDBG提示找不到对应串口，需将虚拟机中的打印机删除，该打印机默认占用了COM1口：<br> <img src="https://images2.imgbox.com/fb/e4/5tamsARK_o.jpg" alt="这里写图片描述"></p> 
+<p>对应WinDBG参数为：</p> 
+<pre><code>"C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\windbg.exe" -b -k com:pipe,port=\\.\pipe\com_1,resets=0,reconnect -y SRV*E:\DBGSymbols*E:\MySymbols*http://msdl.microsoft.com/download/symbols
+</code></pre> 
+<h2><a id="Security_Cookie_10"></a>解决由于Security Cookie初始算法不兼容导致的加载时蓝屏</h2> 
+<p>用VS2017配合WDK10搭了个驱动开发环境，用其中的WDM模板写了个NT式的HelloWorld驱动，编译后拖到测试机里运行居然蓝屏了。故障定位是/GS机制造成的：<br> <img src="https://images2.imgbox.com/a8/66/kK2qcfZ7_o.jpg" alt="2018-07-24_170101"><br> 这个问题有两种解决方案，第一种算是官方途径，建议大家在没有其他特殊需求的情况下采用这种方案。</p> 
+<h3><a id="_14"></a>方案一：更改目标平台</h3> 
+<p>建议首选此方法：在驱动工程属性中，找到“Driver Settings”项，然后将其“General”子项中的“Target OS Version”设置成Windows 7即可，如下图所示。<br> <img src="https://images2.imgbox.com/b4/bf/cytPwRyA_o.jpg" alt="在这里插入图片描述"></p> 
+<h3><a id="KernelBufferOverflowLib_18"></a>方案二：修改链接到的KernelBufferOverflowLib库</h3> 
+<p>将产生故障的代码放到IDA里仔细看看：<br> <img src="https://images2.imgbox.com/63/02/ceJWW3IY_o.jpg" alt="这里写图片描述"></p> 
+<p>很明显，这里就和0x0BB40E64E这个魔数杠上了，只要二者相等就直接蓝屏。当然，直接关闭/GS这个编译开关肯定能解决，但也就意味着程序可能被栈溢出攻击。其主要问题是在Win7下，Loader将__security_cookie就是初始化成了这个值！将这个16进制数搜一下，第一篇链接就解答了我们的疑惑。</p> 
+<p><a href="http://www.yiiyee.cn/Blog/win8-driver/" rel="nofollow">WDM驱动针对Win8前后系统的兼容性问题(张佩)</a></p> 
+<p><a href="https://msdn.microsoft.com/ZH-CN/library/jj572863.ASPX" rel="nofollow">为不同版本的 Windows 构建驱动程序</a></p> 
+<p>同时也给出了解决方案：</p> 
+<ol><li>手动编译，手动设定KernelBufferOverflowLib的路径：</li></ol> 
+<pre><code>&gt;msbuild /p:KernelBufferOverflowLib="C:\Program Files (x86)\Windows Kits\8.1\Lib\win8\km\x64\BufferOverflowK.lib" /p:platform=x64 /p:Configuration="Win8 Release" myDriver.sln
+</code></pre> 
+<ol start="2"><li>用记事本打开驱动项目的工程文件（.vcproj）并添加下面的内容：</li></ol> 
+<pre><code>&lt;KernelBufferOverflowLib&gt;$(DDK_LIB_PATH)\BufferOverflowK.lib&lt;KernelBufferOverflowLib&gt;
+</code></pre> 
+<p>然而我们是在VS下编译，应该可以直接设置lib库的路径，试了一下，果然可以：</p> 
+<p><img src="https://images2.imgbox.com/c9/ef/CTCFP6vg_o.jpg" alt="2018-07-24_172235"></p> 
+<p>再看看生成的驱动程序中cookie初始化部分：</p> 
+<pre><code class="prism language-assembly">INIT:00404010 ; =============== S U B R O U T I N E =======================================
+INIT:00404010
+INIT:00404010 ; Attributes: library function bp-based frame
+INIT:00404010
+INIT:00404010 ___security_init_cookie proc near       ; CODE XREF: GsDriverEntry(x,x)+5↑p
+INIT:00404010
+INIT:00404010 InitialSeed     = _LARGE_INTEGER ptr -8
+INIT:00404010
+INIT:00404010                 mov     edi, edi
+INIT:00404012                 push    ebp
+INIT:00404013                 mov     ebp, esp
+INIT:00404015                 push    ecx
+INIT:00404016                 push    ecx
+INIT:00404017                 mov     eax, ___security_cookie
+INIT:0040401C                 mov     ecx, 0BB40E64Eh
+INIT:00404021                 test    eax, eax
+INIT:00404023                 jz      short loc_404029
+INIT:00404025                 cmp     eax, ecx
+INIT:00404027                 jnz     short loc_40403E
+INIT:00404029
+INIT:00404029 loc_404029:                             ; CODE XREF: ___security_init_cookie+13↑j
+INIT:00404029                 rdtsc
+INIT:0040402B                 xor     eax, offset ___security_cookie
+INIT:00404030                 mov     ___security_cookie, eax
+INIT:00404035                 jnz     short loc_40403E
+INIT:00404037                 mov     eax, ecx
+INIT:00404039                 mov     ___security_cookie, eax
+INIT:0040403E
+INIT:0040403E loc_40403E:                             ; CODE XREF: ___security_init_cookie+17↑j
+INIT:0040403E                                         ; ___security_init_cookie+25↑j
+INIT:0040403E                 not     eax
+INIT:00404040                 mov     ___security_cookie_complement, eax
+INIT:00404045                 mov     esp, ebp
+INIT:00404047                 pop     ebp
+INIT:00404048                 retn
+INIT:00404048 ___security_init_cookie endp
+INIT:00404048
+INIT:00404048 ; ---------------------------------------------------------------------------
+</code></pre> 
+<p>这个流程就比较正常了，如果和魔数值相等，就将当前时间和魔数异或，然后取反作为初始种子。再测试一下，没问题了。</p> 
+<h2><a id="WDK10_Windows_91"></a>使用WDK10 生成兼容旧版Windows的驱动</h2> 
+<p>另外在搜索过程中，还顺带搜到了一篇《vs2015 WDK10 生成 低于win7 的驱动》，可见这里:</p> 
+<p><a href="https://blog.csdn.net/qq_18218335/article/details/77480475">vs2015 WDK10 生成 低于 win7 的驱动</a></p> 
+<p><a href="https://docs.microsoft.com/en-us/windows-hardware/drivers/kernel/single-binary-opt-in-pool-nx-optin" rel="nofollow">Single Binary Opt-In: POOL_NX_OPTIN</a></p> 
+<p>将其中重点摘录如下：</p> 
+<ol><li>定义两个宏：C_DEFINES=$(C_DEFINES) -DPOOL_NX_OPTIN=1</li><li>驱动入口处加入：ExInitializeDriverRuntime(DrvRtPoolNxOptIn);</li></ol> 
+<h2><a id="KdPrint_104"></a>解决看不到KdPrint的问题</h2> 
+<p>这样是可以正常加载运行驱动了，然而却看不到KdPrint的信息。原因是需要在被调试机中，对调试过滤级别进行设定：</p> 
+<ol><li>定位到HKEY_LOCAL_MACHINE/SYSTEM/CurrentControlSet/Control/Session Manager/</li><li>新建Key，名字为Debug Print Filter</li><li>然后在此Key下新建一个DWORD value ，名字为DEFAULT,然后设置值为0x00000008,</li></ol>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/bcf42db1b16ff963b769fae434e45965/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">android窗口动画和过渡动画（activity和dialog）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/de1de1d82673d8b879202a8fe20a6f34/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">解决IDEA2018.1.5的输入法不跟随问题</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

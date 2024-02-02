@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>笔记：STM32——使用ADC通道采集端口电压数据 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="笔记：STM32——使用ADC通道采集端口电压数据" />
+<meta property="og:description" content="1、ADC的介绍 ADC就是模数转换，就是将芯片的端口模拟量转化位数字量显示出来能够看得到这个比例值。
+转换类型分三种：
+1、逐次逼近型就是类似于二分查找法，当给定一个值然后与这个比较，大于这个值那么就是在这个值得以上到边界值，那么下一次比较就是在大于这个值到边界值得中间那个比较，然后在与这两个中间值比较。依次比较，直到找到这个值，这个算法复杂度在log2n。
+2、双积分型就是它先对输入采样电压和基准电压进行两次积分，以获得与采样电压平均值成正比的时间间隔，同时在这个时间间隔内，用计数器对标准时钟脉冲（CP）计数，计数器输出的计数结果就是对应的数字量。优点在于算出得值比较精准。
+3、电压频率转换型就是将模拟电压量变换为脉冲信号，该输出脉冲信号的频率与输入电压的大小成正比。这样就可以算出实际得输出电压了。
+STM32F103通常有ADC1、ADC2、ADC3三个，但是通到有18个外部可用通道有16个，内部通道有2个，意思就是可测IO口得通道有16个。不可测IO口得有2个，但是这两个是测量内部芯片得温度得，这个也是同模数转换来得出温度值得。
+可以看到这个图PA0的IO口可以使用ADC1、ADC2、ADC3这三个其中一个都可以，但是呢通道到IN0就是16个通道里的第0个通道。
+ADC通道表格 通道ADC1ADC2ADC3通道0PA0PA0PA0通道1PA1PA1PA1通道2PA2PA2PA2通道3PA3PA3PA3通道4PA4PA4PF6通道5PA5PA5PF7通道6PA6PA6PF8通道7PA7PA7PF9通道8PB0PB0PF10通道9PB1PB1通道10PC0PC0PC0通道11PC1PC1PC1通道12PC2PC2PC2通道13PC3PC3PC3通道14PC4PC4通道15PC5PC5通道16温度传感通道17内部参考电压 4、ADC的四种转换模式：分别位单次转换非扫描、连续转换非扫描、单次转换扫描、连续转换扫描这四种。还有一个是双重模式，这个只有双ADC的芯片才有的模式。这个模式的意思就是两个ADC分别对这个数据转换，意思就是轮流上。转换速度又快数据又精准。
+这里有个结构图比较好理解。分别1就是ADC开始转换口分别为内部温度和外部IO口的开始。
+2就是ADC选择ADC几和通道。3就是选择通道模式，分别注入组可以到达最多只能四个通道，注入组就是VIP通道可以最大16个通道，还有一个4没有截图那个就是一个触发控制位，5就是ADC
+的分频器，等下讲到ADC规定的分频器不能超过多少，6就是通道模式的寄存器从，存放通到转换的数据，最后第7个全部选择完了，就到到了最后输出NVIC的ADC触发。然后输出结果。
+5、转换模式介绍
+单次转换非扫描模式：意思就是只有第一个开始选的通道数据有效，这个意思就是无论你选择哪一个通道，它只有第一个选的那个通道是有效的，其他的选了意思白选，而不是说通道1的意思，然后触发一次EOC，最后输出数据。
+单次转换扫描模式：意思就是你只要告诉芯片我选了多少个通道，然后执行的时候，芯片就会一下子给你转换多少个通道，把这些转换通道一下子推到寄存器上面。这样就转换完了。每次转换的时候都需要触发一次EOC
+连续转换非扫描模式：意思就是你每次只能给一个通道，但是这个不需要每转一次就触发一次EOC，而是会一直转换但是每次你只能给一个通道。
+连续转换扫描模式：就是可以选很多个通道。一直启动扫描，不会停止。
+6、ADC的数据位左对齐和有对齐，因为ADC的数据位是12，但是芯片的寄存器是16位所以要一个对齐方式，左对齐就是在高位这边对齐，但是这个对齐方式是原来的16倍因为二进制的4个位是2的4次方，而且这个对齐方式数据比较大，不会太精准。右对齐就是在低位开始对齐，就是低位的12个数据位。可以算一下2的12次方是4096。
+大概介绍完，接下来就是开始写代码了。
+照常开始每次初始化结构体。然后打开时钟，这个有个小毛病啊，用旧版本的keil如果结构体在时钟的后面是会报错的，新版本一点的就不会。这个是要注意的，不过只有把结构体初始化放在时钟的前面就一定不会报错。
+void AD_Init(void) { GPIO_InitTypeDef GPIO_Initstruct; //IO口结构体 ADC_InitTypeDef ADC_Initstruct; //ADC结构体 RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1,ENABLE); //打开 ADC的时钟 RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA,ENABLE);//打开GPIOA的时钟 接下来是ADC的分频时钟了，上面说到ADC的分频是不可以超过14MHz的但是分频只有2、4、6、8这四个分频。如果八分频就是9Mhz6分频那么是12Mhz，4分频是18Mhz，所以只能选6和8这两个了，所以这里选的是6分频。当 ADC_CLK=14Mhz 的时候，并设置 1.5 个周期的采样时间，则 Tcovn=1.5&#43;12.5=14 个周期=1us。通常经过 ADC 预分频器能分频到最大的时钟只能是 12M，采样周期设置为 1.5 个周期，算出最短的转换时间为 1.17us，这个才是最常用的。
+RCC_ADCCLKConfig(RCC_PCLK2_Div6); //AD的分频因子确保不允许超过14Mhz 72/6=12 接下来是用到的IO口初始化，这里分别用到了三个，等下是要用三个模块来模拟一下这个IO口的电压的有可调电阻、光照传感器、热敏传感器是D0这个口的接IO口的。剩下的该接电接地，模式选择的模拟输入这个ADC专属的。
+GPIO_Initstruct.GPIO_Mode= GPIO_Mode_AIN; //模拟输入 ADC专属模式 GPIO_Initstruct.GPIO_Pin=GPIO_Pin_0|GPIO_Pin_1|GPIO_Pin_2; GPIO_Initstruct.GPIO_Speed=GPIO_Speed_50MHz; GPIO_Init(GPIOA,&amp;GPIO_Initstruct);//初始化PA2 到ADC结构体参数。一些作用下面注释有
+ADC_Initstruct.ADC_Mode=ADC_Mode_Independent; //模式选择，这里是独立就是不用ADC1和ADC2同时进行 ADC_Initstruct.ADC_DataAlign=ADC_DataAlign_Right; //寄存器数据对齐方式右 ADC_Initstruct.ADC_ExternalTrigConv=ADC_ExternalTrigConv_None;//触发方式禁止外部，使用软件触发 ADC_Initstruct.ADC_ContinuousConvMode=DISABLE; //关闭连续转换所以是单次转换模式 ADC_Initstruct.ADC_ScanConvMode=DISABLE; //非多通道扫面模式 单通道模式 ADC_Initstruct." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/431481de05761223b7ab69255dd1b10f/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-05-07T22:35:36+08:00" />
+<meta property="article:modified_time" content="2022-05-07T22:35:36+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">笔记：STM32——使用ADC通道采集端口电压数据</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2>1、ADC的介绍</h2> 
+<p>ADC就是模数转换，就是将芯片的端口模拟量转化位数字量显示出来能够看得到这个比例值。</p> 
+<p>转换类型分三种：</p> 
+<p>1、逐次逼近型就是类似于二分查找法，当给定一个值然后与这个比较，大于这个值那么就是在这个值得以上到边界值，那么下一次比较就是在大于这个值到边界值得中间那个比较，然后在与这两个中间值比较。依次比较，直到找到这个值，这个算法复杂度在log2n。</p> 
+<p>2、双积分型就是它先对输入采样电压和基准电压进行两次积分，以获得与采样电压平均值成正比的时间间隔，同时在这个时间间隔内，用计数器对标准时钟脉冲（CP）计数，计数器输出的计数结果就是对应的数字量。优点在于算出得值比较精准。</p> 
+<p>3、电压频率转换型就是将模拟电压量变换为脉冲信号，该输出脉冲信号的频率与输入电压的大小成正比。这样就可以算出实际得输出电压了。</p> 
+<p>STM32F103通常有ADC1、ADC2、ADC3三个，但是通到有18个外部可用通道有16个，内部通道有2个，意思就是可测IO口得通道有16个。不可测IO口得有2个，但是这两个是测量内部芯片得温度得，这个也是同模数转换来得出温度值得。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/db/6d/dtNc3rAD_o.png"></p> 
+<p>可以看到这个图PA0的IO口可以使用ADC1、ADC2、ADC3这三个其中一个都可以，但是呢通道到IN0就是16个通道里的第0个通道。</p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><caption>
+   ADC通道表格 
+ </caption><tbody><tr><td>通道</td><td>ADC1</td><td>ADC2</td><td>ADC3</td></tr><tr><td style="vertical-align:bottom;width:48.6pt;"><span style="color:#000000;">通道0</span></td><td style="vertical-align:bottom;width:48.6pt;"><span style="color:#000000;">PA0</span></td><td style="vertical-align:bottom;width:48.6pt;"><span style="color:#000000;">PA0</span></td><td style="vertical-align:bottom;width:48.6pt;"><span style="color:#000000;">PA0</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道1</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA1</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA1</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA1</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道2</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA2</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA2</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA2</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道3</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA3</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA3</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA3</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道4</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA4</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA4</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PF6</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道5</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA5</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA5</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PF7</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道6</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA6</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA6</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PF8</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道7</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA7</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PA7</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PF9</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道8</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PB0</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PB0</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PF10</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道9</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PB1</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PB1</span></td><td style="vertical-align:bottom;"></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道10</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC0</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC0</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC0</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道11</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC1</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC1</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC1</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道12</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC2</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC2</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC2</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道13</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC3</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC3</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC3</span></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道14</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC4</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC4</span></td><td></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道15</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC5</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">PC5</span></td><td></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道16</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">温度传感</span></td><td style="vertical-align:bottom;"></td><td></td></tr><tr><td style="vertical-align:bottom;"><span style="color:#000000;">通道17</span></td><td style="vertical-align:bottom;"><span style="color:#000000;">内部参考电压</span></td><td style="vertical-align:bottom;"></td><td></td></tr></tbody></table> 
+<p></p> 
+<p>4、ADC的四种转换模式：分别位单次转换非扫描、连续转换非扫描、单次转换扫描、连续转换扫描这四种。还有一个是双重模式，这个只有双ADC的芯片才有的模式。这个模式的意思就是两个ADC分别对这个数据转换，意思就是轮流上。转换速度又快数据又精准。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/fe/89/EMMUC6RG_o.png"></p> 
+<p>这里有个结构图比较好理解。分别1就是ADC开始转换口分别为内部温度和外部IO口的开始。</p> 
+<p>2就是ADC选择ADC几和通道。3就是选择通道模式，分别注入组可以到达最多只能四个通道，注入组就是VIP通道可以最大16个通道，还有一个4没有截图那个就是一个触发控制位，5就是ADC</p> 
+<p>的分频器，等下讲到ADC规定的分频器不能超过多少，6就是通道模式的寄存器从，存放通到转换的数据，最后第7个全部选择完了，就到到了最后输出NVIC的ADC触发。然后输出结果。</p> 
+<p>5、转换模式介绍</p> 
+<p>单次转换非扫描模式：意思就是只有第一个开始选的通道数据有效，这个意思就是无论你选择哪一个通道，它只有第一个选的那个通道是有效的，其他的选了意思白选，而不是说通道1的意思，然后触发一次EOC，最后输出数据。</p> 
+<p>单次转换扫描模式：意思就是你只要告诉芯片我选了多少个通道，然后执行的时候，芯片就会一下子给你转换多少个通道，把这些转换通道一下子推到寄存器上面。这样就转换完了。每次转换的时候都需要触发一次EOC</p> 
+<p>连续转换非扫描模式：意思就是你每次只能给一个通道，但是这个不需要每转一次就触发一次EOC，而是会一直转换但是每次你只能给一个通道。</p> 
+<p>连续转换扫描模式：就是可以选很多个通道。一直启动扫描，不会停止。</p> 
+<p>6、ADC的数据位左对齐和有对齐，因为ADC的数据位是12，但是芯片的寄存器是16位所以要一个对齐方式，左对齐就是在高位这边对齐，但是这个对齐方式是原来的16倍因为二进制的4个位是2的4次方，而且这个对齐方式数据比较大，不会太精准。右对齐就是在低位开始对齐，就是低位的12个数据位。可以算一下2的12次方是4096。</p> 
+<p>大概介绍完，接下来就是开始写代码了。</p> 
+<p>照常开始每次初始化结构体。然后打开时钟，这个有个小毛病啊，用旧版本的keil如果结构体在时钟的后面是会报错的，新版本一点的就不会。这个是要注意的，不过只有把结构体初始化放在时钟的前面就一定不会报错。</p> 
+<pre><code class="language-cpp">void AD_Init(void)
+{    
+    GPIO_InitTypeDef  GPIO_Initstruct;   //IO口结构体
+	ADC_InitTypeDef   ADC_Initstruct;    //ADC结构体
+	
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1,ENABLE); //打开 ADC的时钟
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA,ENABLE);//打开GPIOA的时钟</code></pre> 
+<p>接下来是ADC的分频时钟了，上面说到ADC的分频是不可以超过14MHz的但是分频只有2、4、6、8这四个分频。如果八分频就是9Mhz6分频那么是12Mhz，4分频是18Mhz，所以只能选6和8这两个了，所以这里选的是6分频。当 ADC_CLK=14Mhz 的时候，并设置 1.5 个周期的采样时间，则 Tcovn=1.5+12.5=14 个周期=1us。通常经过 ADC 预分频器能分频到最大的时钟只能是 12M，采样周期设置为 1.5 个周期，算出最短的转换时间为 1.17us，这个才是最常用的。</p> 
+<pre><code class="language-cpp">RCC_ADCCLKConfig(RCC_PCLK2_Div6); //AD的分频因子确保不允许超过14Mhz 72/6=12</code></pre> 
+<p>接下来是用到的IO口初始化，这里分别用到了三个，等下是要用三个模块来模拟一下这个IO口的电压的有可调电阻、光照传感器、热敏传感器是D0这个口的接IO口的。剩下的该接电接地，模式选择的模拟输入这个ADC专属的。</p> 
+<pre><code class="language-cpp">    GPIO_Initstruct.GPIO_Mode= GPIO_Mode_AIN;  //模拟输入  ADC专属模式
+	GPIO_Initstruct.GPIO_Pin=GPIO_Pin_0|GPIO_Pin_1|GPIO_Pin_2;
+	GPIO_Initstruct.GPIO_Speed=GPIO_Speed_50MHz;
+	
+	GPIO_Init(GPIOA,&amp;GPIO_Initstruct);//初始化PA2</code></pre> 
+<p>到ADC结构体参数。一些作用下面注释有</p> 
+<pre><code class="language-cpp">    ADC_Initstruct.ADC_Mode=ADC_Mode_Independent;  //模式选择，这里是独立就是不用ADC1和ADC2同时进行
+	ADC_Initstruct.ADC_DataAlign=ADC_DataAlign_Right;  //寄存器数据对齐方式右
+	ADC_Initstruct.ADC_ExternalTrigConv=ADC_ExternalTrigConv_None;//触发方式禁止外部，使用软件触发
+	ADC_Initstruct.ADC_ContinuousConvMode=DISABLE;  //关闭连续转换所以是单次转换模式
+    ADC_Initstruct.ADC_ScanConvMode=DISABLE; //非多通道扫面模式      单通道模式
+    ADC_Initstruct.ADC_NbrOfChannel=1;  //常规则序列通道数量
+	ADC_Init(ADC1,&amp;ADC_Initstruct);
+	
+	ADC_Cmd(ADC1,ENABLE);  //ADC使能校准给ADC上电</code></pre> 
+<p>既然用到了软件触发，那么就要用软件程序来实现触发,到这里触发的ADC的初始化就结束了。</p> 
+<pre><code class="language-cpp">     //以下的为软件触发程序
+	ADC_ResetCalibration(ADC1);//复位指定的ADC的校准寄存器
+	while(ADC_GetResetCalibrationStatus(ADC1) == SET);//获取ADC复位校准寄存器的状态  判断是否空循环秒如果是那么跳出然后获取标志位校准
+	
+	ADC_StartCalibration(ADC1);//开始指定ADC的校准状态
+    while(ADC_GetCalibrationStatus(ADC1) == SET);//开始获取指定ADC的校准程序
+
+    ADC_SoftwareStartConvCmd(ADC1, ENABLE);//使能指定的ADC的软件转换启动功能
+
+}</code></pre> 
+<p>下面是调用这个ADC的实现转换的功能函数</p> 
+<pre><code>u16 Get_ADC_Value(u8 ch,u8 times)
+{
+	u32 temp_val=0;
+	u8 t;
+	ADC_RegularChannelConfig(ADC1, ch, 1, ADC_SampleTime_239Cycles5);//第一个参数ADC1，第二个参数是选择通道几，第三个是计算参数的精致度的，在库函数里面这个值是最大的，也是算的最精准的，如果不需要这么精准可以选择中间一点的数，具体在.ADC文件里面有
+	for(t=0;t&lt;times;t++)
+	{
+		ADC_SoftwareStartConvCmd(ADC1, ENABLE);  //这个是软件使能打开
+		while(!ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC ));  //然后上面说到每次转换要打开EOC
+		temp_val+=ADC_GetConversionValue(ADC1);       //这个是获取在ADC寄存器保存的通道值
+		Delay_ms(5); 
+	}
+	return temp_val/times;             //返回ADC的值这里除以times时间是因为转换需要一定的时间。
+
+
+}</code></pre> 
+<p>然后在主函里面需要调用获取ADC的值</p> 
+<pre><code class="language-cpp">#include "stm32f10x.h"
+int main(void)
+{
+    uint16_t AD0,AD1,AD2;
+    float ADv0,ADv1,ADv2;
+    OLED_Init();  //OLED屏幕显示数值。
+	AD_Init();    //初始化ADC
+
+    OLED_ShowString(1,1,"AD0:");   //显示三个ADC的值
+	OLED_ShowString(2,1,"AD1:");
+	OLED_ShowString(3,1,"AD2:");
+	
+	OLED_ShowString(1,11,".");    
+	OLED_ShowString(2,11,".");
+	OLED_ShowString(3,11,".");
+	
+	OLED_ShowString(1,14,"v");    //显示电压符号
+	OLED_ShowString(2,14,"v");
+	OLED_ShowString(3,14,"v");
+
+    while(1)
+    {
+
+     AD0=Get_ADC_Value(ADC_Channel_0,20);   //获取ADC的通道0
+	 AD1=Get_ADC_Value(ADC_Channel_1,20);   //获取ADC的通道1
+	 AD2=Get_ADC_Value(ADC_Channel_2,20);   //获取ADC的通道2
+	 
+	 ADv0=(float)AD0 / 4095 *3.3;    //这里获取值后需要除以刚才上面说的右对齐4096因为从0开始算所以是4095乘上电压值
+	 ADv1=(float)AD1 / 4095 *3.3;
+	 ADv2=(float)AD2 / 4095 *3.3;
+		
+	 OLED_ShowNum(1,5,AD0,4);	  //显示模拟量转换位数值量
+	 OLED_ShowNum(2,5,AD1,4);   
+	 OLED_ShowNum(3,5,AD2,4);
+    
+     OLED_ShowNum(1,10,ADv0,1);   //显示电压的第一个数
+	 OLED_ShowNum(2,10,ADv1,1);
+	 OLED_ShowNum(3,10,ADv2,1);
+		
+	 OLED_ShowNum(1,12,(unsigned int)(ADv0*100)%100,2);  //显示电压小数后两位因为小数在屏幕无法显示识别，这里先对强制转换位int型然后乘100就是得到把后面两个小数变成整数，然后再求余100剩下的就是后两个数了，然后在显示出来
+	 OLED_ShowNum(2,12,(unsigned int)(ADv1*100)%100,2);  
+	 OLED_ShowNum(3,12,(unsigned int)(ADv2*100)%100,2);
+	 Delay_ms(100);
+     
+
+}
+        
+
+}</code></pre> 
+<p>下面是完整的代码</p> 
+<pre><code class="language-cpp">#include "stm32f10x.h" 
+
+
+u16 Get_ADC_Value(u8 ch,u8 times);
+void AD_Init(void);
+
+
+uint16_t AD0,AD1,AD2;
+float ADv0,ADv1,ADv2;
+int main(void)
+{ 
+	
+	OLED_Init();
+	AD_Init();
+    OLED_ShowString(1,1,"AD0:");
+	OLED_ShowString(2,1,"AD1:");
+	OLED_ShowString(3,1,"AD2:");
+	
+	OLED_ShowString(1,11,".");
+	OLED_ShowString(2,11,".");
+	OLED_ShowString(3,11,".");
+	
+	OLED_ShowString(1,14,"v");
+	OLED_ShowString(2,14,"v");
+	OLED_ShowString(3,14,"v");
+	
+	while(1)
+	{
+		
+     AD0=Get_ADC_Value(ADC_Channel_0,20);
+	 AD1=Get_ADC_Value(ADC_Channel_1,20);
+	 AD2=Get_ADC_Value(ADC_Channel_2,20);
+	 
+	 ADv0=(float)AD0 / 4095 *3.3;
+	 ADv1=(float)AD1 / 4095 *3.3;
+	 ADv2=(float)AD2 / 4095 *3.3;
+		
+	 OLED_ShowNum(1,5,AD0,4);	  //显示数值
+	 OLED_ShowNum(2,5,AD1,4);
+	 OLED_ShowNum(3,5,AD2,4);
+    
+     OLED_ShowNum(1,10,ADv0,1); //显示电压
+	 OLED_ShowNum(2,10,ADv1,1);
+	 OLED_ShowNum(3,10,ADv2,1);
+		
+	 OLED_ShowNum(1,12,(unsigned int)(ADv0*100)%100,2);  //显示电压小数后两位
+	 OLED_ShowNum(2,12,(unsigned int)(ADv1*100)%100,2);
+	 OLED_ShowNum(3,12,(unsigned int)(ADv2*100)%100,2);
+	 Delay_ms(100);
+	}
+	
+}
+
+void AD_Init(void)
+{  
+	GPIO_InitTypeDef  GPIO_Initstruct;
+	ADC_InitTypeDef   ADC_Initstruct;
+	
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1,ENABLE); //打开PA AFOI ADC的时钟
+    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA,ENABLE);
+	
+	RCC_ADCCLKConfig(RCC_PCLK2_Div6); //AD的分频因子确保不允许超过14Mhz 72/6=12
+	
+    GPIO_Initstruct.GPIO_Mode= GPIO_Mode_AIN;  //模拟输入  ADC专属模式
+	GPIO_Initstruct.GPIO_Pin=GPIO_Pin_0|GPIO_Pin_1|GPIO_Pin_2;
+	GPIO_Initstruct.GPIO_Speed=GPIO_Speed_50MHz;
+	
+	GPIO_Init(GPIOA,&amp;GPIO_Initstruct);//初始化PA2
+	
+	
+	ADC_Initstruct.ADC_Mode=ADC_Mode_Independent;  //模式选择，这里是独立就是不用ADC1和ADC2同时进行
+	ADC_Initstruct.ADC_DataAlign=ADC_DataAlign_Right;  //寄存器数据对齐方式右
+	ADC_Initstruct.ADC_ExternalTrigConv=ADC_ExternalTrigConv_None;//触发方式禁止外部，使用软件触发
+	ADC_Initstruct.ADC_ContinuousConvMode=DISABLE;  //关闭连续转换所以是单次转换模式
+    ADC_Initstruct.ADC_ScanConvMode=DISABLE; //非多通道扫面模式 单通道模式
+    ADC_Initstruct.ADC_NbrOfChannel=1;  //常规则序列通道数量
+	ADC_Init(ADC1,&amp;ADC_Initstruct);
+	
+	ADC_Cmd(ADC1,ENABLE);  //ADC使能校准给ADC上电
+	
+	//以下的为软件触发程序
+	ADC_ResetCalibration(ADC1);//复位指定的ADC的校准寄存器
+	while(ADC_GetResetCalibrationStatus(ADC1) == SET);//获取ADC复位校准寄存器的状态  判断是否空循环秒如果是那么跳出然后获取标志位校准
+	
+	ADC_StartCalibration(ADC1);//开始指定ADC的校准状态
+    while(ADC_GetCalibrationStatus(ADC1) == SET);//开始获取指定ADC的校准程序
+
+    ADC_SoftwareStartConvCmd(ADC1, ENABLE);//使能指定的ADC的软件转换启动功能
+	
+}
+
+u16 Get_ADC_Value(u8 ch,u8 times)
+{
+	u32 temp_val=0;
+	u8 t;
+	ADC_RegularChannelConfig(ADC1, ch, 1, ADC_SampleTime_239Cycles5);
+	for(t=0;t&lt;times;t++)
+	{
+		ADC_SoftwareStartConvCmd(ADC1, ENABLE);
+		while(!ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC ));
+		temp_val+=ADC_GetConversionValue(ADC1);
+		Delay_ms(5);
+	}
+	return temp_val/times;
+
+
+}
+</code></pre> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4cddc858fe00cc25469af56fde453bb2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">ARMv7体系结构汇总</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/5ad15bcdff24a63eb860fa908ce97ed7/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">poi使用整理总结</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

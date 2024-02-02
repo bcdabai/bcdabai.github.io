@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>FreeRTOS调度器启动过程分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="FreeRTOS调度器启动过程分析" />
+<meta property="og:description" content="目录
+引出思考
+vTaskStartScheduler()启动任务调度器
+xPortStartScheduler()函数
+FreeRTOS启动第一个任务
+vPortSVCHandler()函数
+总结
+引出思考 首先想象一下如何启动第一个任务？
+假设我们要启动的第一个任务是任务A，那么就需要将任务A的寄存器值恢复到CPU寄存器
+任务A的寄存器值，在一开始创建任务的时候就保存在任务A的栈中了，这个在创建任务的细节博文中我已经分析过FreeRTOS任务创建及细节-CSDN博客
+注意：
+1、中断产生时，硬件将xPSR，PC(R15)、LR(R14)、R12、R3-R0保存和恢复，而R4-R11需要手动保存和恢复
+2、进入中断后硬件会强制使用MSP指针，此时LR(R14)的值将会自动被更新为特殊的EXC_RETURN
+使用FreeRTOS，一个最基本的程序框架如下所示：
+int main(void) { // 必要的初始化工作; // 创建任务1; // 创建任务2; // ... vTaskStartScheduler(); /*启动调度器*/ while(1); } 任务创建完成后，静态变量指针pxCurrentTCB，指向优先级最高的就绪任务，但此时任务不能运行，因为接下来还有最为关键的一步：启动FreeRTOS调度器。
+调度器是FreeRTOS操作系统的核心，主要负责任务切换，即找出最高优先级的就绪任务，并使之获得CPU运行权。调度器并非自动运行的，需要人为启动它。
+vTaskStartScheduler()启动任务调度器 API函数vTaskStartScheduler()用于启动调度器，它会创建一个空闲任务，初始化一些静态变量，最主要的，它会初始化系统节拍定时器并设置好相应的中断，然后启动第一个任务。这里我们分析启动调度器的过程，和之前一样，启动调度器也涉及到硬件架构的一些知识（比如系统节拍定时器初始化），因此本文这里以CortexM3架构为例。
+启动调度器的API函数vTaskStartScheduler()的源码这里我直接精简一下屏蔽掉条件编译的部分：
+void vTaskStartScheduler( void ) { BaseType_t xReturn; StaticTask_t *pxIdleTaskTCBBuffer= NULL; StackType_t *pxIdleTaskStackBuffer= NULL; uint16_t usIdleTaskStackSize =tskIDLE_STACK_SIZE; /*如果使用静态内存分配任务堆栈和任务TCB,则需要为空闲任务预先定义好任务内存和任务TCB空间*/ #if(configSUPPORT_STATIC_ALLOCATION == 1 ) { vApplicationGetIdleTaskMemory( &amp;pxIdleTaskTCBBuffer, &amp;pxIdleTaskStackBuffer, &amp;usIdleTaskStackSize); } #endif /*configSUPPORT_STATIC_ALLOCATION */ /* 创建空闲任务,使用最低优先级*/ xReturn =xTaskGenericCreate( prvIdleTask, &#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/6400674a16ab61ded888bb13f48c9dbd/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-12-05T15:32:37+08:00" />
+<meta property="article:modified_time" content="2023-12-05T15:32:37+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">FreeRTOS调度器启动过程分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="-toc" style="margin-left:0px;"></p> 
+<p id="%E5%BC%95%E5%87%BA%E6%80%9D%E8%80%83-toc" style="margin-left:0px;"><a href="#%E5%BC%95%E5%87%BA%E6%80%9D%E8%80%83" rel="nofollow">引出思考</a></p> 
+<p id="vTaskStartScheduler()%E5%90%AF%E5%8A%A8%E4%BB%BB%E5%8A%A1%E8%B0%83%E5%BA%A6%E5%99%A8-toc" style="margin-left:0px;"><a href="#vTaskStartScheduler%28%29%E5%90%AF%E5%8A%A8%E4%BB%BB%E5%8A%A1%E8%B0%83%E5%BA%A6%E5%99%A8" rel="nofollow">vTaskStartScheduler()启动任务调度器</a></p> 
+<p id="xPortStartScheduler()%E5%87%BD%E6%95%B0-toc" style="margin-left:0px;"><a href="#xPortStartScheduler%28%29%E5%87%BD%E6%95%B0" rel="nofollow">xPortStartScheduler()函数</a></p> 
+<p id="FreeRTOS%E5%90%AF%E5%8A%A8%E7%AC%AC%E4%B8%80%E4%B8%AA%E4%BB%BB%E5%8A%A1-toc" style="margin-left:0px;"><a href="#FreeRTOS%E5%90%AF%E5%8A%A8%E7%AC%AC%E4%B8%80%E4%B8%AA%E4%BB%BB%E5%8A%A1" rel="nofollow">FreeRTOS启动第一个任务</a></p> 
+<p id="vPortSVCHandler()%E5%87%BD%E6%95%B0-toc" style="margin-left:0px;"><a href="#vPortSVCHandler%28%29%E5%87%BD%E6%95%B0" rel="nofollow">vPortSVCHandler()函数</a></p> 
+<p id="%E6%80%BB%E7%BB%93-toc" style="margin-left:0px;"><a href="#%E6%80%BB%E7%BB%93" rel="nofollow">总结</a></p> 
+<hr id="hr-toc"> 
+<p></p> 
+<h2 id="%E5%BC%95%E5%87%BA%E6%80%9D%E8%80%83">引出思考</h2> 
+<p>首先想象一下如何启动第一个任务？</p> 
+<p>假设我们要启动的第一个任务是任务A，那么就需要将任务A的寄存器值恢复到CPU寄存器</p> 
+<p>任务A的寄存器值，在一开始创建任务的时候就保存在任务A的栈中了，这个在创建任务的细节博文中我已经分析过<a href="https://blog.csdn.net/qq_43460068/article/details/134587782?spm=1001.2014.3001.5501" title="FreeRTOS任务创建及细节-CSDN博客">FreeRTOS任务创建及细节-CSDN博客</a></p> 
+<p>注意：</p> 
+<p>1、中断产生时，硬件将xPSR，PC(R15)、LR(R14)、R12、R3-R0保存和恢复，而R4-R11需要手动保存和恢复</p> 
+<p>2、进入中断后硬件会强制使用MSP指针，此时LR(R14)的值将会自动被更新为特殊的EXC_RETURN</p> 
+<p>使用FreeRTOS，一个最基本的程序框架如下所示：</p> 
+<pre><code class="language-cpp">int main(void)
+{  
+    // 必要的初始化工作;
+    // 创建任务1;
+    // 创建任务2;
+    // ...
+    vTaskStartScheduler();  /*启动调度器*/
+    while(1);   
+}</code></pre> 
+<p>任务创建完成后，静态变量指针pxCurrentTCB，指向优先级最高的就绪任务，但此时任务不能运行，因为接下来还有最为关键的一步：启动FreeRTOS调度器。</p> 
+<p>调度器是FreeRTOS操作系统的核心，主要负责任务切换，即找出最高优先级的就绪任务，并使之获得CPU运行权。调度器并非自动运行的，需要人为启动它。</p> 
+<h2 id="vTaskStartScheduler()%E5%90%AF%E5%8A%A8%E4%BB%BB%E5%8A%A1%E8%B0%83%E5%BA%A6%E5%99%A8">vTaskStartScheduler()启动任务调度器</h2> 
+<p>API函数vTaskStartScheduler()用于启动调度器，它会创建一个空闲任务，初始化一些静态变量，最主要的，它会初始化系统节拍定时器并设置好相应的中断，然后启动第一个任务。这里我们分析启动调度器的过程，和之前一样，启动调度器也涉及到硬件架构的一些知识（比如系统节拍定时器初始化），因此本文这里以CortexM3架构为例。</p> 
+<p>启动调度器的API函数vTaskStartScheduler()的源码这里我直接精简一下屏蔽掉条件编译的部分：</p> 
+<pre><code class="language-cpp">void vTaskStartScheduler( void )
+{
+BaseType_t xReturn;
+StaticTask_t *pxIdleTaskTCBBuffer= NULL;
+StackType_t *pxIdleTaskStackBuffer= NULL;
+uint16_t usIdleTaskStackSize =tskIDLE_STACK_SIZE;
+ 
+    /*如果使用静态内存分配任务堆栈和任务TCB,则需要为空闲任务预先定义好任务内存和任务TCB空间*/
+    #if(configSUPPORT_STATIC_ALLOCATION == 1 )
+    {
+       vApplicationGetIdleTaskMemory( &amp;pxIdleTaskTCBBuffer, &amp;pxIdleTaskStackBuffer, &amp;usIdleTaskStackSize);
+    }
+    #endif /*configSUPPORT_STATIC_ALLOCATION */
+ 
+    /* 创建空闲任务,使用最低优先级*/
+    xReturn =xTaskGenericCreate( prvIdleTask, "IDLE",usIdleTaskStackSize, ( void * ) NULL, ( tskIDLE_PRIORITY | portPRIVILEGE_BIT), &amp;xIdleTaskHandle,pxIdleTaskStackBuffer,pxIdleTaskTCBBuffer, NULL );
+ 
+    if( xReturn == pdPASS )
+    {
+        /* 先关闭中断,确保节拍定时器中断不会在调用xPortStartScheduler()时或之前发生.当第一个任务启动时,会重新启动中断*/
+       portDISABLE_INTERRUPTS();
+       
+        /* 初始化静态变量 */
+       xNextTaskUnblockTime = portMAX_DELAY;
+       xSchedulerRunning = pdTRUE;
+        xTickCount = ( TickType_t ) 0U;
+ 
+        /* 如果宏configGENERATE_RUN_TIME_STATS被定义,表示使用运行时间统计功能,则下面这个宏必须被定义,用于初始化一个基础定时器/计数器.*/
+       portCONFIGURE_TIMER_FOR_RUN_TIME_STATS();
+ 
+        /* 设置系统节拍定时器,这与硬件特性相关,因此被放在了移植层.*/
+        if(xPortStartScheduler() != pdFALSE )
+        {
+            /* 如果调度器正确运行,则不会执行到这里,函数也不会返回*/
+        }
+        else
+        {
+            /* 仅当任务调用API函数xTaskEndScheduler()后,会执行到这里.*/
+        }
+    }
+    else
+    {
+        /* 执行到这里表示内核没有启动,可能因为堆栈空间不够 */
+       configASSERT( xReturn );
+    }
+ 
+    /* 预防编译器警告*/
+    ( void ) xIdleTaskHandle;
+}</code></pre> 
+<p>这个API函数首先创建一个空闲任务，空闲任务使用最低优先级0，空闲任务的任务句柄存放在静态变量xIdleTaskHandle中，可以调用API函数xTaskGetIdleTaskHandle()获得空闲任务句柄。</p> 
+<p>如果任务创建成功，则关闭中断（调度器启动结束时会再次使能中断的），初始化一些静态变量，然后调用函数xPortStartScheduler()来启动系统节拍定时器并启动第一个任务。因为设置系统节拍定时器涉及到硬件特性，因此函数xPortStartScheduler函数由移植层提供，不同的硬件架构，这个函数的代码是不一样的。</p> 
+<p>函数<span style="color:#000000;">vTaskStartScheduler()用于启动任务调度器，任务调度器启动后，FreeRTOS便会开始进行任务调度，除非调用函数xTaskEndScheduler()停止调度器，否则不会再返回。</span></p> 
+<p>函数vTaskStartScheduler()主要做了六件事情：</p> 
+<ul><li>创建空闲任务，根据是否支持静态内存管理，使用静态方式或者动态方式创建空闲任务</li><li>创建定时器服务任务，创建定时器服务任务需要配置启用软件定时器，创建定时器服务任务，同样是根据是否配置支持静态内存管理，使用静态或者动态方式创建定时器服务任务。</li><li>关闭中断，使用portDISABLE_INTERRUPTS()关闭中断，这种方式只关闭受FreeRTOS管理的中断。关闭中断主要是为了防止SysTick中断在任务调度器开启之前或过程中，产生中断。FreeRTOS会在开始运行第一个任务时，重新打开中断。</li><li>初始化一些全局变量，并将任务调度器的运行标志设置为已运行</li><li>初始化任务运行时间统计功能的时基定时器，任务运行时间统计功能需要一个硬件定时器提供高精度的计数，这个硬件定时器就在这里进行配置，如果配置不启用任务运行时间统计功能的，就无需进行这项硬件定时器的配置。</li><li>最后就是调用xPortStartScheduler()</li></ul> 
+<h2 id="xPortStartScheduler()%E5%87%BD%E6%95%B0">xPortStartScheduler()函数</h2> 
+<p>对于Cortex-M4架构，函数xPortStartScheduler()函数的实现如下：</p> 
+<pre><code class="language-cpp">	/* Pop the core registers. */
+	ldmia r0!, {r4-r11, r14}
+	msr psp, r0
+	isb
+	mov r0, #0
+	msr	basepri, r0
+	bx r14
+}
+/*-----------------------------------------------------------*/
+
+__asm void prvStartFirstTask( void )
+{
+	PRESERVE8
+
+	/* Use the NVIC offset register to locate the stack. */
+	ldr r0, =0xE000ED08
+	ldr r0, [r0]
+	ldr r0, [r0]
+	/* Set the msp back to the start of the stack. */
+	msr msp, r0
+	/* Clear the bit that indicates the FPU is in use in case the FPU was used
+	before the scheduler was started - which would otherwise result in the
+	unnecessary leaving of space in the SVC stack for lazy saving of FPU
+	registers. */
+	mov r0, #0
+	msr control, r0
+	/* Globally enable interrupts. */
+	cpsie i
+	cpsie f
+	dsb
+	isb
+	/* Call SVC to start the first task. */
+	svc 0
+	nop
+	nop
+}
+/*-----------------------------------------------------------*/
+
+__asm void prvEnableVFP( void )
+{
+	PRESERVE8
+
+	/* The FPU enable bits are in the CPACR. */
+	ldr.w r0, =0xE000ED88
+	ldr	r1, [r0]
+
+	/* Enable CP10 and CP11 coprocessors, then save back. */
+	orr	r1, r1, #( 0xf &lt;&lt; 20 )
+	str r1, [r0]
+	bx	r14
+	nop
+}
+/*-----------------------------------------------------------*/
+
+/*
+ * See header file for description.
+ */
+BaseType_t xPortStartScheduler( void )
+{
+	/* configMAX_SYSCALL_INTERRUPT_PRIORITY must not be set to 0.
+	See http://www.FreeRTOS.org/RTOS-Cortex-M3-M4.html */
+	configASSERT( configMAX_SYSCALL_INTERRUPT_PRIORITY );
+
+	/* This port can be used on all revisions of the Cortex-M7 core other than
+	the r0p1 parts.  r0p1 parts should use the port from the
+	/source/portable/GCC/ARM_CM7/r0p1 directory. */
+	configASSERT( portCPUID != portCORTEX_M7_r0p1_ID );
+	configASSERT( portCPUID != portCORTEX_M7_r0p0_ID );
+
+	#if( configASSERT_DEFINED == 1 )
+	{
+		volatile uint32_t ulOriginalPriority;
+		volatile uint8_t * const pucFirstUserPriorityRegister = ( uint8_t * ) ( portNVIC_IP_REGISTERS_OFFSET_16 + portFIRST_USER_INTERRUPT_NUMBER );
+		volatile uint8_t ucMaxPriorityValue;
+
+		/* Determine the maximum priority from which ISR safe FreeRTOS API
+		functions can be called.  ISR safe functions are those that end in
+		"FromISR".  FreeRTOS maintains separate thread and ISR API functions to
+		ensure interrupt entry is as fast and simple as possible.
+
+		Save the interrupt priority value that is about to be clobbered. */
+		ulOriginalPriority = *pucFirstUserPriorityRegister;
+
+		/* Determine the number of priority bits available.  First write to all
+		possible bits. */
+		*pucFirstUserPriorityRegister = portMAX_8_BIT_VALUE;
+
+		/* Read the value back to see how many bits stuck. */
+		ucMaxPriorityValue = *pucFirstUserPriorityRegister;
+
+		/* The kernel interrupt priority should be set to the lowest
+		priority. */
+		configASSERT( ucMaxPriorityValue == ( configKERNEL_INTERRUPT_PRIORITY &amp; ucMaxPriorityValue ) );
+
+		/* Use the same mask on the maximum system call priority. */
+		ucMaxSysCallPriority = configMAX_SYSCALL_INTERRUPT_PRIORITY &amp; ucMaxPriorityValue;
+
+		/* Calculate the maximum acceptable priority group value for the number
+		of bits read back. */
+		ulMaxPRIGROUPValue = portMAX_PRIGROUP_BITS;
+		while( ( ucMaxPriorityValue &amp; portTOP_BIT_OF_BYTE ) == portTOP_BIT_OF_BYTE )
+		{
+			ulMaxPRIGROUPValue--;
+			ucMaxPriorityValue &lt;&lt;= ( uint8_t ) 0x01;
+		}
+
+		#ifdef __NVIC_PRIO_BITS
+		{
+			/* Check the CMSIS configuration that defines the number of
+			priority bits matches the number of priority bits actually queried
+			from the hardware. */
+			configASSERT( ( portMAX_PRIGROUP_BITS - ulMaxPRIGROUPValue ) == __NVIC_PRIO_BITS );
+		}
+		#endif
+
+		#ifdef configPRIO_BITS
+		{
+			/* Check the FreeRTOS configuration that defines the number of
+			priority bits matches the number of priority bits actually queried
+			from the hardware. */
+			configASSERT( ( portMAX_PRIGROUP_BITS - ulMaxPRIGROUPValue ) == configPRIO_BITS );
+		}
+		#endif
+
+		/* Shift the priority group value back to its position within the AIRCR
+		register. */
+		ulMaxPRIGROUPValue &lt;&lt;= portPRIGROUP_SHIFT;
+		ulMaxPRIGROUPValue &amp;= portPRIORITY_GROUP_MASK;
+
+		/* Restore the clobbered interrupt priority register to its original
+		value. */
+		*pucFirstUserPriorityRegister = ulOriginalPriority;
+	}
+	#endif /* conifgASSERT_DEFINED */
+
+	/* Make PendSV and SysTick the lowest priority interrupts. */
+	portNVIC_SYSPRI2_REG |= portNVIC_PENDSV_PRI;
+	portNVIC_SYSPRI2_REG |= portNVIC_SYSTICK_PRI;
+
+	/* Start the timer that generates the tick ISR.  Interrupts are disabled
+	here already. */
+	vPortSetupTimerInterrupt();
+
+	/* Initialise the critical nesting count ready for the first task. */
+	uxCriticalNesting = 0;
+
+	/* Ensure the VFP is enabled - it should be anyway. */
+	prvEnableVFP();
+
+	/* Lazy save always. */
+	*( portFPCCR ) |= portASPEN_AND_LSPEN_BITS;
+
+	/* Start the first task. */
+	prvStartFirstTask();
+
+	/* Should not get here! */
+	return 0;
+}
+</code></pre> 
+<p>从源码上面来看，其中开始的一大段都是冗余代码。因为Cortex-M4的中断优先级有点反直觉：在Cortex-M内核中，优先级的数值越大，表明优先级越低，数值越小代表优先级越高。根据官方统计，在Cortex-M4硬件上使用FreeRTOS，绝大多数问题都是优先级数值设置不对的问题，因此，为了使得FreeRTOS更健壮，FreeRTOS的作者在编写Cortex-M架构的移植层代码时，特意增加了冗余代码。关于详细的Cortex-M架构的中断优先级设置，后续有机会再写一篇博客。</p> 
+<p>在Cortex-M4架构中，FreeRTOS为了任务启动和任务切换使用了三个重要的异常：<strong>SVC、PendSV、SysTick。</strong>SVC(系统服务调用)用于任务启动（只在启动第一个任务的时候会调用，以后都不会用到），有些操作系统不允许应用程序直接访问硬件，而是通过提供一些系统服务函数、通过SVC来调用；PendSV(可挂起系统调用)用于完成任务切换，它的最大特性是如果当前有优先级比它高的中断在运行，PendSV会推迟执行，直到高优先级中断执行完毕；SysTick用于产生系统时钟节拍时钟，提供一个时间片，如果多个任务共享同一个优先级，则每次Systick中断，下一个任务将获得一个时间片。关于详细的SVC、PendSV异常描述，推荐《Cortex-M3和M4权威指南》一书的“异常”部分。</p> 
+<p> 这里将PendSV和SysTick异常优先级设置为最低，这样任务切换不会打断某个中断服务程序，中断服务程序也不会被延迟，这样简化了设计，有利于系统稳定。</p> 
+<p>      接下来调用函数vPortSetupTimerInterrupt()设置SysTick定时器中断周期并使能定时器运行这个函数比较简单，就是设置SysTick硬件的相应寄存器。</p> 
+<p>这里小小的总结一下这个xPortStartScheduler()函数的工作🤣：</p> 
+<ul><li>在启用断言的情况下，函数xPortStartScheduler会检测用户在FreeRTOSConfig.h文件中对中断的相关配置是否有误</li><li>配置PendSV和SysTick的中断优先级为最低优先级</li><li>调用函数vPortSetupTimerInterrupt()配置SysTick，函数<span style="color:#000000;">vPortSetupTimerInterrupt()首先会将SysTick当前计数值清空，并根据FreeRTOSConfig.h文件中配置</span>configSYSTICK_CLOCK_HZ（SysTick 时钟源频率）和 configTICK_RATE_HZ（系统时钟节拍频率）计算并设置 SysTick 的重装载值，然后启动 SysTick 计数和中断。</li><li>初始化临界区嵌套计数器为0</li><li>调用函数prvEnableVFP()使能FPU，Cortex-M3内核没有FPU，M4内核是有FPU的，执行该函数后，FPU被开启</li><li>接下来将FPCCR寄存器的[31:30]置1，这样在进出异常时，FPU的相关寄存器就会自动地保存和恢复，同样地M3内核的代码是没有的，M4内核有这部分代码</li><li>调用函数prvStartFirstTask()启动第一个任务</li></ul> 
+<h2 id="FreeRTOS%E5%90%AF%E5%8A%A8%E7%AC%AC%E4%B8%80%E4%B8%AA%E4%BB%BB%E5%8A%A1">FreeRTOS启动第一个任务</h2> 
+<p><strong>这里是这篇文章比较重要的关键点和难点</strong>🧐<strong>：</strong></p> 
+<p>      再接下来有一个关键的函数是prvStartFirstTask()，这个函数用来启动第一个任务。我们先看一下源码：</p> 
+<pre><code class="language-cpp">__asm void prvStartFirstTask( void )
+{
+    /*8字节对齐*/
+	PRESERVE8
+
+	/* Use the NVIC offset register to locate the stack. */
+	ldr r0, =0xE000ED08  /*0xE000ED08 为 VTOR 地址*/
+	ldr r0, [r0]         /*获取VTOR的值*/
+	ldr r0, [r0]         /*获取MSP的初始值*/
+
+	/* 初始化MSP */
+	msr msp, r0
+	/* Clear the bit that indicates the FPU is in use in case the FPU was used
+	before the scheduler was started - which would otherwise result in the
+	unnecessary leaving of space in the SVC stack for lazy saving of FPU
+	registers. */
+	mov r0, #0
+	msr control, r0
+	/*使能全局中断 */
+	cpsie i
+	cpsie f
+	dsb
+	isb
+	/* 调用SVC启动第一个任务 */
+	svc 0
+	nop
+	nop
+}</code></pre> 
+<p><strong>函数prvStartFirstTask()用于初始化启动第一个任务前的环境，主要是设置MSP指针，并使能全局中断</strong>，具体的代码如上面所示；</p> 
+<p>从上面的代码可以看出，函数<span style="color:#0d0016;">prvStartFirstTask()是一段汇编代码，分析它的工作：</span></p> 
+<ul><li><span style="color:#0d0016;">首先是使用了PRESERVE8，进行8字节对齐，这是因为，栈在任何时候都是需要4字节对齐的，而在调用入口得8字节对齐，在进行C编程的时候，编译器会自动完成对齐操作，而对于汇编，就需要手动进行对齐</span></li><li><span style="color:#0d0016;">接下来就是为了获得MSP指针得初始值，那么这里肯定会引出两个问题</span>🤣 </li></ul> 
+<p>1. 什么是MSP指针？</p> 
+<p>程序在运行过程中需要一定得栈空间来保存局部变量等一些信息。当有信息需要保存到栈中时，MCU会自动更新SP指针，使SP指针指向最后一个入栈元素，那么程序就可以根据SP指针来从栈中存取信息。对于ARM的Cortex-M内核提供了两个栈空间，这两个栈空间的堆栈指针分别是MSP（主堆栈指针）和PSP（进程堆栈指针）。在Free RTOS中MSP是给系统栈空间使用的，而PSP是给任务栈使用的，也就是说，FreeRTOS任务的栈空间是通过PSP指向的，而在进入中断服务函数时，则是使用MSP指针。当使用不同的堆栈指针时，SP会等于当前使用的堆栈指针。</p> 
+<p>2. 为什么是0xE00ED08?</p> 
+<p>0xE00ED08是VTOR（向量表偏移寄存器）的地址，VTOR中保存了向量表的偏移地址。一般来说向量表其实是从0x00000000开始的，但是在有些情况下，可能需要修改或重定向向量表的首地址，因此ARM Cortex-M提供了VTOR对向量表进行重定向。而向量表是用来保存中断异常的入口函数地址，即栈顶地址的，并且向量表中的第一个字保存的就是栈底的地址，在start_stm32xxxxx.s文件中有如下定义：</p> 
+<pre><code class="language-cpp">__Vectors       DCD     __initial_sp               ; Top of Stack
+                DCD     Reset_Handler              ; Reset Handler
+                DCD     NMI_Handler                ; NMI Handler
+                DCD     HardFault_Handler          ; Hard Fault Handler
+                DCD     MemManage_Handler          ; MPU Fault Handler
+                DCD     BusFault_Handler           ; Bus Fault Handler
+                DCD     UsageFault_Handler         ; Usage Fault Handler
+                DCD     0                          ; Reserved
+                DCD     0                          ; Reserved</code></pre> 
+<p>以上就是向量表的部分内容，可以看到向量表的第一个元素就是栈指针的初始值，也就是栈底地址。</p> 
+<div> 
+ <span style="color:#000000;">在了解了这两个问题之后，接下来再来看看代码。首先是获取 </span> 
+ <span style="color:#000000;">VTOR </span> 
+ <span style="color:#000000;">的地址，接着获取 </span> 
+</div> 
+<div> 
+ <span style="color:#000000;">VTOR </span> 
+ <span style="color:#000000;">的值，也就是获取向量表的首地址，最后获取向量表中第一个字的数据，也就是栈底指 </span> 
+</div> 
+<div> 
+ <span style="color:#000000;">针了。</span> 
+</div> 
+<div></div> 
+<ul><li><span style="color:#000000;">在获取了栈顶指针后，将MSP指针重新赋值为栈底指针。这个操作相当于丢弃了程序之前保存在栈中的数据，因为FreeRTOS从开启任务调度器到启动第一个任务都是不会返回的，是一条不归路，因此将栈中的数据丢弃，也不会有影响。</span></li><li><span style="color:#000000;">重新赋值MSP后，接下来就重新使能全局中断，因为之前在函数vTaskStartScheduler()中关闭了受FreeRTOS管理的中断。</span></li><li><span style="color:#000000;">最后使用SVC指令，并传入系统调用号0，触发SVC中断</span></li></ul> 
+<h2 id="vPortSVCHandler()%E5%87%BD%E6%95%B0"><span style="color:#000000;">vPortSVCHandler()函数</span></h2> 
+<p>当使能了全局中断，并且手动触发了SVC中断之后，就会进入到SVC的中断服务函数中。SVC的中断服务函数为vPortSVCHandler()，该函数在port.c文件中有定义，具体的代码如下所示：</p> 
+<pre><code class="language-cpp">__asm void vPortSVCHandler( void )
+{
+    /*8字节对齐*/
+	PRESERVE8
+
+	/*获取任务栈地址. */
+	ldr	r3, =pxCurrentTCB /*r3指向优先级最高的就绪态任务的任务控制块*/
+	ldr r1, [r3]           /*r1为任务控制块地址*/
+	ldr r0, [r1]            /*r0为任务控制块的第一个元素（栈顶）*/
+
+	/* 模拟出栈，并设置PSP */ 
+	ldmia r0!, {r4-r11, r14}  /*任务栈弹出到CPU寄存器*/
+	msr psp, r0               /*设置PSP为任务栈指针*/ 
+	isb
+
+    /*使能所有中断*/
+	mov r0, #0
+	msr	basepri, r0
+
+	bx r14    /* 使用 PSP 指针，并跳转到任务函数 */
+}</code></pre> 
+<p>从上面的代码中看出，函数vPortSVCHandler就是用来跳转到第一个任务函数中去的，该函数具体解析如下：</p> 
+<ol><li>首先通过pxCurrentTCB获取优先级最高的就绪任务的任务栈地址，优先级最高的就绪态任务就是系统将要运行的任务。pxCurrentTCB是一个全局变量，用于指向系统中优先级最高的就绪态任务的任务控制块。</li><li>接下来通过任务的栈顶指针，将任务栈中的内容出栈到CPU寄存器中，任务栈中的内容在调用任务创建函数的时候，已经初始化好了，然后再设置PSP指针，那么，这么一来，任务的运行环境就准备好了。</li><li>通过往BASEPRI寄存器中写0，允许中断</li><li>最后通过汇编指令bx r14，使CPU跳转到任务的函数中去执行</li></ol> 
+<p>                r14寄存器为链接寄存器LR，用于保存函数的返回地址。但是在异常或中断处理函数中，r14为EXC_RETURN，这个值的各个比特位有特殊的含义</p> 
+<p><img alt="" height="463" src="https://images2.imgbox.com/3d/b6/JR04MDIk_o.png" width="1182"><img alt="" height="225" src="https://images2.imgbox.com/15/01/naeAdyjz_o.png" width="1200"></p> 
+<div> 
+ <span style="color:#000000;">因为此时是在 </span> 
+ <span style="color:#000000;">SVC </span> 
+ <span style="color:#000000;">的中断服务函数中，因此此时的 </span> 
+ <span style="color:#000000;">r14 </span> 
+ <span style="color:#000000;">应为 </span> 
+ <span style="color:#000000;">EXC_RETURN</span> 
+ <span style="color:#000000;">，将 </span> 
+ <span style="color:#000000;">r14 </span> 
+ <span style="color:#000000;">与 </span> 
+ <span style="color:#000000;">0xd </span> 
+</div> 
+<div> 
+ <span style="color:#000000;">作或操作，然后将值写入 </span> 
+ <span style="color:#000000;">r14</span> 
+ <span style="color:#000000;">，那么就是将 </span> 
+ <span style="color:#000000;">r14 </span> 
+ <span style="color:#000000;">的值设置为了 </span> 
+ <span style="color:#000000;">0xFFFFFFED </span> 
+ <span style="color:#000000;">或 </span> 
+ <span style="color:#000000;">0xFFFFFFED</span> 
+ <span style="color:#000000;">（具 </span> 
+</div> 
+<div> 
+ <span style="color:#000000;">体看是否使用了浮点单元），即返回后进入线程模式，并使用 </span> 
+ <span style="color:#000000;">PSP</span> 
+ <span style="color:#000000;">。这里要注意的是，</span> 
+ <span style="color:#000000;">SVC </span> 
+ <span style="color:#000000;">中断 </span> 
+</div> 
+<div> 
+ <span style="color:#000000;">服务函数的前面，将 </span> 
+ <span style="color:#000000;">PSP </span> 
+ <span style="color:#000000;">指向了任务栈。</span> 
+</div> 
+<div></div> 
+<div> 
+ <span style="color:#000000;">说了这么多，</span> 
+ <span style="color:#000000;">FreeRTOS </span> 
+ <span style="color:#000000;">对于进入中断后 </span> 
+ <span style="color:#000000;">r14 </span> 
+ <span style="color:#000000;">为 </span> 
+ <span style="color:#000000;">EXC_RETURN </span> 
+ <span style="color:#000000;">的具体应用就是，通过判断 </span> 
+</div> 
+<div> 
+ <span style="color:#000000;">EXC_RETURN </span> 
+ <span style="color:#000000;">的 </span> 
+ <span style="color:#000000;">bit4 </span> 
+ <span style="color:#000000;">是否为 </span> 
+ <span style="color:#000000;">0</span> 
+ <span style="color:#000000;">，来判断任务是否使用了浮点单元。 </span> 
+</div> 
+<div> 
+ <span style="color:#000000;">最后通过 </span> 
+ <span style="color:#000000;">bx r14 </span> 
+ <span style="color:#000000;">指令，跳转到任务的任务函数中执行，执行此指令，</span> 
+ <span style="color:#000000;">CPU </span> 
+ <span style="color:#000000;">会自动从 </span> 
+ <span style="color:#000000;">PSP </span> 
+ <span style="color:#000000;">指 </span> 
+</div> 
+<div> 
+ <span style="color:#000000;">向的栈中出栈 </span> 
+ <span style="color:#000000;">R0</span> 
+ <span style="color:#000000;">、</span> 
+ <span style="color:#000000;">R1</span> 
+ <span style="color:#000000;">、</span> 
+ <span style="color:#000000;">R2</span> 
+ <span style="color:#000000;">、</span> 
+ <span style="color:#000000;">R3</span> 
+ <span style="color:#000000;">、</span> 
+ <span style="color:#000000;">R12</span> 
+ <span style="color:#000000;">、</span> 
+ <span style="color:#000000;">LR</span> 
+ <span style="color:#000000;">、</span> 
+ <span style="color:#000000;">PC</span> 
+ <span style="color:#000000;">、</span> 
+ <span style="color:#000000;">xPSR </span> 
+ <span style="color:#000000;">寄存器，并且如果 </span> 
+ <span style="color:#000000;">EXC_RETURN </span> 
+ <span style="color:#000000;">的 </span> 
+</div> 
+<div> 
+ <span style="color:#000000;">bit4 </span> 
+ <span style="color:#000000;">为 </span> 
+ <span style="color:#000000;">0</span> 
+ <span style="color:#000000;">（使用了浮点单元），那么 </span> 
+ <span style="color:#000000;">CPU </span> 
+ <span style="color:#000000;">还会自动恢复浮点寄存器。 </span> 
+</div> 
+<div></div> 
+<h2 id="%E6%80%BB%E7%BB%93"><span style="color:#000000;">总结</span></h2> 
+<p><img alt="" height="716" src="https://images2.imgbox.com/c1/3e/1S1lb66x_o.png" width="749"></p> 
+<p>最后，对于程序是个状态机和计算机是个状态机的理解更加深刻了，最后套用韦老师的一句话：</p> 
+<p>栈是一个真正的幕后英雄🤣 </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/302eb7b8d227f17987a8cfd5055fe345/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【SWAT水文模型】SWAT水文模型建立及应用第六期：SWAT模型率定（SWAT CUP）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/04e8023cde0e0d321bf3edf39aa87de1/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">C#通过API实现抓取wish店铺订单</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

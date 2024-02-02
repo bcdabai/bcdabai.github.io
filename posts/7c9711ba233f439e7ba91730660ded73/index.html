@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>NRF24L01 使用小结/自动应答/通道地址 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="NRF24L01 使用小结/自动应答/通道地址" />
+<meta property="og:description" content="本文来自：http://hi.baidu.com/huyudu
+nrf24L01被设置为接收模式后，可通过6个不同的数据通道（data pipe）接收数据。
+每个数据通道都有一个唯一的地址但是各数据通道的频率是相同的。这意味着可以有6个被配置成发送状态的nRF24L01可以和一个配置成接收状态的nRF24L01通信，并且接收方可以区分（通过判断状态寄存器的1-3位即可达到区分的目的）。
+数据通道0有一个唯一的40bit的可设置的地址。其余的通道1到通道5则地址前32位相同，而后8位不同。所有的数据通道都可以实现Enhanced ShockBurst模式。
+在发送端，数据通道0被用来接收确认信息，因此发送端的数据通道0的地址必须等于发送地址，这样才能收到应答信息。
+当一个24L01发送结束后，它会打开接收器并等待确认。如果没有收到确认，则重发，直到收到确认。当重发超过一定次数则发出中断并改变状态寄存器。重发次数的限制在SETUP_RETR_ARC寄存器中设置。
+无论何时收到确认，都会认为上一个数据包发送成功，这个数据包将被从发送缓冲区清除，并且把TX_DS IRQ置为高。
+每次开始spi写，读回来的都是状态字。
+增强型ShockBurst包格式
+前置域1byte
+地址域3-5byte
+包控制域9bit
+载荷0-32字节
+CRC1-2字节
+地址域是接收机地址
+包控制域
+载荷长度6bit
+Pid2bit
+NO_ACK1bit
+载荷长度：6bit说明最多32字节
+Pid：用于包编号，用于确定是重发包还是新包
+NO_ACK：用于表示是否自动应答，如为1则表示无需自动应答
+自动应答的延时和重发次数是可编程的。
+24L01的工作模式和寄存器及IO口的关系如下
+CE引脚的作用
+一个ESB（Enhanced ShockBurst）周期，发送一个字节连带收到ACK大约339us
+从powerdown状态需要先进入standyby状态，该状态转换需要1.5ms延迟，从standyby状态进入rx/tx状态，需要130us
+置高CE维持最少10us，启动Enhanced ShockBurst发送。
+Enhanced ShockBurst™模式下发送数据流程
+1.配置config寄存器，将PRIM_RX置为0，表示发送模式
+2. 当需要发送数据时，首先需要配置地址TX_ADDR，这个地址应该是接收端地址（即应该是接收端6个data pipe地址中的一个即可保证对方收到）。如果要使用自动应答，因为应答消息由发送端的datapipe0接收，所以发送的datapipe0的地址应等于TX_ADDR（若是和上一次发送是相同地址，则可不用重写地址）。
+3.配置数据负载长度TX_PLD，将需要发送的数据送入nrf24L01，通过SPI连续写入数据载荷时，nrf24L01将自动对字节数计数。（数据载荷必须在cs为低的时候连续写入）
+4.将CE置高并维持最少10us，这个脉冲将启动ShockBurst发送
+5.NRF24L01：
+a)打开射频
+b)启动晶振
+c)数据打包
+d)发送数据
+6.如果启动了自动应答（且重传次数未达到最大值），NRF24L01将自动转入接收状态。
+1：若在规定时间内收到了应答包，则这是一次成功的发送，TX FIFO中的数据被清除，同时置高status寄存器中的TX_DS位。
+2：如果在规定时间内未收到应答包则自动重传（当启用自动重传时，由SETUP_RETR寄存器中的ARC位指定重传次数）。
+3：当重传次数到达最大值依然没有收到应答，则status寄存器中的MAX_RT被置高，TX FIFO缓冲区中的数据并不被移除。
+MAX_RT或TX_DS被置高都会在IRQ引脚上引起中断（低电平有效，重写status寄存器中的对应位可清除）。在到达最大重传次数并引发中断后，在没有清除MAX_RT之前，任何数据都不能发送。每次发生MAX_RT中断，PLOS_CNT计数器都会加1，用于统计丢包数。
+7.CE置低以后，设备进入STANDBY_I状态。否则TX FIFO缓冲区中的下一个数据载荷将被发送。如果数据缓冲区空，而CE仍然为高，设备将进入STANDBY-II模式。
+8.如果设备处于STANDBY-II模式，当CE置低后，设备将进入STANDBY-I模式。
+（STANDBY模式可减少电流的消耗，在该模式下，SPI通信仍然可以完成）
+Enhanced ShockBurst™模式下接收数据流程
+1.设置config寄存器中的PRIM_RX为1，且置CE为高
+2.130us之后，NRF24L01开始监视射频信号
+3. 当合法的包被接收到（地址匹配），数据被存储到RX-FIFO缓冲区中，status寄存器中的RX_DR被置高，IRQ引脚同时发出中断信号（如果未屏蔽该信号）。Status寄存器中的RX_P_NO指示这个应该接收该数据的DATA PIPE号。
+4.如果自动应答启用的话，一个应答信号将被发出
+5.MCU将CE置为低将进入STANDBY-I模式
+6.MCU可通过SPI读出接收到的数据
+另外：关于24L01组网想说明几点应注意的地方：
+（1）注意地址的分配" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/7c9711ba233f439e7ba91730660ded73/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2013-04-26T17:08:31+08:00" />
+<meta property="article:modified_time" content="2013-04-26T17:08:31+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">NRF24L01 使用小结/自动应答/通道地址</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>本文来自：http://hi.baidu.com/huyudu<br> </p> 
+<p></p> 
+<div id="content" class="content mod-cs-content text-content clearfix"> 
+ <p>nrf24L01被设置为接收模式后，可通过6个不同的数据通道（data pipe）接收数据。</p> 
+ <p>每个数据通道都有一个唯一的地址但是各数据通道的频率是相同的。这意味着可以有6个被配置成发送状态的nRF24L01可以和一个配置成接收状态的nRF24L01通信，并且接收方可以区分（通过判断状态寄存器的1-3位即可达到区分的目的）。</p> 
+ <p>数据通道0有一个唯一的40bit的可设置的地址。其余的通道1到通道5则地址前32位相同，而后8位不同。所有的数据通道都可以实现Enhanced ShockBurst模式。</p> 
+ <p>在发送端，数据通道0被用来接收确认信息，因此发送端的数据通道0的地址必须等于发送地址，这样才能收到应答信息。</p> 
+ <p>当一个24L01发送结束后，它会打开接收器并等待确认。如果没有收到确认，则重发，直到收到确认。当重发超过一定次数则发出中断并改变状态寄存器。重发次数的限制在SETUP_RETR_ARC寄存器中设置。</p> 
+ <p>无论何时收到确认，都会认为上一个数据包发送成功，这个数据包将被从发送缓冲区清除，并且把TX_DS IRQ置为高。</p> 
+ <p>每次开始spi写，读回来的都是状态字。</p> 
+ <p> </p> 
+ <p>增强型ShockBurst包格式</p> 
+ <p>前置域1byte</p> 
+ <p>地址域3-5byte</p> 
+ <p>包控制域9bit</p> 
+ <p>载荷0-32字节</p> 
+ <p>CRC1-2字节</p> 
+ <p>地址域是接收机地址</p> 
+ <p>包控制域</p> 
+ <p>载荷长度6bit</p> 
+ <p>Pid2bit</p> 
+ <p>NO_ACK1bit</p> 
+ <p>载荷长度：6bit说明最多32字节</p> 
+ <p>Pid：用于包编号，用于确定是重发包还是新包</p> 
+ <p>NO_ACK：用于表示是否自动应答，如为1则表示无需自动应答</p> 
+ <p>自动应答的延时和重发次数是可编程的。</p> 
+ <p> </p> 
+ <p>24L01的工作模式和寄存器及IO口的关系如下</p> 
+ <p>CE引脚的作用</p> 
+ <p>一个ESB（Enhanced ShockBurst）周期，发送一个字节连带收到ACK大约339us</p> 
+ <p>从powerdown状态需要先进入standyby状态，该状态转换需要1.5ms延迟，从standyby状态进入rx/tx状态，需要130us</p> 
+ <p>置高CE维持最少10us，启动Enhanced ShockBurst发送。</p> 
+ <p> </p> 
+ <p>Enhanced ShockBurst™模式下发送数据流程</p> 
+ <p>1.配置config寄存器，将PRIM_RX置为0，表示发送模式</p> 
+ <p>2. 当需要发送数据时，首先需要配置地址TX_ADDR，这个地址应该是接收端地址（即应该是接收端6个data pipe地址中的一个即可保证对方收到）。如果要使用自动应答，因为应答消息由发送端的datapipe0接收，所以发送的datapipe0的地址应等于TX_ADDR（若是和上一次发送是相同地址，则可不用重写地址）。</p> 
+ <p>3.配置数据负载长度TX_PLD，将需要发送的数据送入nrf24L01，通过SPI连续写入数据载荷时，nrf24L01将自动对字节数计数。（数据载荷必须在cs为低的时候连续写入）</p> 
+ <p>4.将CE置高并维持最少10us，这个脉冲将启动ShockBurst发送</p> 
+ <p>5.NRF24L01：</p> 
+ <p>    a)打开射频</p> 
+ <p>    b)启动晶振</p> 
+ <p>    c)数据打包</p> 
+ <p>    d)发送数据</p> 
+ <p>6.如果启动了自动应答（且重传次数未达到最大值），NRF24L01将自动转入接收状态。</p> 
+ <p>  1：若在规定时间内收到了应答包，则这是一次成功的发送，TX FIFO中的数据被清除，同时置高status寄存器中的TX_DS位。</p> 
+ <p>  2：如果在规定时间内未收到应答包则自动重传（当启用自动重传时，由SETUP_RETR寄存器中的ARC位指定重传次数）。</p> 
+ <p>  3：当重传次数到达最大值依然没有收到应答，则status寄存器中的MAX_RT被置高，TX FIFO缓冲区中的数据并不被移除。</p> 
+ <p>MAX_RT或TX_DS被置高都会在IRQ引脚上引起中断（低电平有效，重写status寄存器中的对应位可清除）。在到达最大重传次数并引发中断后，在没有清除MAX_RT之前，任何数据都不能发送。每次发生MAX_RT中断，PLOS_CNT计数器都会加1，用于统计丢包数。</p> 
+ <p>7.CE置低以后，设备进入STANDBY_I状态。否则TX FIFO缓冲区中的下一个数据载荷将被发送。如果数据缓冲区空，而CE仍然为高，设备将进入STANDBY-II模式。</p> 
+ <p>8.如果设备处于STANDBY-II模式，当CE置低后，设备将进入STANDBY-I模式。<br> （STANDBY模式可减少电流的消耗，在该模式下，SPI通信仍然可以完成）</p> 
+ <p> </p> 
+ <p>Enhanced ShockBurst™模式下接收数据流程</p> 
+ <p>1.设置config寄存器中的PRIM_RX为1，且置CE为高</p> 
+ <p>2.130us之后，NRF24L01开始监视射频信号</p> 
+ <p>3. 当合法的包被接收到（地址匹配），数据被存储到RX-FIFO缓冲区中，status寄存器中的RX_DR被置高，IRQ引脚同时发出中断信号（如果未屏蔽该信号）。Status寄存器中的RX_P_NO指示这个应该接收该数据的DATA PIPE号。</p> 
+ <p>4.如果自动应答启用的话，一个应答信号将被发出</p> 
+ <p>5.MCU将CE置为低将进入STANDBY-I模式</p> 
+ <p>6.MCU可通过SPI读出接收到的数据</p> 
+ <p> </p> 
+ <p>另外：关于24L01组网想说明几点应注意的地方：</p> 
+ <p>（1）注意地址的分配</p> 
+ <p>文档中明确说明只有通道0具有5个字节的可配置地址，其他的5个节点都只有1字节可自由配置地址，</p> 
+ <p>比如可以在接收节点这样配置：uint const RXADR0[RX_ADR_WIDTH]= {0x34,0x43,0x10,0x10,0x01};   //接收地址</p> 
+ <p>uint const RXADR1[RX_ADR_WIDTH]= {0xc2,0xc2,0xc2,0xc2,0xc1};     //通道1地址</p> 
+ <p>uint const RXADR2[1]= {0xc2};         //通道2地址</p> 
+ <p>uint const RXADR3[1]= {0xc3};         //通道3地址</p> 
+ <p>uint const RXADR4[1]= {0xc4};         //通道4地址</p> 
+ <p>uint const RXADR5[1]= {0xc5};         //通道5地址</p> 
+ <p>然后将各发送节点地址与接收端相应通道地址设置相同即可</p> 
+ <p>（2）接收节点对各发送节点进行区分</p> 
+ <p>这个就是判断状态寄存器的1-3位即可达到区分的目的</p> 
+</div> 
+<br> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/81d1d3c66d5e2ef254e7c56b14b625c3/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">温度场有限容积法程序入门之四：网格剖分.边界条件设置.迭代.导出后处理数据</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/0684564bd70c05f884604b1cbe94ef63/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">将多个excel表格打包成一个压缩包文件</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

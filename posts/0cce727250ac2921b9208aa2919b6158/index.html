@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>shared memory 优化 gpu 的 归并排序 merge sort - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="shared memory 优化 gpu 的 归并排序 merge sort" />
+<meta property="og:description" content="cuda归并排序的shared memory 优化 在之前的 gpu 归并排序的程序中，没有使用shared memory 进行优化。
+后来仔细分析之后发现，前面的好几步合并需要多次读取局部内存，如果加载到shared memory中说不定可以实现一定程度的优化。
+整个合并过程可以分为两个阶段（如下图所示）：
+第一个阶段：小规模数组的合并 在block内部进行，block中用到的数据加载到共享内存，多线程的 thread需在 steps 间同步各个 step 的并行度逐步下降，因为需要合并的数组段数越来越少，空闲线程越来越多。 第二个阶段：大规模数组的合并，使用 block 间的并行。同样，efficiency 会逐步降低，因为随着合并的进行，数组的段数越来越少，能同时发挥作用的进程数也越来越小。 感觉归并排序的合并过程，与 reduce 规约操作有相似之处，reduce 是从多个数到一个数，而归并排序是从多段数组到一段数组。
+基于上述的操作步骤，代码如下：
+#include &#34;cuda_runtime.h&#34; #include &#34;device_launch_parameters.h&#34; #include &lt;time.h&gt; #include &lt;stdio.h&gt; #include &lt;math.h&gt; #include &lt;vector&gt; #include &lt;memory&gt; #include &lt;iostream&gt; #include &lt;algorithm&gt; #define BIG (1e7) // #define DEBUG using namespace std; template&lt;typename theIterator&gt; void print(theIterator begin, theIterator end); template&lt;typename T&gt; __device__ void mergeVec_half_device(T *A, T *tmp, const int64_t vSize) { /* splict the vector A into two halfs * merge these two half together * * tmp is a temporary vector to * receive the merge result */ int64_t left = 0; int64_t right = left &#43; vSize - 1; int64_t mid = (left &#43; right) / 2; int64_t i = left, j = mid &#43; 1, k = left; // index of left half, right half, and the mergeVec while ((i &lt;= mid) &amp;&amp; (j &lt;= right)) { if (A[i] &lt;= A[j]) { tmp[k] = A[i]; &#43;&#43;i; &#43;&#43;k; } else { tmp[k] = A[j]; &#43;&#43;j; &#43;&#43;k; } } if (i &gt; mid) { for (; j &lt;= right; &#43;&#43;j, &#43;&#43;k) { tmp[k] = A[j]; } } else { for (; i &lt;= mid; &#43;&#43;i, &#43;&#43;k) { tmp[k] = A[i]; } } /// copy tmp to A for (k = left; k &lt;= right; &#43;&#43;k) { A[k] = tmp[k]; } } template&lt;typename T&gt; __global__ void mergeVec_half_global(T *A, T *tmp, const int64_t vSize) { /* splict the vector A into two halfs * merge these two half together * * tmp is a temporary vector to * receive the merge result */ int64_t left = blockIdx." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/0cce727250ac2921b9208aa2919b6158/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-10-17T22:40:07+08:00" />
+<meta property="article:modified_time" content="2022-10-17T22:40:07+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">shared memory 优化 gpu 的 归并排序 merge sort</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="cudashared_memory__0"></a>cuda归并排序的shared memory 优化</h2> 
+<p>在之前的 <a href="https://blog.csdn.net/weixin_43414513/article/details/122756899">gpu 归并排序</a>的程序中，没有使用shared memory 进行优化。<br> 后来仔细分析之后发现，前面的好几步合并需要多次读取局部内存，如果加载到shared memory中说不定可以实现一定程度的优化。<br> 整个合并过程可以分为两个阶段（如下图所示）：</p> 
+<ul><li>第一个阶段：小规模数组的合并 
+  <ul><li>在block内部进行，block中用到的数据加载到共享内存，多线程的 thread需在 steps 间同步</li><li>各个 step 的并行度逐步下降，因为需要合并的数组段数越来越少，空闲线程越来越多。</li></ul> </li><li>第二个阶段：大规模数组的合并，使用 block 间的并行。同样，efficiency 会逐步降低，因为随着合并的进行，数组的段数越来越少，能同时发挥作用的进程数也越来越小。</li></ul> 
+<p>感觉归并排序的合并过程，与 reduce 规约操作有相似之处，reduce 是从多个数到一个数，而归并排序是从多段数组到一段数组。<br> <img src="https://images2.imgbox.com/7c/35/St2Zh0gm_o.png" alt="在这里插入图片描述"><br> 基于上述的操作步骤，代码如下：</p> 
+<pre><code class="prism language-cpp"><span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"cuda_runtime.h"</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">"device_launch_parameters.h"</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;time.h&gt;</span> </span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;stdio.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;math.h&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;vector&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;memory&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;iostream&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">include</span> <span class="token string">&lt;algorithm&gt;</span></span>
+<span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">define</span> <span class="token macro-name">BIG</span> <span class="token expression"><span class="token punctuation">(</span><span class="token number">1e7</span><span class="token punctuation">)</span></span></span>
+<span class="token comment">// #define DEBUG</span>
+<span class="token keyword">using</span> <span class="token keyword">namespace</span> std<span class="token punctuation">;</span>
+<span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">theIterator</span><span class="token operator">&gt;</span> <span class="token keyword">void</span> <span class="token function">print</span><span class="token punctuation">(</span>theIterator begin<span class="token punctuation">,</span> theIterator end<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+<span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">T</span><span class="token operator">&gt;</span> 
+__device__ <span class="token keyword">void</span>
+<span class="token function">mergeVec_half_device</span><span class="token punctuation">(</span>T <span class="token operator">*</span>A<span class="token punctuation">,</span> T <span class="token operator">*</span>tmp<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">int64_t</span> vSize<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/* splict the vector A into two halfs
+     * merge these two half together
+     *
+     * tmp is a temporary vector to 
+     * receive the merge result
+     */</span>
+
+    <span class="token keyword">int64_t</span> left <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">int64_t</span> right <span class="token operator">=</span> left <span class="token operator">+</span> vSize <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token keyword">int64_t</span> mid <span class="token operator">=</span> <span class="token punctuation">(</span>left <span class="token operator">+</span> right<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">int64_t</span> i <span class="token operator">=</span> left<span class="token punctuation">,</span> j <span class="token operator">=</span> mid <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">,</span> k <span class="token operator">=</span> left<span class="token punctuation">;</span>  <span class="token comment">// index of left half, right half, and the mergeVec</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>i <span class="token operator">&lt;=</span> mid<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span>j <span class="token operator">&lt;=</span> right<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>A<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">&lt;=</span> A<span class="token punctuation">[</span>j<span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            tmp<span class="token punctuation">[</span>k<span class="token punctuation">]</span> <span class="token operator">=</span> A<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">;</span>
+            <span class="token operator">++</span>i<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            tmp<span class="token punctuation">[</span>k<span class="token punctuation">]</span> <span class="token operator">=</span> A<span class="token punctuation">[</span>j<span class="token punctuation">]</span><span class="token punctuation">;</span>
+            <span class="token operator">++</span>j<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>i <span class="token operator">&gt;</span> mid<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span> j <span class="token operator">&lt;=</span> right<span class="token punctuation">;</span> <span class="token operator">++</span>j<span class="token punctuation">,</span> <span class="token operator">++</span>k<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            tmp<span class="token punctuation">[</span>k<span class="token punctuation">]</span> <span class="token operator">=</span> A<span class="token punctuation">[</span>j<span class="token punctuation">]</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span> i <span class="token operator">&lt;=</span> mid<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">,</span> <span class="token operator">++</span>k<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            tmp<span class="token punctuation">[</span>k<span class="token punctuation">]</span> <span class="token operator">=</span> A<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">/// copy tmp to A</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span>k <span class="token operator">=</span> left<span class="token punctuation">;</span> k <span class="token operator">&lt;=</span> right<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        A<span class="token punctuation">[</span>k<span class="token punctuation">]</span> <span class="token operator">=</span> tmp<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+
+<span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">T</span><span class="token operator">&gt;</span> 
+__global__ <span class="token keyword">void</span>
+<span class="token function">mergeVec_half_global</span><span class="token punctuation">(</span>T <span class="token operator">*</span>A<span class="token punctuation">,</span> T <span class="token operator">*</span>tmp<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">int64_t</span> vSize<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/* splict the vector A into two halfs
+     * merge these two half together
+     *
+     * tmp is a temporary vector to 
+     * receive the merge result
+     */</span>
+
+    <span class="token keyword">int64_t</span> left <span class="token operator">=</span> blockIdx<span class="token punctuation">.</span>x <span class="token operator">*</span> vSize<span class="token punctuation">;</span>
+    <span class="token keyword">int64_t</span> right <span class="token operator">=</span> left <span class="token operator">+</span> vSize <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token keyword">int64_t</span> mid <span class="token operator">=</span> <span class="token punctuation">(</span>left <span class="token operator">+</span> right<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">int64_t</span> i <span class="token operator">=</span> left<span class="token punctuation">,</span> j <span class="token operator">=</span> mid <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">,</span> k <span class="token operator">=</span> left<span class="token punctuation">;</span>  <span class="token comment">// index of left half, right half, and the mergeVec</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span><span class="token punctuation">(</span>i <span class="token operator">&lt;=</span> mid<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token punctuation">(</span>j <span class="token operator">&lt;=</span> right<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>A<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">&lt;=</span> A<span class="token punctuation">[</span>j<span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            tmp<span class="token punctuation">[</span>k<span class="token punctuation">]</span> <span class="token operator">=</span> A<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">;</span>
+            <span class="token operator">++</span>i<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            tmp<span class="token punctuation">[</span>k<span class="token punctuation">]</span> <span class="token operator">=</span> A<span class="token punctuation">[</span>j<span class="token punctuation">]</span><span class="token punctuation">;</span>
+            <span class="token operator">++</span>j<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>i <span class="token operator">&gt;</span> mid<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span> j <span class="token operator">&lt;=</span> right<span class="token punctuation">;</span> <span class="token operator">++</span>j<span class="token punctuation">,</span> <span class="token operator">++</span>k<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            tmp<span class="token punctuation">[</span>k<span class="token punctuation">]</span> <span class="token operator">=</span> A<span class="token punctuation">[</span>j<span class="token punctuation">]</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span> i <span class="token operator">&lt;=</span> mid<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">,</span> <span class="token operator">++</span>k<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            tmp<span class="token punctuation">[</span>k<span class="token punctuation">]</span> <span class="token operator">=</span> A<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">/// copy tmp to A</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span>k <span class="token operator">=</span> left<span class="token punctuation">;</span> k <span class="token operator">&lt;=</span> right<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        A<span class="token punctuation">[</span>k<span class="token punctuation">]</span> <span class="token operator">=</span> tmp<span class="token punctuation">[</span>k<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+
+<span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">T</span><span class="token operator">&gt;</span> 
+__global__ <span class="token keyword">void</span> 
+<span class="token function">mergeSort_power2n_shared</span><span class="token punctuation">(</span>T <span class="token operator">*</span>A<span class="token punctuation">,</span> T <span class="token operator">*</span>tmp<span class="token punctuation">,</span> <span class="token keyword">const</span> <span class="token keyword">int64_t</span> vSize<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">/* 
+     *  parallely sort each block (with size of power(2, n)) of a vector
+     *  each block is sorted hierarchically by syncthreads
+     *      (synchronize the thread at each step of merge vector)
+     *  when the thread finishes, the sort of each block is finished.
+    */</span>
+
+    <span class="token comment">/// copy A and tmp to the shared memory</span>
+    <span class="token keyword">extern</span> __shared__ T sharedArray<span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    T <span class="token operator">*</span>s_A <span class="token operator">=</span> <span class="token operator">&amp;</span><span class="token punctuation">(</span>sharedArray<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    T <span class="token operator">*</span>s_tmp <span class="token operator">=</span> <span class="token operator">&amp;</span><span class="token punctuation">(</span>sharedArray<span class="token punctuation">[</span>blockDim<span class="token punctuation">.</span>x<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">// __shared__ T s_A[blockDim.x], s_tmp[blockDim.x];</span>
+    s_A<span class="token punctuation">[</span>threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">]</span> <span class="token operator">=</span> A<span class="token punctuation">[</span>blockIdx<span class="token punctuation">.</span>x <span class="token operator">*</span> blockDim<span class="token punctuation">.</span>x <span class="token operator">+</span> threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    s_tmp<span class="token punctuation">[</span>threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">]</span> <span class="token operator">=</span> tmp<span class="token punctuation">[</span>blockIdx<span class="token punctuation">.</span>x <span class="token operator">*</span> blockDim<span class="token punctuation">.</span>x <span class="token operator">+</span> threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token function">__syncthreads</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/// merge hierarchically</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int64_t</span> i <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">;</span> i <span class="token operator">&lt;=</span> blockDim<span class="token punctuation">.</span>x<span class="token punctuation">;</span> i <span class="token operator">&lt;&lt;=</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">// i is the size of vector to be sorted at each step</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>threadIdx<span class="token punctuation">.</span>x <span class="token operator">%</span> i <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">mergeVec_half_device</span><span class="token punctuation">(</span><span class="token operator">&amp;</span><span class="token punctuation">(</span>s_A<span class="token punctuation">[</span>threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span><span class="token punctuation">(</span>s_tmp<span class="token punctuation">[</span>threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">,</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token function">__syncthreads</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">/// data from shared_memory to global memory</span>
+    A<span class="token punctuation">[</span>blockIdx<span class="token punctuation">.</span>x <span class="token operator">*</span> blockDim<span class="token punctuation">.</span>x <span class="token operator">+</span> threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">]</span> <span class="token operator">=</span> s_A<span class="token punctuation">[</span>threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    tmp<span class="token punctuation">[</span>blockIdx<span class="token punctuation">.</span>x <span class="token operator">*</span> blockDim<span class="token punctuation">.</span>x <span class="token operator">+</span> threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">]</span> <span class="token operator">=</span> s_tmp<span class="token punctuation">[</span>threadIdx<span class="token punctuation">.</span>x<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token function">__syncthreads</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+
+<span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">theIterator</span><span class="token punctuation">,</span> <span class="token keyword">typename</span> <span class="token class-name">T</span><span class="token operator">&gt;</span> <span class="token keyword">void</span> 
+<span class="token function">mergeSort_power2n</span><span class="token punctuation">(</span>theIterator begin<span class="token punctuation">,</span> theIterator end<span class="token punctuation">,</span> T args<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">/* 
+        sort a vector with size of power(2, n)
+    */</span>
+    clock_t begT<span class="token punctuation">,</span> endT<span class="token punctuation">;</span>
+    cudaDeviceProp devProp<span class="token punctuation">;</span>
+    <span class="token function">cudaGetDeviceProperties</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>devProp<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    T <span class="token operator">*</span>dataA<span class="token punctuation">,</span> <span class="token operator">*</span>dataTmp<span class="token punctuation">;</span>
+    <span class="token keyword">const</span> <span class="token keyword">int64_t</span> vSize <span class="token operator">=</span> end <span class="token operator">-</span> begin<span class="token punctuation">;</span>
+    <span class="token function">cudaMalloc</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token operator">*</span><span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>dataA<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>begin<span class="token punctuation">)</span> <span class="token operator">*</span> vSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">cudaMalloc</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">void</span><span class="token operator">*</span><span class="token operator">*</span><span class="token punctuation">)</span><span class="token operator">&amp;</span>dataTmp<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>begin<span class="token punctuation">)</span> <span class="token operator">*</span> vSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">DEBUG</span></span>
+    <span class="token keyword">int64_t</span> n <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>vSize <span class="token operator">&gt;=</span> <span class="token number">2</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int64_t</span> i <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> vSize<span class="token punctuation">;</span> i <span class="token operator">&lt;&lt;=</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            n <span class="token operator">+=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">/// check whether n is correct</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token keyword">int64_t</span><span class="token punctuation">)</span><span class="token number">1</span> <span class="token operator">&lt;&lt;</span> n<span class="token punctuation">)</span> <span class="token operator">&gt;</span> vSize<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        cerr <span class="token operator">&lt;&lt;</span> <span class="token string">"\033[31;1m error! vSize != 2 ** n \033[0m"</span><span class="token punctuation">;</span>
+        <span class="token function">exit</span><span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+
+    begT <span class="token operator">=</span> <span class="token function">clock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">cudaMemcpy</span><span class="token punctuation">(</span>dataA<span class="token punctuation">,</span> <span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token operator">*</span>begin<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>begin<span class="token punctuation">)</span> <span class="token operator">*</span> vSize<span class="token punctuation">,</span> cudaMemcpyHostToDevice<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/// merge hierarchically</span>
+    <span class="token keyword">int64_t</span> shared_nums <span class="token operator">=</span> devProp<span class="token punctuation">.</span>sharedMemPerBlock <span class="token operator">/</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>begin<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">int64_t</span> blockSize<span class="token punctuation">,</span> maxBlockSize<span class="token punctuation">;</span>  <span class="token comment">// threads per block</span>
+    <span class="token keyword">int64_t</span> gridSize <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>  <span class="token comment">// blocks per grid</span>
+
+    <span class="token comment">/* here each thread needs 2 nums of shared memory, 
+       hence, use maximum size of shared memory to define the max block size */</span>
+    maxBlockSize <span class="token operator">=</span> shared_nums <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">;</span>  <span class="token comment">// partition by array and tmp</span>
+    <span class="token comment">/* the maximum block size can not exceed maxThreadsPerBlock of device  */</span>
+    maxBlockSize <span class="token operator">=</span> <span class="token function">min</span><span class="token punctuation">(</span>maxBlockSize<span class="token punctuation">,</span> <span class="token punctuation">(</span><span class="token keyword">int64_t</span><span class="token punctuation">)</span>devProp<span class="token punctuation">.</span>maxThreadsPerBlock<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>vSize <span class="token operator">&gt;</span> maxBlockSize<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">// vSize very big</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span>blockSize <span class="token operator">=</span> vSize<span class="token punctuation">;</span> blockSize <span class="token operator">&gt;</span> maxBlockSize<span class="token punctuation">;</span> <span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            blockSize <span class="token operator">&gt;&gt;=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        gridSize <span class="token operator">=</span> <span class="token punctuation">(</span>vSize <span class="token operator">+</span> blockSize <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token operator">/</span> blockSize<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>  <span class="token comment">// vSize not that big</span>
+        blockSize <span class="token operator">=</span> vSize<span class="token punctuation">;</span>
+        gridSize <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">DEBUG</span></span>
+        cout <span class="token operator">&lt;&lt;</span> <span class="token string">"devProp.sharedMemPerBlock = "</span> <span class="token operator">&lt;&lt;</span> devProp<span class="token punctuation">.</span>sharedMemPerBlock <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+        cout <span class="token operator">&lt;&lt;</span> <span class="token string">"blockSize = "</span> <span class="token operator">&lt;&lt;</span> blockSize <span class="token operator">&lt;&lt;</span> <span class="token string">", gridSize = "</span> <span class="token operator">&lt;&lt;</span> gridSize <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+        cout <span class="token operator">&lt;&lt;</span> <span class="token string">"vSize = "</span> <span class="token operator">&lt;&lt;</span> vSize <span class="token operator">&lt;&lt;</span> <span class="token string">", maxBlockSize = "</span> <span class="token operator">&lt;&lt;</span> maxBlockSize <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+        cout <span class="token operator">&lt;&lt;</span> <span class="token string">"sizeof(*begin) * blockSize * 2 = "</span> <span class="token operator">&lt;&lt;</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>begin<span class="token punctuation">)</span> <span class="token operator">*</span> blockSize <span class="token operator">*</span> <span class="token number">2</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+    <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+
+    <span class="token comment">/// sort each block respectively</span>
+    mergeSort_power2n_shared <span class="token operator">&lt;&lt;</span><span class="token operator">&lt;</span>gridSize<span class="token punctuation">,</span> blockSize<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>begin<span class="token punctuation">)</span> <span class="token operator">*</span> blockSize <span class="token operator">*</span> <span class="token number">2</span><span class="token operator">&gt;&gt;</span><span class="token operator">&gt;</span> <span class="token punctuation">(</span>dataA<span class="token punctuation">,</span> dataTmp<span class="token punctuation">,</span> vSize<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    cudaError_t err <span class="token operator">=</span> <span class="token function">cudaGetLastError</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>err <span class="token operator">!=</span> cudaSuccess<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        cerr <span class="token operator">&lt;&lt;</span> <span class="token string">"mergeSort_power2n_shared, CUDA Error: "</span> <span class="token operator">&lt;&lt;</span> <span class="token function">cudaGetErrorString</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+        <span class="token comment">// Possibly: exit(-1) if program cannot continue....</span>
+    <span class="token punctuation">}</span> 
+
+    <span class="token comment">/// the parallelly merge all blocks</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int64_t</span> i <span class="token operator">=</span> blockSize <span class="token operator">*</span> <span class="token number">2</span><span class="token punctuation">;</span> i <span class="token operator">&lt;=</span> vSize<span class="token punctuation">;</span> i <span class="token operator">&lt;&lt;=</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        mergeVec_half_global <span class="token operator">&lt;&lt;</span><span class="token operator">&lt;</span>vSize <span class="token operator">/</span> i<span class="token punctuation">,</span> <span class="token number">1</span><span class="token operator">&gt;&gt;</span><span class="token operator">&gt;</span> <span class="token punctuation">(</span>dataA<span class="token punctuation">,</span> dataTmp<span class="token punctuation">,</span> i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        cudaError_t err <span class="token operator">=</span> <span class="token function">cudaGetLastError</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>err <span class="token operator">!=</span> cudaSuccess<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            cerr <span class="token operator">&lt;&lt;</span> <span class="token string">"mergeVec_half_global, CUDA Error: "</span> <span class="token operator">&lt;&lt;</span> <span class="token function">cudaGetErrorString</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+            <span class="token comment">// Possibly: exit(-1) if program cannot continue....</span>
+        <span class="token punctuation">}</span> 
+        <span class="token comment">// cudaDeviceSynchronize();  // no need to synchronize here, because kernel2 will wait for kernel1</span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">ifdef</span> <span class="token expression">DEBUG</span></span>
+            <span class="token function">cudaMemcpy</span><span class="token punctuation">(</span><span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token operator">*</span>begin<span class="token punctuation">)</span><span class="token punctuation">,</span> dataA<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>begin<span class="token punctuation">)</span> <span class="token operator">*</span> vSize<span class="token punctuation">,</span> cudaMemcpyDeviceToHost<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            cout <span class="token operator">&lt;&lt;</span> <span class="token string">"merging Vector, vec = "</span><span class="token punctuation">;</span>
+            <span class="token function">print</span><span class="token punctuation">(</span>begin<span class="token punctuation">,</span> end<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token macro property"><span class="token directive-hash">#</span><span class="token directive keyword">endif</span></span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/// data from device to host</span>
+    <span class="token function">cudaMemcpy</span><span class="token punctuation">(</span><span class="token operator">&amp;</span><span class="token punctuation">(</span><span class="token operator">*</span>begin<span class="token punctuation">)</span><span class="token punctuation">,</span> dataA<span class="token punctuation">,</span> <span class="token keyword">sizeof</span><span class="token punctuation">(</span><span class="token operator">*</span>begin<span class="token punctuation">)</span> <span class="token operator">*</span> vSize<span class="token punctuation">,</span> cudaMemcpyDeviceToHost<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    endT <span class="token operator">=</span> <span class="token function">clock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    cout <span class="token operator">&lt;&lt;</span> <span class="token string">"inside GPU operation, time = "</span> <span class="token operator">&lt;&lt;</span> endT <span class="token operator">-</span> begT <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+
+    <span class="token function">cudaFree</span><span class="token punctuation">(</span>dataA<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">cudaFree</span><span class="token punctuation">(</span>dataTmp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">theIterator</span><span class="token operator">&gt;</span> <span class="token keyword">inline</span> <span class="token keyword">void</span> 
+<span class="token function">mergeSort_power2n</span><span class="token punctuation">(</span>theIterator begin<span class="token punctuation">,</span> theIterator end<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">mergeSort_power2n</span><span class="token punctuation">(</span>begin<span class="token punctuation">,</span> end<span class="token punctuation">,</span> <span class="token operator">*</span>begin<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+
+<span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">theIterator</span><span class="token punctuation">,</span> <span class="token keyword">typename</span> <span class="token class-name">T</span><span class="token operator">&gt;</span> <span class="token keyword">void</span>
+<span class="token function">mergeVec</span><span class="token punctuation">(</span>
+    theIterator beg1<span class="token punctuation">,</span> theIterator end1<span class="token punctuation">,</span>
+    theIterator beg2<span class="token punctuation">,</span> theIterator end2<span class="token punctuation">,</span>
+    T args
+<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">/* 
+     * merge 2 vectors with arbitrary length
+     * of each vector
+     */</span>
+    vector<span class="token operator">&lt;</span>T<span class="token operator">&gt;</span> <span class="token function">tmp</span><span class="token punctuation">(</span><span class="token punctuation">(</span>end1 <span class="token operator">-</span> beg1<span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">(</span>end2 <span class="token operator">-</span> beg2<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    theIterator i <span class="token operator">=</span> beg1<span class="token punctuation">,</span> j <span class="token operator">=</span> beg2<span class="token punctuation">;</span>
+    theIterator k <span class="token operator">=</span> tmp<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">while</span><span class="token punctuation">(</span>i <span class="token operator">!=</span> end1 <span class="token operator">&amp;&amp;</span> j <span class="token operator">!=</span> end2<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">*</span>i <span class="token operator">&lt;=</span> <span class="token operator">*</span>j<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token operator">*</span>k <span class="token operator">=</span> <span class="token operator">*</span>i<span class="token punctuation">;</span>
+            <span class="token operator">++</span>i<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token operator">*</span>k <span class="token operator">=</span> <span class="token operator">*</span>j<span class="token punctuation">;</span>
+            <span class="token operator">++</span>j<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>i <span class="token operator">==</span> end1<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">while</span> <span class="token punctuation">(</span>j <span class="token operator">!=</span> end2<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token operator">*</span>k <span class="token operator">=</span> <span class="token operator">*</span>j<span class="token punctuation">;</span>
+            <span class="token operator">++</span>j<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">while</span> <span class="token punctuation">(</span>i <span class="token operator">!=</span> end1<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token operator">*</span>k <span class="token operator">=</span> <span class="token operator">*</span>i<span class="token punctuation">;</span>
+            <span class="token operator">++</span>i<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">/// copy tmp to original vectors</span>
+    k <span class="token operator">=</span> tmp<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span>i <span class="token operator">=</span> beg1<span class="token punctuation">;</span> i <span class="token operator">!=</span> end1<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">,</span> <span class="token operator">++</span>k<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token operator">*</span>i <span class="token operator">=</span> <span class="token operator">*</span>k<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span>j <span class="token operator">=</span> beg2<span class="token punctuation">;</span> j <span class="token operator">!=</span> end2<span class="token punctuation">;</span> <span class="token operator">++</span>j<span class="token punctuation">,</span> <span class="token operator">++</span>k<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token operator">*</span>j <span class="token operator">=</span> <span class="token operator">*</span>k<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">theIterator</span><span class="token operator">&gt;</span> <span class="token keyword">inline</span> <span class="token keyword">void</span> 
+<span class="token function">mergeVec</span><span class="token punctuation">(</span>theIterator beg1<span class="token punctuation">,</span> theIterator end1<span class="token punctuation">,</span> theIterator beg2<span class="token punctuation">,</span> theIterator end2<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">mergeVec</span><span class="token punctuation">(</span>beg1<span class="token punctuation">,</span> end1<span class="token punctuation">,</span> beg2<span class="token punctuation">,</span> end2<span class="token punctuation">,</span> <span class="token operator">*</span>beg1<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+
+<span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">vec</span><span class="token operator">&gt;</span> <span class="token keyword">void</span> 
+<span class="token function">mergeSort_gpu</span><span class="token punctuation">(</span>vec <span class="token operator">&amp;</span>A<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">/* can deal with arbitary size of vector */</span>
+    vector<span class="token operator">&lt;</span><span class="token keyword">bool</span><span class="token operator">&gt;</span> binA<span class="token punctuation">;</span>
+    <span class="token keyword">int64_t</span> vSize <span class="token operator">=</span> A<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> n <span class="token operator">=</span> A<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">int64_t</span> one <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token keyword">while</span> <span class="token punctuation">(</span>n <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>n <span class="token operator">&amp;</span> one<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            binA<span class="token punctuation">.</span><span class="token function">push_back</span><span class="token punctuation">(</span><span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            binA<span class="token punctuation">.</span><span class="token function">push_back</span><span class="token punctuation">(</span><span class="token boolean">false</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        n <span class="token operator">&gt;&gt;=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    vector<span class="token operator">&lt;</span><span class="token keyword">int64_t</span><span class="token operator">&gt;</span> idxVec<span class="token punctuation">;</span>
+    idxVec<span class="token punctuation">.</span><span class="token function">push_back</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int64_t</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">!=</span> binA<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>binA<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            idxVec<span class="token punctuation">.</span><span class="token function">push_back</span><span class="token punctuation">(</span>idxVec<span class="token punctuation">.</span><span class="token function">back</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token punctuation">(</span>one <span class="token operator">&lt;&lt;</span> i<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int64_t</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">!=</span> idxVec<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">mergeSort_power2n</span><span class="token punctuation">(</span>A<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> idxVec<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> A<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> idxVec<span class="token punctuation">[</span>i <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token comment">/// merge all ranges of vector</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int64_t</span> i <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span> i <span class="token operator">!=</span> idxVec<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">mergeVec</span><span class="token punctuation">(</span>
+            A<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> A<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> idxVec<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span>
+            A<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> idxVec<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">,</span> A<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> idxVec<span class="token punctuation">[</span>i <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">]</span>
+        <span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+
+<span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">theIterator</span><span class="token punctuation">,</span> <span class="token keyword">typename</span> <span class="token class-name">T</span><span class="token operator">&gt;</span> <span class="token keyword">void</span> 
+<span class="token function">mergeSort_cpu</span><span class="token punctuation">(</span>theIterator begin<span class="token punctuation">,</span> theIterator end<span class="token punctuation">,</span> T args<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/* cpu version of the merge sort */</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>end <span class="token operator">-</span> <span class="token number">1</span> <span class="token operator">-</span> begin <span class="token operator">&lt;</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token keyword">return</span><span class="token punctuation">;</span>
+
+    vector<span class="token operator">&lt;</span>T<span class="token operator">&gt;</span> <span class="token function">tmp</span><span class="token punctuation">(</span>end <span class="token operator">-</span> begin<span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    theIterator left <span class="token operator">=</span> begin<span class="token punctuation">,</span> right <span class="token operator">=</span> end <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    theIterator mid <span class="token operator">=</span> left <span class="token operator">+</span> <span class="token punctuation">(</span>right <span class="token operator">-</span> left<span class="token punctuation">)</span> <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">;</span>
+
+    <span class="token function">mergeSort_cpu</span><span class="token punctuation">(</span>begin<span class="token punctuation">,</span> mid <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">,</span> args<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">mergeSort_cpu</span><span class="token punctuation">(</span>mid <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">,</span> end<span class="token punctuation">,</span> args<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    theIterator i <span class="token operator">=</span> begin<span class="token punctuation">;</span>
+    theIterator j <span class="token operator">=</span> mid <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    theIterator k <span class="token operator">=</span> tmp<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    
+    <span class="token keyword">while</span><span class="token punctuation">(</span>i <span class="token operator">&lt;=</span> mid <span class="token operator">&amp;&amp;</span> j <span class="token operator">&lt;</span> end<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">*</span>i <span class="token operator">&lt;=</span> <span class="token operator">*</span>j<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token operator">*</span>k <span class="token operator">=</span> <span class="token operator">*</span>i<span class="token punctuation">;</span>
+            <span class="token operator">++</span>i<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token operator">*</span>k <span class="token operator">=</span> <span class="token operator">*</span>j<span class="token punctuation">;</span>
+            <span class="token operator">++</span>j<span class="token punctuation">;</span> <span class="token operator">++</span>k<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>i <span class="token operator">&gt;</span> mid<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span> j <span class="token operator">&lt;</span> end<span class="token punctuation">;</span> <span class="token operator">++</span>j<span class="token punctuation">,</span> <span class="token operator">++</span>k<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token operator">*</span>k <span class="token operator">=</span> <span class="token operator">*</span>j<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token punctuation">;</span> i <span class="token operator">&lt;=</span> mid<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">,</span> <span class="token operator">++</span>k<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token operator">*</span>k <span class="token operator">=</span> <span class="token operator">*</span>i<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span>i <span class="token operator">=</span> begin<span class="token punctuation">,</span> k <span class="token operator">=</span> tmp<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> i <span class="token operator">!=</span> end<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">,</span> <span class="token operator">++</span>k<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token operator">*</span>i <span class="token operator">=</span> <span class="token operator">*</span>k<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+<span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">theIterator</span><span class="token operator">&gt;</span> <span class="token keyword">inline</span> <span class="token keyword">void</span> 
+<span class="token function">mergeSort_cpu</span><span class="token punctuation">(</span>theIterator begin<span class="token punctuation">,</span> theIterator end<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token function">mergeSort_cpu</span><span class="token punctuation">(</span>begin<span class="token punctuation">,</span> end<span class="token punctuation">,</span> <span class="token operator">*</span>begin<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+
+<span class="token keyword">template</span><span class="token operator">&lt;</span><span class="token keyword">typename</span> <span class="token class-name">theIterator</span><span class="token operator">&gt;</span> <span class="token keyword">void</span> 
+<span class="token function">print</span><span class="token punctuation">(</span>theIterator begin<span class="token punctuation">,</span> theIterator end<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">int64_t</span> showNums <span class="token operator">=</span> <span class="token number">10</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>end <span class="token operator">-</span> begin <span class="token operator">&lt;=</span> showNums<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span>theIterator i <span class="token operator">=</span> begin<span class="token punctuation">;</span> i <span class="token operator">!=</span> end<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            cout <span class="token operator">&lt;&lt;</span> <span class="token operator">*</span>i <span class="token operator">&lt;&lt;</span> <span class="token string">", "</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> cout <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span>theIterator i <span class="token operator">=</span> begin<span class="token punctuation">;</span> i <span class="token operator">!=</span> begin <span class="token operator">+</span> showNums <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            cout <span class="token operator">&lt;&lt;</span> <span class="token operator">*</span>i <span class="token operator">&lt;&lt;</span> <span class="token string">", "</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> cout <span class="token operator">&lt;&lt;</span> <span class="token string">"......, "</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span>theIterator i <span class="token operator">=</span> end <span class="token operator">-</span> showNums <span class="token operator">/</span> <span class="token number">2</span><span class="token punctuation">;</span> i <span class="token operator">!=</span> end<span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            cout <span class="token operator">&lt;&lt;</span> <span class="token operator">*</span>i <span class="token operator">&lt;&lt;</span> <span class="token string">", "</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> cout <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+
+<span class="token keyword">int</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+    clock_t start<span class="token punctuation">,</span> end<span class="token punctuation">;</span>
+
+    <span class="token comment">// vector&lt;double&gt; A(pow(2, 20) * 16), B(pow(2, 20) * 16);</span>
+    <span class="token comment">// vector&lt;double&gt; A(19), B(19);</span>
+    vector<span class="token operator">&lt;</span><span class="token keyword">long</span> <span class="token keyword">long</span><span class="token operator">&gt;</span> <span class="token function">A</span><span class="token punctuation">(</span>BIG<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">B</span><span class="token punctuation">(</span>BIG<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token function">C</span><span class="token punctuation">(</span>BIG<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int64_t</span> i <span class="token operator">=</span> A<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span> i <span class="token operator">!=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span> <span class="token operator">--</span>i<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// A[i] = A.size() - 1 - i;</span>
+        A<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token function">rand</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        C<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> B<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">=</span> A<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    cout <span class="token operator">&lt;&lt;</span> <span class="token string">"initially, A = "</span><span class="token punctuation">;</span>
+    <span class="token function">print</span><span class="token punctuation">(</span>A<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> A<span class="token punctuation">.</span><span class="token function">end</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    start <span class="token operator">=</span> <span class="token function">clock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// begin cuda computation</span>
+    <span class="token function">mergeSort_gpu</span><span class="token punctuation">(</span>A<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    end <span class="token operator">=</span> <span class="token function">clock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// end cuda computation</span>
+    cout <span class="token operator">&lt;&lt;</span> <span class="token string">"using GPU, consuming time = "</span> <span class="token operator">&lt;&lt;</span> <span class="token punctuation">(</span>end <span class="token operator">-</span> start<span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">1000.</span> <span class="token operator">/</span> CLOCKS_PER_SEC <span class="token operator">&lt;&lt;</span> <span class="token string">" ms"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+    cout <span class="token operator">&lt;&lt;</span> <span class="token string">"after sort, A = "</span><span class="token punctuation">;</span>
+    <span class="token function">print</span><span class="token punctuation">(</span>A<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> A<span class="token punctuation">.</span><span class="token function">end</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/// use cpu to sort</span>
+    start <span class="token operator">=</span> <span class="token function">clock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">mergeSort_cpu</span><span class="token punctuation">(</span>B<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> B<span class="token punctuation">.</span><span class="token function">end</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    end <span class="token operator">=</span> <span class="token function">clock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    cout <span class="token operator">&lt;&lt;</span> <span class="token string">"using CPU, consuming time = "</span> <span class="token operator">&lt;&lt;</span> <span class="token punctuation">(</span>end <span class="token operator">-</span> start<span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">1000.</span> <span class="token operator">/</span> CLOCKS_PER_SEC <span class="token operator">&lt;&lt;</span> <span class="token string">" ms"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+    cout <span class="token operator">&lt;&lt;</span> <span class="token string">"after sort, B = "</span><span class="token punctuation">;</span>
+    <span class="token function">print</span><span class="token punctuation">(</span>B<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> B<span class="token punctuation">.</span><span class="token function">end</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/// use sort algorithm of stl</span>
+    start <span class="token operator">=</span> <span class="token function">clock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">stable_sort</span><span class="token punctuation">(</span>C<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> C<span class="token punctuation">.</span><span class="token function">end</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    end <span class="token operator">=</span> <span class="token function">clock</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    cout <span class="token operator">&lt;&lt;</span> <span class="token string">"using CPU, stl::stable_sort, consuming time = "</span> <span class="token operator">&lt;&lt;</span> <span class="token punctuation">(</span>end <span class="token operator">-</span> start<span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">1000.</span> <span class="token operator">/</span> CLOCKS_PER_SEC <span class="token operator">&lt;&lt;</span> <span class="token string">" ms"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+    cout <span class="token operator">&lt;&lt;</span> <span class="token string">"after sort, C = "</span><span class="token punctuation">;</span>
+    <span class="token function">print</span><span class="token punctuation">(</span>C<span class="token punctuation">.</span><span class="token function">begin</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> C<span class="token punctuation">.</span><span class="token function">end</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/// check whether A equals C</span>
+    <span class="token keyword">bool</span> equal <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+    <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int64_t</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">!=</span> A<span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token operator">++</span>i<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>A<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">!=</span> C<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            equal <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+            <span class="token keyword">break</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>equal<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        cerr <span class="token operator">&lt;&lt;</span> <span class="token string">"\033[31;1m there is a bug in the program, A != C. \033[0m"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+        cout <span class="token operator">&lt;&lt;</span> <span class="token string">"\033[32;1m very good, A == C. \033[0m"</span> <span class="token operator">&lt;&lt;</span> endl<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>测试发现优化结果并不显著，主要是由于 shared memory大小的限制，前面只有约10步的合并可以在block内部进行；而后面block间的合并，与reduce操作有所不同，因为随着合并排序的进行，每段数组的size都越来越大，即一个线程要处理的数据量会越来越大，没法放入shared memory中加速，因此只能使用block间的并行</p> 
+<p>归并排序归根结底是efficiency (= 加速比 / 核数) 比较低的算法，如果想要实现比STL 快很多的排序算法，估计得上 <strong>bitonic sort</strong> (<strong>双调排序</strong>)，这里先挖个坑，后面来填。我最近尝试实现gpu版本的 bitonic sort , 发现一个亿的数组排序可以比 STL排序快几十倍 （虽然 bitonic sort 的总复杂度work complexity比较高，达到 N * log N * log N, 但是其并行度是在是高，加速比可以达到 p 倍, p 是核数，因此速度远高于各种其它的基于比较的排序算法）。最近时间比较紧，没有时间写博客，后面准备花点时间把 bitonic sort 的学习笔记和代码整理一下再发出来</p> 
+<h3><a id="_450"></a>参考资料</h3> 
+<p><a href="https://item.jd.com/13024122.html" rel="nofollow">樊哲勇，CUDA 编程：基础与实践，https://item.jd.com/13024122.html</a><br> <a href="https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html" rel="nofollow">CUDA 官方文档 https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/8966be0606c06613b1f2ffbd7d50b78d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">从多变形面积到多面体体积：鞋带公式的3D版本</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b2521db11f8bd17dc35a88f8b368146f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">CBOW和Skip-Gram模型介绍及Python编程实现</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

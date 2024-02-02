@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>一种基于http协议的敏感数据传输方案 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="一种基于http协议的敏感数据传输方案" />
+<meta property="og:description" content="最近公司需要通过公网与其它平台完成接口对接，但是基于开发时间和其它因素的考虑，本次对接无法采用https协议实现。既然不能用https协议，那就退而求其次采用http协议吧！
+那么问题来了！在对接的过程中我们需要对如下问题进行相关的考虑：
+1、敏感信息的不可见性 使用http协议传输数据很容易被抓包监听传输内容，如果这些数据中存在敏感信息的话，风险太大了。因此我们需要对我们的传输数据进行一定的加密处理，即使数据被预期接收方之外的其它不法分子拦截，也无法轻易的破译此次请求的传输内容！最简单的方案就是对传输数据使用Base64方法转码，使得数据具备一定的不可读性。当然啦，这种方案实际上是不可取的，因为Base64方案太容易被识别然后解密了。比较常见的做法是，发送方和接收方彼此约定密钥，发送方发送时用密钥对数据加密，接收方用密钥对数据解密。比如AES128加密算法？但是AES128加密也存在局限性，需要定期维护。就算你认为你这方的内部人员是可信的，你也无法无法保证对方的密钥不会泄漏吧。当然聪明的你可能会说，那我就使用非对称加密算法，比如RSA好了。好像是没啥问题？但是如果数据量比较大的话，RSA加密方法对服务器的压力也是很大的。。所以本次结合了AES和RSA来实现我们的数据传输。
+2、防止数据被篡改 用签名！用签名！用签名！重要的事情说三遍？例如：当数据被封装好后，我们可以用md5算法计算出待传输数据的摘要字符串作为签名。当服务器接受到数据后，同样使用md5对数据做摘要，同请求报文中的签名作比较，若不一致则说明该http请求数据已被篡改。但仅仅使用md5对数据作摘要就够了吗？万一攻击方发现了数据签名是用md5做的，攻击方只需要对已篡改的数据再做一次md5，同时更新请求中的签名即可。因此如何生成可靠的签名也需要我们仔细的斟酌。有几点我觉得是需要注意的：1、无法轻易的根据签名推反推出当前签名所采用的算法；2、签名算法的复杂性、可靠性；3、不要直接对传输数据作签名，可以先对请求数据作摘要，再使用加密算法生成签名，既可以提升效率也在一定程度上提高了安全性。
+3、http请求的真实性 有很多方案可以保证http请求的真实性。比如使用token来进行身份验证，可以借鉴微信的身份验证方案或者jwt实现。本次我们只做了简单的处理，在http请求头中设置了一个时间戳，当服务器接收到数据后，会取出http请求中的时间戳，同时与服务器当前时间作比较。若时间间隔过大，则认为该请求是不真实的，直接拒绝并返回！
+上面简单的介绍了http传输敏感数据需要注意的地方，本方案具体实现思路如下图所示：
+发送方需要干的事 1、生成签名
+构造传输对象，并将传输对象转换成json字符串 本次接口传输采用rest模式作为标准，先构造待传输对象。构造完成后借用Google的Gson包来将对象转换成json字符串。
+使用md5算法生成json字符串摘要使用RSA公钥对摘要字符串作加密处理，生成签名 2、加密请求报文
+发送方创建一个http请求时，需要动态的生成一个AESKey，同时使用该AESKey对请求数据作加密处理。为什么每次请求都需要生成一个新的AESKey呢？主要还是为了防止数据泄漏。如果固定使用相同的Key，万一Key被发送方内部人员泄漏了，其实也对发送数据的加密也就没有意义了。
+3、加密AES密钥
+在http请求传递数据时，AES密钥也会被同样传递过去。为了保证AES密钥的安全性，我们采用RSA公钥对AES密钥作加密处理。处理完后会放到Http请求头的Authencation字段中。
+4、构造http请求
+将第一步生成的签名放到http请求头中的Authencation字段中将加密后的AES密钥放到http请求头中的SecurityKey字段中将该请求创建时间放到http请求头中的TimesTamp字段中将第二步生成的加密报文放到http body中 5、处理http请求结果
+在此之前，请求方和发送方需要约定返回结果的加密方式。发送方接收到http请求返回结果后，通过约定的方式对返回结果进行处理，以供后续使用。这里我们仅简单的约定接收方使用接收到的AES密钥对返回数据作加密后返回即可。
+接收方需要干的事 1、请求的真实性校验
+获取http请求头中的TimesTamp字段，同时与系统时间作比较。如果请求时间与当前系统时间间隔在五分钟之内，则认为请求是真实的，反之则认为请求是非法的。
+2、获取AES密钥
+从http请求中的SecurtiyKey获取被加密的AES密钥，使用RSA密钥对其解密，获取可供使用的AES密钥
+3、获取请求报文
+从httpbody中获取请求报文，使用上面第二步生成的AES密钥解密请求报文
+4、验签
+对第三步生成的请求报文作md5摘要生成md5Str获取http请求头中的Authencation字符串，接着使用接收方保存的RSA密钥对其作解密处理获取rsaDecryptStr比较md5Str和rsaDecryptStr是否一致，若一致则验签通过 5、业务处理
+使用第三步得到的请求报文进行业务处理
+6、返回处理结果
+使用第二步获取到的AES密钥对返回结果作加密处理并返回
+总结
+本次http请求传输敏感数据方案的实现，上面做了详细的介绍。另外多提一下。在接收方进行验签的时候，我们可以定义一个过滤器来过滤指定http请求。在过滤器中完成验签的工作，以避免在业务处理代码中掺杂验签代码！同时使用过滤器也可以对请求返回结果进行加工处理，在这里就是用AES密钥加密返回结果啦！" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/53fc330b4d0a4112c6640981ea766947/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-01-11T02:04:01+08:00" />
+<meta property="article:modified_time" content="2018-01-11T02:04:01+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">一种基于http协议的敏感数据传输方案</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div class="article fmt article__content"> 
+ <p>最近公司需要通过公网与其它平台完成接口对接，但是基于开发时间和其它因素的考虑，本次对接无法采用https协议实现。既然不能用https协议，那就退而求其次采用http协议吧！</p> 
+ <p>那么问题来了！在对接的过程中我们需要对如下问题进行相关的考虑：</p> 
+ <pre><code>1、敏感信息的不可见性
+</code></pre> 
+ <p>　　使用http协议传输数据很容易被抓包监听传输内容，如果这些数据中存在敏感信息的话，风险太大了。因此我们需要对我们的传输数据进行一定的加密处理，即使数据被预期接收方之外的其它不法分子拦截，也无法轻易的破译此次请求的传输内容！最简单的方案就是对传输数据使用Base64方法转码，使得数据具备一定的不可读性。当然啦，这种方案实际上是不可取的，因为Base64方案太容易被识别然后解密了。比较常见的做法是，发送方和接收方彼此约定密钥，发送方发送时用密钥对数据加密，接收方用密钥对数据解密。比如AES128加密算法？但是AES128加密也存在局限性，需要定期维护。就算你认为你这方的内部人员是可信的，你也无法无法保证对方的密钥不会泄漏吧。当然聪明的你可能会说，那我就使用非对称加密算法，比如RSA好了。好像是没啥问题？但是如果数据量比较大的话，RSA加密方法对服务器的压力也是很大的。。所以本次结合了AES和RSA来实现我们的数据传输。</p> 
+ <pre><code>2、防止数据被篡改
+</code></pre> 
+ <p>　　用签名！用签名！用签名！重要的事情说三遍？例如：当数据被封装好后，我们可以用md5算法计算出待传输数据的摘要字符串作为签名。当服务器接受到数据后，同样使用md5对数据做摘要，同请求报文中的签名作比较，若不一致则说明该http请求数据已被篡改。但仅仅使用md5对数据作摘要就够了吗？万一攻击方发现了数据签名是用md5做的，攻击方只需要对已篡改的数据再做一次md5，同时更新请求中的签名即可。因此如何生成可靠的签名也需要我们仔细的斟酌。有几点我觉得是需要注意的：1、无法轻易的根据签名推反推出当前签名所采用的算法；2、签名算法的复杂性、可靠性；3、不要直接对传输数据作签名，可以先对请求数据作摘要，再使用加密算法生成签名，既可以提升效率也在一定程度上提高了安全性。</p> 
+ <pre><code>3、http请求的真实性
+</code></pre> 
+ <p>　　有很多方案可以保证http请求的真实性。比如使用token来进行身份验证，可以借鉴微信的身份验证方案或者jwt实现。本次我们只做了简单的处理，在http请求头中设置了一个时间戳，当服务器接收到数据后，会取出http请求中的时间戳，同时与服务器当前时间作比较。若时间间隔过大，则认为该请求是不真实的，直接拒绝并返回！</p> 
+ <p>上面简单的介绍了http传输敏感数据需要注意的地方，本方案具体实现思路如下图所示：</p> 
+ <p><span class="img-wrap"><img src="https://images2.imgbox.com/af/1b/WaD88bjh_o.png" alt="图片描述" title="图片描述"></span></p> 
+ <pre><code>发送方需要干的事
+</code></pre> 
+ <p>1、生成签名</p> 
+ <ul><li>构造传输对象，并将传输对象转换成json字符串</li></ul> 
+ <p>　　　　 本次接口传输采用rest模式作为标准，先构造待传输对象。构造完成后借用Google的Gson包来将对象转换成json字符串。</p> 
+ <ul><li>使用md5算法生成json字符串摘要</li><li>使用RSA公钥对摘要字符串作加密处理，生成签名</li></ul> 
+ <p>2、加密请求报文<br>　　发送方创建一个http请求时，需要动态的生成一个AESKey，同时使用该AESKey对请求数据作加密处理。为什么每次请求都需要生成一个新的AESKey呢？主要还是为了防止数据泄漏。如果固定使用相同的Key，万一Key被发送方内部人员泄漏了，其实也对发送数据的加密也就没有意义了。</p> 
+ <p>3、加密AES密钥<br>　　在http请求传递数据时，AES密钥也会被同样传递过去。为了保证AES密钥的安全性，我们采用RSA公钥对AES密钥作加密处理。处理完后会放到Http请求头的Authencation字段中。</p> 
+ <p>4、构造http请求</p> 
+ <ul><li>将第一步生成的签名放到http请求头中的Authencation字段中</li><li>将加密后的AES密钥放到http请求头中的SecurityKey字段中</li><li>将该请求创建时间放到http请求头中的TimesTamp字段中</li><li>将第二步生成的加密报文放到http body中</li></ul> 
+ <p>5、处理http请求结果<br>　　在此之前，请求方和发送方需要约定返回结果的加密方式。发送方接收到http请求返回结果后，通过约定的方式对返回结果进行处理，以供后续使用。这里我们仅简单的约定接收方使用接收到的AES密钥对返回数据作加密后返回即可。</p> 
+ <pre><code>接收方需要干的事
+</code></pre> 
+ <p>1、请求的真实性校验<br>　　获取http请求头中的TimesTamp字段，同时与系统时间作比较。如果请求时间与当前系统时间间隔在五分钟之内，则认为请求是真实的，反之则认为请求是非法的。</p> 
+ <p>2、获取AES密钥<br>　　从http请求中的SecurtiyKey获取被加密的AES密钥，使用RSA密钥对其解密，获取可供使用的AES密钥</p> 
+ <p>3、获取请求报文<br>　　从httpbody中获取请求报文，使用上面第二步生成的AES密钥解密请求报文</p> 
+ <p>4、验签</p> 
+ <ul><li>对第三步生成的请求报文作md5摘要生成md5Str</li><li>获取http请求头中的Authencation字符串，接着使用接收方保存的RSA密钥对其作解密处理获取rsaDecryptStr</li><li>比较md5Str和rsaDecryptStr是否一致，若一致则验签通过</li></ul> 
+ <p>5、业务处理<br>　　使用第三步得到的请求报文进行业务处理</p> 
+ <p>6、返回处理结果<br>　　使用第二步获取到的AES密钥对返回结果作加密处理并返回</p> 
+ <p>总结<br>　　本次http请求传输敏感数据方案的实现，上面做了详细的介绍。另外多提一下。在接收方进行验签的时候，我们可以定义一个过滤器来过滤指定http请求。在过滤器中完成验签的工作，以避免在业务处理代码中掺杂验签代码！同时使用过滤器也可以对请求返回结果进行加工处理，在这里就是用AES密钥加密返回结果啦！</p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/7e690eedf608ccd5f84cf207cc2ee15c/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">PTA JAVA选择题汇总（一）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/225e794de87873143e85cc9eb8dc8a3a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Java线程Thread之yeild方法解析</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>生产环境服务CPU飙升问题分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="生产环境服务CPU飙升问题分析" />
+<meta property="og:description" content="文章目录 前言一、事情起因二、分析stack日志 1.列出当前进程的运行列表 2.打印进程的GC情况3.列出进程下消耗最高的线程4.导出进程的快照5.查看线程异常信息6.导出进程的dump文件 三、dump文件分析 1.MAT工具分析报告 2.Histogram大对象分析3.优化后结果 总结 前言 最近遇到了一次生产环境上服务CPU高的问题，本篇会记录问题处理全过程，并分享给大家，希望能够帮助到遇到同样问题的人。
+一、事情起因 运营在群里面反馈系统（3年前老项目）速度很慢，然后自己也去试了一下发现所有页面都数据加载都很慢，然后服务器也报警了，这个服务CPU彪升到100%了，初步推测是内存泄漏了。
+二、分析stack日志 1.列出当前进程的运行列表 指令： top -c
+如上图 PID=21398的进程CPU已经超过100%
+2.打印进程的GC情况 指令：jstat -gcutil 21398 1000 1000
+幸存者空间异常？
+S0 0.00 S1 100.00 ？幸存者区的空间是不是很奇怪，我第一时间也没有看懂。
+仔细看了一下，JVM参数指定的是G1GC，因为G1的堆布局跟HotSpot VM里其它GC不一样——它只有一组逻辑上的survivor space，而不像其它HotSpot GC一样有两段明确、固定的地址空间用作survivor space——所以用jstat看G1的话肯定是survivor space 0显示0%，survivor space 1显示100%，这个是正常的。
+老年代空间占用率超过 82%，老年代空间占用率高一般都是代码写的有问题，这个和之前猜测的内存泄漏问题可以对上（加上重启服务止血后所有功能都正常了，锁定是内存泄漏问题）。
+方法区空间占用率超过94.66，方法区存储的是类的加载信息、常量、静态变量等，按照经验来说方法区内存溢出都是新导入的框架不兼容等问题导致的，排查了一下没有引入奇怪的框架，之后分析重点放在 常量和静态变量这块。
+3.列出进程下消耗最高的线程 指令 ：top -Hp 21398
+如上图 PID=21771的线程CPU已经 99.9%
+21771是十进制的数，快照中线程是十六进制，将其转为十六进制：550b
+4.导出进程的快照 指令： jstack -l 21398 &gt; ./21398.stack
+备注： stack文件很小
+5.查看线程异常信息 指令：jstack -l 21398 &gt; ./21398.stack
+从stack日志中也只能看出来好多线程都在等待中且有死锁问题，如果有经验的就能从大量线程time_waiting就能猜到是tcp连接池有问题，在项目中全局搜索了一下发现根本就没有配置线程池，那么具体是什么问题还得分析dump文件。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/e7b2bbf790ce49268e8b946dfdead3b0/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-05-23T00:30:39+08:00" />
+<meta property="article:modified_time" content="2022-05-23T00:30:39+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">生产环境服务CPU飙升问题分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h4><a id="_0"></a>文章目录</h4> 
+<ul><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#_8">前言</a></li><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#_14">一、事情起因</a></li><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#stack_17">二、分析stack日志</a></li><li> 
+  <ul><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#1_18">1.列出当前进程的运行列表</a> 
+    <ul><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#2GC_23">2.打印进程的GC情况</a></li><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#3_36">3.列出进程下消耗最高的线程</a></li><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#4_42">4.导出进程的快照</a></li><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#5_46">5.查看线程异常信息</a></li><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#6dump_52">6.导出进程的dump文件</a></li></ul> </li></ul> </li><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#dump_57">三、dump文件分析</a></li><li> 
+  <ul><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#1MAT_58">1.MAT工具分析报告</a> 
+    <ul><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#2Histogram_61">2.Histogram大对象分析</a></li><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#3_91">3.优化后结果</a></li></ul> </li></ul> </li><li><a href="https://blog.csdn.net/qq_32979219/article/details/116571935?spm=1001.2014.3001.5502#_94">总结</a></li></ul> 
+<hr> 
+<h2><a id="_19"></a>前言</h2> 
+<p>最近遇到了一次生产环境上服务CPU高的问题，本篇会记录问题处理全过程，并分享给大家，希望能够帮助到遇到同样问题的人。</p> 
+<h2><a id="_23"></a>一、事情起因</h2> 
+<p>运营在群里面反馈系统（3年前老项目）速度很慢，然后自己也去试了一下发现所有页面都数据加载都很慢，然后服务器也报警了，这个服务CPU彪升到100%了，初步推测是内存泄漏了。</p> 
+<h2><a id="stack_27"></a>二、分析stack日志</h2> 
+<h3><a id="1_29"></a>1.列出当前进程的运行列表</h3> 
+<p>指令： top -c<br> <img src="https://images2.imgbox.com/d0/ef/NoIoBKfa_o.png" alt="在这里插入图片描述"><br> 如上图 PID=21398的进程CPU已经超过100%</p> 
+<h3><a id="2GC_35"></a>2.打印进程的GC情况</h3> 
+<p>指令：jstat -gcutil 21398 1000 1000<br> <img src="https://images2.imgbox.com/43/11/Hkmo92mZ_o.png" alt="在这里插入图片描述"></p> 
+<p>幸存者空间异常？<br> S0 0.00 S1 100.00 ？幸存者区的空间是不是很奇怪，我第一时间也没有看懂。<br> <img src="https://images2.imgbox.com/27/81/O8UkkTmJ_o.png" alt="在这里插入图片描述"><br> 仔细看了一下，JVM参数指定的是G1GC，因为G1的堆布局跟HotSpot VM里其它GC不一样——它只有一组逻辑上的survivor space，而不像其它HotSpot GC一样有两段明确、固定的地址空间用作survivor space——所以用jstat看G1的话肯定是survivor space 0显示0%，survivor space 1显示100%，这个是正常的。</p> 
+<p>老年代空间占用率超过 82%，老年代空间占用率高一般都是代码写的有问题，这个和之前猜测的内存泄漏问题可以对上（加上重启服务止血后所有功能都正常了，锁定是内存泄漏问题）。</p> 
+<p>方法区空间占用率超过94.66，方法区存储的是类的加载信息、常量、静态变量等，按照经验来说方法区内存溢出都是新导入的框架不兼容等问题导致的，排查了一下没有引入奇怪的框架，之后分析重点放在 常量和静态变量这块。</p> 
+<h3><a id="3_49"></a>3.列出进程下消耗最高的线程</h3> 
+<p>指令 ：top -Hp 21398<br> <img src="https://images2.imgbox.com/49/1c/DBBIzu17_o.png" alt="在这里插入图片描述"><br> 如上图 PID=21771的线程CPU已经 99.9%<br> 21771是十进制的数，快照中线程是十六进制，将其转为十六进制：550b</p> 
+<h3><a id="4_56"></a>4.导出进程的快照</h3> 
+<p>指令： jstack -l 21398 &gt; ./21398.stack<br> 备注： stack文件很小</p> 
+<h3><a id="5_61"></a>5.查看线程异常信息</h3> 
+<p>指令：jstack -l 21398 &gt; ./21398.stack</p> 
+<p><img src="https://images2.imgbox.com/ca/d3/QwjGz0qu_o.png" alt="在这里插入图片描述"><br> 从stack日志中也只能看出来好多线程都在等待中且有死锁问题，如果有经验的就能从大量线程time_waiting就能猜到是tcp连接池有问题，在项目中全局搜索了一下发现根本就没有配置线程池，那么具体是什么问题还得分析dump文件。</p> 
+<h3><a id="6dump_68"></a>6.导出进程的dump文件</h3> 
+<p>jmap -dump:format=b,file=21398.dmp 21398<br> 备注：导出的是堆内存的dump文件 体积和堆一致，体积大，速度非常慢，有可能会影响到服务。<br> jmap -dump:live,format=b,file=21398.hprof 21398<br> 备注：导出的是堆内存中存活的dump文件 体积要小于堆（推荐），hprof是给MAT分析用的。<img src="https://images2.imgbox.com/d9/62/MWtRQ2CC_o.jpg" alt="在这里插入图片描述"></p> 
+<h2><a id="dump_75"></a>三、dump文件分析</h2> 
+<h3><a id="1MAT_77"></a>1.MAT工具分析报告</h3> 
+<p><img src="https://images2.imgbox.com/d9/30/P2hCfo7G_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="2Histogram_81"></a>2.Histogram大对象分析</h3> 
+<p><img src="https://images2.imgbox.com/ba/22/hlkB28uj_o.png" alt="在这里插入图片描述"><br> Histogram：</p> 
+<ol><li>Class Name ： 类名称，java类名；</li><li>Objects ： 类的对象的数量；</li><li>Shallow Heap ：一个对象内存的消耗大小，不包含对其他对象的引用；</li><li>Retained Heap ：可以被GC回收到内存的总和；</li></ol> 
+<p>从以上分析结果来看，可以得出结论：</p> 
+<ol><li>Retained Heap没有可被GC回收的对象，实锤了是内存泄漏问题；</li><li>内存泄漏的’凶手‘就是 byte[]对象，大小已经超过1G了，重点分析；</li><li>char[] 这个也存在隐患，需要具体分析。</li></ol> 
+<p>byte[]内容分析：<br> <img src="https://images2.imgbox.com/dd/09/4UkAn4vo_o.png" alt="在这里插入图片描述"><br> byte[]中存放都是http请求头信息，实际这些请求头信息拷贝出来也就几百B，为什么这里所有对象都整整齐齐全部占用了约10M，猜测是某个地方配置问题，然后先检查了一下配置文件，果然发现了“凶手”，和byte[]的大小一致，真凶找到了如下：<br> <img src="https://images2.imgbox.com/8d/17/XyHXeJKw_o.png" alt="在这里插入图片描述"><br> 这块去了解了一下应该算spring boot的一个bug，你配置这个参数后它会帮你默认构造你传入的size大小的数组，请求量较大就直接OOM。</p> 
+<p>然后我追溯了一下git历史提交记录发现是第一次搭建项目就提交了这个配置（很明显是抄其他项目的配置），埋下了一个大坑，可见项目脚手架何其重要。<br> 解决方案 就是去掉这个配置即可。</p> 
+<p>char[]内容分析：<br> <img src="https://images2.imgbox.com/e8/b3/4w32dTKC_o.png" alt="在这里插入图片描述"><br> 这问题就很明显了是日志问题，仔细核对了一下服务日志，发现有重复打日志（用aop打日志，在controller层中也打日志了），每天日志量大概在2.5G左右（服务业务并不复杂，日志量明显不对），还发现日志打印都是用字符串拼接，根据以上分析日志改造如下：</p> 
+<ol><li>日志输出由字符串拼接改为占位符；</li><li>private static final Logger logger = LoggerFactory.getLogger(xxx.class); 改为用注解方式 。</li></ol> 
+<p>以上问题基本上分析完了。</p> 
+<h3><a id="3_115"></a>3.优化后结果</h3> 
+<p>经过持续观察将近半个月，CPU高的问题已经彻底解决了。</p> 
+<h2><a id="_119"></a>总结</h2> 
+<p>实际中遇到的CPU飙高的问题往往都是需要从多个维度分析，远比一些写demo然后定位内存溢出问题（可以直接定位到错误代码）要复杂得多，最后推荐一下MAT工具，真的非常好用。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/48290730d5ec5e7c0410e9d96e7aa9f8/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Mac 无法访问github</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e18d9ee6fb0756df75322d20fe0620a1/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">树的最长路径（树形dp）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

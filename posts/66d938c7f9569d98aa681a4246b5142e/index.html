@@ -1,0 +1,1288 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Prometheus Operator监控k8s集群 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Prometheus Operator监控k8s集群" />
+<meta property="og:description" content="之前的文章中，使用传统方式安装了prometheus来监控node、mysql、redis等。这样配置非常麻烦，成本非常高。如果还要考虑Prometheus、AlertManager这些组件服务本身的高可用的话，成本就更高了。当然了，我们完全可以用自定义的方式来实现这些需求，我们也知道Prometheus在代码上就已经对Kubernetes有了原生的支持，可以通过服务发现的形式来自动监控集群，因此我们可以使用另外一种更加高级的方式来部署Prometheus：Operator框架。
+一、什么是Operator Operator是由CoreOS公司开发的用来扩展Kubernetes API的特定应用程序控制器，用来创建、配置和管理复杂的有状态应用，例如数据库、缓存和监控系统。Operator基于kubernetes的资源和控制器概念上构建，但同时又包含了应用程序特定的领域知识。创建Operator的关键是CRD（自定义资源）的设计。
+Operator是将运维人员对软件操作的只是给代码化，同时利用Kubernetes强大的抽象来管理大规模的软件应用。目前CoreOS官方提供了几种Operator的实现，其中就包括了Prometheus Operator，Operator的核心实现是基于Kubernetes的一下两个概念：
+资源：对象的状态定义控制器：观测、分析和行动，以调节资源的分布 当前CoreOS提供了四种Operator：
+etcd：创建etcd集群Rook：云原生环境下的文件、块、对象存储服务Prometheus：创建Prometheus监控实例Tectonic：部署Kubernetes集群 Prometheus作为一个核心的控制器，它会创建Prometheus、ServiceMonitor、AlertManager以及我们的prometheus-rule这四个资源对象，operator会一直监控并维持这四个资源对象的状态，其中创建Prometheus资源对象就是最为Prometheus Server进行监控，而ServiceMonitor就是我们用的exporter的各种抽象(exporter就是提供我们各种服务的metrics的工具)。Prometheus就是通过ServiceMonitor提供的metrics数据接口把我们数据pull过来的。现在我们监控prometheus不需要每个服务单独创建修改规则。通过直接管理Operator来进行集群的监控。这里还要说一下，一个ServiceMonitor可以通过我们的label标签去匹配集群内部的service，而我们的prometheus也可以通过label匹配多个ServiceMonitor。
+其中Operator是核心部分，作为一个控制器而存在，Operator会其创建Prometheus、ServiceMonitor、AlertManager和PrometheusRule这4个CRD资源对象，然后一直监控并维持这4个CRD资源对象的状态。
+Prometheus资源对象是作为Prometheus Service存在的ServiceMonitor资源对象是专门的提供metrics数据接口的exporter的抽象，Prometheus就是通过ServiceMonitor提供的metrics数据接口去pull数据的AlertManager资源对应alertmanager组件PrometheusRule资源对象是被Prometheus实例使用的告警规则文件 CRD简介 全称CustomResourceDefinition，在Kubernetes中一切都可视为资源，在Kubernetes1.7之后增加对CRD自定义资源二次开发能力扩展Kubernetes API，当我们创建一个新的CRD时，Kubernetes API服务将为你制定的每个版本创建一个新的RESTful资源路径，我们可以根据该API路径来创建一些我们自己定义的类型资源。CRD可以是命名空间，也可以是集群范围。由CRD的作用于scpoe字段中所制定的，与现有的内置对象一样，删除命名空间将删除该命名空间下的所有自定义对象。 简单来说CRD是对Kubernetes API的扩展，kubernetes中的每个资源都是一个API对象的集合，例如yaml文件中定义spec那样，都是对Kubernetes中资源对象的定义，所有的自定义资源可以跟Kubernetes中内建的资源一样使用kubectl。 这样，在集群中监控数据，就变成Kubernetes直接去监控资源对象，Service和ServiceMonitor都是Kubernetes的资源对象，一个ServiceMonitor可以通过labelSelector匹配一类Service，Prometheus也可以通过labelSelector匹配多个ServiceMonitor，并且Prometheus和AlertManager都是自动感知监控告警配置的变化，不需要人为进行reload操作。
+二、安装Prometheus Operator Operator是原生支持Prometheus的，可以通过服务发现来监控集群，并且是通用安装。也就是operator提供的yaml文件，基本上在Prometheus是可以直接使用的，需要改动的地方比较少。
+这里直接通过Prometheus-Operator的源码进行安装，当然也可以用Helm来进行一键安装。采用源码安装可以去了解更多的实现细节。
+在安装之前，先把现在的环境说明一下
+服务器IP系统主机名组件192.168.0.71CentOS7.6k8s-01Kubernetes 1.16.6,Docker 18.09.6,Etcd 3.3.20,Flanneld 0.11.0,kube-apiserver,kube-controller-manager,kube-scheduler,kubelet,kube-proxy,nginx-1.15.3192.168.0.72CentOS7.6k8s-02同上192.168.0.73CentOS7.6k8s-03同上192.168.0.74CentOS7.6nfs-server安装nfs服务用来持久化存储prometheus和grafana数据 如上表格，我已经用一键部署脚本部署好了k8s集群，并安装好了coredns插件和dashboard插件。
+首先将Prometheus-Operator的源码克隆下来。这里有个坑要提前说一下：由于墙的原因，原本是要把Registry的地址换成微软中国的地址的，但是发现貌似从2020年4月份开始就用不了了，网上也是有很多的网友反映，暂时未能找到可以替代的镜像仓库地址。我这里已经把相关的镜像上传到了阿里云镜像仓库中。为了保证所需镜像的版本保持不变，我已经将https://github.com/coreos/kube-prometheus.git fork到了自己的github中，地址为https://github.com/wangchaoforever/kube-prometheus.git。
+$ cd /opt/k8s/work $ git clone https://github.com/wangchaoforever/kube-prometheus.git ##注意：下面的镜像要在所有的k8s集群主机中都拉取和改tag # 拉取镜像 docker pull registry.cn-hangzhou.aliyuncs.com/wc181/alertmanager:v0.20.0 docker pull registry.cn-hangzhou.aliyuncs.com/wc181/grafana:6.6.0 docker pull registry.cn-hangzhou.aliyuncs.com/wc181/kube-state-metrics:v1.9.5 docker pull registry.cn-hangzhou.aliyuncs.com/wc181/kube-rbac-proxy:v0.4.1 docker pull registry.cn-hangzhou.aliyuncs.com/wc181/node-exporter:v0.18.1 docker pull registry.cn-hangzhou.aliyuncs.com/wc181/k8s-prometheus-adapter-amd64:v0.5.0 docker pull registry.cn-hangzhou.aliyuncs.com/wc181/prometheus:v2.15.2 docker pull registry.cn-hangzhou.aliyuncs.com/wc181/prometheus-operator:v0.38.1 docker pull registry." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/66d938c7f9569d98aa681a4246b5142e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-10-19T15:56:24+08:00" />
+<meta property="article:modified_time" content="2020-10-19T15:56:24+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Prometheus Operator监控k8s集群</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>之前的文章中，使用传统方式安装了prometheus来监控node、mysql、redis等。这样配置非常麻烦，成本非常高。如果还要考虑Prometheus、AlertManager这些组件服务本身的高可用的话，成本就更高了。当然了，我们完全可以用自定义的方式来实现这些需求，我们也知道Prometheus在代码上就已经对Kubernetes有了原生的支持，可以通过服务发现的形式来自动监控集群，因此我们可以使用另外一种更加高级的方式来部署Prometheus：Operator框架。</p> 
+<h4><a id="Operator_2"></a>一、什么是Operator</h4> 
+<p>Operator是由CoreOS公司开发的用来扩展Kubernetes API的特定应用程序控制器，用来创建、配置和管理复杂的有状态应用，例如数据库、缓存和监控系统。Operator基于kubernetes的资源和控制器概念上构建，但同时又包含了应用程序特定的领域知识。创建Operator的关键是CRD（自定义资源）的设计。</p> 
+<p>Operator是将运维人员对软件操作的只是给代码化，同时利用Kubernetes强大的抽象来管理大规模的软件应用。目前CoreOS官方提供了几种Operator的实现，其中就包括了<code>Prometheus Operator</code>，Operator的核心实现是基于Kubernetes的一下两个概念：</p> 
+<ul><li>资源：对象的状态定义</li><li>控制器：观测、分析和行动，以调节资源的分布</li></ul> 
+<p>当前CoreOS提供了四种Operator：</p> 
+<ul><li>etcd：创建etcd集群</li><li>Rook：云原生环境下的文件、块、对象存储服务</li><li>Prometheus：创建Prometheus监控实例</li><li>Tectonic：部署Kubernetes集群</li></ul> 
+<p>Prometheus作为一个核心的控制器，它会创建Prometheus、ServiceMonitor、AlertManager以及我们的prometheus-rule这四个资源对象，operator会一直监控并维持这四个资源对象的状态，其中创建Prometheus资源对象就是最为Prometheus Server进行监控，而ServiceMonitor就是我们用的exporter的各种抽象(exporter就是提供我们各种服务的metrics的工具)。Prometheus就是通过ServiceMonitor提供的metrics数据接口把我们数据pull过来的。现在我们监控prometheus不需要每个服务单独创建修改规则。通过直接管理Operator来进行集群的监控。这里还要说一下，一个ServiceMonitor可以通过我们的label标签去匹配集群内部的service，而我们的prometheus也可以通过label匹配多个ServiceMonitor。<br> <img src="https://images2.imgbox.com/b3/51/mMqzL9tn_o.png" alt="在这里插入图片描述"><br> 其中Operator是核心部分，作为一个控制器而存在，Operator会其创建Prometheus、ServiceMonitor、AlertManager和PrometheusRule这4个CRD资源对象，然后一直监控并维持这4个CRD资源对象的状态。</p> 
+<ul><li>Prometheus资源对象是作为Prometheus Service存在的</li><li>ServiceMonitor资源对象是专门的提供metrics数据接口的exporter的抽象，Prometheus就是通过ServiceMonitor提供的metrics数据接口去pull数据的</li><li>AlertManager资源对应alertmanager组件</li><li>PrometheusRule资源对象是被Prometheus实例使用的告警规则文件</li></ul> 
+<pre><code class="prism language-shell">CRD简介
+全称CustomResourceDefinition，在Kubernetes中一切都可视为资源，在Kubernetes1.7之后增加对CRD自定义资源二次开发能力扩展Kubernetes API，当我们创建一个新的CRD时，Kubernetes API服务将为你制定的每个版本创建一个新的RESTful资源路径，我们可以根据该API路径来创建一些我们自己定义的类型资源。CRD可以是命名空间，也可以是集群范围。由CRD的作用于scpoe字段中所制定的，与现有的内置对象一样，删除命名空间将删除该命名空间下的所有自定义对象。
+
+简单来说CRD是对Kubernetes API的扩展，kubernetes中的每个资源都是一个API对象的集合，例如yaml文件中定义spec那样，都是对Kubernetes中资源对象的定义，所有的自定义资源可以跟Kubernetes中内建的资源一样使用kubectl。
+</code></pre> 
+<p>这样，在集群中监控数据，就变成Kubernetes直接去监控资源对象，Service和ServiceMonitor都是Kubernetes的资源对象，一个ServiceMonitor可以通过labelSelector匹配一类Service，Prometheus也可以通过labelSelector匹配多个ServiceMonitor，并且Prometheus和AlertManager都是自动感知监控告警配置的变化，不需要人为进行reload操作。</p> 
+<h4><a id="Prometheus_Operator_38"></a>二、安装Prometheus Operator</h4> 
+<p>Operator是原生支持Prometheus的，可以通过服务发现来监控集群，并且是通用安装。也就是operator提供的yaml文件，基本上在Prometheus是可以直接使用的，需要改动的地方比较少。</p> 
+<p>这里直接通过Prometheus-Operator的源码进行安装，当然也可以用Helm来进行一键安装。采用源码安装可以去了解更多的实现细节。</p> 
+<p>在安装之前，先把现在的环境说明一下</p> 
+<table><thead><tr><th>服务器IP</th><th>系统</th><th>主机名</th><th>组件</th></tr></thead><tbody><tr><td>192.168.0.71</td><td>CentOS7.6</td><td>k8s-01</td><td>Kubernetes 1.16.6,Docker 18.09.6,Etcd 3.3.20,Flanneld 0.11.0,kube-apiserver,kube-controller-manager,kube-scheduler,kubelet,kube-proxy,nginx-1.15.3</td></tr><tr><td>192.168.0.72</td><td>CentOS7.6</td><td>k8s-02</td><td>同上</td></tr><tr><td>192.168.0.73</td><td>CentOS7.6</td><td>k8s-03</td><td>同上</td></tr><tr><td>192.168.0.74</td><td>CentOS7.6</td><td>nfs-server</td><td>安装nfs服务用来持久化存储prometheus和grafana数据</td></tr></tbody></table> 
+<p>如上表格，我已经用<a href="https://blog.csdn.net/wc1695040842/article/details/106017878">一键部署脚本</a>部署好了k8s集群，并<a href="https://blog.csdn.net/wc1695040842/article/details/105856080">安装好了coredns插件</a>和<a href="https://blog.csdn.net/wc1695040842/article/details/105856243">dashboard插件</a>。</p> 
+<p>首先将Prometheus-Operator的源码克隆下来。这里有个坑要提前说一下：由于墙的原因，原本是要把Registry的地址换成微软中国的地址的，但是发现貌似从2020年4月份开始就用不了了，网上也是有很多的网友反映，暂时未能找到可以替代的镜像仓库地址。我这里已经把相关的镜像上传到了阿里云镜像仓库中。为了保证所需镜像的版本保持不变，我已经将https://github.com/coreos/kube-prometheus.git fork到了自己的github中，地址为https://github.com/wangchaoforever/kube-prometheus.git。</p> 
+<pre><code class="prism language-shell">$ <span class="token function">cd</span> /opt/k8s/work
+$ <span class="token function">git</span> clone https://github.com/wangchaoforever/kube-prometheus.git
+
+<span class="token comment">##注意：下面的镜像要在所有的k8s集群主机中都拉取和改tag</span>
+<span class="token comment"># 拉取镜像</span>
+docker pull registry.cn-hangzhou.aliyuncs.com/wc181/alertmanager:v0.20.0
+docker pull registry.cn-hangzhou.aliyuncs.com/wc181/grafana:6.6.0
+docker pull registry.cn-hangzhou.aliyuncs.com/wc181/kube-state-metrics:v1.9.5
+docker pull registry.cn-hangzhou.aliyuncs.com/wc181/kube-rbac-proxy:v0.4.1
+docker pull registry.cn-hangzhou.aliyuncs.com/wc181/node-exporter:v0.18.1
+docker pull registry.cn-hangzhou.aliyuncs.com/wc181/k8s-prometheus-adapter-amd64:v0.5.0
+docker pull registry.cn-hangzhou.aliyuncs.com/wc181/prometheus:v2.15.2
+docker pull registry.cn-hangzhou.aliyuncs.com/wc181/prometheus-operator:v0.38.1
+docker pull registry.cn-hangzhou.aliyuncs.com/wc181/configmap-reload:v0.3.0
+docker pull registry.cn-hangzhou.aliyuncs.com/wc181/prometheus-config-reloader:v0.38.1
+docker pull registry.cn-hangzhou.aliyuncs.com/wc181/pause:3.1
+
+<span class="token comment"># 修改tag</span>
+docker tag registry.cn-hangzhou.aliyuncs.com/wc181/alertmanager:v0.20.0 quay.io/prometheus/alertmanager:v0.20.0
+docker tag registry.cn-hangzhou.aliyuncs.com/wc181/grafana:6.6.0 grafana/grafana:6.6.0
+docker tag registry.cn-hangzhou.aliyuncs.com/wc181/kube-state-metrics:v1.9.5 quay.io/coreos/kube-state-metrics:v1.9.5
+docker tag registry.cn-hangzhou.aliyuncs.com/wc181/kube-rbac-proxy:v0.4.1 quay.io/coreos/kube-rbac-proxy:v0.4.1
+docker tag registry.cn-hangzhou.aliyuncs.com/wc181/node-exporter:v0.18.1 quay.io/prometheus/node-exporter:v0.18.1
+docker tag registry.cn-hangzhou.aliyuncs.com/wc181/k8s-prometheus-adapter-amd64:v0.5.0 quay.io/coreos/k8s-prometheus-adapter-amd64:v0.5.0
+docker tag registry.cn-hangzhou.aliyuncs.com/wc181/prometheus:v2.15.2 quay.io/prometheus/prometheus:v2.15.2
+docker tag registry.cn-hangzhou.aliyuncs.com/wc181/prometheus-operator:v0.38.1 quay.io/coreos/prometheus-operator:v0.38.1
+docker tag registry.cn-hangzhou.aliyuncs.com/wc181/configmap-reload:v0.3.0 jimmidyson/configmap-reload:v0.3.0
+docker tag registry.cn-hangzhou.aliyuncs.com/wc181/prometheus-config-reloader:v0.38.1 quay.io/coreos/prometheus-config-reloader:v0.38.1
+docker tag registry.cn-hangzhou.aliyuncs.com/wc181/pause:3.1 k8s.gcr.io/pause:3.1
+
+<span class="token comment"># 删除多余镜像</span>
+docker rmi -f registry.cn-hangzhou.aliyuncs.com/wc181/alertmanager:v0.20.0
+docker rmi -f registry.cn-hangzhou.aliyuncs.com/wc181/grafana:6.6.0
+docker rmi -f registry.cn-hangzhou.aliyuncs.com/wc181/kube-state-metrics:v1.9.5
+docker rmi -f registry.cn-hangzhou.aliyuncs.com/wc181/kube-rbac-proxy:v0.4.1
+docker rmi -f registry.cn-hangzhou.aliyuncs.com/wc181/node-exporter:v0.18.1
+docker rmi -f registry.cn-hangzhou.aliyuncs.com/wc181/k8s-prometheus-adapter-amd64:v0.5.0
+docker rmi -f registry.cn-hangzhou.aliyuncs.com/wc181/prometheus:v2.15.2
+docker rmi -f registry.cn-hangzhou.aliyuncs.com/wc181/prometheus-operator:v0.38.1
+docker rmi -f registry.cn-hangzhou.aliyuncs.com/wc181/configmap-reload:v0.3.0
+docker rmi -f registry.cn-hangzhou.aliyuncs.com/wc181/prometheus-config-reloader:v0.38.1
+docker rmi -f registry.cn-hangzhou.aliyuncs.com/wc181/pause:3.1
+
+$ <span class="token function">cd</span> kube-prometheus/
+
+<span class="token comment"># 安装 prometheus-operator</span>
+$ kubectl apply -f manifests/setup 
+
+<span class="token comment"># 安装 promethes metric adapter</span>
+$ kubectl apply -f manifests/ 
+</code></pre> 
+<p>部署完成之后，会创建一个名为monitoring的namespace，所有资源对象将部署在该命名空间下。此外Operator会自动创建6个CRD资源对象：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 work<span class="token punctuation">]</span><span class="token comment"># kubectl get crd |grep coreos</span>
+alertmanagers.monitoring.coreos.com     2020-08-27T08:36:24Z
+podmonitors.monitoring.coreos.com       2020-08-27T08:36:24Z
+prometheuses.monitoring.coreos.com      2020-08-27T08:36:25Z
+prometheusrules.monitoring.coreos.com   2020-08-27T08:36:29Z
+servicemonitors.monitoring.coreos.com   2020-08-27T08:36:29Z
+thanosrulers.monitoring.coreos.com      2020-08-27T08:36:31Z
+</code></pre> 
+<p>可以在monitoring命名空间下查看所有的Pod，其中alertmanager和prometheus是用StatefulSet 控制器管理的，还有一个比较核心的prometheus-operator的Pod，用来控制其他资源对象和监听对象变化的：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 kube-prometheus<span class="token punctuation">]</span><span class="token comment"># kubectl get pods -n monitoring</span>
+NAME                                   READY   STATUS    RESTARTS   AGE
+alertmanager-main-0                    2/2     Running   0          3m17s
+alertmanager-main-1                    2/2     Running   0          3m16s
+alertmanager-main-2                    2/2     Running   0          3m15s
+grafana-86b55cb79f-htjzl               1/1     Running   0          3m41s
+kube-state-metrics-dbb85dfd5-zd2mx     3/3     Running   0          3m41s
+node-exporter-4rb6w                    2/2     Running   0          3m40s
+node-exporter-fss8l                    2/2     Running   0          3m40s
+node-exporter-pmlgw                    2/2     Running   0          3m40s
+prometheus-adapter-5cd5798d96-2qpb7    1/1     Running   0          3m40s
+prometheus-k8s-0                       3/3     Running   1          2m58s
+prometheus-k8s-1                       3/3     Running   1          2m58s
+prometheus-operator-5cfbdc9b67-tvzct   2/2     Running   0          3m58s
+</code></pre> 
+<p>查看创建的Service：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 work<span class="token punctuation">]</span><span class="token comment"># kubectl get pods -n monitoring</span>
+NAME                                   READY   STATUS    RESTARTS   AGE
+alertmanager-main-0                    2/2     Running   0          39m
+alertmanager-main-1                    2/2     Running   0          39m
+alertmanager-main-2                    2/2     Running   0          39m
+grafana-86b55cb79f-htjzl               1/1     Running   0          39m
+kube-state-metrics-dbb85dfd5-zd2mx     3/3     Running   0          39m
+node-exporter-4rb6w                    2/2     Running   0          39m
+node-exporter-fss8l                    2/2     Running   0          39m
+node-exporter-pmlgw                    2/2     Running   0          39m
+prometheus-adapter-5cd5798d96-2qpb7    1/1     Running   0          39m
+prometheus-k8s-0                       3/3     Running   1          38m
+prometheus-k8s-1                       3/3     Running   1          38m
+prometheus-operator-5cfbdc9b67-tvzct   2/2     Running   0          39m
+</code></pre> 
+<p>可以看到上面针对grafana和prometheus都创建了一个类型为ClusterIP的Service，当然如果我们想再外网访问这两个服务的话，可以通过创建对应的Ingress对象或者使用NodePort类型的Service，我这里为了方便，直接使用NodePort类型的服务即可。编辑grafana和prometheus-k8s这两个Service，将服务类型更改为NodePort：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 work<span class="token punctuation">]</span><span class="token comment"># kubectl edit svc grafana -n monitoring</span>
+<span class="token punctuation">..</span>.
+  type: NodePort
+<span class="token punctuation">..</span>.
+<span class="token punctuation">[</span>root@k8s-01 work<span class="token punctuation">]</span><span class="token comment"># kubectl edit svc prometheus-k8s -n monitoring</span>
+<span class="token punctuation">..</span>.
+  type: NodePort
+<span class="token punctuation">..</span>.
+<span class="token punctuation">[</span>root@k8s-01 work<span class="token punctuation">]</span><span class="token comment"># kubectl get svc -n monitoring</span>
+NAME                    TYPE        CLUSTER-IP       EXTERNAL-IP   PORT<span class="token punctuation">(</span>S<span class="token punctuation">)</span>                      AGE
+alertmanager-main       ClusterIP   10.254.245.0     <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        9093/TCP                     49m
+alertmanager-operated   ClusterIP   None             <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        9093/TCP,9094/TCP,9094/UDP   49m
+grafana                 NodePort    10.254.111.205   <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        3000:31019/TCP               49m
+kube-state-metrics      ClusterIP   None             <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        8443/TCP,9443/TCP            49m
+node-exporter           ClusterIP   None             <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        9100/TCP                     49m
+prometheus-adapter      ClusterIP   10.254.35.129    <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        443/TCP                      49m
+prometheus-k8s          NodePort    10.254.22.213    <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        9090:32159/TCP               49m
+prometheus-operated     ClusterIP   None             <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        9090/TCP                     48m
+prometheus-operator     ClusterIP   None             <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        8443/TCP                     49m
+</code></pre> 
+<p>修改完成后，就可以去访问prometheus和grafana这两个服务了。这里先查看下prometheus的targets页面：</p> 
+<p>会发现这时候的<code>monitoring/kubelet/0</code>和<code>monitoring/kubelet/1</code>都是红色的，如下图：<br> <img src="https://images2.imgbox.com/40/5c/z6KMI4I7_o.png" alt="在这里插入图片描述"><br> 查看kubelet的日志，有报错：<code>TLS handshake error from 192.168.0.71:45994: no serving certificate available for the kubelet</code>。</p> 
+<p>这是因为基于<a href="https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet-tls-bootstrapping/#kubelet-configuration" rel="nofollow">安全性考虑</a>，CSR approving controllers 不会自动 approve kubelet server 证书签名请求，需要手动 approve。</p> 
+<p><strong>解决方法：</strong></p> 
+<p>我们手动approve一下CSR即可。</p> 
+<pre><code class="prism language-shell">kubectl get csr <span class="token operator">|</span> <span class="token function">grep</span> Pending <span class="token operator">|</span> <span class="token function">awk</span> <span class="token string">'{print <span class="token variable">$1</span>}'</span> <span class="token operator">|</span> <span class="token function">xargs</span> kubectl certificate approve 
+</code></pre> 
+<p>然后再去查看prometheus的targets页面，能成功监控上kubelet了。<br> <img src="https://images2.imgbox.com/8b/7a/TxuRjuom_o.png" alt="在这里插入图片描述"><br> 除此之外，在prometheus的targets页面中，大部分配置都是正常的，但是还有<code>kube-controller-manager</code>和<code>kube-scheduler</code>这两个系统组件没有监控到，这是由于我这里是二进制安装，所以没有获取到相关的信息<br> <img src="https://images2.imgbox.com/19/c1/wn485deg_o.png" alt="在这里插入图片描述"><br> 这是由于serverMonitor是根据label去选取svc的，我们可以看下对应的<code>serviceMonitor</code>选取的范围是<code>kube-system</code></p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># grep -2 selector prometheus-serviceMonitorKube*</span>
+prometheus-serviceMonitorKubeControllerManager.yaml-    matchNames:
+prometheus-serviceMonitorKubeControllerManager.yaml-    - kube-system
+prometheus-serviceMonitorKubeControllerManager.yaml:  selector:
+prometheus-serviceMonitorKubeControllerManager.yaml-    matchLabels:
+prometheus-serviceMonitorKubeControllerManager.yaml-      k8s-app: kube-controller-manager
+--
+prometheus-serviceMonitorKubelet.yaml-    matchNames:
+prometheus-serviceMonitorKubelet.yaml-    - kube-system
+prometheus-serviceMonitorKubelet.yaml:  selector:
+prometheus-serviceMonitorKubelet.yaml-    matchLabels:
+prometheus-serviceMonitorKubelet.yaml-      k8s-app: kubelet
+--
+prometheus-serviceMonitorKubeScheduler.yaml-    matchNames:
+prometheus-serviceMonitorKubeScheduler.yaml-    - kube-system
+prometheus-serviceMonitorKubeScheduler.yaml:  selector:
+prometheus-serviceMonitorKubeScheduler.yaml-    matchLabels:
+prometheus-serviceMonitorKubeScheduler.yaml-      k8s-app: kube-scheduler
+</code></pre> 
+<p>但是在kube-system命名空间中没有符合标签的label</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl get svc -n kube-system --show-labels</span>
+NAME       TYPE        CLUSTER-IP   EXTERNAL-IP   PORT<span class="token punctuation">(</span>S<span class="token punctuation">)</span>                        AGE   LABELS
+kube-dns   ClusterIP   10.254.0.2   <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        53/UDP,53/TCP,9153/TCP         21h   k8s-app<span class="token operator">=</span>kube-dns,kubernetes.io/cluster-service<span class="token operator">=</span>true,kubernetes.io/name<span class="token operator">=</span>CoreDNS
+kubelet    ClusterIP   None         <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        10250/TCP,10255/TCP,4194/TCP   20h   k8s-app<span class="token operator">=</span>kubelet
+</code></pre> 
+<p>但是却有endpoint（我这里二进制安装的有）</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 xinjia<span class="token punctuation">]</span><span class="token comment"># kubectl get ep -n kube-system --show-labels</span>
+NAME                      ENDPOINTS                                                              AGE   LABELS
+kube-controller-manager   <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>                                                                 22h   k8s-app<span class="token operator">=</span>kube-controller-manager,service.kubernetes.io/headless<span class="token operator">=</span>
+kube-dns                  172.30.56.2:53,172.30.56.2:53,172.30.56.2:9153                         22h   k8s-app<span class="token operator">=</span>kube-dns,kubernetes.io/cluster-service<span class="token operator">=</span>true,kubernetes.io/name<span class="token operator">=</span>CoreDNS
+kube-scheduler            <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>                                                                 22h   k8s-app<span class="token operator">=</span>kube-scheduler,service.kubernetes.io/headless<span class="token operator">=</span>
+kubelet                   192.168.0.71:10255,192.168.0.72:10255,192.168.0.73:10255 + 6 more<span class="token punctuation">..</span>.   21h   k8s-app<span class="token operator">=</span>kubelet
+</code></pre> 
+<p><strong>解决方法：</strong></p> 
+<p>这里创建两个管理组件的svc，将svc的label设置为k8s-app: <code>{kube-controller-manager、kube-scheduler}</code>，这样就可以被serviceMonitor选中了。</p> 
+<p>创建一个svc用来绑定</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 manifests<span class="token punctuation">]</span><span class="token comment"># vim controllerandscheduler-svc.yaml</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Service
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">namespace</span><span class="token punctuation">:</span> kube<span class="token punctuation">-</span>system
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> kube<span class="token punctuation">-</span>controller<span class="token punctuation">-</span>manager
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">k8s-app</span><span class="token punctuation">:</span> kube<span class="token punctuation">-</span>controller<span class="token punctuation">-</span>manager
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">component</span><span class="token punctuation">:</span> kube<span class="token punctuation">-</span>controller<span class="token punctuation">-</span>manager
+  <span class="token key atrule">type</span><span class="token punctuation">:</span> ClusterIP
+  <span class="token key atrule">clusterIP</span><span class="token punctuation">:</span> None
+  <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> http<span class="token punctuation">-</span>metrics
+    <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">10252</span>
+    <span class="token key atrule">targetPort</span><span class="token punctuation">:</span> <span class="token number">10252</span>
+    <span class="token key atrule">protocol</span><span class="token punctuation">:</span> TCP
+<span class="token punctuation">---</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Service
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">namespace</span><span class="token punctuation">:</span> kube<span class="token punctuation">-</span>system
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> kube<span class="token punctuation">-</span>scheduler
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">k8s-app</span><span class="token punctuation">:</span> kube<span class="token punctuation">-</span>scheduler
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">component</span><span class="token punctuation">:</span> kube<span class="token punctuation">-</span>scheduler
+  <span class="token key atrule">type</span><span class="token punctuation">:</span> ClusterIP
+  <span class="token key atrule">clusterIP</span><span class="token punctuation">:</span> None
+  <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> http<span class="token punctuation">-</span>metrics
+    <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">10251</span>
+    <span class="token key atrule">targetPort</span><span class="token punctuation">:</span> <span class="token number">10251</span>
+    <span class="token key atrule">protocol</span><span class="token punctuation">:</span> TCP
+</code></pre> 
+<p>创建这两个svc</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl create -f controllerandscheduler-svc.yaml</span>
+service/kube-controller-manager created
+service/kube-scheduler created
+</code></pre> 
+<p>手动编辑svc对应的ep的属性，ep的名称要和svc名称和属性对应上</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 xinjia<span class="token punctuation">]</span><span class="token comment"># kubectl edit ep kube-controller-manager -n kube-system</span>
+<span class="token comment">##在末尾加上下面内容</span>
+<span class="token key atrule">subsets</span><span class="token punctuation">:</span>
+<span class="token punctuation">-</span> <span class="token key atrule">addresses</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">ip</span><span class="token punctuation">:</span> 192.168.0.71
+  <span class="token punctuation">-</span> <span class="token key atrule">ip</span><span class="token punctuation">:</span> 192.168.0.72
+  <span class="token punctuation">-</span> <span class="token key atrule">ip</span><span class="token punctuation">:</span> 192.168.0.73
+  <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> http<span class="token punctuation">-</span>metrics
+    <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">10252</span>
+    <span class="token key atrule">protocol</span><span class="token punctuation">:</span> TCP
+
+<span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 xinjia<span class="token punctuation">]</span><span class="token comment"># kubectl edit ep kube-scheduler -n kube-system</span>
+<span class="token comment">##在末尾加上下面内容</span>
+<span class="token key atrule">subsets</span><span class="token punctuation">:</span>
+<span class="token punctuation">-</span> <span class="token key atrule">addresses</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">ip</span><span class="token punctuation">:</span> 192.168.0.71
+  <span class="token punctuation">-</span> <span class="token key atrule">ip</span><span class="token punctuation">:</span> 192.168.0.72
+  <span class="token punctuation">-</span> <span class="token key atrule">ip</span><span class="token punctuation">:</span> 192.168.0.73
+  <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> http<span class="token punctuation">-</span>metrics
+    <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">10251</span>
+    <span class="token key atrule">protocol</span><span class="token punctuation">:</span> TCP
+</code></pre> 
+<p>查看一下svc，已经和ep绑定好了</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 xinjia<span class="token punctuation">]</span><span class="token comment"># kubectl get svc -n kube-system</span>
+NAME                      TYPE        CLUSTER-IP   EXTERNAL-IP   PORT<span class="token punctuation">(</span>S<span class="token punctuation">)</span>                        AGE
+kube-controller-manager   ClusterIP   None         <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        10252/TCP                      30m
+kube-dns                  ClusterIP   10.254.0.2   <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        53/UDP,53/TCP,9153/TCP         22h
+kube-scheduler            ClusterIP   None         <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        10251/TCP                      30m
+kubelet                   ClusterIP   None         <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        10250/TCP,10255/TCP,4194/TCP   21h
+<span class="token punctuation">[</span>root@k8s-01 xinjia<span class="token punctuation">]</span><span class="token comment"># kubectl describe svc -n kube-system kube-scheduler</span>
+Name:              kube-scheduler
+Namespace:         kube-system
+Labels:            k8s-app<span class="token operator">=</span>kube-scheduler
+Annotations:       <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>
+Selector:          component<span class="token operator">=</span>kube-scheduler
+Type:              ClusterIP
+IP:                None
+Port:              http-metrics  10251/TCP
+TargetPort:        10251/TCP
+Endpoints:         192.168.0.71:10251,192.168.0.72:10251,192.168.0.73:10251
+Session Affinity:  None
+Events:            <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>
+
+</code></pre> 
+<p>OK，这个时候再去看一眼prometheus的targets页面：<br> <img src="https://images2.imgbox.com/79/f3/rs0yA6Vd_o.png" alt="在这里插入图片描述"><br> 可以看到kube-scheduler没问题了，但是kube-controller-manager显示是红色的。查看kube-controller-manager的日志，有报错<code>server returned HTTP status 400 Bad Request，且kube-controller-manager日志报TLS handshake error from 192.168.0.71:43604: remote error: tls: unknown certificate authority</code>。</p> 
+<p>解决方法，参考了<code>https://www.cnblogs.com/yuhaohao/p/10197315.html</code>，具体方法为：</p> 
+<p>修改kube-controller-manager服务的Service文件：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 system<span class="token punctuation">]</span><span class="token comment"># vim /etc/systemd/system/kube-controller-manager.service</span>
+<span class="token comment">###删除下面两行</span>
+--port<span class="token operator">=</span>0
+--secure-port<span class="token operator">=</span>10252
+
+<span class="token comment">#重启kube-controller-manager服务</span>
+systemctl daemon-reload
+systemctl restart kube-controller-manager
+
+</code></pre> 
+<p><strong>注意：这里有个问题，kube-controller-manager重启之后，上面自改的两个endpoint会失效，需要再修改一遍，暂时未找到解决的办法，等找到之后再回来更新。</strong></p> 
+<p>这时候可以看到所有的targets都正常了：<br> <img src="https://images2.imgbox.com/42/90/po8jaMis_o.png" alt="在这里插入图片描述"><br> 上面的监控数据配置完成后，现在可以去查看下grafana中的dashboard，同样是使用上面的NodePort访问即可，首次登陆使用admin/admin登陆即可，进入首页之后，发现已经和Prometheus数据源关联上了，可以看到监控图表了：<br> <img src="https://images2.imgbox.com/07/ed/rZ7aLgZ1_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="Etcd_379"></a>三、自定义监控(Etcd)</h4> 
+<p>除了Kubernetes集群中的一些资源对象、节点以及组件需要监控，有的时候我们可能还需要根据实际的业务需求去添加自定义的监控项，添加一个自定义监控的步骤如下：</p> 
+<ul><li>创建一个ServiceMonitor对象，用于Prometheus添加监控项</li><li>为ServiceMonitor对象关联metrics数据接口的一个Service对象</li><li>确保Service对象可以正确获取到metrics数据</li></ul> 
+<p><strong>获取ETCD证书</strong></p> 
+<p>对于etcd集群，在搭建的时候就采用了https证书认证的方式，所以这里如果想用Prometheus访问到etcd集群的监控数据，就需要添加证书</p> 
+<p>可以通过查看etcd的service文件来查看证书路径</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 system<span class="token punctuation">]</span><span class="token comment"># cat /etc/systemd/system/etcd.service </span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/1c/51/SX3m0WNS_o.png" alt="在这里插入图片描述"></p> 
+<p>接着需要创建一个secret，让prometheus pod节点挂载</p> 
+<pre><code class="prism language-shell">kubectl create secret generic etcd-ssl --from-file<span class="token operator">=</span>/etc/kubernetes/cert/ca.pem --from-file<span class="token operator">=</span>/etc/etcd/cert/etcd.pem --from-file<span class="token operator">=</span>/etc/etcd/cert/etcd-key.pem -n monitoring
+
+</code></pre> 
+<p>创建完成后检查一下：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 system<span class="token punctuation">]</span><span class="token comment"># kubectl describe secrets -n monitoring etcd-ssl</span>
+Name:         etcd-ssl
+Namespace:    monitoring
+Labels:       <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>
+Annotations:  <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>
+
+Type:  Opaque
+
+Data
+<span class="token operator">==</span><span class="token operator">==</span>
+ca.pem:        1322 bytes
+etcd-key.pem:  1679 bytes
+etcd.pem:      1444 bytes
+
+</code></pre> 
+<p>将etcd-ssl secret对象配置到prometheus资源对象中去：</p> 
+<pre><code class="prism language-shell"><span class="token comment">#修改prometheus-prometheus.yaml </span>
+<span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># vim prometheus-prometheus.yaml</span>
+  nodeSelector:
+    kubernetes.io/os: linux
+  podMonitorNamespaceSelector: <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  podMonitorSelector: <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  replicas: 2
+  secrets:
+  - etcd-ssl <span class="token comment">#添加secret名称</span>
+  
+<span class="token comment">#更新使生效</span>
+<span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl apply -f prometheus-prometheus.yaml </span>
+prometheus.monitoring.coreos.com/k8s configured
+
+</code></pre> 
+<p>更新完之后，就可以在Prometheus Pod中查看到对象的目录</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl exec -it -n monitoring prometheus-k8s-0 /bin/sh </span>
+Defaulting container name to prometheus.
+Use <span class="token string">'kubectl describe pod/prometheus-k8s-0 -n monitoring'</span> to see all of the containers <span class="token keyword">in</span> this pod.
+/prometheus $ <span class="token function">ls</span> /etc/prometheus/secrets/etcd-ssl/
+ca.pem        etcd-key.pem  etcd.pem
+
+</code></pre> 
+<p><strong>创建ServiceMonitor</strong></p> 
+<p>目前prometheus已经挂载了etcd的证书文件，接下来需要创建ServiceMonitor</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 xinjia<span class="token punctuation">]</span><span class="token comment"># vim etcd-servicemonitor.yaml</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> monitoring.coreos.com/v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> ServiceMonitor
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> etcd<span class="token punctuation">-</span>k8s
+  <span class="token key atrule">namespace</span><span class="token punctuation">:</span> monitoring
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">k8s-app</span><span class="token punctuation">:</span> etcd<span class="token punctuation">-</span>k8s
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">jobLabel</span><span class="token punctuation">:</span> k8s<span class="token punctuation">-</span>app
+  <span class="token key atrule">endpoints</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">port</span><span class="token punctuation">:</span> port
+    <span class="token key atrule">interval</span><span class="token punctuation">:</span> 30s
+    <span class="token key atrule">scheme</span><span class="token punctuation">:</span> https
+    <span class="token key atrule">tlsConfig</span><span class="token punctuation">:</span>
+      <span class="token key atrule">caFile</span><span class="token punctuation">:</span> /etc/prometheus/secrets/etcd<span class="token punctuation">-</span>ssl/ca.pem    <span class="token comment">#证书路径 (在prometheus pod里路径)</span>
+      <span class="token key atrule">certFile</span><span class="token punctuation">:</span> /etc/prometheus/secrets/etcd<span class="token punctuation">-</span>ssl/etcd.pem
+      <span class="token key atrule">keyFile</span><span class="token punctuation">:</span> /etc/prometheus/secrets/etcd<span class="token punctuation">-</span>ssl/etcd<span class="token punctuation">-</span>key.pem
+      <span class="token key atrule">insecureSkipVerify</span><span class="token punctuation">:</span> <span class="token boolean important">true</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">matchLabels</span><span class="token punctuation">:</span>
+      <span class="token key atrule">k8s-app</span><span class="token punctuation">:</span> etcd
+  <span class="token key atrule">namespaceSelector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">matchNames</span><span class="token punctuation">:</span>
+    <span class="token punctuation">-</span> kube<span class="token punctuation">-</span>system
+</code></pre> 
+<p>匹配kube-system这个命令空间下面具有<code>k8s-app=etcd</code>这个label标签的Service，job label用于检索job任务名称的标签。由于证书serverName和etcd中签发的证书可能不匹配，所以添加了<code>insecureSkipVerify=true</code>将不再对服务端的证书进行校验。</p> 
+<p>接下来，直接创建这个ServiceMonitor</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 xinjia<span class="token punctuation">]</span><span class="token comment"># kubectl apply -f etcd-servicemonitor.yaml</span>
+servicemonitor.monitoring.coreos.com/etcd-k8s created
+
+<span class="token comment">###查看servicemonitor</span>
+<span class="token punctuation">[</span>root@k8s-01 xinjia<span class="token punctuation">]</span><span class="token comment"># kubectl get servicemonitors -n monitoring |grep etcd</span>
+etcd-k8s                  41s
+</code></pre> 
+<p><strong>创建Service</strong></p> 
+<p>ServiceMonitor创建完成，但是还没有关联对应的Service对象，所以需要创建一个service对象</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 xinjia<span class="token punctuation">]</span><span class="token comment"># vim etcd-prometheus-svc.yaml</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Service
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> etcd<span class="token punctuation">-</span>k8s
+  <span class="token key atrule">namespace</span><span class="token punctuation">:</span> kube<span class="token punctuation">-</span>system
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">k8s-app</span><span class="token punctuation">:</span> etcd
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">type</span><span class="token punctuation">:</span> ClusterIP
+  <span class="token key atrule">clusterIP</span><span class="token punctuation">:</span> None
+  <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> port
+    <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">2379</span>
+    <span class="token key atrule">protocol</span><span class="token punctuation">:</span> TCP
+
+<span class="token punctuation">---</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Endpoints
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> etcd<span class="token punctuation">-</span>k8s
+  <span class="token key atrule">namespace</span><span class="token punctuation">:</span> kube<span class="token punctuation">-</span>system
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">k8s-app</span><span class="token punctuation">:</span> etcd
+<span class="token key atrule">subsets</span><span class="token punctuation">:</span>
+<span class="token punctuation">-</span> <span class="token key atrule">addresses</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">ip</span><span class="token punctuation">:</span> 192.168.0.71     <span class="token comment">#etcd节点名称</span>
+    <span class="token key atrule">nodeName</span><span class="token punctuation">:</span> k8s<span class="token punctuation">-</span><span class="token number">01     </span><span class="token comment">#kubelet名称 (kubectl get node)显示的名称</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">ip</span><span class="token punctuation">:</span> 192.168.0.72
+    <span class="token key atrule">nodeName</span><span class="token punctuation">:</span> k8s<span class="token punctuation">-</span><span class="token number">02</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">ip</span><span class="token punctuation">:</span> 192.168.0.73
+    <span class="token key atrule">nodeName</span><span class="token punctuation">:</span> k8s<span class="token punctuation">-</span><span class="token number">03</span>
+  <span class="token key atrule">ports</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> port
+    <span class="token key atrule">port</span><span class="token punctuation">:</span> <span class="token number">2379</span>
+    <span class="token key atrule">protocol</span><span class="token punctuation">:</span> TCP
+</code></pre> 
+<p>直接创建：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 xinjia<span class="token punctuation">]</span><span class="token comment"># kubectl apply -f etcd-prometheus-svc.yaml</span>
+service/etcd-k8s created
+endpoints/etcd-k8s created
+
+<span class="token comment">###查看结果</span>
+<span class="token punctuation">[</span>root@k8s-01 xinjia<span class="token punctuation">]</span><span class="token comment"># kubectl get svc -n kube-system | grep etcd</span>
+etcd-k8s                  ClusterIP   None         <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>        2379/TCP                       69s
+
+</code></pre> 
+<p>不放心的话，还可以查看下service是否绑定到对象的ip上了：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 xinjia<span class="token punctuation">]</span><span class="token comment"># kubectl describe svc etcd-k8s -n kube-system</span>
+Name:              etcd-k8s
+Namespace:         kube-system
+Labels:            k8s-app<span class="token operator">=</span>etcd
+Annotations:       kubectl.kubernetes.io/last-applied-configuration:
+                     <span class="token punctuation">{<!-- --></span><span class="token string">"apiVersion"</span><span class="token keyword">:</span><span class="token string">"v1"</span>,<span class="token string">"kind"</span><span class="token keyword">:</span><span class="token string">"Service"</span>,<span class="token string">"metadata"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"annotations"</span>:<span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>,<span class="token string">"labels"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"k8s-app"</span><span class="token keyword">:</span><span class="token string">"etcd"</span><span class="token punctuation">}</span>,<span class="token string">"name"</span><span class="token keyword">:</span><span class="token string">"etcd-k8s"</span>,<span class="token string">"namespace"</span><span class="token keyword">:</span><span class="token string">"kube-system"</span><span class="token punctuation">}</span>,<span class="token punctuation">..</span>.
+Selector:          <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>
+Type:              ClusterIP
+IP:                None
+Port:              port  2379/TCP
+TargetPort:        2379/TCP
+Endpoints:         192.168.0.71:2379,192.168.0.72:2379,192.168.0.73:2379
+Session Affinity:  None
+Events:            <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>
+
+</code></pre> 
+<p>稍等一会，去prometheus targets查看，就会看到etcd的监控信息了<br> <img src="https://images2.imgbox.com/45/94/HESuDvj7_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="K8S_581"></a>四、监控K8S集群中的哪些指标和相关的方法</h4> 
+<h5><a id="1_583"></a>1、监控指标</h5> 
+<p>上面prometheus的targets页面中都是些K8S集群本身的服务组件（如）和一些监控</p> 
+<p>我个人把上面prometheus的target页面中的这些服务分为三类：</p> 
+<ul><li>第一类是K8S集群本身的组件：如kube-controller-manager、etcd等。</li><li>第二类是所要使用的第三方服务：如prometheus和grafana</li><li>第三类是为prometheus收集监控信息而部署的服务（即作为prometheus的客户端）：如node-exporter和kube-state-metrics等。</li></ul> 
+<p>分完 这三类之后，我们再来看看在K8S集群中，我们所要监控的对象。</p> 
+<p><strong>Pod监控</strong></p> 
+<p>之前在安装kubelet的时候有讲过，cadvisor 是内嵌在 kubelet 二进制中的，统计所在节点各容器的资源(CPU、内存、磁盘、网卡)使用情况的服务。<br> kubelet的节点使用cAdvisor提供的metrics接口获取该节点所有Pod和容器相关的性能指标数据。也就是kubelet会暴露两个接口地址：<br> https://NodeIP:10250/metrics和https://NodeIP:10250/metrics/cadvisor分别返回 kubelet 和 cadvisor 的 metrics。需要注意的是，用浏览器直接访问是不行的，其中还设计到一些授权的问题，具体可以移步到之前安装kubelet的文章。</p> 
+<p><strong>Node监控</strong></p> 
+<p>Prometheus Operator以DaemonSet的形式在k8s集群的每个node节点上都部署一个node-exporter来采集各个node的资源利用率信息。</p> 
+<p><strong>资源对象监控</strong></p> 
+<p>Prometheus Operator部署了一个kube-state-metrics来采集k8s中各种资源对象的状态信息。</p> 
+<h5><a id="2GrafanaPrometheus_611"></a>2、使用Grafana可视化展示Prometheus监控数据</h5> 
+<p>没错，其实上面已经展示过了，因为Prometheus Operator部署完成之后的grafana中自带了模板。</p> 
+<p>但是我这里还是要推荐下几个不错的模板：</p> 
+<ul><li>集群资源监控：3119（以监控资源的具体指标值为主）</li><li>资源状态监控：6417（以监控资源的具体数量为主）</li><li>Node监控：9276</li><li>Etcd监控：9733</li></ul> 
+<p>可以在grafana中根据模板id直接导入这几个模板，导入的方法比较简单，前面的文章都有讲过，这里不再赘述。</p> 
+<p>现在使用3119这个模板，来展示<strong>K8S集群的资源</strong>。</p> 
+<p>因为在prometheus中已经有了数据，所以就直接能查看到的集群的资源了。</p> 
+<p>下图是网络IO图表，一个是接收，一个是发送。<br> <img src="https://images2.imgbox.com/4d/5f/CK86rPjG_o.png" alt="在这里插入图片描述"><br> 再下面是集群内存、CPU、文件系统的使用情况。可以看到文件系统并没有显示出来，我们可以看下它的PromQL怎么写的，然后把这个PromQL UI上去调试一下即可。<br> <img src="https://images2.imgbox.com/a0/f4/h7dsoAZZ_o.png" alt="在这里插入图片描述"><br> 来看一下怎么解决：<br> <img src="https://images2.imgbox.com/08/ca/HmTRWPA5_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/e6/82/oGyvM9R4_o.png" alt="在这里插入图片描述"><br> 可以看到默认的device是用xvda去匹配的，我们这里改成sda就行。改完之后，数据就出来了。<br> <img src="https://images2.imgbox.com/38/26/I67dXvI9_o.png" alt="在这里插入图片描述"><br> 其他的图标也有一些需要修改的地方，根据自己集群的实际情况进行修改就行。我这边是把我修改好的模板给导出来保存为json文件了。</p> 
+<p>现在来看一下资源状态监控的模板6417，直接导入这个模板。<br> <img src="https://images2.imgbox.com/29/35/BrRQTht0_o.png" alt="在这里插入图片描述"><br> 可以看到，磁盘这里显示不出数据来，这是因为查询语句做了更新，我们添加上<code>_bytes</code>就可以了。<br> <img src="https://images2.imgbox.com/8e/ed/DgQQgZtC_o.png" alt="在这里插入图片描述"><img src="https://images2.imgbox.com/87/6a/OWwPFel3_o.png" alt="在这里插入图片描述"><br> 修改完成后如下图：<br> <img src="https://images2.imgbox.com/ea/35/Aguy4jQB_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>node监控</strong></p> 
+<p>node监控这里使用9276模板，直接导入模板来看下。分组名称选择<code>node-exporter</code>，IP地址选择主机名即可。<br> <img src="https://images2.imgbox.com/03/24/SwFQmrWl_o.png" alt="在这里插入图片描述"><br> 在这个模板里面，获取网络带宽失败，这是因为网卡名称的原因，有的是eth0，有的是ens32,ens33等。这个根据自己的实际情况去修改就行。<br> <img src="https://images2.imgbox.com/5c/a9/mwyNOVBD_o.png" alt="在这里插入图片描述"><br> 修改完之后，就有数据了：<br> <img src="https://images2.imgbox.com/f1/27/ldz6ZIXC_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>Etcd监控</strong></p> 
+<p>Etcd的监控这里使用9733模板，直接导入即可。<br> <img src="https://images2.imgbox.com/5e/b6/NHRCQAJb_o.png" alt="在这里插入图片描述"><br> 这个模板是中文的，而且所有的监控项都能正常的获取到数据。</p> 
+<h4><a id="_663"></a>五、配置报警规则和报警方式</h4> 
+<h5><a id="1_665"></a>1、配置报警规则</h5> 
+<p>监控项和监控展示都已经搞定了，现在要做的就是设置相应的报警规则，并把报警内容给发送到相关人员的手中。</p> 
+<p>上面知道了怎么样自定义一个ServiceMonitor对象，怎么样使用grafana模板来展示监控的数据。但是如果需要自定义一个规则呢？如果现在去看Prometheus Dashboard的Alert页面下面就已经有一些报警规则了，还有一些规则已经被触发了：<br> <img src="https://images2.imgbox.com/64/7b/oK2Otc19_o.png" alt="在这里插入图片描述"><br> 这时候，就会产生一些疑问：这些报警信息是哪里来的呢？应该用怎么样的方式通知我们呢？</p> 
+<p>之前在使用k8s之前，用自定义的方式我可以在Prometheus的配置文件中指定AlertManager实例和报警rules文件，这都好理解。但是我们现在是通过Operator部署的Prometheus，那我们要怎么自定义AlertManager和rules呢？我们可以在Prometheus Dashboard的Configuration页面下查看关于AlertManager的配置：</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">global</span><span class="token punctuation">:</span>
+  <span class="token key atrule">scrape_interval</span><span class="token punctuation">:</span> 30s
+  <span class="token key atrule">scrape_timeout</span><span class="token punctuation">:</span> 10s
+  <span class="token key atrule">evaluation_interval</span><span class="token punctuation">:</span> 30s
+  <span class="token key atrule">external_labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">prometheus</span><span class="token punctuation">:</span> monitoring/k8s
+    <span class="token key atrule">prometheus_replica</span><span class="token punctuation">:</span> prometheus<span class="token punctuation">-</span>k8s<span class="token punctuation">-</span><span class="token number">0</span>
+<span class="token key atrule">alerting</span><span class="token punctuation">:</span>
+  <span class="token key atrule">alert_relabel_configs</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">separator</span><span class="token punctuation">:</span> ;
+    <span class="token key atrule">regex</span><span class="token punctuation">:</span> prometheus_replica
+    <span class="token key atrule">replacement</span><span class="token punctuation">:</span> $1
+    <span class="token key atrule">action</span><span class="token punctuation">:</span> labeldrop
+  <span class="token key atrule">alertmanagers</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">kubernetes_sd_configs</span><span class="token punctuation">:</span>
+    <span class="token punctuation">-</span> <span class="token key atrule">role</span><span class="token punctuation">:</span> endpoints
+      <span class="token key atrule">namespaces</span><span class="token punctuation">:</span>
+        <span class="token key atrule">names</span><span class="token punctuation">:</span>
+        <span class="token punctuation">-</span> monitoring
+    <span class="token key atrule">scheme</span><span class="token punctuation">:</span> http
+    <span class="token key atrule">path_prefix</span><span class="token punctuation">:</span> /
+    <span class="token key atrule">timeout</span><span class="token punctuation">:</span> 10s
+    <span class="token key atrule">api_version</span><span class="token punctuation">:</span> v1
+    <span class="token key atrule">relabel_configs</span><span class="token punctuation">:</span>
+    <span class="token punctuation">-</span> <span class="token key atrule">source_labels</span><span class="token punctuation">:</span> <span class="token punctuation">[</span>__meta_kubernetes_service_name<span class="token punctuation">]</span>
+      <span class="token key atrule">separator</span><span class="token punctuation">:</span> ;
+      <span class="token key atrule">regex</span><span class="token punctuation">:</span> alertmanager<span class="token punctuation">-</span>main
+      <span class="token key atrule">replacement</span><span class="token punctuation">:</span> $1
+      <span class="token key atrule">action</span><span class="token punctuation">:</span> keep
+    <span class="token punctuation">-</span> <span class="token key atrule">source_labels</span><span class="token punctuation">:</span> <span class="token punctuation">[</span>__meta_kubernetes_endpoint_port_name<span class="token punctuation">]</span>
+      <span class="token key atrule">separator</span><span class="token punctuation">:</span> ;
+      <span class="token key atrule">regex</span><span class="token punctuation">:</span> web
+      <span class="token key atrule">replacement</span><span class="token punctuation">:</span> $1
+      <span class="token key atrule">action</span><span class="token punctuation">:</span> keep
+<span class="token key atrule">rule_files</span><span class="token punctuation">:</span>
+<span class="token punctuation">-</span> /etc/prometheus/rules/prometheus<span class="token punctuation">-</span>k8s<span class="token punctuation">-</span>rulefiles<span class="token punctuation">-</span>0/*.yaml
+</code></pre> 
+<p>从上面的alertmanager实例的配置我们可以看到是通过角色为<code>endpoints</code>的kubernetes的服务发现机制获取的，匹配的是服务名为alertmanager-main，端口名为web的Service服务。然后我们查看下alertmanager-main这个Service：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># kubectl describe svc alertmanager-main -n monitoring</span>
+Name:              alertmanager-main
+Namespace:         monitoring
+Labels:            alertmanager<span class="token operator">=</span>main
+Annotations:       kubectl.kubernetes.io/last-applied-configuration:
+                     <span class="token punctuation">{<!-- --></span><span class="token string">"apiVersion"</span><span class="token keyword">:</span><span class="token string">"v1"</span>,<span class="token string">"kind"</span><span class="token keyword">:</span><span class="token string">"Service"</span>,<span class="token string">"metadata"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"annotations"</span>:<span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>,<span class="token string">"labels"</span>:<span class="token punctuation">{<!-- --></span><span class="token string">"alertmanager"</span><span class="token keyword">:</span><span class="token string">"main"</span><span class="token punctuation">}</span>,<span class="token string">"name"</span><span class="token keyword">:</span><span class="token string">"alertmanager-main"</span>,<span class="token string">"namespace"</span>:"<span class="token punctuation">..</span>.
+Selector:          alertmanager<span class="token operator">=</span>main,app<span class="token operator">=</span>alertmanager
+Type:              ClusterIP
+IP:                10.254.245.0
+Port:              web  9093/TCP
+TargetPort:        web/TCP
+Endpoints:         172.30.16.3:9093,172.30.32.5:9093,172.30.32.8:9093
+Session Affinity:  ClientIP
+Events:            <span class="token operator">&lt;</span>none<span class="token operator">&gt;</span>
+</code></pre> 
+<p>可以看到服务名正是<code>alertmanager-main</code>，Port定义的名称也是web，符合上面的规则，所以Prometheus和AlertManager组件就正确关联上了。而对应的报警文件位于<code>/etc/prometheus/rules/prometheus-k8s-rulefiles-0/</code>这个目录下面所有的YAML文件。我们可以进入Prometheus的Pod中验证下该目录下面是否有YAML文件：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># kubectl exec -it prometheus-k8s-0 -n monitoring /bin/sh  </span>
+Defaulting container name to prometheus.
+Use <span class="token string">'kubectl describe pod/prometheus-k8s-0 -n monitoring'</span> to see all of the containers <span class="token keyword">in</span> this pod.
+/prometheus $ <span class="token function">ls</span> /etc/prometheus/rules/prometheus-k8s-rulefiles-0/
+monitoring-prometheus-k8s-rules.yaml
+/prometheus $ <span class="token function">cat</span> /etc/prometheus/rules/prometheus-k8s-rulefiles-0/monitoring-prometheus-k8s-rules.yaml
+groups:
+- name: node-exporter.rules
+  rules:
+  - expr: <span class="token operator">|</span>
+      count without <span class="token punctuation">(</span>cpu<span class="token punctuation">)</span> <span class="token punctuation">(</span>
+        count without <span class="token punctuation">(</span>mode<span class="token punctuation">)</span> <span class="token punctuation">(</span>
+          node_cpu_seconds_total<span class="token punctuation">{<!-- --></span>job<span class="token operator">=</span><span class="token string">"node-exporter"</span><span class="token punctuation">}</span>
+        <span class="token punctuation">)</span>
+      <span class="token punctuation">)</span>
+    record: instance:node_num_cpu:sum
+  - expr: <span class="token operator">|</span>
+      1 - avg without <span class="token punctuation">(</span>cpu, mode<span class="token punctuation">)</span> <span class="token punctuation">(</span>
+        rate<span class="token punctuation">(</span>node_cpu_seconds_total<span class="token punctuation">{<!-- --></span>job<span class="token operator">=</span><span class="token string">"node-exporter"</span>, mode<span class="token operator">=</span><span class="token string">"idle"</span><span class="token punctuation">}</span><span class="token punctuation">[</span>1m<span class="token punctuation">]</span><span class="token punctuation">)</span>
+      <span class="token punctuation">)</span>
+    record: instance:node_cpu_utilisation:rate1m
+  - expr: <span class="token operator">|</span>
+      <span class="token punctuation">(</span>
+        node_load1<span class="token punctuation">{<!-- --></span>job<span class="token operator">=</span><span class="token string">"node-exporter"</span><span class="token punctuation">}</span>
+      /
+        instance:node_num_cpu:sum<span class="token punctuation">{<!-- --></span>job<span class="token operator">=</span><span class="token string">"node-exporter"</span><span class="token punctuation">}</span>
+      <span class="token punctuation">)</span>
+    record: instance:node_load1_per_cpu:ratio
+  - expr: <span class="token operator">|</span>
+      1 - <span class="token punctuation">(</span>
+        node_memory_MemAvailable_bytes<span class="token punctuation">{<!-- --></span>job<span class="token operator">=</span><span class="token string">"node-exporter"</span><span class="token punctuation">}</span>
+      /
+        node_memory_MemTotal_bytes<span class="token punctuation">{<!-- --></span>job<span class="token operator">=</span><span class="token string">"node-exporter"</span><span class="token punctuation">}</span>
+      <span class="token punctuation">)</span>
+    record: instance:node_memory_utilisation:ratio
+  - expr: <span class="token operator">|</span>
+      rate<span class="token punctuation">(</span>node_vmstat_pgmajfault<span class="token punctuation">{<!-- --></span>job<span class="token operator">=</span><span class="token string">"node-exporter"</span><span class="token punctuation">}</span><span class="token punctuation">[</span>1m<span class="token punctuation">]</span><span class="token punctuation">)</span>
+    record: instance:node_vmstat_pgmajfault:rate1m
+<span class="token punctuation">..</span><span class="token punctuation">..</span><span class="token punctuation">..</span><span class="token punctuation">..</span><span class="token punctuation">..</span><span class="token punctuation">..</span>
+
+</code></pre> 
+<p>这个YAML文件实际上就是Prometheus Operator项目中的<code>prometheus-rules.yaml</code>文件创建的一个PrometheusRule 包含的：</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 manifests<span class="token punctuation">]</span><span class="token comment"># cat prometheus-rules.yaml</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> monitoring.coreos.com/v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> PrometheusRule
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">prometheus</span><span class="token punctuation">:</span> k8s
+    <span class="token key atrule">role</span><span class="token punctuation">:</span> alert<span class="token punctuation">-</span>rules
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> prometheus<span class="token punctuation">-</span>k8s<span class="token punctuation">-</span>rules
+  <span class="token key atrule">namespace</span><span class="token punctuation">:</span> monitoring
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">groups</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> node<span class="token punctuation">-</span>exporter.rules
+    <span class="token key atrule">rules</span><span class="token punctuation">:</span>
+    <span class="token punctuation">-</span> <span class="token key atrule">expr</span><span class="token punctuation">:</span> <span class="token punctuation">|</span><span class="token scalar string">
+        count without (cpu) (
+          count without (mode) (
+            node_cpu_seconds_total{job="node-exporter"}
+          )
+        )</span>
+      <span class="token key atrule">record</span><span class="token punctuation">:</span> instance<span class="token punctuation">:</span>node_num_cpu<span class="token punctuation">:</span>sum
+    <span class="token punctuation">-</span> <span class="token key atrule">expr</span><span class="token punctuation">:</span> <span class="token punctuation">|</span><span class="token scalar string">
+        1 - avg without (cpu, mode) (
+          rate(node_cpu_seconds_total{job="node-exporter", mode="idle"}[1m])
+        )</span>
+      <span class="token key atrule">record</span><span class="token punctuation">:</span> instance<span class="token punctuation">:</span>node_cpu_utilisation<span class="token punctuation">:</span>rate1m
+    <span class="token punctuation">-</span> <span class="token key atrule">expr</span><span class="token punctuation">:</span> <span class="token punctuation">|</span><span class="token scalar string">
+        (
+          node_load1{job="node-exporter"}
+        /
+          instance:node_num_cpu:sum{job="node-exporter"}
+        )</span>
+      <span class="token key atrule">record</span><span class="token punctuation">:</span> instance<span class="token punctuation">:</span>node_load1_per_cpu<span class="token punctuation">:</span>ratio
+    <span class="token punctuation">-</span> <span class="token key atrule">expr</span><span class="token punctuation">:</span> <span class="token punctuation">|</span><span class="token scalar string">
+        1 - (
+          node_memory_MemAvailable_bytes{job="node-exporter"}
+        /
+          node_memory_MemTotal_bytes{job="node-exporter"}
+        )</span>
+      <span class="token key atrule">record</span><span class="token punctuation">:</span> instance<span class="token punctuation">:</span>node_memory_utilisation<span class="token punctuation">:</span>ratio
+    <span class="token punctuation">-</span> <span class="token key atrule">expr</span><span class="token punctuation">:</span> <span class="token punctuation">|</span><span class="token scalar string">
+        rate(node_vmstat_pgmajfault{job="node-exporter"}[1m])</span>
+      <span class="token key atrule">record</span><span class="token punctuation">:</span> instance<span class="token punctuation">:</span>node_vmstat_pgmajfault<span class="token punctuation">:</span>rate1m
+<span class="token punctuation">...</span><span class="token punctuation">...</span><span class="token punctuation">...</span><span class="token punctuation">...</span>
+</code></pre> 
+<p>这里的PrometheusRule的name为prometheus-k8s-rules，namespace为monitoring，我们可以猜想到我们创建一个PrometheusRule资源对象后，会自动在上面的prometheus-k8s-rulefiles-0目录下面生成一个对应的-.yaml文件，所以如果以后我们需要自定义一个报警选项的话，只需要定义一个Prometheus资源对象即可。治愈为什么Prometheus能够识别这个PrometheusRule资源对象呢？这就需要查看我们创建的prometheus这个资源对象了，里面有非常重要的一个属性ruleSelector，哟呵你过来匹配rule规则的过滤器，要求匹配具有prometheus=k8s和role=alert-rules标签的PrometheusRules资源对象。</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">ruleSelector</span><span class="token punctuation">:</span>
+  <span class="token key atrule">matchLabels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">prometheus</span><span class="token punctuation">:</span> k8s
+    <span class="token key atrule">role</span><span class="token punctuation">:</span> alert<span class="token punctuation">-</span>rules
+</code></pre> 
+<p>所以我们要想自定义一个报警规则，只需要创建一个具有prometheus=k8s和role=alert-rules标签的PrometheusRule对象就行了。</p> 
+<p>这里我个人认为Prometheus Operator项目中自带的报警规则不太适用，于是我就在<a href="https://awesome-prometheus-alerts.grep.to/" rel="nofollow">Awesome Prometheus alerts</a>这个网站中找了自己需要用的报警规则，因为内容比较多，我这里直接将整理报警规则放到了github中（注意label标签一定至少要有prometheus=k8s和role=alert-rules）。直接拿这个文件的内容覆盖掉prometheus-rules.yaml文件中的内容，然后使生效：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl apply -f prometheus-rules.yaml                 </span>
+prometheusrule.monitoring.coreos.com/prometheus-k8s-rules configured
+
+</code></pre> 
+<p>然后再去Prometheus Dashboard的Alert页面下就可以看到上面我们新建的报警规则了：<br> <img src="https://images2.imgbox.com/10/cd/nmN5zrqa_o.png" alt="在这里插入图片描述"></p> 
+<h5><a id="2_848"></a>2、配置报警方式</h5> 
+<p>我们知道了如何去添加一个报警规则配置项，但是这些报警信息用怎样的方式去发送呢？之前我们已经知道了可以通过AlertManager的配置文件去配置各种报警接收器，这没啥问题。但是现在我们是通过Prometheus Operator提供的alertmanager资源对象创建的组件，应该怎么样去修改配置呢？</p> 
+<p>首先我们将alertmanager-main这个Service改为NodePort类型的Service，修改完成后可以在页面上的status路径下查看AlertManager的配置信息：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl edit svc alertmanager-main -n monitoring</span>
+<span class="token punctuation">..</span><span class="token punctuation">..</span><span class="token punctuation">..</span>
+  selector:
+    alertmanager: main
+    app: alertmanager
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+  type: NodePort
+<span class="token punctuation">..</span><span class="token punctuation">..</span><span class="token punctuation">..</span>
+</code></pre> 
+<p>然后用NodePort访问alertmanager-main<br> <img src="https://images2.imgbox.com/37/1c/3mBZQvoY_o.png" alt="在这里插入图片描述"><br> 这些配置信息实际上是来自于<code>kube-prometheus/manifests/</code>目录下面的alertmanager-secret.yaml文件</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># cat alertmanager-secret.yaml </span>
+apiVersion: v1
+data: <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+kind: Secret
+metadata:
+  name: alertmanager-main
+  namespace: monitoring
+stringData:
+  alertmanager.yaml: <span class="token operator">|</span>-
+    <span class="token string">"global"</span><span class="token keyword">:</span>
+      <span class="token string">"resolve_timeout"</span><span class="token keyword">:</span> <span class="token string">"5m"</span>
+    <span class="token string">"inhibit_rules"</span><span class="token keyword">:</span>
+    - <span class="token string">"equal"</span><span class="token keyword">:</span>
+      - <span class="token string">"namespace"</span>
+      - <span class="token string">"alertname"</span>
+      <span class="token string">"source_match"</span><span class="token keyword">:</span>
+        <span class="token string">"severity"</span><span class="token keyword">:</span> <span class="token string">"critical"</span>
+      <span class="token string">"target_match_re"</span><span class="token keyword">:</span>
+        <span class="token string">"severity"</span><span class="token keyword">:</span> <span class="token string">"warning|info"</span>
+    - <span class="token string">"equal"</span><span class="token keyword">:</span>
+      - <span class="token string">"namespace"</span>
+      - <span class="token string">"alertname"</span>
+      <span class="token string">"source_match"</span><span class="token keyword">:</span>
+        <span class="token string">"severity"</span><span class="token keyword">:</span> <span class="token string">"warning"</span>
+      <span class="token string">"target_match_re"</span><span class="token keyword">:</span>
+        <span class="token string">"severity"</span><span class="token keyword">:</span> <span class="token string">"info"</span>
+    <span class="token string">"receivers"</span><span class="token keyword">:</span>
+    - <span class="token string">"name"</span><span class="token keyword">:</span> <span class="token string">"Default"</span>
+    - <span class="token string">"name"</span><span class="token keyword">:</span> <span class="token string">"Watchdog"</span>
+    - <span class="token string">"name"</span><span class="token keyword">:</span> <span class="token string">"Critical"</span>
+    <span class="token string">"route"</span><span class="token keyword">:</span>
+      <span class="token string">"group_by"</span><span class="token keyword">:</span>
+      - <span class="token string">"namespace"</span>
+      <span class="token string">"group_interval"</span><span class="token keyword">:</span> <span class="token string">"5m"</span>
+      <span class="token string">"group_wait"</span><span class="token keyword">:</span> <span class="token string">"30s"</span>
+      <span class="token string">"receiver"</span><span class="token keyword">:</span> <span class="token string">"Default"</span>
+      <span class="token string">"repeat_interval"</span><span class="token keyword">:</span> <span class="token string">"12h"</span>
+      <span class="token string">"routes"</span><span class="token keyword">:</span>
+      - <span class="token string">"match"</span><span class="token keyword">:</span>
+          <span class="token string">"alertname"</span><span class="token keyword">:</span> <span class="token string">"Watchdog"</span>
+        <span class="token string">"receiver"</span><span class="token keyword">:</span> <span class="token string">"Watchdog"</span>
+      - <span class="token string">"match"</span><span class="token keyword">:</span>
+          <span class="token string">"severity"</span><span class="token keyword">:</span> <span class="token string">"critical"</span>
+        <span class="token string">"receiver"</span><span class="token keyword">:</span> <span class="token string">"Critical"</span>
+type: Opaque
+</code></pre> 
+<p>所以如果我们想要添加自己的接收器，或者模板消息，就可以更改这个文件。这里我修改报警接收为邮件+微信。创建alertmanager.yaml文件，里面设置好发动的方式、路由和接受者，内容如下：</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 manifests<span class="token punctuation">]</span><span class="token comment"># vim alertmanager.yaml</span>
+<span class="token key atrule">global</span><span class="token punctuation">:</span>
+  <span class="token key atrule">resolve_timeout</span><span class="token punctuation">:</span> 5m
+  <span class="token key atrule">smtp_smarthost</span><span class="token punctuation">:</span> <span class="token string">'smtp.163.com:25'</span>
+  <span class="token key atrule">smtp_from</span><span class="token punctuation">:</span> <span class="token string">'15257862054@163.com'</span>
+  <span class="token key atrule">smtp_auth_username</span><span class="token punctuation">:</span> <span class="token string">'15257862054@163.com'</span>
+  <span class="token key atrule">smtp_auth_password</span><span class="token punctuation">:</span> <span class="token string">'PNRUAELMPDOMTEMP'</span>
+  <span class="token key atrule">smtp_require_tls</span><span class="token punctuation">:</span> <span class="token boolean important">false</span>
+<span class="token key atrule">templates</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token string">'*.tmpl'</span>
+<span class="token key atrule">route</span><span class="token punctuation">:</span>
+  <span class="token key atrule">group_by</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">'job'</span><span class="token punctuation">,</span> <span class="token string">'severity'</span><span class="token punctuation">]</span>
+  <span class="token key atrule">group_wait</span><span class="token punctuation">:</span> 30s
+  <span class="token key atrule">group_interval</span><span class="token punctuation">:</span> 5m
+  <span class="token key atrule">repeat_interval</span><span class="token punctuation">:</span> 5m
+  <span class="token key atrule">receiver</span><span class="token punctuation">:</span> default
+  <span class="token key atrule">routes</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">receiver</span><span class="token punctuation">:</span> <span class="token string">'wechat'</span>
+    <span class="token key atrule">group_wait</span><span class="token punctuation">:</span> 10s
+    <span class="token key atrule">match</span><span class="token punctuation">:</span>
+      <span class="token key atrule">severity</span><span class="token punctuation">:</span> warning
+  <span class="token punctuation">-</span> <span class="token key atrule">receiver</span><span class="token punctuation">:</span> <span class="token string">'wechat'</span>
+    <span class="token key atrule">group_wait</span><span class="token punctuation">:</span> 5s
+    <span class="token key atrule">match</span><span class="token punctuation">:</span>
+      <span class="token key atrule">severity</span><span class="token punctuation">:</span> critical
+<span class="token key atrule">receivers</span><span class="token punctuation">:</span>
+<span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> <span class="token string">'default'</span>
+  <span class="token key atrule">email_configs</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">to</span><span class="token punctuation">:</span> <span class="token string">'1695040842@qq.com'</span>
+    <span class="token key atrule">send_resolved</span><span class="token punctuation">:</span> <span class="token boolean important">true</span>
+<span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> <span class="token string">'wechat'</span>
+  <span class="token key atrule">wechat_configs</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">corp_id</span><span class="token punctuation">:</span> <span class="token string">'wwa4b5acd214ea2189'</span>
+    <span class="token key atrule">to_party</span><span class="token punctuation">:</span> <span class="token string">'2'</span>
+    <span class="token key atrule">to_user</span><span class="token punctuation">:</span> <span class="token string">"WangChao"</span>
+    <span class="token key atrule">agent_id</span><span class="token punctuation">:</span> <span class="token string">'1000003'</span>
+    <span class="token key atrule">api_secret</span><span class="token punctuation">:</span> <span class="token string">'563Dd_wXc6o2mQ4A2nWcPbuhIh8jLLlehs96hXnX23c'</span>
+    <span class="token key atrule">send_resolved</span><span class="token punctuation">:</span> <span class="token boolean important">true</span>
+</code></pre> 
+<p>然后再创建一个微信模板文件<code>wechat.tmpl</code>，内容如下：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># vim wechat.tmpl</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> define <span class="token string">"wechat.default.message"</span> <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- <span class="token keyword">if</span> gt <span class="token punctuation">(</span>len .Alerts.Firing<span class="token punctuation">)</span> 0 -<span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- range <span class="token variable">$index</span>, <span class="token variable">$alert</span> :<span class="token operator">=</span> .Alerts -<span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- <span class="token keyword">if</span> eq <span class="token variable">$index</span> 0 <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>异常告警<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span>
+告警类型: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Labels.alertname <span class="token punctuation">}</span><span class="token punctuation">}</span>
+告警级别: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Labels.severity <span class="token punctuation">}</span><span class="token punctuation">}</span>
+告警详情: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Annotations.message <span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Annotations.description<span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">;</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span><span class="token variable">$alert</span>.Annotations.summary<span class="token punctuation">}</span><span class="token punctuation">}</span>
+故障时间: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token punctuation">(</span><span class="token variable">$alert</span>.StartsAt.Add 28800e9<span class="token punctuation">)</span>.Format <span class="token string">"2006-01-02 15:04:05"</span> <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- <span class="token keyword">if</span> gt <span class="token punctuation">(</span>len <span class="token variable">$alert</span>.Labels.instance<span class="token punctuation">)</span> 0 <span class="token punctuation">}</span><span class="token punctuation">}</span>
+实例信息: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Labels.instance <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- <span class="token keyword">if</span> gt <span class="token punctuation">(</span>len <span class="token variable">$alert</span>.Labels.namespace<span class="token punctuation">)</span> 0 <span class="token punctuation">}</span><span class="token punctuation">}</span>
+命名空间: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Labels.namespace <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- <span class="token keyword">if</span> gt <span class="token punctuation">(</span>len <span class="token variable">$alert</span>.Labels.node<span class="token punctuation">)</span> 0 <span class="token punctuation">}</span><span class="token punctuation">}</span>
+节点信息: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Labels.node <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- <span class="token keyword">if</span> gt <span class="token punctuation">(</span>len <span class="token variable">$alert</span>.Labels.pod<span class="token punctuation">)</span> 0 <span class="token punctuation">}</span><span class="token punctuation">}</span>
+实例名称: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Labels.pod <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>END<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- <span class="token keyword">if</span> gt <span class="token punctuation">(</span>len .Alerts.Resolved<span class="token punctuation">)</span> 0 -<span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- range <span class="token variable">$index</span>, <span class="token variable">$alert</span> :<span class="token operator">=</span> .Alerts -<span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- <span class="token keyword">if</span> eq <span class="token variable">$index</span> 0 <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>异常恢复<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span>
+告警类型: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Labels.alertname <span class="token punctuation">}</span><span class="token punctuation">}</span>
+告警级别: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Labels.severity <span class="token punctuation">}</span><span class="token punctuation">}</span>
+告警详情: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Annotations.message <span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Annotations.description<span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">;</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span><span class="token variable">$alert</span>.Annotations.summary<span class="token punctuation">}</span><span class="token punctuation">}</span>
+故障时间: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token punctuation">(</span><span class="token variable">$alert</span>.StartsAt.Add 28800e9<span class="token punctuation">)</span>.Format <span class="token string">"2006-01-02 15:04:05"</span> <span class="token punctuation">}</span><span class="token punctuation">}</span>
+恢复时间: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token punctuation">(</span><span class="token variable">$alert</span>.EndsAt.Add 28800e9<span class="token punctuation">)</span>.Format <span class="token string">"2006-01-02 15:04:05"</span> <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- <span class="token keyword">if</span> gt <span class="token punctuation">(</span>len <span class="token variable">$alert</span>.Labels.instance<span class="token punctuation">)</span> 0 <span class="token punctuation">}</span><span class="token punctuation">}</span>
+实例信息: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Labels.instance <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- <span class="token keyword">if</span> gt <span class="token punctuation">(</span>len <span class="token variable">$alert</span>.Labels.namespace<span class="token punctuation">)</span> 0 <span class="token punctuation">}</span><span class="token punctuation">}</span>
+命名空间: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Labels.namespace <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- <span class="token keyword">if</span> gt <span class="token punctuation">(</span>len <span class="token variable">$alert</span>.Labels.node<span class="token punctuation">)</span> 0 <span class="token punctuation">}</span><span class="token punctuation">}</span>
+节点信息: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Labels.node <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- <span class="token keyword">if</span> gt <span class="token punctuation">(</span>len <span class="token variable">$alert</span>.Labels.pod<span class="token punctuation">)</span> 0 <span class="token punctuation">}</span><span class="token punctuation">}</span>
+实例名称: <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> <span class="token variable">$alert</span>.Labels.pod <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>END<span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">==</span><span class="token operator">=</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+<span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span>- end <span class="token punctuation">}</span><span class="token punctuation">}</span>
+</code></pre> 
+<p>然后使用这两个文件创建一个Secret对象：</p> 
+<pre><code class="prism language-shell"><span class="token comment">#删除原secret对象</span>
+<span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl delete secret alertmanager-main -n monitoring</span>
+  cret <span class="token string">"alertmanager-main"</span> deleted
+<span class="token comment">#将自己的配置文件导入到新的secret中</span>
+<span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl create secret generic alertmanager-main --from-file=alertmanager.yaml --from-file=wechat.tmpl -n monitoring</span>
+secret/alertmanager-main created
+</code></pre> 
+<p>我添加了两个接收器，默认的通过邮箱发送，对于告警级别为warning和critical的通过为wechat来发送。执行完成之后，很快就会收到邮件和微信的告警信息，并且等恢复之后，也会有恢复的信息：<br> <img src="https://images2.imgbox.com/67/cd/4RO0H7o6_o.png" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/51/39/kTK6FGd2_o.png" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/6e/ae/FoPLXn4p_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="_1047"></a>六、数据持久化</h4> 
+<h5><a id="1prometheus_1049"></a>1、prometheus设置数据持久化</h5> 
+<p>因为Prometheus Operator默认情况下没有将数据做持久化存储，当Pod被删除或者意外重启之后，可能会造成数据丢失。</p> 
+<p>首先在192.168.0.74服务器上部署NFS服务</p> 
+<pre><code class="prism language-shell"><span class="token comment">#这里我使用单独的一台nfs服务器进行演示，实际上随便使用一台服务器安装nfs都是可以的（建议是和Kubernetes集群分开）</span>
+<span class="token punctuation">[</span>root@nfs-server ~<span class="token punctuation">]</span><span class="token comment"># yum install -y nfs-utils rpcbind</span>
+
+<span class="token comment">#接下来设置nfs存储目录</span>
+<span class="token punctuation">[</span>root@nfs-server ~<span class="token punctuation">]</span><span class="token comment"># mkdir -p /data/k8s-volume       </span>
+<span class="token punctuation">[</span>root@nfs-server ~<span class="token punctuation">]</span><span class="token comment"># chmod 755 /data/k8s-volume/</span>
+
+<span class="token comment">#编辑nfs配置文件</span>
+<span class="token punctuation">[</span>root@nfs-server ~<span class="token punctuation">]</span><span class="token comment"># vim /etc/exports</span>
+/data/k8s-volume  *<span class="token punctuation">(</span>rw,no_root_squash,sync<span class="token punctuation">)</span>
+<span class="token comment">#存储目录，*表示允许所有人连接，rw续写权限，sync文件同时写入硬盘和内存，no_root_squash使用者root用户自动修改为普通用户</span>
+
+<span class="token comment">#启动rpcbind，由于nfs需要向rpcbind进行注册，所以要优先启动rpcbind</span>
+<span class="token punctuation">[</span>root@nfs-server ~<span class="token punctuation">]</span><span class="token comment"># systemctl start rpcbind</span>
+<span class="token punctuation">[</span>root@nfs-server ~<span class="token punctuation">]</span><span class="token comment"># systemctl enable rpcbind</span>
+<span class="token punctuation">[</span>root@nfs-server ~<span class="token punctuation">]</span><span class="token comment"># systemctl status rpcbind</span>
+● rpcbind.service - RPC bind <span class="token function">service</span>
+   Loaded: loaded <span class="token punctuation">(</span>/usr/lib/systemd/system/rpcbind.service<span class="token punctuation">;</span> enabled<span class="token punctuation">;</span> vendor preset: enabled<span class="token punctuation">)</span>
+   Active: active <span class="token punctuation">(</span>running<span class="token punctuation">)</span> since Tue 2020-09-01 14:56:24 CST<span class="token punctuation">;</span> 21s ago
+ Main PID: 9522 <span class="token punctuation">(</span>rpcbind<span class="token punctuation">)</span>
+   CGroup: /system.slice/rpcbind.service
+           └─9522 /sbin/rpcbind -w
+
+Sep 01 14:56:24 nfs-server systemd<span class="token punctuation">[</span>1<span class="token punctuation">]</span>: Starting RPC bind service<span class="token punctuation">..</span>.
+Sep 01 14:56:24 nfs-server systemd<span class="token punctuation">[</span>1<span class="token punctuation">]</span>: Started RPC bind service.
+
+<span class="token comment">#启动的nfs</span>
+<span class="token punctuation">[</span>root@nfs-server ~<span class="token punctuation">]</span><span class="token comment"># systemctl restart nfs</span>
+<span class="token punctuation">[</span>root@nfs-server ~<span class="token punctuation">]</span><span class="token comment"># systemctl enable nfs </span>
+<span class="token punctuation">[</span>root@nfs-server ~<span class="token punctuation">]</span><span class="token comment"># systemctl status nfs</span>
+● nfs-server.service - NFS server and services
+   Loaded: loaded <span class="token punctuation">(</span>/usr/lib/systemd/system/nfs-server.service<span class="token punctuation">;</span> enabled<span class="token punctuation">;</span> vendor preset: disabled<span class="token punctuation">)</span>
+  Drop-In: /run/systemd/generator/nfs-server.service.d
+           └─order-with-mounts.conf
+   Active: active <span class="token punctuation">(</span>exited<span class="token punctuation">)</span> since Tue 2020-09-01 14:58:51 CST<span class="token punctuation">;</span> 26s ago
+ Main PID: 9612 <span class="token punctuation">(</span>code<span class="token operator">=</span>exited, status<span class="token operator">=</span>0/SUCCESS<span class="token punctuation">)</span>
+   CGroup: /system.slice/nfs-server.service
+
+Sep 01 14:58:50 nfs-server systemd<span class="token punctuation">[</span>1<span class="token punctuation">]</span>: Starting NFS server and services<span class="token punctuation">..</span>.
+Sep 01 14:58:51 nfs-server systemd<span class="token punctuation">[</span>1<span class="token punctuation">]</span>: Started NFS server and services.
+
+<span class="token comment">#检查rpcbind和nfs是否正常</span>
+<span class="token punctuation">[</span>root@nfs-server ~<span class="token punctuation">]</span><span class="token comment"># rpcinfo | grep nfs</span>
+    100003    3    tcp       0.0.0.0.8.1            nfs        superuser
+    100003    4    tcp       0.0.0.0.8.1            nfs        superuser
+    100227    3    tcp       0.0.0.0.8.1            nfs_acl    superuser
+    100003    3    udp       0.0.0.0.8.1            nfs        superuser
+    100003    4    udp       0.0.0.0.8.1            nfs        superuser
+    100227    3    udp       0.0.0.0.8.1            nfs_acl    superuser
+    100003    3    tcp6      ::.8.1                 nfs        superuser
+    100003    4    tcp6      ::.8.1                 nfs        superuser
+    100227    3    tcp6      ::.8.1                 nfs_acl    superuser
+    100003    3    udp6      ::.8.1                 nfs        superuser
+    100003    4    udp6      ::.8.1                 nfs        superuser
+    100227    3    udp6      ::.8.1                 nfs_acl    superuser
+
+<span class="token comment">#查看nfs目录挂载权限</span>
+<span class="token punctuation">[</span>root@nfs-server ~<span class="token punctuation">]</span><span class="token comment"># cat /var/lib/nfs/etab</span>
+/data/k8s-volume        *<span class="token punctuation">(</span>rw,sync,wdelay,hide,nocrossmnt,secure,no_root_squash,no_all_squash,no_subtree_check,secure_locks,acl,no_pnfs,anonuid<span class="token operator">=</span>65534,anongid<span class="token operator">=</span>65534,sec<span class="token operator">=</span>sys,rw,secure,no_root_squash,no_all_squash<span class="token punctuation">)</span>
+</code></pre> 
+<p><strong>nfs server端已经挂载完毕，接下来在所有都需要nfs挂载的集群节点执行下面命令</strong></p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># yum install -y nfs-utils rpcbind</span>
+<span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># systemctl start rpcbind</span>
+<span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># systemctl enable rpcbind</span>
+<span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># systemctl start nfs</span>
+<span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># systemctl enable nfs</span>
+</code></pre> 
+<p>NFS安装完毕之后，先来看一下prometheus operator数据存储的目录</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl get pod prometheus-k8s-0 -n monitoring -o yaml</span>
+<span class="token punctuation">..</span><span class="token punctuation">..</span><span class="token punctuation">..</span>
+    volumeMounts:
+    - mountPath: /etc/prometheus/config_out
+      name: config-out
+      readOnly: <span class="token boolean">true</span>
+    - mountPath: /etc/prometheus/certs
+      name: tls-assets
+      readOnly: <span class="token boolean">true</span>
+    - mountPath: /prometheus
+      name: prometheus-k8s-db
+    - mountPath: /etc/prometheus/rules/prometheus-k8s-rulefiles-0
+      name: prometheus-k8s-rulefiles-0
+<span class="token punctuation">..</span><span class="token punctuation">..</span><span class="token punctuation">..</span>
+  - emptyDir: <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+    name: prometheus-k8s-db
+  - name: prometheus-k8s-token-9rhsh
+</code></pre> 
+<p>这里<code>/prometheus</code>目录使用的是emptyDir进行挂载，我们重建Pod之后之前的数据就没有了，由于Prometheus使用Statefulset控制器进行 部署的，为了保证数据一致性，这里采用storageclass来做持久化。</p> 
+<p>因为要使用刚刚创建好的NFS作为后端存储，这里需要一个nfs-client</p> 
+<pre><code class="prism language-yaml"><span class="token comment">#现在还需要创建NFS-Client，不然prometheus pod现在是无法Running状态</span>
+<span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 storageclass<span class="token punctuation">]</span><span class="token comment"># vim nfs-client.yaml</span>
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Deployment
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> apps/v1
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>provisioner
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">replicas</span><span class="token punctuation">:</span> <span class="token number">1</span>
+  <span class="token key atrule">selector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">matchLabels</span><span class="token punctuation">:</span>
+      <span class="token key atrule">app</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>provisioner
+  <span class="token key atrule">strategy</span><span class="token punctuation">:</span>
+    <span class="token key atrule">type</span><span class="token punctuation">:</span> Recreate
+  <span class="token key atrule">template</span><span class="token punctuation">:</span>
+    <span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+      <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+        <span class="token key atrule">app</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>provisioner
+    <span class="token key atrule">spec</span><span class="token punctuation">:</span>
+      <span class="token key atrule">serviceAccountName</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>provisioner
+      <span class="token key atrule">containers</span><span class="token punctuation">:</span>
+        <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>provisioner
+          <span class="token key atrule">image</span><span class="token punctuation">:</span> quay.io/external_storage/nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>provisioner<span class="token punctuation">:</span>latest
+          <span class="token key atrule">volumeMounts</span><span class="token punctuation">:</span>
+            <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>root
+              <span class="token key atrule">mountPath</span><span class="token punctuation">:</span> /persistentvolumes
+          <span class="token key atrule">env</span><span class="token punctuation">:</span>
+            <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> PROVISIONER_NAME
+              <span class="token key atrule">value</span><span class="token punctuation">:</span> fuseim.pri/ifs
+            <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> NFS_SERVER
+              <span class="token key atrule">value</span><span class="token punctuation">:</span> 192.168.0.74           <span class="token comment">#nfs server 地址</span>
+            <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> NFS_PATH
+              <span class="token key atrule">value</span><span class="token punctuation">:</span> /data/k8s<span class="token punctuation">-</span>volume     <span class="token comment">#nfs共享目录</span>
+      <span class="token key atrule">volumes</span><span class="token punctuation">:</span>
+        <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>root
+          <span class="token key atrule">nfs</span><span class="token punctuation">:</span>
+            <span class="token key atrule">server</span><span class="token punctuation">:</span> 192.168.0.74
+            <span class="token key atrule">path</span><span class="token punctuation">:</span> /data/k8s<span class="token punctuation">-</span>volume
+</code></pre> 
+<p>创建nfs-client rbac文件</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 storageclass<span class="token punctuation">]</span><span class="token comment"># vim nfs-rbac.yaml</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> ServiceAccount
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>provisioner
+
+<span class="token punctuation">---</span>
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> ClusterRole
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> rbac.authorization.k8s.io/v1
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>provisioner<span class="token punctuation">-</span>runner
+<span class="token key atrule">rules</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">apiGroups</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">""</span><span class="token punctuation">]</span>
+    <span class="token key atrule">resources</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"persistentvolumes"</span><span class="token punctuation">]</span>
+    <span class="token key atrule">verbs</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"get"</span><span class="token punctuation">,</span> <span class="token string">"list"</span><span class="token punctuation">,</span> <span class="token string">"watch"</span><span class="token punctuation">,</span> <span class="token string">"create"</span><span class="token punctuation">,</span> <span class="token string">"delete"</span><span class="token punctuation">]</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">apiGroups</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">""</span><span class="token punctuation">]</span>
+    <span class="token key atrule">resources</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"persistentvolumeclaims"</span><span class="token punctuation">]</span>
+    <span class="token key atrule">verbs</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"get"</span><span class="token punctuation">,</span> <span class="token string">"list"</span><span class="token punctuation">,</span> <span class="token string">"watch"</span><span class="token punctuation">,</span> <span class="token string">"update"</span><span class="token punctuation">]</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">apiGroups</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"storage.k8s.io"</span><span class="token punctuation">]</span>
+    <span class="token key atrule">resources</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"storageclasses"</span><span class="token punctuation">]</span>
+    <span class="token key atrule">verbs</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"get"</span><span class="token punctuation">,</span> <span class="token string">"list"</span><span class="token punctuation">,</span> <span class="token string">"watch"</span><span class="token punctuation">]</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">apiGroups</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">""</span><span class="token punctuation">]</span>
+    <span class="token key atrule">resources</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"events"</span><span class="token punctuation">]</span>
+    <span class="token key atrule">verbs</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"list"</span><span class="token punctuation">,</span> <span class="token string">"watch"</span><span class="token punctuation">,</span> <span class="token string">"create"</span><span class="token punctuation">,</span> <span class="token string">"update"</span><span class="token punctuation">,</span> <span class="token string">"patch"</span><span class="token punctuation">]</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">apiGroups</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">""</span><span class="token punctuation">]</span>
+    <span class="token key atrule">resources</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"endpoints"</span><span class="token punctuation">]</span>
+    <span class="token key atrule">verbs</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"create"</span><span class="token punctuation">,</span> <span class="token string">"delete"</span><span class="token punctuation">,</span> <span class="token string">"get"</span><span class="token punctuation">,</span> <span class="token string">"list"</span><span class="token punctuation">,</span> <span class="token string">"watch"</span><span class="token punctuation">,</span> <span class="token string">"patch"</span><span class="token punctuation">,</span> <span class="token string">"update"</span><span class="token punctuation">]</span>
+
+<span class="token punctuation">---</span>
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> ClusterRoleBinding
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> rbac.authorization.k8s.io/v1
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> run<span class="token punctuation">-</span>nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>provisioner
+<span class="token key atrule">subjects</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">kind</span><span class="token punctuation">:</span> ServiceAccount
+    <span class="token key atrule">name</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>provisioner
+    <span class="token key atrule">namespace</span><span class="token punctuation">:</span> default
+<span class="token key atrule">roleRef</span><span class="token punctuation">:</span>
+  <span class="token key atrule">kind</span><span class="token punctuation">:</span> ClusterRole
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> nfs<span class="token punctuation">-</span>client<span class="token punctuation">-</span>provisioner<span class="token punctuation">-</span>runner
+  <span class="token key atrule">apiGroup</span><span class="token punctuation">:</span> rbac.authorization.k8s.io
+</code></pre> 
+<p>创建</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 storageclass<span class="token punctuation">]</span><span class="token comment"># kubectl create -f nfs-client.yaml</span>
+deployment.apps/nfs-client-provisioner created
+
+<span class="token punctuation">[</span>root@k8s-01 storageclass<span class="token punctuation">]</span><span class="token comment"># kubectl create -f nfs-rbac.yaml</span>
+serviceaccount/nfs-client-provisioner created
+clusterrole.rbac.authorization.k8s.io/nfs-client-provisioner-runner created
+clusterrolebinding.rbac.authorization.k8s.io/run-nfs-client-provisioner created
+
+<span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl get pod | grep nfs-client</span>
+nfs-client-provisioner-65bc578f87-xtrhm   1/1     Running     0          6h25m
+</code></pre> 
+<p>这里创建一个storageclass对象</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># vim prometheus-storageclass.yaml </span>
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: prometheus-data-db
+provisioner: fuseim.pri/ifs
+
+<span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># kubectl apply -f prometheus-storageclass.yaml </span>
+storageclass.storage.k8s.io/prometheus-data-db created
+</code></pre> 
+<p>这里我们声明StorageClass对象，其中的<code>provisioner=fuseim.pri/ifs</code>则是我们集群中使用NFS作为后端存储。</p> 
+<p>接下来我们在Prometheus中添加如下配置</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 manifests<span class="token punctuation">]</span><span class="token comment"># vim kube-prometheus/manifests/prometheus-prometheus.yaml </span>
+<span class="token punctuation">...</span><span class="token punctuation">...</span>
+  <span class="token key atrule">storage</span><span class="token punctuation">:</span>
+    <span class="token key atrule">volumeClaimTemplate</span><span class="token punctuation">:</span>
+      <span class="token key atrule">spec</span><span class="token punctuation">:</span>
+        <span class="token key atrule">storageClassName</span><span class="token punctuation">:</span> prometheus<span class="token punctuation">-</span>data<span class="token punctuation">-</span>db
+        <span class="token key atrule">accessModes</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"ReadWriteOnce"</span><span class="token punctuation">]</span>
+        <span class="token key atrule">resources</span><span class="token punctuation">:</span>
+          <span class="token key atrule">requests</span><span class="token punctuation">:</span>
+            <span class="token key atrule">storage</span><span class="token punctuation">:</span> 20Gi
+<span class="token punctuation">...</span><span class="token punctuation">...</span>
+
+<span class="token comment">#只需要在sepc中添加对应的信息，storageClassName为刚刚创建的名称，storage为资源对象大小</span>
+</code></pre> 
+<p>Prometheus的完成配置文件如下：</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 manifests<span class="token punctuation">]</span><span class="token comment"># cat prometheus-prometheus.yaml     </span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> monitoring.coreos.com/v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Prometheus
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">labels</span><span class="token punctuation">:</span>
+    <span class="token key atrule">prometheus</span><span class="token punctuation">:</span> k8s
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> k8s
+  <span class="token key atrule">namespace</span><span class="token punctuation">:</span> monitoring
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">alerting</span><span class="token punctuation">:</span>
+    <span class="token key atrule">alertmanagers</span><span class="token punctuation">:</span>
+    <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> alertmanager<span class="token punctuation">-</span>main
+      <span class="token key atrule">namespace</span><span class="token punctuation">:</span> monitoring
+      <span class="token key atrule">port</span><span class="token punctuation">:</span> web
+  <span class="token key atrule">storage</span><span class="token punctuation">:</span>
+    <span class="token key atrule">volumeClaimTemplate</span><span class="token punctuation">:</span>
+      <span class="token key atrule">spec</span><span class="token punctuation">:</span>
+        <span class="token key atrule">storageClassName</span><span class="token punctuation">:</span> prometheus<span class="token punctuation">-</span>data<span class="token punctuation">-</span>db
+        <span class="token key atrule">accessModes</span><span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token string">"ReadWriteOnce"</span><span class="token punctuation">]</span>
+        <span class="token key atrule">resources</span><span class="token punctuation">:</span>
+          <span class="token key atrule">requests</span><span class="token punctuation">:</span>
+            <span class="token key atrule">storage</span><span class="token punctuation">:</span> 20Gi
+  <span class="token key atrule">image</span><span class="token punctuation">:</span> quay.io/prometheus/prometheus<span class="token punctuation">:</span>v2.15.2
+  <span class="token key atrule">nodeSelector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">kubernetes.io/os</span><span class="token punctuation">:</span> linux
+  <span class="token key atrule">podMonitorNamespaceSelector</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  <span class="token key atrule">podMonitorSelector</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  <span class="token key atrule">replicas</span><span class="token punctuation">:</span> <span class="token number">2</span>
+  <span class="token key atrule">secrets</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> etcd<span class="token punctuation">-</span>ssl <span class="token comment">#添加secret名称</span>
+  <span class="token key atrule">resources</span><span class="token punctuation">:</span>
+    <span class="token key atrule">requests</span><span class="token punctuation">:</span>
+      <span class="token key atrule">memory</span><span class="token punctuation">:</span> 400Mi
+  <span class="token key atrule">ruleSelector</span><span class="token punctuation">:</span>
+    <span class="token key atrule">matchLabels</span><span class="token punctuation">:</span>
+      <span class="token key atrule">prometheus</span><span class="token punctuation">:</span> k8s
+      <span class="token key atrule">role</span><span class="token punctuation">:</span> alert<span class="token punctuation">-</span>rules
+  <span class="token key atrule">securityContext</span><span class="token punctuation">:</span>
+    <span class="token key atrule">fsGroup</span><span class="token punctuation">:</span> <span class="token number">2000</span>
+    <span class="token key atrule">runAsNonRoot</span><span class="token punctuation">:</span> <span class="token boolean important">true</span>
+    <span class="token key atrule">runAsUser</span><span class="token punctuation">:</span> <span class="token number">1000</span>
+  <span class="token key atrule">serviceAccountName</span><span class="token punctuation">:</span> prometheus<span class="token punctuation">-</span>k8s
+  <span class="token key atrule">serviceMonitorNamespaceSelector</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  <span class="token key atrule">serviceMonitorSelector</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+  <span class="token key atrule">version</span><span class="token punctuation">:</span> v2.15.2
+</code></pre> 
+<p>更新并查看prometheus的启动状态</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl apply -f prometheus-prometheus.yaml </span>
+prometheus.monitoring.coreos.com/k8s configured
+
+<span class="token comment">#在更新之后，会自动创建两个指定大小的pv卷，因为会为prometheus的备份(prometheus-k8s-0,prometheus-k8s-1)也创建一个pv。pv卷创建之后无法修改，所以最好先考虑好适合的参数配置，比如访问模式和容量大小。</span>
+
+<span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl get pod -n monitoring</span>
+NAME                                   READY   STATUS    RESTARTS   AGE
+alertmanager-main-0                    2/2     Running   4          2d
+alertmanager-main-1                    2/2     Running   4          2d
+alertmanager-main-2                    2/2     Running   4          2d
+grafana-86b55cb79f-jmd7h               1/1     Running   2          2d
+kube-state-metrics-dbb85dfd5-6dm9b     3/3     Running   6          2d
+node-exporter-52js6                    2/2     Running   4          2d
+node-exporter-bcr4h                    2/2     Running   4          2d
+node-exporter-mrznt                    2/2     Running   4          2d
+prometheus-adapter-5cd5798d96-f2k2n    1/1     Running   3          2d
+prometheus-k8s-0                       3/3     Running   1          18s
+prometheus-k8s-1                       3/3     Running   1          18s
+prometheus-operator-5cfbdc9b67-m2qrj   2/2     Running   4          2d
+</code></pre> 
+<p>可以看一下pv和pvc对象资源</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl get pv -n monitoring | grep prometheus</span>
+pvc-1fd80f38-ebfe-4f69-b7f1-ce7dcdfabc2f   20Gi       RWO            Delete           Bound    monitoring/prometheus-k8s-db-prometheus-k8s-1   prometheus-data-db             82s
+pvc-68302b85-841b-40e9-a331-5e4b231989d9   20Gi       RWO            Delete           Bound    monitoring/prometheus-k8s-db-prometheus-k8s-0   prometheus-data-db             82s
+
+<span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl get pvc -n monitoring</span>
+NAME                                 STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS         AGE
+prometheus-k8s-db-prometheus-k8s-0   Bound    pvc-68302b85-841b-40e9-a331-5e4b231989d9   20Gi       RWO            prometheus-data-db   2m9s
+prometheus-k8s-db-prometheus-k8s-1   Bound    pvc-1fd80f38-ebfe-4f69-b7f1-ce7dcdfabc2f   20Gi       RWO            prometheus-data-db   2m9s
+</code></pre> 
+<p>接下来可以测试下Pod删除之后数据是否丢失</p> 
+<p>记录删除前的数据图<br> <img src="https://images2.imgbox.com/9d/ae/kGr2w5pS_o.png" alt="在这里插入图片描述"></p> 
+<p>删除Pod</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 setup<span class="token punctuation">]</span><span class="token comment"># kubectl delete pod prometheus-k8s-0 -n monitoring</span>
+pod <span class="token string">"prometheus-k8s-0"</span> deleted
+<span class="token punctuation">[</span>root@k8s-01 setup<span class="token punctuation">]</span><span class="token comment"># kubectl delete pod prometheus-k8s-1 -n monitoring </span>
+pod <span class="token string">"prometheus-k8s-1"</span> deleted
+</code></pre> 
+<p>等新的Pod启动之后，再查看结果<br> <img src="https://images2.imgbox.com/45/64/eNGgD3Pa_o.png" alt="在这里插入图片描述"></p> 
+<p>可以看到，数据没丢失。</p> 
+<h5><a id="2prometheus_1398"></a>2、修改prometheus的数据存储时间</h5> 
+<p>prometheus是实现持久化了，但是还有一个问题，就是prometheus operator数据保留的天数，根据官方文档说明，默认prometheus operator数据存储的时间为1d，这个时候无论你prometheus operator如何进行持久化，都没有作用。因为数据只保留了1天，那么你是无法看到更多天的数据的。</p> 
+<p>官方文档可以配置的说明<br> <img src="https://images2.imgbox.com/62/4d/MYczSeWR_o.png" alt="在这里插入图片描述"></p> 
+<p>实际上，修改prometheus operator时间是通过<code>retention</code>参数进行修改，，上面也提示了再prometheus.spec下填写。</p> 
+<p>接下来需要修改prometheus operator的deployment文件，来加上<code>retention</code>这个参数。</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 manifests<span class="token punctuation">]</span><span class="token comment"># vim prometheus-prometheus.yaml </span>
+<span class="token punctuation">...</span><span class="token punctuation">...</span>
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">retention</span><span class="token punctuation">:</span> 7d <span class="token comment">#添加数据保留时间</span>
+  <span class="token key atrule">alerting</span><span class="token punctuation">:</span>
+    <span class="token key atrule">alertmanagers</span><span class="token punctuation">:</span>
+    <span class="token punctuation">-</span> <span class="token key atrule">name</span><span class="token punctuation">:</span> alertmanager<span class="token punctuation">-</span>main
+      <span class="token key atrule">namespace</span><span class="token punctuation">:</span> monitoring
+      <span class="token key atrule">port</span><span class="token punctuation">:</span> web
+<span class="token punctuation">...</span><span class="token punctuation">...</span>
+
+<span class="token comment">#更新</span>
+<span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 manifests<span class="token punctuation">]</span><span class="token comment"># kubectl apply -f prometheus-prometheus.yaml </span>
+prometheus.monitoring.coreos.com/k8s configured
+</code></pre> 
+<p>修改完毕之后，等待2天，然后查看数据是否能正常显示。</p> 
+<h5><a id="3grafana_1431"></a>3、grafana配置数据持久化</h5> 
+<p>新建grafana-pvc，这里storageclass还是用之前的prometheus-data-db</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@k8s<span class="token punctuation">-</span>01 ~<span class="token punctuation">]</span><span class="token comment"># vim grafana-pvc.yaml</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> PersistentVolumeClaim
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+    <span class="token key atrule">name</span><span class="token punctuation">:</span> grafana<span class="token punctuation">-</span>pvc
+    <span class="token key atrule">namespace</span><span class="token punctuation">:</span> monitoring
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">accessModes</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> ReadWriteOnce
+  <span class="token key atrule">resources</span><span class="token punctuation">:</span>
+    <span class="token key atrule">requests</span><span class="token punctuation">:</span>
+      <span class="token key atrule">storage</span><span class="token punctuation">:</span> 15Gi
+  <span class="token key atrule">storageClassName</span><span class="token punctuation">:</span> prometheus<span class="token punctuation">-</span>data<span class="token punctuation">-</span>db
+</code></pre> 
+<p>创建pvc并查看pv和pvc对象资源</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># kubectl apply -f grafana-pvc.yaml </span>
+persistentvolumeclaim/grafana-pvc created
+
+<span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># kubectl get pv -n monitoring | grep prometheus</span>
+pvc-1fd80f38-ebfe-4f69-b7f1-ce7dcdfabc2f   20Gi       RWO            Delete           Bound    monitoring/prometheus-k8s-db-prometheus-k8s-1   prometheus-data-db             143m
+pvc-330838e4-e254-49ce-be96-7e791867f175   15Gi       RWO            Delete           Bound    monitoring/grafana-pvc                          prometheus-data-db             3m10s
+pvc-68302b85-841b-40e9-a331-5e4b231989d9   20Gi       RWO            Delete           Bound    monitoring/prometheus-k8s-db-prometheus-k8s-0   prometheus-data-db             143m
+
+<span class="token punctuation">[</span>root@k8s-01 ~<span class="token punctuation">]</span><span class="token comment"># kubectl get pvc -n monitoring</span>
+NAME                                 STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS         AGE
+grafana-pvc                          Bound    pvc-330838e4-e254-49ce-be96-7e791867f175   15Gi       RWO            prometheus-data-db   3m36s
+prometheus-k8s-db-prometheus-k8s-0   Bound    pvc-68302b85-841b-40e9-a331-5e4b231989d9   20Gi       RWO            prometheus-data-db   143m
+prometheus-k8s-db-prometheus-k8s-1   Bound    pvc-1fd80f38-ebfe-4f69-b7f1-ce7dcdfabc2f   20Gi       RWO            prometheus-data-db   143m
+</code></pre> 
+<p>然后在grafana-deployment.yaml中将emptydir存储方式改为pvc方式：</p> 
+<pre><code class="prism language-shell"><span class="token punctuation">[</span>root@k8s-01 manifests<span class="token punctuation">]</span><span class="token comment"># vim grafana-deployment.yaml</span>
+<span class="token punctuation">..</span><span class="token punctuation">..</span><span class="token punctuation">..</span>
+      volumes:
+      <span class="token comment">#- emptyDir: {}</span>
+      <span class="token comment">#  name: grafana-storage</span>
+      - name: grafana-storage
+        persistentVolumeClaim:
+          claimName: grafana-pvc
+      - name: grafana-datasources
+        secret:
+          secretName: grafana-datasources
+      - configMap:
+          name: grafana-dashboards
+        name: grafana-dashboards
+      - configMap:
+          name: grafana-dashboard-apiserver
+        name: grafana-dashboard-apiserver
+      - configMap:
+          name: grafana-dashboard-cluster-total
+        name: grafana-dashboard-cluster-total
+      - configMap:
+          name: grafana-dashboard-controller-manager
+<span class="token punctuation">..</span><span class="token punctuation">..</span><span class="token punctuation">..</span>
+</code></pre> 
+<p>更新grafana</p> 
+<pre><code>[root@k8s-01 manifests]# kubectl apply -f grafana-deployment.yaml 
+deployment.apps/grafana configured
+</code></pre> 
+<p>然后去nfs存储上看一眼<br> <img src="https://images2.imgbox.com/9b/34/7Snjbj3Q_o.png" alt="在这里插入图片描述"></p> 
+<p>好了，到这里grafana的数据持久化也完成了。</p> 
+<p>参考文章：<br> <a href="https://blog.51cto.com/14143894/2438026?source=drh" rel="nofollow">https://blog.51cto.com/14143894/2438026?source=drh</a><br> <a href="https://www.cnblogs.com/xzkzzz/p/10532002.html" rel="nofollow">https://www.cnblogs.com/xzkzzz/p/10532002.html</a><br> <a href="https://www.cnblogs.com/zhangzhi19861216/p/12591345.html" rel="nofollow">https://www.cnblogs.com/zhangzhi19861216/p/12591345.html</a><br> <a href="https://blog.csdn.net/qq_24923725/article/details/82910793?utm_medium=distribute.pc_relevant.none-task-blog-BlogCommendFromMachineLearnPai2-2.channel_param&amp;depth_1-utm_source=distribute.pc_relevant.none-task-blog-BlogCommendFromMachineLearnPai2-2.channel_param">https://blog.csdn.net/qq_24923725/article/details/82910793?utm_medium=distribute.pc_relevant.none-task-blog-BlogCommendFromMachineLearnPai2-2.channel_param&amp;depth_1-utm_source=distribute.pc_relevant.none-task-blog-BlogCommendFromMachineLearnPai2-2.channel_param</a><br> <a href="https://www.cnblogs.com/yuhaohao/p/10197315.html" rel="nofollow">https://www.cnblogs.com/yuhaohao/p/10197315.html</a><br> <a href="https://awesome-prometheus-alerts.grep.to/rules#host-and-hardware" rel="nofollow">https://awesome-prometheus-alerts.grep.to/rules#host-and-hardware</a><br> <a href="https://www.cnblogs.com/coolops/p/13174233.html" rel="nofollow">https://www.cnblogs.com/coolops/p/13174233.html</a><br> <a href="https://i4t.com/4586.html" rel="nofollow">https://i4t.com/4586.html</a><br> <a href="https://blog.csdn.net/qq_37332827/article/details/105114439">https://blog.csdn.net/qq_37332827/article/details/105114439</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3bee12fbe7a436df7439ce3609f1aec0/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">mysql的alter语句中modify，rename，change详解</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/565f896eb2e092bbbead5a5b5ffeb491/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">nginx代理转发说明</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

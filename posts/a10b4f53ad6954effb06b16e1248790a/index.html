@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>基于本地缓存制作一个分库分表的分布式ID生成器 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="基于本地缓存制作一个分库分表的分布式ID生成器" />
+<meta property="og:description" content="引言： 代码在 https://gitee.com/lbmb/mb-live-app 中 【mb-live-id-generate-provider】 模块里面 如果喜欢 希望大家给给star 项目还在持续更新中。
+背景介绍 项目整体架构是 基于springboot 3.0 开发 rpc 调用采用 dubbo
+注册配置中心 使用 nacos 采用sharding-jdbc 来实现分库分表。
+基于以上情况 我想生成分布式id。再根据生成的分布式id 存到不同的表中
+例如 id 1000 存在 user01表 id 1001 存到 user02表，然后sharding-jdbc会根据我们
+基础成长 可以学习到多线程、线程池的使用和设计分布式id器的优化策略（预加载、类似hashmap扩容） 首先我们需要设计一张id策略表
+CREATE TABLE `t_id_generate_config` ( `id` int NOT NULL AUTO_INCREMENT COMMENT &#39;主键 id&#39;, `remark` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT &#39;描述&#39;, `next_threshold` bigint DEFAULT NULL COMMENT &#39;当前 id 所在阶段的阈\n值&#39;, `init_num` bigint DEFAULT NULL COMMENT &#39;初始化值&#39;, `current_start` bigint DEFAULT NULL COMMENT &#39;当前 id 所在阶段的开始\n值&#39;, `step` int DEFAULT NULL COMMENT &#39;id 递增区间&#39;, `is_seq` tinyint DEFAULT NULL COMMENT &#39;是否有序（0 无序，1 有序）&#39;, `id_prefix` varchar(60) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT &#39;业务前缀码，如果没有则返回\n时不携带&#39;, `version` int NOT NULL DEFAULT &#39;0&#39; COMMENT &#39;乐观锁版本号&#39;, `create_time` datetime DEFAULT CURRENT_TIMESTAMP COMMENT &#39;创建时\n间&#39;, `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT &#39;更新时间&#39;, PRIMARY KEY (`id`) ) ENGINE=InnoDB AUTO_INCREMENT=8 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci; INSERT INTO `t_id_generate_config` (`id`, `remark`, `next_threshold`, `init_num`, `current_start`, `step`, `is_seq`,`id_prefix`, `version`, `create_time`, `update_time`) VALUES (1, &#39;用户 id 生成策略&#39;, 10050, 10000, 10000, 50, 0, &#39;user_id&#39;, 0, &#39;2023-05-23 12:38:21&#39;, &#39;2023-05-23 23:31:45&#39;); 定义全局变量" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/a10b4f53ad6954effb06b16e1248790a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-26T02:05:40+08:00" />
+<meta property="article:modified_time" content="2024-01-26T02:05:40+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">基于本地缓存制作一个分库分表的分布式ID生成器</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>引言：</h2> 
+<p><strong>代码在 <a href="https://gitee.com/lbmb/mb-live-app" rel="nofollow">https://gitee.com/lbmb/mb-live-app</a> 中 【mb-live-id-generate-provider】 模块里面 如果喜欢 希望大家给给star 项目还在持续更新中。</strong></p> 
+<h2><a id="_2"></a>背景介绍</h2> 
+<p><strong>项目整体架构是 基于springboot 3.0 开发 rpc 调用采用 dubbo<br> 注册配置中心 使用 nacos 采用sharding-jdbc 来实现分库分表。<br> 基于以上情况 我想生成分布式id。再根据生成的分布式id 存到不同的表中<br> 例如 id 1000 存在 user01表 id 1001 存到 user02表，然后sharding-jdbc会根据我们</strong></p> 
+<h2><a id="_7"></a>基础成长</h2> 
+<ol><li>可以学习到多线程、线程池的使用和设计</li><li>分布式id器的优化策略（预加载、类似hashmap扩容）</li></ol> 
+<p>首先我们需要设计一张id策略表</p> 
+<pre><code class="prism language-sql"><span class="token keyword">CREATE</span> <span class="token keyword">TABLE</span> <span class="token punctuation">`</span>t_id_generate_config<span class="token punctuation">`</span> <span class="token punctuation">(</span>
+  <span class="token punctuation">`</span>id<span class="token punctuation">`</span> <span class="token keyword">int</span> <span class="token operator">NOT</span> <span class="token boolean">NULL</span> <span class="token keyword">AUTO_INCREMENT</span> <span class="token keyword">COMMENT</span> <span class="token string">'主键 id'</span><span class="token punctuation">,</span>
+  <span class="token punctuation">`</span>remark<span class="token punctuation">`</span> <span class="token keyword">varchar</span><span class="token punctuation">(</span><span class="token number">255</span><span class="token punctuation">)</span> <span class="token keyword">CHARACTER</span> <span class="token keyword">SET</span> utf8mb4 <span class="token keyword">COLLATE</span> utf8mb4_unicode_ci <span class="token keyword">DEFAULT</span> <span class="token boolean">NULL</span> <span class="token keyword">COMMENT</span> <span class="token string">'描述'</span><span class="token punctuation">,</span>
+  <span class="token punctuation">`</span>next_threshold<span class="token punctuation">`</span> <span class="token keyword">bigint</span> <span class="token keyword">DEFAULT</span> <span class="token boolean">NULL</span> <span class="token keyword">COMMENT</span> <span class="token string">'当前 id 所在阶段的阈\n值'</span><span class="token punctuation">,</span>
+  <span class="token punctuation">`</span>init_num<span class="token punctuation">`</span> <span class="token keyword">bigint</span> <span class="token keyword">DEFAULT</span> <span class="token boolean">NULL</span> <span class="token keyword">COMMENT</span> <span class="token string">'初始化值'</span><span class="token punctuation">,</span>
+  <span class="token punctuation">`</span>current_start<span class="token punctuation">`</span> <span class="token keyword">bigint</span> <span class="token keyword">DEFAULT</span> <span class="token boolean">NULL</span> <span class="token keyword">COMMENT</span> <span class="token string">'当前 id 所在阶段的开始\n值'</span><span class="token punctuation">,</span>
+  <span class="token punctuation">`</span>step<span class="token punctuation">`</span> <span class="token keyword">int</span> <span class="token keyword">DEFAULT</span> <span class="token boolean">NULL</span> <span class="token keyword">COMMENT</span> <span class="token string">'id 递增区间'</span><span class="token punctuation">,</span>
+  <span class="token punctuation">`</span>is_seq<span class="token punctuation">`</span> <span class="token keyword">tinyint</span> <span class="token keyword">DEFAULT</span> <span class="token boolean">NULL</span> <span class="token keyword">COMMENT</span> <span class="token string">'是否有序（0 无序，1 有序）'</span><span class="token punctuation">,</span>
+  <span class="token punctuation">`</span>id_prefix<span class="token punctuation">`</span> <span class="token keyword">varchar</span><span class="token punctuation">(</span><span class="token number">60</span><span class="token punctuation">)</span> <span class="token keyword">CHARACTER</span> <span class="token keyword">SET</span> utf8mb4 <span class="token keyword">COLLATE</span> utf8mb4_unicode_ci <span class="token keyword">DEFAULT</span> <span class="token boolean">NULL</span> <span class="token keyword">COMMENT</span> <span class="token string">'业务前缀码，如果没有则返回\n时不携带'</span><span class="token punctuation">,</span>
+  <span class="token punctuation">`</span>version<span class="token punctuation">`</span> <span class="token keyword">int</span> <span class="token operator">NOT</span> <span class="token boolean">NULL</span> <span class="token keyword">DEFAULT</span> <span class="token string">'0'</span> <span class="token keyword">COMMENT</span> <span class="token string">'乐观锁版本号'</span><span class="token punctuation">,</span>
+  <span class="token punctuation">`</span>create_time<span class="token punctuation">`</span> <span class="token keyword">datetime</span> <span class="token keyword">DEFAULT</span> <span class="token keyword">CURRENT_TIMESTAMP</span> <span class="token keyword">COMMENT</span> <span class="token string">'创建时\n间'</span><span class="token punctuation">,</span>
+  <span class="token punctuation">`</span>update_time<span class="token punctuation">`</span> <span class="token keyword">datetime</span> <span class="token keyword">DEFAULT</span> <span class="token keyword">CURRENT_TIMESTAMP</span> <span class="token keyword">ON</span> <span class="token keyword">UPDATE</span> <span class="token keyword">CURRENT_TIMESTAMP</span> <span class="token keyword">COMMENT</span> <span class="token string">'更新时间'</span><span class="token punctuation">,</span>
+  <span class="token keyword">PRIMARY</span> <span class="token keyword">KEY</span> <span class="token punctuation">(</span><span class="token punctuation">`</span>id<span class="token punctuation">`</span><span class="token punctuation">)</span>
+<span class="token punctuation">)</span> <span class="token keyword">ENGINE</span><span class="token operator">=</span><span class="token keyword">InnoDB</span> <span class="token keyword">AUTO_INCREMENT</span><span class="token operator">=</span><span class="token number">8</span> <span class="token keyword">DEFAULT</span> <span class="token keyword">CHARSET</span><span class="token operator">=</span>utf8mb4 <span class="token keyword">COLLATE</span><span class="token operator">=</span>utf8mb4_unicode_ci<span class="token punctuation">;</span>
+
+<span class="token keyword">INSERT</span> <span class="token keyword">INTO</span> <span class="token punctuation">`</span>t_id_generate_config<span class="token punctuation">`</span> <span class="token punctuation">(</span><span class="token punctuation">`</span>id<span class="token punctuation">`</span><span class="token punctuation">,</span> <span class="token punctuation">`</span>remark<span class="token punctuation">`</span><span class="token punctuation">,</span>
+<span class="token punctuation">`</span>next_threshold<span class="token punctuation">`</span><span class="token punctuation">,</span> <span class="token punctuation">`</span>init_num<span class="token punctuation">`</span><span class="token punctuation">,</span> <span class="token punctuation">`</span>current_start<span class="token punctuation">`</span><span class="token punctuation">,</span> <span class="token punctuation">`</span>step<span class="token punctuation">`</span><span class="token punctuation">,</span> <span class="token punctuation">`</span>is_seq<span class="token punctuation">`</span><span class="token punctuation">,</span><span class="token punctuation">`</span>id_prefix<span class="token punctuation">`</span><span class="token punctuation">,</span> <span class="token punctuation">`</span>version<span class="token punctuation">`</span><span class="token punctuation">,</span> <span class="token punctuation">`</span>create_time<span class="token punctuation">`</span><span class="token punctuation">,</span> <span class="token punctuation">`</span>update_time<span class="token punctuation">`</span><span class="token punctuation">)</span>
+<span class="token keyword">VALUES</span>
+<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token string">'用户 id 生成策略'</span><span class="token punctuation">,</span> <span class="token number">10050</span><span class="token punctuation">,</span> <span class="token number">10000</span><span class="token punctuation">,</span> <span class="token number">10000</span><span class="token punctuation">,</span> <span class="token number">50</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span>
+<span class="token string">'user_id'</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token string">'2023-05-23 12:38:21'</span><span class="token punctuation">,</span> <span class="token string">'2023-05-23 23:31:45'</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>定义全局变量<br> 变量解析</p> 
+<ol><li>localSeqIdBOMap 缓存中可分配的分布式id（有序id）</li><li>localUnSeqIdBOMap 缓存中可分配的分布式id（无序id）</li><li>SEQ_ID = 1; 判断是否为有序id 的操作（扩容 存取 等）</li><li>threadPoolExecutor 移步线程池（用来异步动态扩容缓存的可分配id 池）</li><li>semaphoreMap 信号量存放map 防止多线程环境下 多次重复触发异步扩容线程池。参考 ConcurrentHashMap 的扩容 实现（ConcurrentHashMap ： ）。</li><li>UNDATE_RATE：动态扩容阀值</li></ol> 
+<pre><code class="prism language-java">
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token class-name">Logger</span> LOGGER <span class="token operator">=</span> <span class="token class-name">LoggerFactory</span><span class="token punctuation">.</span><span class="token function">getLogger</span><span class="token punctuation">(</span><span class="token class-name">IdGenerateService</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">,</span> <span class="token class-name">LocalSeqIdBO</span><span class="token punctuation">&gt;</span></span> localSeqIdBOMap <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ConcurrentHashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">,</span> <span class="token class-name">LocalSeqIdBO</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">,</span> <span class="token class-name">LocalUnSeqIdBO</span><span class="token punctuation">&gt;</span></span> localUnSeqIdBOMap <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ConcurrentHashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">,</span> <span class="token class-name">LocalUnSeqIdBO</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token class-name">Integer</span> SEQ_ID <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">ThreadPoolExecutor</span> threadPoolExecutor <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ThreadPoolExecutor</span><span class="token punctuation">(</span><span class="token number">8</span><span class="token punctuation">,</span> <span class="token number">16</span><span class="token punctuation">,</span> <span class="token number">3</span><span class="token punctuation">,</span> <span class="token class-name">TimeUnit</span><span class="token punctuation">.</span>SECONDS<span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">ArrayBlockingQueue</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+            <span class="token keyword">new</span> <span class="token class-name">ThreadFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token annotation punctuation">@Override</span>
+                <span class="token keyword">public</span> <span class="token class-name">Thread</span> <span class="token function">newThread</span><span class="token punctuation">(</span><span class="token class-name">Runnable</span> r<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token class-name">Thread</span> thread <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Thread</span><span class="token punctuation">(</span>r<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    thread<span class="token punctuation">.</span><span class="token function">setName</span><span class="token punctuation">(</span><span class="token string">"id-generate-thread-"</span> <span class="token operator">+</span> <span class="token class-name">ThreadLocalRandom</span><span class="token punctuation">.</span><span class="token function">current</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">nextInt</span><span class="token punctuation">(</span><span class="token number">1000</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * 使用Semaphore 信号量来防止多线程并发 多次刷新id段
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Integer</span><span class="token punctuation">,</span> <span class="token class-name">Semaphore</span><span class="token punctuation">&gt;</span></span> semaphoreMap <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ConcurrentHashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * id段刷新优化 阈值为0.75 达到百分之75 执行异步任务创建 优化
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">float</span> UNDATE_RATE <span class="token operator">=</span> <span class="token number">0.75f</span><span class="token punctuation">;</span>
+</code></pre> 
+<h2><a id="_id__76"></a>有序 id 生成器</h2> 
+<pre><code class="prism language-javva"> /**
+     * 有序id生成器
+     *
+     * @param id
+     * @return
+     */
+    @Override
+    public Long geSeqId(Integer id) {
+        if (id == null) {
+            LOGGER.error("[geSeqId] id is error,id is{}", id);
+            return null;
+        }
+        LocalSeqIdBO localSeqIdBO = localSeqIdBOMap.get(id);
+        if (localSeqIdBO == null) {
+            LOGGER.error("[geSeqId] localSeqIdBO is null,id is{}", id);
+            return null;
+        }
+
+        /**
+         * 异步 预执行刷新id段
+         */
+        this.refreshLocalSeqId(localSeqIdBO);
+        long andIncrement = localSeqIdBO.getCurrentNum().getAndIncrement();
+
+        if (andIncrement&gt; localSeqIdBO.getNextThreshold()) {
+            LOGGER.error("[geSeqId] id  is over limit,id is{}", id);
+            return null;
+        }
+
+        // 获取当前id 直增
+        return andIncrement;
+    }
+</code></pre> 
+<p>代码解读 从数据库读取到对应的方案（有序id 和无序id 方案 会有当前 可用的 id段 开始值 和 结束值 以及步长等信息）<br> LocalSeqIdBO localSeqIdBO = localSeqIdBOMap.get(id);<br> 预扩容：例如当前 可用id段是 1000-1500 判断 1000-1500 的id 被使用超过了 百分之75 就动态将id池 进行扩容</p> 
+<pre><code>this.refreshLocalSeqId(localSeqIdBO);
+</code></pre> 
+<p>取出当前已使用的id 最大值 并且进行+1<br> long andIncrement = localSeqIdBO.getCurrentNum().getAndIncrement();</p> 
+<p>// 优化逻辑 如果当前 已经用的id +1 后 超过了当前id池的最大值 则不会生成id。例： 当前id池最大是 1500 但是取出的当前已用的id 为 1500 则加一后是1501 超过了id池最大值1500 则不会生成id 继而下一次操作 会扩容id池<br> if (andIncrement&gt; localSeqIdBO.getNextThreshold()) {<!-- --><br> LOGGER.error(“[geSeqId] id is over limit,id is{}”, id);<br> return null;<br> }</p> 
+<h2><a id="_id_128"></a>异步刷新本地 id池</h2> 
+<pre><code class="prism language-java"> <span class="token comment">/**
+     * 刷新本地有序的id段
+     *
+     * @param localSeqIdBO
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">refreshLocalSeqId</span><span class="token punctuation">(</span><span class="token class-name">LocalSeqIdBO</span> localSeqIdBO<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 当前 id字段区间值</span>
+        <span class="token keyword">long</span> step <span class="token operator">=</span> localSeqIdBO<span class="token punctuation">.</span><span class="token function">getNextThreshold</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> localSeqIdBO<span class="token punctuation">.</span><span class="token function">getCurrentStart</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">/**
+         * 使用Semaphore 信号量来防止多线程并发 多次刷新id段
+         * 防止没扩容完成的时候过多线程进入到 if里面
+         */</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>localSeqIdBO<span class="token punctuation">.</span><span class="token function">getCurrentNum</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-</span> localSeqIdBO<span class="token punctuation">.</span><span class="token function">getCurrentStart</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> step <span class="token operator">*</span> UNDATE_RATE<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+            <span class="token class-name">Semaphore</span> semaphore <span class="token operator">=</span> semaphoreMap<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>localSeqIdBO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>semaphore <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                LOGGER<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"semaphore is null ,id is{}"</span><span class="token punctuation">,</span> localSeqIdBO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+
+            <span class="token punctuation">}</span>
+            <span class="token keyword">boolean</span> acquireStatus <span class="token operator">=</span> semaphore<span class="token punctuation">.</span><span class="token function">tryAcquire</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>acquireStatus<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">// 异步进行同步id字段的操作</span>
+                LOGGER<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"尝试开始进行同步id段的同步操作"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                threadPoolExecutor<span class="token punctuation">.</span><span class="token function">execute</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">Runnable</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                    <span class="token annotation punctuation">@Override</span>
+                    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">run</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token class-name">IdGeneratePO</span> idGeneratePO <span class="token operator">=</span> mapper<span class="token punctuation">.</span><span class="token function">selectById</span><span class="token punctuation">(</span>localSeqIdBO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token function">tryUpdateMysqlRecord</span><span class="token punctuation">(</span>idGeneratePO<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 释放semaphore资源</span>
+
+
+                        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                            LOGGER<span class="token punctuation">.</span><span class="token function">error</span><span class="token punctuation">(</span><span class="token string">"[refreshLocalSeqId] error is {}"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+                            semaphoreMap<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>localSeqIdBO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">release</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            LOGGER<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"有序id段同步完成，id is {}"</span><span class="token punctuation">,</span> localSeqIdBO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        <span class="token punctuation">}</span>
+
+                    <span class="token punctuation">}</span>
+                <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+
+        <span class="token punctuation">}</span>
+
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h2><a id="idid_181"></a>初次落第一批id数据到id池</h2> 
+<p>spring 容器启动的时候 在初始化Bean后 会回调这个方法</p> 
+<pre><code class="prism language-java">   <span class="token comment">//spring 启动的时候 bean 初始化的时候会回调这里</span>
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">afterPropertiesSet</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">IdGeneratePO</span><span class="token punctuation">&gt;</span></span> idGeneratePOList <span class="token operator">=</span> mapper<span class="token punctuation">.</span><span class="token function">selectAll</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token class-name">IdGeneratePO</span> idGeneratePO <span class="token operator">:</span> idGeneratePOList<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">tryUpdateMysqlRecord</span><span class="token punctuation">(</span>idGeneratePO<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            semaphoreMap<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>idGeneratePO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token keyword">new</span> <span class="token class-name">Semaphore</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h2><a id="_id__id__198"></a>更新数据库里面的 id字段占用位置信息 并且尝试将 已更新的id 段写入到缓存</h2> 
+<pre><code class="prism language-java">   <span class="token comment">/**
+     * 更新mysql里面的分布式id的配置信息，占用对应id段
+     *
+     * @param idGeneratePO
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">tryUpdateMysqlRecord</span><span class="token punctuation">(</span><span class="token class-name">IdGeneratePO</span> idGeneratePO<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token keyword">int</span> updateResult <span class="token operator">=</span> mapper<span class="token punctuation">.</span><span class="token function">updateNewIdCountAndVersion</span><span class="token punctuation">(</span>idGeneratePO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> idGeneratePO<span class="token punctuation">.</span><span class="token function">getVersion</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>updateResult <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token function">localIdBoHandler</span><span class="token punctuation">(</span>idGeneratePO<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">3</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">IdGeneratePO</span> newIdGeneratePO <span class="token operator">=</span> mapper<span class="token punctuation">.</span><span class="token function">selectById</span><span class="token punctuation">(</span>idGeneratePO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            updateResult <span class="token operator">=</span> mapper<span class="token punctuation">.</span><span class="token function">updateNewIdCountAndVersion</span><span class="token punctuation">(</span>idGeneratePO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> idGeneratePO<span class="token punctuation">.</span><span class="token function">getVersion</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>updateResult <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token function">localIdBoHandler</span><span class="token punctuation">(</span>idGeneratePO<span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//                LocalSeqIdBO localSeqIdBO = new LocalSeqIdBO();</span>
+<span class="token comment">//                AtomicLong atomicLong = new AtomicLong(idGeneratePO.getCurrentStart());</span>
+<span class="token comment">//                localSeqIdBO.setId(idGeneratePO.getId() );</span>
+<span class="token comment">//                localSeqIdBO.setCurrentNum(atomicLong );</span>
+<span class="token comment">//                localSeqIdBO.setCurrentStart(idGeneratePO.getCurrentStart() );</span>
+<span class="token comment">//                localSeqIdBO.setNextThreshold(idGeneratePO.getNextThreshold()  );</span>
+<span class="token comment">//                localSeqIdBO.setCurrentNum(atomicLong );</span>
+<span class="token comment">//                localSeqIdBOMap.put(localSeqIdBO.getId(),localSeqIdBO);</span>
+                <span class="token keyword">return</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+
+        <span class="token punctuation">}</span>
+        <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">RuntimeException</span><span class="token punctuation">(</span><span class="token string">"表id字段占用失败, 竞争过于激烈 id is :"</span> <span class="token operator">+</span> idGeneratePO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h2><a id="id__233"></a>将更新的id段 实际落到缓存</h2> 
+<pre><code class="prism language-java"><span class="token comment">/**
+     * 专门处理如何将id对象放入本地缓存中
+     *
+     * @param idGeneratePO
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">localIdBoHandler</span><span class="token punctuation">(</span><span class="token class-name">IdGeneratePO</span> idGeneratePO<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">long</span> currentStart <span class="token operator">=</span> idGeneratePO<span class="token punctuation">.</span><span class="token function">getCurrentStart</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">long</span> nextThreshold <span class="token operator">=</span> idGeneratePO<span class="token punctuation">.</span><span class="token function">getNextThreshold</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">long</span> currentNum <span class="token operator">=</span> currentStart<span class="token punctuation">;</span>
+        <span class="token comment">// 判断数据库取出来的id配置是有序还是无序 1 有序 非 1 无序</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>idGeneratePO<span class="token punctuation">.</span><span class="token function">getIsSeq</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">==</span> SEQ_ID<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 有序存储</span>
+            <span class="token class-name">LocalSeqIdBO</span> localSeqIdBO <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">LocalSeqIdBO</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">AtomicLong</span> atomicLong <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">AtomicLong</span><span class="token punctuation">(</span>currentStart<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            localSeqIdBO<span class="token punctuation">.</span><span class="token function">setId</span><span class="token punctuation">(</span>idGeneratePO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            localSeqIdBO<span class="token punctuation">.</span><span class="token function">setCurrentStart</span><span class="token punctuation">(</span>currentStart<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            localSeqIdBO<span class="token punctuation">.</span><span class="token function">setNextThreshold</span><span class="token punctuation">(</span>nextThreshold<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            localSeqIdBO<span class="token punctuation">.</span><span class="token function">setCurrentNum</span><span class="token punctuation">(</span>atomicLong<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            localSeqIdBOMap<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>localSeqIdBO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> localSeqIdBO<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">LocalUnSeqIdBO</span> localUnSeqIdBO <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">LocalUnSeqIdBO</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            localUnSeqIdBO<span class="token punctuation">.</span><span class="token function">setId</span><span class="token punctuation">(</span>idGeneratePO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            localUnSeqIdBO<span class="token punctuation">.</span><span class="token function">setCurrentStart</span><span class="token punctuation">(</span>currentStart<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            localUnSeqIdBO<span class="token punctuation">.</span><span class="token function">setNextThreshold</span><span class="token punctuation">(</span>nextThreshold<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">long</span> begin <span class="token operator">=</span> idGeneratePO<span class="token punctuation">.</span><span class="token function">getCurrentStart</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">long</span> end <span class="token operator">=</span> idGeneratePO<span class="token punctuation">.</span><span class="token function">getNextThreshold</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">ConcurrentLinkedQueue</span> idQueue <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ConcurrentLinkedQueue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Long</span><span class="token punctuation">&gt;</span></span> idList <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">long</span> i <span class="token operator">=</span> begin<span class="token punctuation">;</span> i <span class="token operator">&lt;</span> end<span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                idList<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token comment">// 无序操作将有序集合打乱</span>
+            <span class="token class-name">Collections</span><span class="token punctuation">.</span><span class="token function">shuffle</span><span class="token punctuation">(</span>idList<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            idQueue<span class="token punctuation">.</span><span class="token function">addAll</span><span class="token punctuation">(</span>idList<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            localUnSeqIdBO<span class="token punctuation">.</span><span class="token function">setIdQueue</span><span class="token punctuation">(</span>idQueue<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            localUnSeqIdBOMap<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>localUnSeqIdBO<span class="token punctuation">.</span><span class="token function">getId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> localUnSeqIdBO<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h2><a id="mapper__277"></a>mapper 内容</h2> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Mapper</span>
+<span class="token keyword">public</span> <span class="token keyword">interface</span> <span class="token class-name">IdGenerateMapper</span> <span class="token keyword">extends</span> <span class="token class-name">BaseMapper</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">IdGeneratePO</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">//    @Update("update t_id_generate_config set next_threshold = next_threshold + step,current_start=current_start + step , version = version + 1 where id = #{id} and version = #{version}")</span>
+<span class="token comment">//    int updateNewIdCountAndVersion(@Param("id") int id, @Param("version") int version);</span>
+    <span class="token annotation punctuation">@Update</span><span class="token punctuation">(</span><span class="token string">"update t_id_generate_config set next_threshold=next_threshold+step,"</span> <span class="token operator">+</span>
+            <span class="token string">"current_start=current_start+step,version=version+1 where id =#{id} and version=#{version}"</span><span class="token punctuation">)</span>
+    <span class="token keyword">int</span> <span class="token function">updateNewIdCountAndVersion</span><span class="token punctuation">(</span><span class="token annotation punctuation">@Param</span><span class="token punctuation">(</span><span class="token string">"id"</span><span class="token punctuation">)</span> <span class="token keyword">int</span> id<span class="token punctuation">,</span> <span class="token annotation punctuation">@Param</span><span class="token punctuation">(</span><span class="token string">"version"</span><span class="token punctuation">)</span> <span class="token keyword">int</span> version<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token annotation punctuation">@Select</span><span class="token punctuation">(</span><span class="token string">"select * from t_id_generate_config"</span><span class="token punctuation">)</span>
+    <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">IdGeneratePO</span><span class="token punctuation">&gt;</span></span> <span class="token function">selectAll</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d0b8b5a879f0ea11f8d44809bfe02e9f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Spring-Kafka 3.0 消费者消费失败处理方案</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/7963313a2928d267185dc3b8866e8431/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">YOLO-V4源码详解</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

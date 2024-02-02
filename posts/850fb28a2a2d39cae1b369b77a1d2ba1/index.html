@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Redis数据结构与底层实现揭秘 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Redis数据结构与底层实现揭秘" />
+<meta property="og:description" content="在高并发的系统开发中，缓存和高效的数据存储机制对于提升应用性能至关重要。Redis，作为其中的佼佼者，以其卓越的性能和丰富的数据结构赢得了开发者的青睐。本文将深入探讨Redis的数据结构及其底层实现，带领读者走进这个高性能数据库的幕后世界。
+一、Redis数据结构概览 Redis支持五种主要数据结构：字符串（Strings）、列表（Lists）、哈希表（Hashes）、集合（Sets）和有序集合（Sorted Sets）。这些数据结构为开发者提供了灵活的数据操作方式，满足了不同场景下的数据存储需求。
+字符串（Strings）：最基本的数据类型，可以包含任何数据，如数字、字符串、二进制数据等。在Redis中，字符串是二进制安全的，这意味着它们可以有任何长度，并且不会因为包含空字符而被截断。列表（Lists）：简单的字符串列表，按照插入顺序排序。你可以添加一个元素到头部（左边）或者尾部（右边）。哈希表（Hashes）：是键值对的集合，是字符串类型的字段和值的映射表。适合存储对象。集合（Sets）：是字符串类型的无序集合。它是通过哈希表实现的，可以做到添加、删除、查找的时间复杂度都是O(1)。有序集合（Sorted Sets）：和Sets相似，但每个字符串元素都会关联一个浮点数类型的分数。元素的分数用来排序，如果两个成员有相同的分数，那么他们的排名按照字典序计算。
+二、Redis底层实现揭秘 Redis的性能优势很大程度上来自于其精巧的底层数据结构和编码方式。Redis并没有直接使用上述的高级数据结构进行存储，而是根据数据的特性和大小，选择最合适的内部编码方式。
+1.字符串的底层实现：简单动态字符串（SDS） Redis的字符串类型并不是直接使用C语言中的原生字符串（以空字符\0结尾的字符数组）进行存储，而是使用了一个称为简单动态字符串（Simple Dynamic String，SDS）的数据结构。这种设计选择为Redis带来了许多优势，尤其是在性能和灵活性方面。
+SDS结构
+SDS的数据结构定义大致如下（可能根据Redis版本有所不同）：
+struct sdshdr { int len; // 记录buf数组中已使用字节的数量，等于SDS所保存字符串的长度 int free; // 记录buf数组中未使用字节的数量 char buf[]; // 字节数组，用于保存字符串。注意这里并没有指明数组的长度，这是一个柔性数组（flexible array member） }; 优势分析
+预分配：SDS会为buf分配额外的未使用空间（通过free字段记录），这意味着当你向一个SDS字符串追加内容时，如果未使用空间足够，Redis就不需要重新分配内存。这减少了内存分配次数，从而提高了性能。
+常数时间复杂度获取字符串长度：由于SDS结构内部维护了一个len字段来记录字符串的当前长度，获取字符串长度的操作可以在常数时间复杂度O(1)内完成，而不需要像C语言的原生字符串那样遍历整个字符串。
+二进制安全：SDS可以存储任意二进制数据，包括空字符\0。C语言的原生字符串以空字符作为结束标志，这限制了它们不能包含空字符。而SDS则通过len字段来明确字符串的长度，因此不受此限制。
+兼容C语言字符串函数：尽管SDS提供了自己的一套API来进行字符串操作，但它的buf字段实际上就是一个普通的C字符串（以\0结尾），这意味着在必要时，可以直接使用标准的C语言字符串处理函数来操作buf字段（尽管通常不推荐这样做，因为可能会破坏SDS结构的完整性）。
+操作优化
+SDS提供了一组API来进行字符串的创建、修改、拼接等操作。这些API在内部会处理内存分配、长度更新等细节，使得用户在使用时无需关心底层实现。
+例如，当你使用sdscat函数向一个SDS字符串追加内容时，该函数会首先检查未使用空间是否足够，如果不够，则会重新分配更大的内存空间，并将原有数据复制到新位置，然后再追加新内容。所有这些操作对用户都是透明的。
+通过使用SDS作为字符串的底层实现，Redis实现了字符串操作的高效性和灵活性，为上层提供了丰富的数据操作接口，同时保证了内部数据的一致性和稳定性。这种设计使得Redis在处理大量字符串数据时能够保持出色的性能。
+2.列表的底层实现：双向链表与压缩列表 Redis的列表（Lists）数据类型是一个非常重要的数据结构，它允许用户在列表的两端推入或者弹出元素。为了实现这种高效的操作，Redis的列表在底层使用了两种数据结构：双向链表和压缩列表。选择哪种结构取决于列表的大小和元素的特性。
+双向链表 当列表的元素数量较多或者元素较大时，Redis会选择使用双向链表作为底层实现。双向链表中的每个节点都保存了前一个节点和后一个节点的指针，这使得在列表的任何位置插入或删除元素都变得相对容易。
+双向链表的结构大致如下：
+typedef struct listNode { struct listNode *prev; // 指向前一个节点的指针 struct listNode *next; // 指向后一个节点的指针 void *value; // 节点保存的数据 } listNode; typedef struct list { listNode *head; // 指向链表头部的指针 listNode *tail; // 指向链表尾部的指针 unsigned long len; // 链表的长度 // ." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/850fb28a2a2d39cae1b369b77a1d2ba1/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-25T11:49:32+08:00" />
+<meta property="article:modified_time" content="2024-01-25T11:49:32+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis数据结构与底层实现揭秘</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <blockquote> 
+ <p>在高并发的系统开发中，缓存和高效的数据存储机制对于提升应用性能至关重要。Redis，作为其中的佼佼者，以其卓越的性能和丰富的数据结构赢得了开发者的青睐。本文将深入探讨Redis的数据结构及其底层实现，带领读者走进这个高性能数据库的幕后世界。</p> 
+</blockquote> 
+<h3><a id="Redis_2"></a>一、Redis数据结构概览</h3> 
+<p>Redis支持五种主要数据结构：字符串（Strings）、列表（Lists）、哈希表（Hashes）、集合（Sets）和有序集合（Sorted Sets）。这些数据结构为开发者提供了灵活的数据操作方式，满足了不同场景下的数据存储需求。</p> 
+<ul><li>字符串（Strings）：最基本的数据类型，可以包含任何数据，如数字、字符串、二进制数据等。在Redis中，字符串是二进制安全的，这意味着它们可以有任何长度，并且不会因为包含空字符而被截断。</li><li>列表（Lists）：简单的字符串列表，按照插入顺序排序。你可以添加一个元素到头部（左边）或者尾部（右边）。</li><li>哈希表（Hashes）：是键值对的集合，是字符串类型的字段和值的映射表。适合存储对象。</li><li>集合（Sets）：是字符串类型的无序集合。它是通过哈希表实现的，可以做到添加、删除、查找的时间复杂度都是O(1)。</li><li>有序集合（Sorted Sets）：和Sets相似，但每个字符串元素都会关联一个浮点数类型的分数。元素的分数用来排序，如果两个成员有相同的分数，那么他们的排名按照字典序计算。<br> <img src="https://images2.imgbox.com/ad/9c/lW5UEWX2_o.png" alt="在这里插入图片描述"></li></ul> 
+<h3><a id="Redis_12"></a>二、Redis底层实现揭秘</h3> 
+<p>Redis的性能优势很大程度上来自于其精巧的底层数据结构和编码方式。Redis并没有直接使用上述的高级数据结构进行存储，而是根据数据的特性和大小，选择最合适的内部编码方式。</p> 
+<p><img src="https://images2.imgbox.com/bc/e7/A5LZdiQJ_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="1SDS_19"></a>1.字符串的底层实现：简单动态字符串（SDS）</h3> 
+<p>Redis的字符串类型并不是直接使用C语言中的原生字符串（以空字符\0结尾的字符数组）进行存储，而是使用了一个称为简单动态字符串（Simple Dynamic String，SDS）的数据结构。这种设计选择为Redis带来了许多优势，尤其是在性能和灵活性方面。</p> 
+<p><strong>SDS结构</strong></p> 
+<p>SDS的数据结构定义大致如下（可能根据Redis版本有所不同）：</p> 
+<pre><code class="prism language-c"><span class="token keyword">struct</span> <span class="token class-name">sdshdr</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">int</span> len<span class="token punctuation">;</span>      <span class="token comment">// 记录buf数组中已使用字节的数量，等于SDS所保存字符串的长度  </span>
+    <span class="token keyword">int</span> free<span class="token punctuation">;</span>     <span class="token comment">// 记录buf数组中未使用字节的数量  </span>
+    <span class="token keyword">char</span> buf<span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">;</span>   <span class="token comment">// 字节数组，用于保存字符串。注意这里并没有指明数组的长度，这是一个柔性数组（flexible array member）  </span>
+<span class="token punctuation">}</span><span class="token punctuation">;</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/77/73/w2pdQrpK_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>优势分析</strong></p> 
+<ul><li> <p>预分配：SDS会为buf分配额外的未使用空间（通过free字段记录），这意味着当你向一个SDS字符串追加内容时，如果未使用空间足够，Redis就不需要重新分配内存。这减少了内存分配次数，从而提高了性能。</p> </li><li> <p>常数时间复杂度获取字符串长度：由于SDS结构内部维护了一个len字段来记录字符串的当前长度，获取字符串长度的操作可以在常数时间复杂度O(1)内完成，而不需要像C语言的原生字符串那样遍历整个字符串。</p> </li><li> <p>二进制安全：SDS可以存储任意二进制数据，包括空字符\0。C语言的原生字符串以空字符作为结束标志，这限制了它们不能包含空字符。而SDS则通过len字段来明确字符串的长度，因此不受此限制。</p> </li><li> <p>兼容C语言字符串函数：尽管SDS提供了自己的一套API来进行字符串操作，但它的buf字段实际上就是一个普通的C字符串（以\0结尾），这意味着在必要时，可以直接使用标准的C语言字符串处理函数来操作buf字段（尽管通常不推荐这样做，因为可能会破坏SDS结构的完整性）。</p> </li></ul> 
+<p><strong>操作优化</strong></p> 
+<p>SDS提供了一组API来进行字符串的创建、修改、拼接等操作。这些API在内部会处理内存分配、长度更新等细节，使得用户在使用时无需关心底层实现。</p> 
+<p>例如，当你使用sdscat函数向一个SDS字符串追加内容时，该函数会首先检查未使用空间是否足够，如果不够，则会重新分配更大的内存空间，并将原有数据复制到新位置，然后再追加新内容。所有这些操作对用户都是透明的。</p> 
+<blockquote> 
+ <p>通过使用SDS作为字符串的底层实现，Redis实现了字符串操作的高效性和灵活性，为上层提供了丰富的数据操作接口，同时保证了内部数据的一致性和稳定性。这种设计使得Redis在处理大量字符串数据时能够保持出色的性能。</p> 
+</blockquote> 
+<h3><a id="2_53"></a><strong>2.列表的底层实现：双向链表与压缩列表</strong></h3> 
+<p>Redis的列表（Lists）数据类型是一个非常重要的数据结构，它允许用户在列表的两端推入或者弹出元素。为了实现这种高效的操作，Redis的列表在底层使用了两种数据结构：双向链表和压缩列表。选择哪种结构取决于列表的大小和元素的特性。</p> 
+<ul><li><strong>双向链表</strong></li></ul> 
+<p>当列表的元素数量较多或者元素较大时，Redis会选择使用双向链表作为底层实现。双向链表中的每个节点都保存了前一个节点和后一个节点的指针，这使得在列表的任何位置插入或删除元素都变得相对容易。</p> 
+<p>双向链表的结构大致如下：</p> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">listNode</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">struct</span> <span class="token class-name">listNode</span> <span class="token operator">*</span>prev<span class="token punctuation">;</span>  <span class="token comment">// 指向前一个节点的指针  </span>
+    <span class="token keyword">struct</span> <span class="token class-name">listNode</span> <span class="token operator">*</span>next<span class="token punctuation">;</span>  <span class="token comment">// 指向后一个节点的指针  </span>
+    <span class="token keyword">void</span> <span class="token operator">*</span>value<span class="token punctuation">;</span>            <span class="token comment">// 节点保存的数据  </span>
+<span class="token punctuation">}</span> listNode<span class="token punctuation">;</span>  
+  
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">list</span> <span class="token punctuation">{<!-- --></span>  
+    listNode <span class="token operator">*</span>head<span class="token punctuation">;</span>         <span class="token comment">// 指向链表头部的指针  </span>
+    listNode <span class="token operator">*</span>tail<span class="token punctuation">;</span>         <span class="token comment">// 指向链表尾部的指针  </span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> len<span class="token punctuation">;</span>      <span class="token comment">// 链表的长度  </span>
+    <span class="token comment">// ... 可能还有其他字段，如复制函数、比较函数等  </span>
+<span class="token punctuation">}</span> list<span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>使用双向链表的优势在于：</strong></p> 
+<p>可以在O(1)时间复杂度内完成在列表头部或尾部的元素插入和删除。<br> 当需要遍历列表时，可以从头部或尾部开始，沿着节点的指针依次访问。</p> 
+<ul><li><strong>压缩列表</strong></li></ul> 
+<p>当列表的元素数量较少且元素较小时，Redis会使用压缩列表（ziplist）作为底层实现来节省内存。压缩列表是一个紧凑的、连续的内存块，它按顺序存储了列表中的元素。</p> 
+<p>压缩列表的结构大致如下：</p> 
+<pre><code class="prism language-sql"><span class="token operator">+</span><span class="token comment">--------+--------+--------+------+  </span>
+<span class="token operator">|</span> ZLBYTE <span class="token operator">|</span> LEN    <span class="token operator">|</span> <span class="token string">'one'</span>  <span class="token operator">|</span> <span class="token string">'two'</span><span class="token operator">|</span> <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>  
+<span class="token operator">+</span><span class="token comment">--------+--------+--------+------+</span>
+</code></pre> 
+<ul><li>ZLBYTE： 压缩列表的头部信息，包含了特殊编码和压缩列表的长度信息。</li><li>LEN： 每个元素前的长度字段，用于记录该元素的长度或前一个元素到当前元素的偏移量。</li><li>‘one’, ‘two’： 实际的列表元素，它们被连续地存储在压缩列表中。</li></ul> 
+<p><strong>使用压缩列表的优势在于：</strong></p> 
+<p>内存利用率高，因为元素是连续存储的，没有额外的指针开销。<br> 对于小列表，操作速度可以很快，因为所有数据都在一个连续的内存块中。</p> 
+<p><strong>操作优化</strong></p> 
+<p>Redis的列表实现提供了一组API来进行列表的创建、修改、遍历等操作。这些API在内部会根据列表的大小和元素的特性选择合适的底层数据结构，并且在必要时进行数据结构之间的转换。</p> 
+<p>例如，当向一个使用压缩列表实现的列表中添加一个新元素时，如果添加后的列表仍然满足压缩列表的使用条件（即元素数量和大小都没有超过预设的阈值），那么Redis会直接在压缩列表的末尾添加新元素。否则，Redis会将压缩列表转换为双向链表，并在链表的尾部添加新元素。</p> 
+<blockquote> 
+ <p>通过使用双向链表和压缩列表作为底层实现，Redis的列表数据类型能够在不同的使用场景下提供高效的操作性能。这种灵活的设计使得Redis能够处理各种大小和复杂度的列表数据，同时保持内存的低消耗和操作的快速性。</p> 
+</blockquote> 
+<h3><a id="3_Redis_112"></a><strong>3. 哈希的底层实现：Redis中的字典与压缩列表</strong></h3> 
+<p>Redis的哈希（Hashes）类型允许用户在单个键中存储多个字段和对应的值。为了高效地支持这种数据结构，Redis在底层使用了两种主要的数据结构来实现哈希：字典（也称为哈希表）和压缩列表。</p> 
+<ul><li><strong>字典（哈希表</strong>）</li></ul> 
+<p>当哈希中的字段和值较多或者较大时，Redis会选择使用字典作为底层实现。字典是一种通过键（在Redis哈希中是字段）来直接访问值的数据结构，它能够在平均情况下提供O(1)时间复杂度的查找、插入和删除操作。<br> <img src="https://images2.imgbox.com/6f/c8/aaX4DCT4_o.png" alt="在这里插入图片描述"></p> 
+<p>Redis的字典实现通常包含两个哈希表，用于处理哈希表扩容时的数据迁移。每个哈希表节点保存了字段的哈希值、字段本身和对应的值。结构大致如下：</p> 
+<pre><code class="prism language-c"><span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">dictEntry</span> <span class="token punctuation">{<!-- --></span>  
+    <span class="token keyword">void</span> <span class="token operator">*</span>key<span class="token punctuation">;</span>                <span class="token comment">// 字段  </span>
+    <span class="token keyword">union</span> <span class="token punctuation">{<!-- --></span>  
+        <span class="token keyword">void</span> <span class="token operator">*</span>val<span class="token punctuation">;</span>  
+        <span class="token class-name">uint64_t</span> u64<span class="token punctuation">;</span>  
+        <span class="token class-name">int64_t</span> s64<span class="token punctuation">;</span>  
+        <span class="token comment">// ... 其他可能的值类型  </span>
+    <span class="token punctuation">}</span> v<span class="token punctuation">;</span>                      <span class="token comment">// 值  </span>
+    <span class="token keyword">struct</span> <span class="token class-name">dictEntry</span> <span class="token operator">*</span>next<span class="token punctuation">;</span>   <span class="token comment">// 指向下一个节点的指针，用于解决哈希冲突  </span>
+<span class="token punctuation">}</span> dictEntry<span class="token punctuation">;</span>  
+  
+<span class="token keyword">typedef</span> <span class="token keyword">struct</span> <span class="token class-name">dict</span> <span class="token punctuation">{<!-- --></span>  
+    dictEntry <span class="token operator">*</span><span class="token operator">*</span>table<span class="token punctuation">;</span>        <span class="token comment">// 哈希表数组  </span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> size<span class="token punctuation">;</span>       <span class="token comment">// 哈希表大小  </span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> sizemask<span class="token punctuation">;</span>   <span class="token comment">// 用于计算索引的掩码  </span>
+    <span class="token keyword">unsigned</span> <span class="token keyword">long</span> used<span class="token punctuation">;</span>       <span class="token comment">// 已使用的节点数量  </span>
+    <span class="token comment">// ... 可能还有其他字段，如哈希函数、复制函数等  </span>
+<span class="token punctuation">}</span> dict<span class="token punctuation">;</span>
+</code></pre> 
+<p><strong>使用字典的优势在于：</strong></p> 
+<p>提供了快速的字段查找、插入和删除操作。<br> 哈希表的扩容机制可以保持较低的哈希冲突率，从而保证操作的效率。</p> 
+<ul><li><strong>压缩列表</strong></li></ul> 
+<p>当哈希中的字段和值较少且较小时，Redis会使用压缩列表作为底层实现来节省内存。压缩列表是一种紧凑的、连续的内存块，它按顺序存储了哈希中的字段和值对。</p> 
+<p>压缩列表的结构大致如下：</p> 
+<pre><code class="prism language-sql"><span class="token operator">+</span><span class="token comment">--------+--------+--------+--------+  </span>
+<span class="token operator">|</span> ZLBYTE <span class="token operator">|</span> LEN1   <span class="token operator">|</span> FIELD1 <span class="token operator">|</span> LEN2   <span class="token operator">|</span> VALUE2 <span class="token operator">|</span> <span class="token punctuation">.</span><span class="token punctuation">.</span><span class="token punctuation">.</span>  
+<span class="token operator">+</span><span class="token comment">--------+--------+--------+--------+</span>
+ZLBYTE：压缩列表的头部信息。
+LEN1、FIELD1：第一个字段的长度和字段本身。
+LEN2、VALUE2：第一个字段对应的值的长度和值本身。
+</code></pre> 
+<p>以此类推，后续的字段和值对也是按照这个格式存储的。</p> 
+<p><strong>使用压缩列表的优势在于：</strong></p> 
+<ul><li>内存利用率高，因为字段和值是连续存储的，没有额外的指针和元数据开销。</li><li>对于小哈希，操作速度可以很快，因为所有数据都在一个连续的内存块中。</li></ul> 
+<p><strong>操作优化</strong></p> 
+<p>Redis的哈希实现提供了一组API来进行哈希的创建、修改、查找等操作。这些API在内部会根据哈希的大小和字段的特性选择合适的底层数据结构，并且在必要时进行数据结构之间的转换。</p> 
+<p>例如，当向一个使用压缩列表实现的哈希中添加一个新的字段和值时，如果添加后的哈希仍然满足压缩列表的使用条件（即字段和值的数量和大小都没有超过预设的阈值），那么Redis会直接在压缩列表的末尾添加新的字段和值。否则，Redis会将压缩列表转换为字典，并在字典中插入新的字段和值。</p> 
+<blockquote> 
+ <p>通过使用字典和压缩列表作为底层实现，Redis的哈希数据类型能够在不同的使用场景下提供高效的操作性能。这种灵活的设计使得Redis能够处理各种大小和复杂度的哈希数据，同时保持内存的低消耗和操作的快速性。</p> 
+</blockquote> 
+<h3><a id="4__179"></a><strong>4. 集合的底层实现：整数集合和字典</strong></h3> 
+<p>Redis的集合（Sets）是一个无序的、元素不重复的集合。为了高效地支持这种数据结构及其操作，Redis在底层使用了两种主要的数据结构：整数集合（intset）和字典（hashtable）。</p> 
+<p><strong>整数集合（int set）</strong></p> 
+<p>当集合中的元素都是整数，并且元素数量较少时，Redis会选择使用整数集合作为底层实现。整数集合是一个紧凑的数组，数组中的每个元素都是集合中的一个整数。<br> <img src="https://images2.imgbox.com/25/37/Xsv89ihk_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>整数集合的优势在于：</strong></p> 
+<ul><li>内存利用率高：整数集合将整数紧密地存储在一个连续的内存块中，没有额外的指针或元数据开销。</li><li>操作速度快：对于整数集合中的元素，Redis可以直接通过数组索引访问，这使得查找、添加和删除整数的操作非常快速。<br> 然而，整数集合也有其局限性。由于它要求集合中的元素必须是整数，并且元素数量较少，因此在处理非整数元素或大量元素时，整数集合可能不是最优的选择。</li></ul> 
+<p><strong>字典（hashtable）</strong></p> 
+<p>当集合中的元素不满足整数集合的条件（即元素不是整数或元素数量较多）时，Redis会使用字典作为底层实现。字典是一种哈希表，它通过哈希函数将元素的哈希值映射到相应的桶（bucket）中，以支持快速的查找、插入和删除操作。</p> 
+<p><strong>字典的优势在于：</strong></p> 
+<ul><li>灵活性高：字典可以存储任意类型的元素，而不仅仅是整数。</li><li>操作效率高：通过哈希函数，字典可以在平均情况下提供O(1)时间复杂度的查找、插入和删除操作。</li></ul> 
+<p>然而，字典也有一定的开销。每个字典元素都需要额外的空间来存储哈希值、指针等元数据。此外，当哈希表发生哈希冲突时，可能需要通过链表或其他方式解决冲突，这可能会降低操作的效率。</p> 
+<p><strong>操作优化和转换</strong></p> 
+<p>Redis的集合实现提供了一组API来进行集合的创建、修改、查找等操作。这些API在内部会根据集合的大小和元素的特性选择合适的底层数据结构，并且在必要时进行数据结构之间的转换。</p> 
+<p>例如，当向一个使用整数集合实现的集合中添加一个新的整数元素时，如果添加后的集合仍然满足整数集合的使用条件（即元素数量没有超过预设的阈值），那么Redis会直接在整数集合的末尾添加新的元素。否则，Redis会将整数集合转换为字典，并在字典中插入新的元素。</p> 
+<blockquote> 
+ <p>Redis的集合在底层使用了整数集合和字典两种数据结构来实现。整数集合适用于元素较少且都是整数的场景，而字典适用于元素数量较多或元素类型不限的场景。通过这种灵活的设计，Redis能够在不同的使用场景下提供高效的操作性能，同时保持内存的低消耗和操作的快速性。</p> 
+</blockquote> 
+<h3><a id="5_Redis_214"></a><strong>5. 有序集合的底层实现：Redis中的数据结构</strong></h3> 
+<p>Redis的有序集合（Sorted Sets）是一个有序的、元素不重复的集合，其中每个元素都关联了一个分数（score）。为了实现这种数据结构及其相关操作的高效性，Redis在底层主要使用了两种数据结构：压缩列表（ziplist）和跳表（skiplist）。</p> 
+<p><strong>跳表（skiplist）</strong></p> 
+<p>当有序集合的元素数量较多或元素的大小较大时，Redis会使用跳表作为底层实现。跳表是一种多层的有序链表，它通过维护多个层次的指针来加快查找、插入和删除操作的速度。<br> <img src="https://images2.imgbox.com/46/c6/0TgY8CwR_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>跳表的优势在于：</strong></p> 
+<ul><li>查找效率高：通过维护多个层次的指针，跳表可以在平均情况下提供O(log N)时间复杂度的查找操作，其中N是元素的数量。</li><li>插入和删除操作快速：跳表的插入和删除操作只需要局部地调整指针，而不需要移动大量的数据。</li><li>支持范围查询：跳表可以方便地支持按照分数范围查询元素的操作</li></ul> 
+<p>然而，跳表也有一定的开销。每个元素在跳表中都有多个指向前驱和后继的指针，这些指针会占用额外的内存空间。</p> 
+<p><img src="https://images2.imgbox.com/db/33/lFaqHXbh_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>操作优化和转换</strong></p> 
+<p>Redis的有序集合实现提供了一组API来进行集合的创建、修改、查找等操作。这些API在内部会根据集合的大小和元素的特性选择合适的底层数据结构，并且在必要时进行数据结构之间的转换。</p> 
+<p>例如，当向一个使用压缩列表实现的有序集合中添加一个新的元素时，如果添加后的集合仍然满足压缩列表的使用条件（即元素数量没有超过预设的阈值），那么Redis会直接在压缩列表的末尾添加新的元素。否则，Redis会将压缩列表转换为跳表，并在跳表中插入新的元素。</p> 
+<blockquote> 
+ <p>Redis的有序集合在底层使用了压缩列表和跳表两种数据结构来实现。压缩列表适用于元素较少且大小较小的场景，而跳表适用于元素数量较多或元素大小较大的场景。通过这种灵活的设计，Redis能够在不同的使用场景下提供高效的操作性能，同时保持内存的低消耗和操作的快速性。有序集合的实现使得Redis能够支持按照分数排序、范围查询等复杂操作，满足了业务上的多样化需求。</p> 
+</blockquote> 
+<h3><a id="_241"></a>三、总结</h3> 
+<p>Redis通过精巧的数据结构和编码方式，实现了高性能的数据存储和操作。其底层实现不仅考虑了内存的使用效率，还充分考虑了数据操作的性能。这使得Redis能够在处理大量数据和并发请求时，依然保持出色的性能表现。对于开发者而言，理解Redis的数据结构和底层实现，有助于更好地使用和优化Redis，从而提升应用的整体性能。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/17cf24c1d8425271138bfa288cce1916/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">大文件传输之怎样定时往ftp里拷文件</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/09cbd5ae84114fe91750196b0d4c7c7d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">数字孪生系统的开发流程</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

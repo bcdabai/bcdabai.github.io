@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>STM32之CAN ---CAN ID过滤器分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="STM32之CAN ---CAN ID过滤器分析" />
+<meta property="og:description" content="1 前言 在CAN协议里，报文的标识符不代表节点的地址，而是跟报文的内容相关的。因此，发送者以广播的形式把报文发送给所有的接收者。节点在接收报文时,根据标识符(CAN ID)的值决定软件是否需要该报文；如果需要，就拷贝到SRAM里；如果不需要，报文就被丢弃且无需软件的干预。
+为满足这一需求，bxCAN为应用程序提供了14个位宽可变的、可配置的过滤器组(13~0)，以便只接收那些软件需要的报文。硬件过滤的做法节省了CPU开销，否则就必须由软件过滤从而占用一定的CPU开销。每个过滤器组x由2个32位寄存器，CAN_FxR0和CAN_FxR1组成。
+为了让大家了解STM32的bxCAN的接收过滤机制，首先大家需要了解几个概念。
+2 几个重要的概念 2.1 过滤器组 STM32总共提供14个过滤器组来处理CAN接收过滤问题，每个过滤器组包含两个32位寄存器CAN_FxR0和CAN_FxR1组成，在设置为屏蔽位模式下，其中一个作为标识符寄存器，另一个作为屏蔽码寄存器。过滤器组中的每个过滤器，编号(叫做过滤器号)从0开始，到某个最大数值（这时最大值并非13，而是取决于14个过滤器组的模式和位宽的设置，当全部配置为位宽为16，且为标识符列表模式时，最大编号为14*4-1=55）。
+2.2 过滤器的过滤模式 STM32提供两种过滤模式供用户设置：屏蔽位模式和标识符列表模式。
+2.2.1 屏蔽位模式 为了过滤出一组标识符，应该设置过滤器组工作在屏蔽位模式。 在屏蔽位模式下，标识符寄存器和屏蔽寄存器一起，指定报文标识符的任何一位，应该按照“必须匹配”或“不用关心”处理。
+2.2.2 标识符列表模式 为了过滤出一个标识符，应该设置过滤器组工作在标识符列表模式。 在标识符列表模式下，屏蔽寄存器也被当作标识符寄存器用。因此，不是采用一个标识符加一个屏蔽位的方式，而是使用2个标识符寄存器。接收报文标识符的每一位都必须跟过滤器标识符相同。
+2.3 过滤器的位宽 每个过滤器组的位宽都可以独立配置，以满足应用程序的不同需求。根据位宽的不同，每个过滤器组可提供：
+●1个32位过滤器，包括：STDID[10:0]、EXTID[17:0]、IDE和RTR位
+●2个16位过滤器，包括：STDID[10:0]、IDE、RTR和EXTID[17:15]位
+2.3 过滤器组的过滤模式和位宽设置 过滤器组可以通过相应的CAN_FMR寄存器（CAN过滤器主控寄存器）配置。但是不是什么时候都可以直接配置，在配置一个过滤器组前，必须通过清除CAN_FAR寄存器（CAN过滤器激活寄存器）的FACT位，把它设置为禁用状态。然后才能设置或设置过滤器组的配置。
+通过设置CAN_FS1R（CAN过滤器位宽寄存器）的相应FSCx位，可以配置一个过滤器组的位宽。通过CAN_FM1R（CAN过滤器模式寄存器）的FBMx位，可以配置对应的屏蔽/标识符寄存器的标识符列表模式或屏蔽位模式。(见后续3.2节)
+应用程序不用的过滤器组，应该保持在禁用状态。
+关于过滤器配置，可参见下图:
+图1
+2.4 过滤器匹配序号 一旦收到的报文被存入FIFO，就可被应用程序访问。通常情况下，报文中的数据被拷贝到SRAM中；为了把数据拷贝到合适的位置，应用程序需要根据报文的标识符来辨别不同的数据。bxCAN提供了过滤器匹配序号，以简化这一辨别过程。
+根据过滤器优先级规则，过滤器匹配序号和报文一起，被存入邮箱中。因此每个收到的报文，都有与它相关联的过滤器匹配序号。
+过滤器匹配序号可以通过下面两种方式来使用：
+● 把过滤器匹配序号跟一系列所期望的值进行比较
+● 把过滤器匹配序号当作一个索引来访问目标地址
+对于标识符列表模式下的过滤器(非屏蔽方式的过滤器)，软件不需要直接跟标识符进行比较。
+对于屏蔽位模式下的过滤器，软件只须对需要的那些屏蔽位(必须匹配的位)进行比较即可。
+在给过滤器编号时，并不考虑过滤器组是否为激活状态。另外，每个FIFO各自对其关联的过滤器进行编号,如下图：
+图2
+2.5 过滤器优先级规则 根据过滤器的不同配置，有可能一个报文标识符能通过多个过滤器的过滤；在这种情况下，存放在接收邮箱中的过滤器匹配序号，根据下列优先级规则来确定：
+● 位宽为32位的过滤器，优先级高于位宽为16位的过滤器
+● 对于位宽相同的过滤器，标识符列表模式的优先级高于屏蔽位模式
+● 位宽和模式都相同的过滤器，优先级由过滤器号决定，过滤器号小的优先级高
+如下图:
+图3
+如上图，在接收一个报文时，其标识符首先与配置在标识符列表模式下的过滤器相比较；如果匹配上，报文就被存放到相关联的FIFO中，并且所匹配的过滤器的序号（这时为4）被存入过滤器匹配序号中。如同例子中所显示，报文标识符跟#4标识符匹配，因此报文内容和FMI4被存入FIFO。
+如果没有匹配，报文标识符接着与配置在屏蔽位模式下的过滤器进行比较。
+如果报文标识符没有跟过滤器中的任何标识符相匹配，那么硬件就丢弃该报文，且不会对软件有任何打扰。
+3 与过滤器相关的寄存器 3.1 CAN 过滤器主控寄存器 (CAN_FMR) 地址偏移量: 0x200" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/da41d911c35d68d269b0ce558fc12cad/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2012-11-05T16:01:16+08:00" />
+<meta property="article:modified_time" content="2012-11-05T16:01:16+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">STM32之CAN ---CAN ID过滤器分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h3>1 前言</h3> 
+<p>         在CAN协议里，报文的标识符不代表节点的地址，而是跟报文的内容相关的。因此，发送者以广播的形式把报文发送给所有的接收者。节点在接收报文时,根据标识符(CAN ID)的值决定软件是否需要该报文；如果需要，就拷贝到SRAM里；如果不需要，报文就被丢弃且无需软件的干预。<br>         为满足这一需求，bxCAN为应用程序提供了14个位宽可变的、可配置的过滤器组(13~0)，以便只接收那些软件需要的报文。硬件过滤的做法节省了CPU开销，否则就必须由软件过滤从而占用一定的CPU开销。每个过滤器组x由2个32位寄存器，CAN_FxR0和CAN_FxR1组成。<br></p> 
+<p>        为了让大家了解STM32的bxCAN的接收过滤机制，首先大家需要了解几个概念。</p> 
+<h3>2 几个重要的概念</h3> 
+<h4>2.1 过滤器组</h4> 
+<p>        STM32总共提供14个过滤器组来处理CAN接收过滤问题，每个过滤器组包含两个32位寄存器CAN_FxR0和CAN_FxR1组成，在设置为屏蔽位模式下，其中一个作为标识符寄存器，另一个作为屏蔽码寄存器。过滤器组中的每个过滤器，编号(叫做过滤器号)从0开始，到某个最大数值（这时最大值并非13，而是取决于14个过滤器组的模式和位宽的设置，当全部配置为位宽为16，且为标识符列表模式时，最大编号为14*4-1=55）。<br></p> 
+<h4>2.2 过滤器的过滤模式</h4> 
+<p>        STM32提供两种过滤模式供用户设置：屏蔽位模式和标识符列表模式。</p> 
+<h5>2.2.1 屏蔽位模式</h5> 
+<div> 
+ <span style="white-space: pre;">为了过滤出一组标识符，应该设置过滤器组工作在屏蔽位模式。</span> 
+</div> 
+<p>        在屏蔽位模式下，标识符寄存器和屏蔽寄存器一起，指定报文标识符的任何一位，应该按照“必须匹配”或“不用关心”处理。</p> 
+<h5>2.2.2 标识符列表模式</h5> 
+<div> 
+ <span style="white-space: pre;">为了过滤出一个标识符，应该设置过滤器组工作在标识符列表模式。</span> 
+</div> 
+<p>        在标识符列表模式下，屏蔽寄存器也被当作标识符寄存器用。因此，不是采用一个标识符加一个屏蔽位的方式，而是使用2个标识符寄存器。接收报文标识符的每一位都必须跟过滤器标识符相同。</p> 
+<h4>2.3 过滤器的位宽</h4> 
+<p>        每个过滤器组的位宽都可以独立配置，以满足应用程序的不同需求。根据位宽的不同，每个过滤器组可提供：<br>        ●1个32位过滤器，包括：STDID[10:0]、EXTID[17:0]、IDE和RTR位<br>        ●2个16位过滤器，包括：STDID[10:0]、IDE、RTR和EXTID[17:15]位<br></p> 
+<h4>2.3 过滤器组的过滤模式和位宽设置</h4> 
+<p>        过滤器组可以通过相应的CAN_FMR寄存器（CAN过滤器主控寄存器）配置。但是不是什么时候都可以直接配置，在配置一个过滤器组前，必须通过清除CAN_FAR寄存器（CAN过滤器激活寄存器）的FACT位，把它设置为禁用状态。然后才能设置或设置过滤器组的配置。<br></p> 
+<ul><li>通过设置CAN_FS1R（CAN过滤器位宽寄存器）的相应FSCx位，可以配置一个过滤器组的位宽。</li><li>通过CAN_FM1R（CAN过滤器模式寄存器）的FBMx位，可以配置对应的屏蔽/标识符寄存器的标识符列表模式或屏蔽位模式。<span style="color:#000099;background-color: rgb(255, 255, 255);"><em>(见后续3.2节)</em></span><br></li></ul> 
+<blockquote> 
+ <p>应用程序不用的过滤器组，应该保持在禁用状态。</p> 
+ <p>关于过滤器配置，可参见下图:</p> 
+ <p><img alt="" src="https://images2.imgbox.com/39/8b/q4UlplZz_o.jpg"></p> 
+ <p>                                                                                                            <strong>图1</strong><br></p> 
+</blockquote> 
+<h4>2.4 过滤器匹配序号</h4> 
+<p>                一旦收到的报文被存入FIFO，就可被应用程序访问。通常情况下，报文中的数据被拷贝到SRAM中；为了把数据拷贝到合适的位置，应用程序需要根据报文的标识符来辨别不同的数据。bxCAN提供了过滤器匹配序号，以简化这一辨别过程。</p> 
+<p>               根据过滤器优先级规则，过滤器匹配序号和报文一起，被存入邮箱中。因此每个收到的报文，都有与它相关联的过滤器匹配序号。</p> 
+<p>              过滤器匹配序号可以通过下面两种方式来使用：<br>             ● 把过滤器匹配序号跟一系列所期望的值进行比较<br>             ● 把过滤器匹配序号当作一个索引来访问目标地址<br>            对于标识符列表模式下的过滤器(非屏蔽方式的过滤器)，软件不需要直接跟标识符进行比较。<br>            对于屏蔽位模式下的过滤器，软件只须对需要的那些屏蔽位(必须匹配的位)进行比较即可。<br>在给过滤器编号时，并不考虑过滤器组是否为激活状态。另外，每个FIFO各自对其关联的过滤器进行编号,如下图：</p> 
+<p><img alt="" src="https://images2.imgbox.com/dd/c4/PdemnSMQ_o.jpg"></p> 
+<p>                                                                                     <strong>图2</strong></p> 
+<h4>2.5 过滤器优先级规则</h4> 
+<p>根据过滤器的不同配置，有可能一个报文标识符能通过多个过滤器的过滤；在这种情况下，存放在接收邮箱中的过滤器匹配序号，根据下列优先级规则来确定：<br>● 位宽为32位的过滤器，优先级高于位宽为16位的过滤器<br>● 对于位宽相同的过滤器，标识符列表模式的优先级高于屏蔽位模式<br>● 位宽和模式都相同的过滤器，优先级由过滤器号决定，过滤器号小的优先级高</p> 
+<p>如下图:</p> 
+<p><img alt="" src="https://images2.imgbox.com/43/8e/Jz8VhULr_o.jpg"></p> 
+<p>                                                                                <strong>图3</strong></p> 
+<p>               如上图，在接收一个报文时，其标识符首先与配置在标识符列表模式下的过滤器相比较；如果匹配上，报文就被存放到相关联的FIFO中，并且所匹配的过滤器的序号（这时为4）被存入过滤器匹配序号中。如同例子中所显示，报文标识符跟#4标识符匹配，因此报文内容和FMI4被存入FIFO。</p> 
+<p>              如果没有匹配，报文标识符接着与配置在屏蔽位模式下的过滤器进行比较。<br>              如果报文标识符没有跟过滤器中的任何标识符相匹配，那么硬件就丢弃该报文，且不会对软件有任何打扰。</p> 
+<h3>3 与过滤器相关的寄存器</h3> 
+<h4>3.1 CAN 过滤器主控寄存器 (CAN_FMR)</h4> 
+<p>地址偏移量: 0x200</p> 
+<p>复位值: 0x2A1C 0E01</p> 
+<p><span style="color:#ff0000;">注： 该寄存器的非保留位完全由软件控制。</span></p> 
+<p><img alt="" src="https://images2.imgbox.com/0f/48/CCvGDFyR_o.jpg"></p> 
+<p>                                                                                                                   <strong> 图4</strong></p> 
+<p></p> 
+<table width="822" height="164" border="1" cellspacing="1" cellpadding="1"><tbody><tr><td align="left">位31:1</td><td>保留位，强制为复位值。</td></tr><tr><td align="left">位0</td><td>FINIT : 过滤器初始化模式<br>针对所有过滤器组的初始化模式设置。<br>0: 过滤器组工作在正常模式；<br>1: 过滤器组工作在初始化模式。</td></tr></tbody></table> 
+<p></p> 
+<h4>3.2 CAN 过滤器模式寄存器 (CAN_FM1R)</h4> 
+<p>地址偏移量: 0x204<br>复位值: 0x0000 0000<br><span style="color:#ff0000;">注： 只有在设置CAN_FMR(FINIT=1)，使过滤器处于初始化模式下，才能对该寄存器写入。</span></p> 
+<p><img alt="" src="https://images2.imgbox.com/06/01/YuO2krtD_o.jpg"></p> 
+<p>                                                                                                     <strong>图5</strong></p> 
+<p></p> 
+<table width="775" height="164" border="1" cellspacing="1" cellpadding="1"><tbody><tr><td>位31:14</td><td>保留位，硬件强制为0</td></tr><tr><td>位13:0</td><td>FBMx : 过滤器模式<br>过滤器组x的工作模式。<br>0: 过滤器组x的2个32位寄存器工作在标识符屏蔽位模式；<br>1: 过滤器组x的2个32位寄存器工作在标识符列表模式。</td></tr></tbody></table> 
+<p></p> 
+<h4>3.3 CAN 过滤器位宽寄存器 (CAN_FS1R)</h4> 
+<p>地址偏移量: 0x20C<br>复位值: 0x0000 0000<br><span style="color:#ff0000;">注： 只有在设置CAN_FMR(FINIT=1)，使过滤器处于初始化模式下，才能对该寄存器写入。</span></p> 
+<p><img alt="" src="https://images2.imgbox.com/fc/8e/Pl2pm41X_o.jpg"></p> 
+<p>                                                                                                              <strong>图6</strong></p> 
+<p></p> 
+<table width="777" height="147" border="1" cellspacing="1" cellpadding="1"><tbody><tr><td>位31:14</td><td>保留位，硬件强制为0</td></tr><tr><td>位13:0</td><td>FSCx : 过滤器位宽设置<br>过滤器组x(13～0)的位宽。<br>0：过滤器位宽为2个16位；<br>1：过滤器位宽为单个32位。</td></tr></tbody></table> 
+<p></p> 
+<h4>3.4 CAN 过滤器FIFO关联寄存器 (CAN_FFA1R)</h4> 
+<p>地址偏移量: 0x214<br>复位值: 0x0000 0000<br><span style="color:#ff0000;">注： 只有在设置CAN_FMR(FINIT=1)，使过滤器处于初始化模式下，才能对该寄存器写入。</span></p> 
+<p><img alt="" src="https://images2.imgbox.com/52/4c/2jmJTwJG_o.jpg"></p> 
+<p>                                                                                                      <strong>   图7</strong></p> 
+<p></p> 
+<table width="772" height="147" border="1" cellspacing="1" cellpadding="1"><tbody><tr><td>位31:14</td><td>保留位，硬件强制为0。</td></tr><tr><td>位13:0</td><td>FFAx : 过滤器位宽设置<br>报文在通过了某过滤器的过滤后，将被存放到其关联的FIFO中。<br>0：过滤器被关联到FIFO0；<br>1：过滤器被关联到FIFO1。</td></tr></tbody></table> 
+<p></p> 
+<h4>3.5 CAN 过滤器激活寄存器 (CAN_FA1R)</h4> 
+<p>地址偏移量: 0x21C<br>复位值: 0x0000 0000</p> 
+<p><img alt="" src="https://images2.imgbox.com/f6/bf/glELTyRo_o.jpg"></p> 
+<p>                                                                                        <strong>图7</strong></p> 
+<p></p> 
+<table width="776" height="198" border="1" cellspacing="1" cellpadding="1"><tbody><tr><td>位31:14</td><td>保留位，硬件强制为0。</td></tr><tr><td>位13:0</td><td>FACTx : 过滤器激活<br>软件对某位设置1来激活相应的过滤器。只有对FACTx位清0，或对CAN_FMR寄存器的FINIT位设置1后，才能修改相应的过滤器寄存器x(CAN_FxR[0:1])。<br>0：过滤器被禁用；<br>1：过滤器被激活。</td></tr></tbody></table> 
+<p></p> 
+<h4>3.6 CAN 过滤器组x寄存器 (CAN_FiRx) (i＝0..13，x=1..2)</h4> 
+<p>地址偏移量：0x240h..0x2AC<br>复位值：未定义位<br><span style="color:#ff0000;">注： 共有14组过滤器：i=0..13。每组过滤器由2个32位的寄存器，CAN_FiR[2:1]组成。只有在CAN_FaxR寄存器（CAN过滤器激活寄存器）相应的FACTx位清’0’，或CAN_FMR寄存器（CAN过滤器主控寄存器）的FINIT位为’1’时，才能修改相应的过滤器寄存器。</span></p> 
+<p><img alt="" src="https://images2.imgbox.com/5b/16/52Xhy8Px_o.jpg"></p> 
+<p>                                                                                 <strong>图8</strong></p> 
+<p></p> 
+<table width="782" height="246" border="1" cellspacing="1" cellpadding="1"><tbody><tr><td>位31:0</td><td>FB[31:0] : 过滤器位<br> 
+    <ul><li><strong>当为标识符模式时：</strong></li></ul>             寄存器的每位对应于所期望的标识符的相应位的电平。<br>             0: 期望相应位为显性位；<br>             1: 期望相应位为隐性位。<br> 
+    <ul><li><strong>当为屏蔽位模式时：</strong></li></ul>             寄存器的每位指示是否对应的标识符寄存器位一定要与期望的标识符的相应位一致。<br>             0: 不关心，该位不用于比较；<br>             1: 必须匹配，到来的标识符位必须与滤波器对应的标识符寄存器位相一致。</td></tr></tbody></table> 
+<span style="color:#ff0000;">注： 根据过滤器位宽和模式的不同设置，过滤器组中的两个寄存器的功能也不尽相同。。关于过滤器的映射，功能描述和屏蔽寄存器的关联，请参见2节标识符过滤。</span> 
+<p></p> 
+<p>屏蔽位模式下的屏蔽/标识符寄存器，跟标识符列表模式下的寄存器位定义相同。</p> 
+<h3>4 代码实例</h3> 
+<h4>4.1 CAN ID值的结构分析<br></h4> 
+<p>              在讲到代码实例之前，首先大家都弄懂一件事，当给定一个CAN ID，如0x1800f001,当然这个是扩展ID，这里要问的是，这个CAN ID的值本身包含两部分，即基本ID与扩展ID，即么你知道这个扩展ID0x1800f001的哪些位是基本ID，哪些位又是扩展ID？（在基本CANID格式下不存在这个问题）<br></p> 
+<p>                在回答这个问题之前我们来看看ISO11898的定义，如下图：</p> 
+<p><img alt="" src="https://images2.imgbox.com/a2/b2/34ezi7H0_o.jpg"><br></p> 
+<p>                                                                                     <strong>图9</strong></p> 
+<p>如上图，基本格式不存在扩展ID，而扩展格式中ID0~ID17为Extension ID,而ID18~ID28为Base ID.</p> 
+<p>因此CAN ID值0x1800f001用二进制表示为：0b 0001 1000 0000 0000 1111 0000 0000 0001,用括号分别区别为：0b 000<span style="color:#000099;">[1 1000 0000 00]</span><span style="color:#ff0000;">[00 1111 0000 0000 0001]</span>，红色部分为扩展ID，蓝色部分为基本ID。那么知道这些有什么用呢？接下来的代码示例中你就会有什么用了。<br></p> 
+<h4>4.2 位宽为32位的屏蔽模式<br></h4> 
+<p>在此种模式下中过滤多个CAN ID，此时，过滤器包含两个寄存器，屏蔽码寄存器和标识符寄存器。此模式下最多只存在一个屏蔽过滤器。</p> 
+<p>如下图所示：</p> 
+<p><img alt="" src="https://images2.imgbox.com/f0/4b/kwkoAsGi_o.jpg"></p> 
+<p>                                                                               <strong>  图10</strong></p> 
+<p>如上图，上面的ID为标识符寄存器，中间部分的MASK为屏蔽码寄存器。每个寄存器都是32位的。最下边显示的是与CAN ID各位定位的映射关系。由4.1的知识很快可以发现，上图最下边的映射关系恰好等于扩展CAN值左移3位再补上IDE（扩展帧标识），RTR（远程帧标志）。</p> 
+<p><br></p> 
+<p>因此，我们初步得出这样的推论：对于一个扩展CAN ID，不能单纯地将它看到的一个数，而应该将它看成两部分，基本ID和扩展ID(当然标准CAN ID只包含基本ID部分)，过滤器屏蔽码寄存器和标识符寄存器也应该看成多个部分，然后问题就变成了如何将CAN ID所表示的各部分如何针对过滤器寄存器各部分对号入座的问题了。</p> 
+<p>对号入座的方法多种多样，但万变不离其心，主要是掌握其核心思想即可：1:在各种过滤器模式下，CAN ID与寄存器相应位置一定要匹配；2：在屏蔽方式下，屏蔽码寄存器某位为1表示接收到的CAN ID对应的位必须对验证码寄存器对应的位相同。<br></p> 
+<p><br></p> 
+<p>下面给出一个代码例子，假设我们要接收多个ID：0x7e9,0x1800f001,前面为标准ID，后面为扩展ID，要同时能接收这两个ID，那么该如何设置这个过滤器呢?</p> 
+<p></p> 
+<pre><code class="language-cpp">CAN_FilterInitTypeDef  CAN_FilterInitStructure;
+U16 std_id =0x7e9;
+U32 ext_id =0x1800f001;
+U32 mask =0;
+
+CAN_FilterInit(&amp;CAN_FilterInitStructure);     //初始化CAN_FilterInitStructrue结构体变量
+CAN_FilterInitStructure.CAN_FilterNumber=0;      //设置过滤器组0，范围为0~13
+CAN_FilterInitStructure.CAN_FilterMode=CAN_FilterMode_IdMask;    //设置过滤器组0为屏蔽模式
+CAN_FilterInitStructure.CAN_FilterScale=CAN_FilterScale_32bit;   //设置过滤器组0位宽为32位
+
+//标识位寄存器的设置
+//ext_id&lt;&lt;3对齐，见上图9，再&gt;&gt;16取高16位
+CAN_FilterInitStructure.CAN_FilterIdHigh=（(ext_id&lt;&lt;3) &gt;&gt;16) &amp;0xffff;  //设置标识符寄存器高字节。
+CAN_FilterInitStructure.CAN_FilterIdLow=(U16)(ext_id&lt;&lt;3) | CAN_ID_EXT;   //设置标识符寄存器低字节
+//这里也可以这样设置
+//CAN_FilterInitStructure.CAN_FilterIdHigh=std_id&lt;&lt;5;  //设置标识符寄存器高字节.这里为什么是左移5位呢？从上图可以看出，CAN_FilterIdHigh包含的是STD[0~10]和EXID[13~17],标准CAN ID本身是不包含扩展ID数据，因此为了要将标准CAN ID放入此寄存器，标准CAN ID首先应左移5位后才能对齐.
+//CAN_FilterInitStructure.CAN_FilterIdLow=0|CAN_ID_EXT;   //设置标识符寄存器低字节,这里也可以设置为CAN_ID_STD
+
+//屏蔽寄存器的设置
+//这里的思路是先将标准CAN ID和扩展CAN ID对应的ID值先异或后取反，为什么？异或是为了找出两个CAN ID有哪些位是相同的，是相同的位则说明需要关心，需要关心的位对应的屏蔽码位应该设置为1，因此需要取反一下。最后再整体左移3位。
+mask =(std_id&lt;&lt;18);//这里为什么左移18位？因为从ISO11898中可以看出，标准CAN ID占ID18~ID28，为了与CAN_FilterIdHigh对齐，应左移2位，接着为了与扩展CAN对应，还应该再左移16位，因此，总共应左移2+16＝18位。也可以用另一个方式来理解：直接看Mapping的内容，发现STDID相对EXID[0]偏移了18位,因此左移18位.
+mask ^=ext_id;//将对齐后的标准CAN与扩展CAN异或后取反
+mask =~mask;
+mask &lt;&lt;=3;//再整体左移3位
+mask |=0x02; //只接收数据帧，不接收远程帧
+CAN_FilterInitStructure.CAN_FilterMaskIdHigh=(mask&gt;&gt;16)&amp;0xffff; //设置屏蔽寄存器高字节
+CAN_FilterInitStructure.CAN_FilterMaskIdLow=mask&amp;0xffff;   //设置屏蔽寄存器低字节
+
+CAN_FilterInitStructure.CAN_FilterFIFOAssignment=CAN_FIFO0;  //此过滤器组关联到接收FIFO0
+CAN_FilterInitStructure.CAN_FilterActivation=ENABLE; //激活此过滤器组
+CAN_FilterInit(&amp;CAN_FilterInitStructure); //设置过滤器
+</code></pre> 
+<p><span style="color:#ff0000;">总结可知，当过滤器为屏蔽模式时，标识符寄存器对应的ID内容可为任意一需求接收的ID值，当同时要接收标准帧和扩展帧时，标识符寄存器对应IDE位也随意设置，屏蔽寄存器的IDE位设置为0，表示不关心标准帧还是扩展帧。而屏蔽寄存器对应的ID内容为各需求接收的ID值依次异或的结果再取反。</span></p> 
+<h4>4.3 位宽为32位的标识符列表模式</h4> 
+<p>在此种模式下，过滤器组包含的两个寄存器含义一样，此模式下只多存在两个标识符列表过滤器如下图：</p> 
+<p><img alt="" src="https://images2.imgbox.com/4a/fd/A96WPJj3_o.jpg"></p> 
+<p>                                                                                                 <strong>  图11</strong></p> 
+<p></p> 
+<pre><code class="language-cpp">CAN_FilterInitTypeDef  CAN_FilterInitStructure;
+U16 std_id =0x7e9;
+U32 ext_id =0x1800f001;
+CAN_FilterInit(&amp;CAN_FilterInitStructure); //初始化CAN_FilterInitStructrue结构体变量
+CAN_FilterInitStructure.CAN_FilterNumber=0;     //设置过滤器组0，范围为0~13
+CAN_FilterInitStructure.CAN_FilterMode=CAN_FilterMode_IdList;    //设置过滤器组0为标识符列表模式
+CAN_FilterInitStructure.CAN_FilterScale=CAN_FilterScale_32bit;   //设置过滤器组0位宽为32位
+
+//设置屏蔽寄存器，这里当标识符寄存器用
+CAN_FilterInitStructure.CAN_FilterIdHigh=std_id&lt;&lt;5) ;  //为什么左移5位？与上面相同道理，这里不再重复解释
+CAN_FilterInitStructure.CAN_FilterIdLow=0|CAN_ID_STD; //设置标识符寄存器低字节,CAN_FilterIdLow的ID位可以随意设置，在此模式下不会有效。
+
+//设置标识符寄存器
+CAN_FilterInitStructure.CAN_FilterMaskIdHigh=((ext_id&lt;&lt;3)&gt;&gt;16) &amp; 0xffff; //设置屏蔽寄存器高字节
+CAN_FilterInitStructure.CAN_FilterMaskIdLow=((ext_id&lt;&lt;3)&amp; 0xffff) | CAN_ID_EXT;   //设置屏蔽寄存器低字节
+
+CAN_FilterInitStructure.CAN_FilterFIFOAssignment=CAN_FIFO0;  //此过滤器组关联到接收FIFO0
+CAN_FilterInitStructure.CAN_FilterActivation=ENABLE; //激活此过滤器组
+CAN_FilterInit(&amp;CAN_FilterInitStructure); //设置过滤器
+</code></pre> 
+<h4>4.4 位宽为16位的屏蔽码模式</h4> 
+<p>在此模式下，最多存在两个屏蔽码过滤器，如下图：</p> 
+<p><img alt="" src="https://images2.imgbox.com/bb/ba/j34eZ5eS_o.jpg"></p> 
+<p>                                                                                                        <strong>  图12</strong></p> 
+<p>由上图映射可知，最下面的映射只包含STDID0~ID10,因此，此模式下的两个屏蔽过滤器只能实现对标准ID的过滤。具体代码就不介绍了，参见上图的映射即可。</p> 
+<p></p> 
+<h4>4.5 位宽为16位的标识符列表模式</h4> 
+<p><img alt="" src="https://images2.imgbox.com/a1/6d/tQeB854F_o.jpg"></p> 
+<p>                                                                                              <strong>图13</strong><br></p> 
+<p>在此模式下，由于标识符寄存器的高16位和低16位，屏蔽寄存器的高16位和低16位都用来做标识符寄存器，因此，最多可存在4个标识符过滤器。同样，只能实现对标准帧的过滤。具体代码就不介绍了，参见上图的映射即可。</p> 
+<p><br></p> 
+<p>注： 关于CAN ID过滤器方面我已经更新过一篇文章，基于Cube库的，感兴趣的读者可以参考：<a target="_blank" href="http://blog.csdn.net/flydream0/article/details/52317532" rel="noopener noreferrer">http://blog.csdn.net/flydream0/article/details/52317532</a></p> 
+<p></p> 
+<div style="top: 7961px;">
+  ﻿﻿ 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3c4d6f07cc53aff970ba5a7d36b6309a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Microsoft Visual Studio  命令行 编译 cl link rc</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/96000ec8f9f49506ea8d6fd5c363d88c/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">jquery 克隆clone()使用实例</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

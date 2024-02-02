@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Netty粘包拆包、自定义Protostuff编解码器 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Netty粘包拆包、自定义Protostuff编解码器" />
+<meta property="og:description" content="1、Netty粘包拆包 TCP是一个“流”协议，所谓流，就是没有界限的一长串二进制数据。TCP作为传输层协议并不了解上层业务数据的具体含义，会根据TCP缓冲区的实际情况进行数据包的划分；所以在业务上认为是一个完整的包，可能会被TCP拆分成多个包进行发送，也有可能把多个小的包封装成一个大的数据包发送，这就是所谓的TCP粘包和拆包问题。
+例如，TCP缓冲区是1024个字节大小，如果应用一次请求发送的数据量比较小，没达到缓冲区大小，TCP则会将多个请求合并为同一个请求进行发送，这就形成了粘包问题；如果应用一次请求发送的数据量比较大，超过了缓冲区大小，TCP就会将其拆分为多次发送，这就是拆包，也就是将一个大的包拆分为多个小包进行发送。
+半包的主要原因:
+发送方写入数据 &gt; 套接字缓冲区大小发送的数据大于协议的 MTU(Maximum Transmission Unit，最大传输单元)，必须拆包 粘包的主要原因:
+发送方每次写入数据 &lt; 套接字缓冲区大小接收方读取套接字缓冲区数据不够及时 如下图所示，一次性发送服务端50条消息，客户端收到的消息
+解决半包粘包问题的常用三种解码器（一次解码器：结果是字节）
+二次解码器：将 Java 对象与字节流转化方便存储或传输
+一次解码器:ByteToMessageDecoder io.netty.buffer.ByteBuf (原始数据流)-&gt; io.netty.buffer.ByteBuf (用户数据) 二次解码器:MessageToMessageDecoder io.netty.buffer.ByteBuf (用户数据)-&gt; Java Object常用的二次解码器，json、Protobuf、xml等 1.1、LineBasedFrameDecoder（回车换行分包） Netty中，提供了一个开箱即用、使用换行符分割字符串的解码器——LineBasedFrameDecoder，它是一个最为基础的Netty内置解码器。这个解码器的工作原理，依次遍历ByteBuf数据包中的可读字节，判断在二进制字节流中是否存在换行符&#34;\n&#34;或者&#34;\r\n&#34;的字节码。如果有，就以此位置为结束位置，把从可读索引到结束位置之间的字节作为解码成功后的ByteBuf数据包。
+LineBasedFrameDecoder支持配置一个最大长度值，表示解码出来的ByteBuf能包含的最大字节数。如果连续读取到最大长度后仍然没有发现换行符，就会抛出异常。
+注意顺序
+1.2、DelimiterBasedFrameDecoder（特殊分隔符分包） DelimiterBasedFrameDecoder解码器不仅可以使用换行符，还可以使用其他特殊字符作为数据包的分隔符，例如制表符&#34;\t&#34;。
+DelimiterBasedFrameDecoder与LineBasedFrameDecoder都支持配置一个最大长度值，同时还支持解码后的数据包是否去掉分隔符，分隔符
+pipeline.addLast(new DelimiterBasedFrameDecoder(10240,false,Unpooled.copiedBuffer(“!”.getBytes(“UTF-8”))));
+构造方法
+public DelimiterBasedFrameDecoder( int maxFrameLength, //解码的数据包的最大长度 Boolean stripDelimiter, //解码后的数据包是否去掉分隔符 ByteBuf delimiter //分隔符 ) 1.3、LengthFieldBasedFrameDecoder（固定长度字段报文来分包） LengthFieldBasedFrameDecoder可以翻译为“长度字段数据包解码器”。传输内容中的Length(长度)字段的值是指存放在数据包中要传输内容的字节数。
+消息分为两部分，一部分为消息头部，一部分为实际的消息体。其中消息头部是固定长度的，消息体是可变的，且消息头部一般会包含一个Length字段
+LengthFieldBasedFrameDecoder与LengthFieldPrepender需要配合起来使用，其实本质上来讲，这两者一个是解码，一个是编码的关系。
+LengthFieldPrepender（如果我们在发送消息的时候采用：消息长度字段&#43;原始消息的形式，我们就可以使用 LengthFieldPrepender。 LengthFieldPrepender 可以将待发送消息的长度（二进制字节长度）写到 ByteBuf 的前两个字节） 原理：
+在生成的数据包中添加一个长度字段，用于记录当前数据包的长度。
+LengthFieldBasedFrameDecoder会按照参数指定的包长度偏移量数据对接收到的数据进行解码，从而得到目标消息体数据；
+LengthFieldPrepender则会在响应的数据前面添加指定的字节数据，这个字节数据中保存了当前消息体的整体字节数据长度。
+LengthFieldBasedFrameDecoder构造方法参数：
+maxFrameLength：发送数据包的最大长度lengthFieldOffset：长度域的偏移量。长度域位于整个数据包字节数组中的开始下标。lengthFieldLength：长度域的字节数长度。lengthAdjustment：长度域的偏移量矫正。如果长度域的值，除了包含有效数据域的长度外，还包含了其他域（如长度域自身）长度，那么，就需要进行矫正。矫正的值为：包长 - 长度域的值 – 长度域偏移 – 长度域长。initialBytesToStrip：丢弃的起始字节数。丢弃处于此索引值前面的字节。 ch." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/2ab9e48f5dae27818075f64caba5e6d1/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-08-02T21:42:58+08:00" />
+<meta property="article:modified_time" content="2022-08-02T21:42:58+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Netty粘包拆包、自定义Protostuff编解码器</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="1Netty_0"></a>1、Netty粘包拆包</h3> 
+<p>TCP是一个“流”协议，所谓流，就是没有界限的一长串二进制数据。TCP作为传输层协议并不了解上层业务数据的具体含义，会根据TCP缓冲区的实际情况进行数据包的划分；所以在业务上认为是一个完整的包，可能会被TCP拆分成多个包进行发送，也有可能把多个小的包封装成一个大的数据包发送，这就是所谓的TCP粘包和拆包问题。</p> 
+<p>例如，TCP缓冲区是1024个字节大小，如果应用一次请求发送的数据量比较小，没达到缓冲区大小，TCP则会将多个请求合并为同一个请求进行发送，这就形成了粘包问题；如果应用一次请求发送的数据量比较大，超过了缓冲区大小，TCP就会将其拆分为多次发送，这就是拆包，也就是将一个大的包拆分为多个小包进行发送。</p> 
+<p>半包的主要原因:</p> 
+<ul><li>发送方写入数据 &gt; 套接字缓冲区大小</li><li>发送的数据大于协议的 MTU(Maximum Transmission Unit，最大传输单元)，必须拆包</li></ul> 
+<p>粘包的主要原因:</p> 
+<ul><li>发送方每次写入数据 &lt; 套接字缓冲区大小</li><li>接收方读取套接字缓冲区数据不够及时</li></ul> 
+<p>如下图所示，一次性发送服务端50条消息，客户端收到的消息<br> <img src="https://images2.imgbox.com/fb/e2/ZYgRapsC_o.png" alt="在这里插入图片描述"><br> 解决半包粘包问题的常用三种解码器（一次解码器：结果是字节）<br> <img src="https://images2.imgbox.com/f6/f9/ni2TGE5r_o.png" alt="在这里插入图片描述"></p> 
+<p>二次解码器：将 Java 对象与字节流转化方便存储或传输</p> 
+<ul><li>一次解码器:ByteToMessageDecoder 
+  <ul><li>io.netty.buffer.ByteBuf (原始数据流)-&gt; io.netty.buffer.ByteBuf (用户数据)</li></ul> </li><li>二次解码器:MessageToMessageDecoder<i> </i> 
+  <ul><li>io.netty.buffer.ByteBuf (用户数据)-&gt; Java Object</li><li>常用的二次解码器，json、Protobuf、xml等</li></ul> </li></ul> 
+<h4><a id="11LineBasedFrameDecoder_25"></a>1.1、LineBasedFrameDecoder（回车换行分包）</h4> 
+<p>Netty中，提供了一个开箱即用、使用换行符分割字符串的解码器——LineBasedFrameDecoder，它是一个最为基础的Netty内置解码器。这个解码器的工作原理，<code>依次遍历ByteBuf数据包中的可读字节，判断在二进制字节流中是否存在换行符"\n"或者"\r\n"的字节码。如果有，就以此位置为结束位置</code>，把从可读索引到结束位置之间的字节作为解码成功后的ByteBuf数据包。</p> 
+<p>LineBasedFrameDecoder支持配置一个最大长度值，表示解码出来的ByteBuf能包含的最大字节数。如果连续读取到最大长度后仍然没有发现换行符，就会抛出异常。<br> <strong><code>注意顺序</code></strong><br> <img src="https://images2.imgbox.com/26/f9/xHZjq0Lu_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="12DelimiterBasedFrameDecoder_32"></a>1.2、DelimiterBasedFrameDecoder（特殊分隔符分包）</h4> 
+<p>DelimiterBasedFrameDecoder解码器不仅可以使用换行符，还可以使用其他特殊字符作为数据包的分隔符，例如制表符"\t"。</p> 
+<p>DelimiterBasedFrameDecoder与LineBasedFrameDecoder都支持配置一个最大长度值，同时还支持解码后的数据包是否去掉分隔符，分隔符<br> <img src="https://images2.imgbox.com/2f/b0/eDpHSzHS_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>pipeline.addLast(new DelimiterBasedFrameDecoder(10240,false,Unpooled.copiedBuffer(“!”.getBytes(“UTF-8”))));</p> 
+</blockquote> 
+<p>构造方法</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token class-name">DelimiterBasedFrameDecoder</span><span class="token punctuation">(</span>
+	<span class="token keyword">int</span> maxFrameLength<span class="token punctuation">,</span> <span class="token comment">//解码的数据包的最大长度</span>
+	<span class="token class-name">Boolean</span> stripDelimiter<span class="token punctuation">,</span> <span class="token comment">//解码后的数据包是否去掉分隔符</span>
+	<span class="token class-name">ByteBuf</span> delimiter <span class="token comment">//分隔符</span>
+	<span class="token punctuation">)</span> 
+</code></pre> 
+<h4><a id="13LengthFieldBasedFrameDecoder_47"></a>1.3、LengthFieldBasedFrameDecoder（固定长度字段报文来分包）</h4> 
+<p>LengthFieldBasedFrameDecoder可以翻译为“长度字段数据包解码器”。传输内容中的Length(长度)字段的值是指存放在数据包中要传输内容的字节数。</p> 
+<p>消息分为两部分，一部分为消息头部，一部分为实际的消息体。其中消息头部是固定长度的，消息体是可变的，且消息头部一般会包含一个Length字段<br> <img src="https://images2.imgbox.com/76/ff/xKlE0IWO_o.png" alt="在这里插入图片描述"></p> 
+<p><code>LengthFieldBasedFrameDecoder</code>与<code>LengthFieldPrepender</code>需要配合起来使用，其实本质上来讲，这两者一个是解码，一个是编码的关系。</p> 
+<ul><li>LengthFieldPrepender（如果我们在发送消息的时候采用：消息长度字段+原始消息的形式，我们就可以使用 LengthFieldPrepender。<code> LengthFieldPrepender 可以将待发送消息的长度（二进制字节长度）写到 ByteBuf 的前两个字节）</code></li></ul> 
+<p>原理：</p> 
+<ul><li> <p>在生成的数据包中添加一个长度字段，用于记录当前数据包的长度。</p> </li><li> <p>LengthFieldBasedFrameDecoder会按照参数指定的包长度偏移量数据对接收到的数据进行解码，从而得到目标消息体数据；</p> </li><li> <p>LengthFieldPrepender则会在响应的数据前面添加指定的字节数据，这个字节数据中保存了当前消息体的整体字节数据长度。</p> </li></ul> 
+<p>LengthFieldBasedFrameDecoder<code>构造方法参数</code>：</p> 
+<ul><li>maxFrameLength：发送数据包的最大长度</li><li>lengthFieldOffset：长度域的偏移量。长度域位于整个数据包字节数组中的开始下标。</li><li>lengthFieldLength：长度域的字节数长度。</li><li>lengthAdjustment：长度域的偏移量矫正。如果长度域的值，除了包含有效数据域的长度外，还包含了其他域（如长度域自身）长度，那么，就需要进行矫正。矫正的值为：包长 - 长度域的值 – 长度域偏移 – 长度域长。</li><li>initialBytesToStrip：丢弃的起始字节数。丢弃处于此索引值前面的字节。</li></ul> 
+<p><img src="https://images2.imgbox.com/a9/75/CqoFvtIO_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>ch.pipeline().addLast(new LengthFieldBasedFrameDecoder(1024, 0, 2, 0, 2));<br> // LengthFieldPrepender是一个编码器，主要是在响应字节数据前面添加字节长度字段<br> ch.pipeline().addLast(new LengthFieldPrepender(2));</p> 
+</blockquote> 
+<h3><a id="2Protostuff_75"></a>2、自定义Protostuff编解码器</h3> 
+<p>protostuff是一个开箱即用的序列化库，使用非常简单。protostuff基于Google Protobuf，不需要自己写.proto文件即可实现对象的序列化与反序列化。</p> 
+<p>相对json等文本序列化库，protostuff是二进制的，因此性能比json等方式高</p> 
+<h4><a id="21pom_79"></a>2.1、pom</h4> 
+<pre><code class="prism language-xml"> <span class="token comment">&lt;!-- protostuff--&gt;</span>
+ <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>dependency</span><span class="token punctuation">&gt;</span></span>
+     <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>groupId</span><span class="token punctuation">&gt;</span></span>com.dyuproject.protostuff<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>groupId</span><span class="token punctuation">&gt;</span></span>
+     <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>artifactId</span><span class="token punctuation">&gt;</span></span>protostuff-api<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>artifactId</span><span class="token punctuation">&gt;</span></span>
+     <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>version</span><span class="token punctuation">&gt;</span></span>1.0.10<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>version</span><span class="token punctuation">&gt;</span></span>
+ <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>dependency</span><span class="token punctuation">&gt;</span></span>
+ <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>dependency</span><span class="token punctuation">&gt;</span></span>
+     <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>groupId</span><span class="token punctuation">&gt;</span></span>com.dyuproject.protostuff<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>groupId</span><span class="token punctuation">&gt;</span></span>
+     <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>artifactId</span><span class="token punctuation">&gt;</span></span>protostuff-core<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>artifactId</span><span class="token punctuation">&gt;</span></span>
+     <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>version</span><span class="token punctuation">&gt;</span></span>1.0.10<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>version</span><span class="token punctuation">&gt;</span></span>
+ <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>dependency</span><span class="token punctuation">&gt;</span></span>
+ <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>dependency</span><span class="token punctuation">&gt;</span></span>
+     <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>groupId</span><span class="token punctuation">&gt;</span></span>com.dyuproject.protostuff<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>groupId</span><span class="token punctuation">&gt;</span></span>
+     <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>artifactId</span><span class="token punctuation">&gt;</span></span>protostuff-runtime<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>artifactId</span><span class="token punctuation">&gt;</span></span>
+     <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>version</span><span class="token punctuation">&gt;</span></span>1.0.10<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>version</span><span class="token punctuation">&gt;</span></span>
+ <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>dependency</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<h4><a id="22protostuff_protobuf_98"></a>2.2、protostuff 序列化工具类，基于protobuf封装</h4> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>dyuproject<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">LinkedBuffer</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>dyuproject<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">ProtostuffIOUtil</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>dyuproject<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">Schema</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>dyuproject<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span>runtime<span class="token punctuation">.</span></span><span class="token class-name">RuntimeSchema</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">java<span class="token punctuation">.</span>util<span class="token punctuation">.</span></span><span class="token class-name">Map</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">java<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span></span><span class="token class-name">ConcurrentHashMap</span><span class="token punctuation">;</span>
+
+<span class="token comment">/**
+ * protostuff 序列化工具类，基于protobuf封装
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">ProtostuffUtil</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">Map</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Class</span><span class="token punctuation">&lt;</span><span class="token operator">?</span><span class="token punctuation">&gt;</span><span class="token punctuation">,</span> <span class="token class-name">Schema</span><span class="token punctuation">&lt;</span><span class="token operator">?</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span> cachedSchema <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ConcurrentHashMap</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Class</span><span class="token punctuation">&lt;</span><span class="token operator">?</span><span class="token punctuation">&gt;</span><span class="token punctuation">,</span> <span class="token class-name">Schema</span><span class="token punctuation">&lt;</span><span class="token operator">?</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token class-name">Schema</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token function">getSchema</span><span class="token punctuation">(</span><span class="token class-name">Class</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> clazz<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token annotation punctuation">@SuppressWarnings</span><span class="token punctuation">(</span><span class="token string">"unchecked"</span><span class="token punctuation">)</span>
+        <span class="token class-name">Schema</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> schema <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">Schema</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">)</span> cachedSchema<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>clazz<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>schema <span class="token operator">==</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            schema <span class="token operator">=</span> <span class="token class-name">RuntimeSchema</span><span class="token punctuation">.</span><span class="token function">getSchema</span><span class="token punctuation">(</span>clazz<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>schema <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                cachedSchema<span class="token punctuation">.</span><span class="token function">put</span><span class="token punctuation">(</span>clazz<span class="token punctuation">,</span> schema<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> schema<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/**
+     * 序列化
+     *
+     * @param obj
+     * @return
+     */</span>
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> <span class="token function">serializer</span><span class="token punctuation">(</span><span class="token class-name">T</span> obj<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token annotation punctuation">@SuppressWarnings</span><span class="token punctuation">(</span><span class="token string">"unchecked"</span><span class="token punctuation">)</span>
+        <span class="token class-name">Class</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> clazz <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">Class</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">)</span> obj<span class="token punctuation">.</span><span class="token function">getClass</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">LinkedBuffer</span> buffer <span class="token operator">=</span> <span class="token class-name">LinkedBuffer</span><span class="token punctuation">.</span><span class="token function">allocate</span><span class="token punctuation">(</span><span class="token class-name">LinkedBuffer</span><span class="token punctuation">.</span>DEFAULT_BUFFER_SIZE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">Schema</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> schema <span class="token operator">=</span> <span class="token function">getSchema</span><span class="token punctuation">(</span>clazz<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> <span class="token class-name">ProtostuffIOUtil</span><span class="token punctuation">.</span><span class="token function">toByteArray</span><span class="token punctuation">(</span>obj<span class="token punctuation">,</span> schema<span class="token punctuation">,</span> buffer<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">IllegalStateException</span><span class="token punctuation">(</span>e<span class="token punctuation">.</span><span class="token function">getMessage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            buffer<span class="token punctuation">.</span><span class="token function">clear</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/**
+     * 反序列化
+     *
+     * @param data
+     * @param clazz
+     * @return
+     */</span>
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> <span class="token class-name">T</span> <span class="token function">deserializer</span><span class="token punctuation">(</span><span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> data<span class="token punctuation">,</span> <span class="token class-name">Class</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> clazz<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">T</span> obj <span class="token operator">=</span> clazz<span class="token punctuation">.</span><span class="token function">newInstance</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">Schema</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">T</span><span class="token punctuation">&gt;</span></span> schema <span class="token operator">=</span> <span class="token function">getSchema</span><span class="token punctuation">(</span>clazz<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">ProtostuffIOUtil</span><span class="token punctuation">.</span><span class="token function">mergeFrom</span><span class="token punctuation">(</span>data<span class="token punctuation">,</span> obj<span class="token punctuation">,</span> schema<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> obj<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">IllegalStateException</span><span class="token punctuation">(</span>e<span class="token punctuation">.</span><span class="token function">getMessage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> userBytes <span class="token operator">=</span> <span class="token class-name">ProtostuffUtil</span><span class="token punctuation">.</span><span class="token function">serializer</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">User</span><span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">,</span> <span class="token string">"zhangsan"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">User</span> user1 <span class="token operator">=</span> <span class="token class-name">ProtostuffUtil</span><span class="token punctuation">.</span><span class="token function">deserializer</span><span class="token punctuation">(</span>userBytes<span class="token punctuation">,</span> <span class="token class-name">User</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span>user1<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="23EchoResponse_171"></a>2.3、EchoResponse</h4> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Data</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">EchoResponse</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> <span class="token class-name">String</span> responseId<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token class-name">Object</span> responseObj<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token class-name">Class</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token operator">?</span><span class="token punctuation">&gt;</span></span> responseObjClass<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<h4><a id="24EchoRequest_181"></a>2.4、EchoRequest</h4> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Data</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">EchoRequest</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> <span class="token class-name">String</span> requestId<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token class-name">Object</span> requestObj<span class="token punctuation">;</span>
+    <span class="token keyword">private</span> <span class="token class-name">Class</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token operator">?</span><span class="token punctuation">&gt;</span></span> requestObjClass<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>User</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Data</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">User</span> <span class="token keyword">implements</span> <span class="token class-name">Serializable</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token keyword">private</span> <span class="token class-name">Integer</span> age<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> name<span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> <span class="token class-name">User</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+
+    <span class="token punctuation">}</span>
+    <span class="token keyword">public</span> <span class="token class-name">User</span><span class="token punctuation">(</span><span class="token class-name">Integer</span> age<span class="token punctuation">,</span> <span class="token class-name">String</span> name<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>age <span class="token operator">=</span> age<span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>name <span class="token operator">=</span> name<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="25ProtostuffEncoder_208"></a>2.5、ProtostuffEncoder</h4> 
+<pre><code class="prism language-java"><span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">ProtostuffUtil</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>buffer<span class="token punctuation">.</span></span><span class="token class-name">ByteBuf</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span></span><span class="token class-name">ChannelHandlerContext</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>handler<span class="token punctuation">.</span>codec<span class="token punctuation">.</span></span><span class="token class-name">MessageToByteEncoder</span><span class="token punctuation">;</span>
+
+<span class="token comment">/**
+ * @author
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">ProtostuffEncoder</span> <span class="token keyword">extends</span> <span class="token class-name">MessageToByteEncoder</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Object</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">protected</span> <span class="token keyword">void</span> <span class="token function">encode</span><span class="token punctuation">(</span><span class="token class-name">ChannelHandlerContext</span> ctx<span class="token punctuation">,</span> <span class="token class-name">Object</span> msg<span class="token punctuation">,</span> <span class="token class-name">ByteBuf</span> out<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 直接生成序列化对象</span>
+        <span class="token comment">// 需要注意的是，使用protostuff序列化时，不需要知道pojo对象的具体类型也可以进行序列化时</span>
+        <span class="token comment">// 在反序列化时，只要提供序列化后的字节数组和原来pojo对象的类型即可完成反序列化</span>
+        <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> array <span class="token operator">=</span> <span class="token class-name">ProtostuffUtil</span><span class="token punctuation">.</span><span class="token function">serializer</span><span class="token punctuation">(</span>msg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        out<span class="token punctuation">.</span><span class="token function">writeBytes</span><span class="token punctuation">(</span>array<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="26ProtostuffDecoder_230"></a>2.6、ProtostuffDecoder</h4> 
+<pre><code class="prism language-java">
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">ProtostuffUtil</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>buffer<span class="token punctuation">.</span></span><span class="token class-name">ByteBuf</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span></span><span class="token class-name">ChannelHandlerContext</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>handler<span class="token punctuation">.</span>codec<span class="token punctuation">.</span></span><span class="token class-name">MessageToMessageDecoder</span><span class="token punctuation">;</span>
+
+<span class="token comment">/**
+ * PojoDecoder继承自Netty中的MessageToMessageDecoder类，
+ * 并重写抽象方法decode(ChannelHandlerContext ctx, ByteBuf msg, List&lt;Object&gt; out)
+ * 首先从数据报msg（数据类型取决于继承MessageToMessageDecoder时填写的泛型类型）中获取需要解码的byte数组
+ * 然后调用使用序列化工具类将其反序列化（解码）为Object对象 将解码后的对象加入到解码列表out中，这样就完成了解码操作
+ * @author
+ */</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">ProtostuffDecoder</span> <span class="token keyword">extends</span> <span class="token class-name">MessageToMessageDecoder</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ByteBuf</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/**
+     * 需要反序列对象所属的类型
+     */</span>
+    <span class="token keyword">private</span> <span class="token class-name">Class</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token operator">?</span><span class="token punctuation">&gt;</span></span> genericClass<span class="token punctuation">;</span>
+
+    <span class="token comment">/**
+     * 构造方法，传入需要反序列化对象的类型
+     * @param genericClass
+     */</span>
+    <span class="token keyword">public</span> <span class="token class-name">ProtostuffDecoder</span><span class="token punctuation">(</span><span class="token class-name">Class</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token operator">?</span><span class="token punctuation">&gt;</span></span> genericClass<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>genericClass <span class="token operator">=</span> genericClass<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">protected</span> <span class="token keyword">void</span> <span class="token function">decode</span><span class="token punctuation">(</span><span class="token class-name">ChannelHandlerContext</span> ctx<span class="token punctuation">,</span> <span class="token class-name">ByteBuf</span> msg<span class="token punctuation">,</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">Object</span><span class="token punctuation">&gt;</span></span> out<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// ByteBuf的长度</span>
+        <span class="token keyword">int</span> length <span class="token operator">=</span> msg<span class="token punctuation">.</span><span class="token function">readableBytes</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 构建length长度的字节数组</span>
+        <span class="token keyword">byte</span><span class="token punctuation">[</span><span class="token punctuation">]</span> array <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token keyword">byte</span><span class="token punctuation">[</span>length<span class="token punctuation">]</span><span class="token punctuation">;</span>
+        <span class="token comment">// 将ByteBuf数据复制到字节数组中</span>
+        msg<span class="token punctuation">.</span><span class="token function">readBytes</span><span class="token punctuation">(</span>array<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 反序列化对象</span>
+        <span class="token class-name">Object</span> obj <span class="token operator">=</span> <span class="token class-name">ProtostuffUtil</span><span class="token punctuation">.</span><span class="token function">deserializer</span><span class="token punctuation">(</span>array<span class="token punctuation">,</span> <span class="token keyword">this</span><span class="token punctuation">.</span>genericClass<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 添加到反序列化对象结果列表</span>
+        out<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>obj<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="27NettyChatServer_276"></a>2.7、NettyChatServer</h4> 
+<pre><code class="prism language-java">
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>decode<span class="token punctuation">.</span></span><span class="token class-name">ProtostuffDecoder</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>encode<span class="token punctuation">.</span></span><span class="token class-name">ProtostuffEncoder</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">EchoRequest</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>bootstrap<span class="token punctuation">.</span></span><span class="token class-name">ServerBootstrap</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span></span><span class="token operator">*</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span>nio<span class="token punctuation">.</span></span><span class="token class-name">NioEventLoopGroup</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span>socket<span class="token punctuation">.</span></span><span class="token class-name">SocketChannel</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span>socket<span class="token punctuation">.</span>nio<span class="token punctuation">.</span></span><span class="token class-name">NioServerSocketChannel</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>handler<span class="token punctuation">.</span>codec<span class="token punctuation">.</span></span><span class="token class-name">LengthFieldBasedFrameDecoder</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>handler<span class="token punctuation">.</span>codec<span class="token punctuation">.</span></span><span class="token class-name">LengthFieldPrepender</span><span class="token punctuation">;</span>
+
+<span class="token keyword">import</span> <span class="token namespace">java<span class="token punctuation">.</span>io<span class="token punctuation">.</span></span><span class="token class-name">UnsupportedEncodingException</span><span class="token punctuation">;</span>
+
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">NettyChatServer</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">int</span> PORT <span class="token operator">=</span> <span class="token number">8080</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">InterruptedException</span><span class="token punctuation">,</span> <span class="token class-name">UnsupportedEncodingException</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">final</span> <span class="token class-name">ServerHandler</span> serverHandler <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ServerHandler</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 负责服务器通道新连接的IO事件的监听，但是不做任何处理</span>
+        <span class="token class-name">EventLoopGroup</span> bossGroup <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">NioEventLoopGroup</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 负责传输通道的IO事件的处理和数据传输（真正干活的）</span>
+        <span class="token class-name">EventLoopGroup</span> workerGroup <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">NioEventLoopGroup</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">try</span><span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// Netty的服务引导类</span>
+            <span class="token class-name">ServerBootstrap</span> serverBootstrap <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ServerBootstrap</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 设置反应器轮询组</span>
+            serverBootstrap<span class="token punctuation">.</span><span class="token function">group</span><span class="token punctuation">(</span>bossGroup <span class="token punctuation">,</span> workerGroup<span class="token punctuation">)</span>
+                    <span class="token comment">// 设置nio类型的通道</span>
+                    <span class="token punctuation">.</span><span class="token function">channel</span><span class="token punctuation">(</span><span class="token class-name">NioServerSocketChannel</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span>
+                    <span class="token punctuation">.</span><span class="token function">childOption</span><span class="token punctuation">(</span><span class="token class-name">ChannelOption</span><span class="token punctuation">.</span>SO_REUSEADDR<span class="token punctuation">,</span><span class="token boolean">true</span><span class="token punctuation">)</span>
+                    <span class="token comment">// 设置监听端口</span>
+                    <span class="token punctuation">.</span><span class="token function">localAddress</span><span class="token punctuation">(</span>PORT<span class="token punctuation">)</span>
+                    <span class="token comment">// 装配子通道流水线</span>
+                    <span class="token punctuation">.</span><span class="token function">childHandler</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ChannelInitializer</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">SocketChannel</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token comment">/**
+                         * 有连接到达时会创建一个通道
+                         * @param ch 通道
+                         * @throws Exception
+                         */</span>
+                        <span class="token annotation punctuation">@Override</span>
+                        <span class="token keyword">protected</span> <span class="token keyword">void</span> <span class="token function">initChannel</span><span class="token punctuation">(</span><span class="token class-name">SocketChannel</span> ch<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">UnsupportedEncodingException</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token comment">// 流水线的职责:负责管理通道中的处理器</span>
+                            <span class="token class-name">ChannelPipeline</span> pipeline <span class="token operator">=</span> ch<span class="token punctuation">.</span><span class="token function">pipeline</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 发送数据包的最大长度</span>
+                            <span class="token keyword">int</span> maxFrameLength <span class="token operator">=</span> <span class="token number">1024</span><span class="token operator">*</span><span class="token number">1024</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 长度域的偏移量</span>
+                            <span class="token keyword">int</span> lengthFieldOffset <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 长度域的字节数长度</span>
+                            <span class="token keyword">int</span> lengthFieldLength <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 长度域的偏移量矫正</span>
+                            <span class="token keyword">int</span> lengthAdjustment <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 丢弃的起始字节数</span>
+                            <span class="token keyword">int</span> initialBytesToStrip <span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 固定长度字段报文来分包</span>
+                            ch<span class="token punctuation">.</span><span class="token function">pipeline</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">addLast</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">LengthFieldBasedFrameDecoder</span><span class="token punctuation">(</span>maxFrameLength<span class="token punctuation">,</span> lengthFieldOffset<span class="token punctuation">,</span>
+                                    lengthFieldLength<span class="token punctuation">,</span> lengthAdjustment<span class="token punctuation">,</span> initialBytesToStrip<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token comment">// LengthFieldPrepender是一个编码器，主要是在响应字节数据前面添加字节长度字段</span>
+                            ch<span class="token punctuation">.</span><span class="token function">pipeline</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">addLast</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">LengthFieldPrepender</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 自定义解码器</span>
+                            pipeline<span class="token punctuation">.</span><span class="token function">addLast</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ProtostuffDecoder</span><span class="token punctuation">(</span><span class="token class-name">EchoRequest</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 自定义编码器</span>
+                            pipeline<span class="token punctuation">.</span><span class="token function">addLast</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ProtostuffEncoder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 向“子通道”(传输通道)流水线添加一个处理器，</span>
+                            pipeline<span class="token punctuation">.</span><span class="token function">addLast</span><span class="token punctuation">(</span>serverHandler<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        <span class="token punctuation">}</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 开始绑定服务器，通过调用sync同步方法阻塞直到绑定成功</span>
+            <span class="token class-name">ChannelFuture</span> channelFuture <span class="token operator">=</span> serverBootstrap<span class="token punctuation">.</span><span class="token function">bind</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">sync</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 等待通道关闭的异步任务结束，服务监听通道会一直等待通道关闭的异步任务结束</span>
+            channelFuture<span class="token punctuation">.</span><span class="token function">channel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">closeFuture</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">sync</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">// 优雅关闭EventLoopGroup</span>
+            <span class="token comment">// 释放掉所有资源，包括创建的线程</span>
+            bossGroup<span class="token punctuation">.</span><span class="token function">shutdownGracefully</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            workerGroup<span class="token punctuation">.</span><span class="token function">shutdownGracefully</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="28ServerHandler_360"></a>2.8、ServerHandler</h4> 
+<pre><code class="prism language-java">
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">EchoRequest</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">EchoResponse</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">User</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span></span><span class="token class-name">Channel</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span></span><span class="token class-name">ChannelHandler</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span></span><span class="token class-name">ChannelHandlerContext</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span></span><span class="token class-name">ChannelInboundHandlerAdapter</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span>group<span class="token punctuation">.</span></span><span class="token class-name">ChannelGroup</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span>group<span class="token punctuation">.</span></span><span class="token class-name">DefaultChannelGroup</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>util<span class="token punctuation">.</span>concurrent<span class="token punctuation">.</span></span><span class="token class-name">GlobalEventExecutor</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">java<span class="token punctuation">.</span>util<span class="token punctuation">.</span></span>UUID<span class="token punctuation">;</span>
+
+<span class="token comment">/**
+ * @author
+ */</span>
+<span class="token annotation punctuation">@ChannelHandler.Sharable</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">ServerHandler</span>  <span class="token keyword">extends</span> <span class="token class-name">ChannelInboundHandlerAdapter</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token class-name">ChannelGroup</span> clientChannels <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">DefaultChannelGroup</span><span class="token punctuation">(</span><span class="token class-name">GlobalEventExecutor</span><span class="token punctuation">.</span>INSTANCE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">channelActive</span><span class="token punctuation">(</span><span class="token class-name">ChannelHandlerContext</span> ctx<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Channel</span> channel <span class="token operator">=</span> ctx<span class="token punctuation">.</span><span class="token function">channel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        clientChannels<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>channel<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">String</span> sendMsg <span class="token operator">=</span> <span class="token string">"客户["</span> <span class="token operator">+</span> channel<span class="token punctuation">.</span><span class="token function">remoteAddress</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">"]上线\n"</span><span class="token punctuation">;</span>
+        <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">print</span><span class="token punctuation">(</span>sendMsg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        clientChannels<span class="token punctuation">.</span><span class="token function">forEach</span><span class="token punctuation">(</span>clientChannel <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span><span class="token punctuation">(</span>clientChannel <span class="token operator">!=</span> channel<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                clientChannel<span class="token punctuation">.</span><span class="token function">writeAndFlush</span><span class="token punctuation">(</span>sendMsg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">channelInactive</span><span class="token punctuation">(</span><span class="token class-name">ChannelHandlerContext</span> ctx<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Channel</span> channel <span class="token operator">=</span> ctx<span class="token punctuation">.</span><span class="token function">channel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span><span class="token punctuation">(</span>clientChannels<span class="token punctuation">.</span><span class="token function">contains</span><span class="token punctuation">(</span>channel<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            clientChannels<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>channel<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token class-name">String</span> sendMsg <span class="token operator">=</span> <span class="token string">"客户["</span> <span class="token operator">+</span> channel<span class="token punctuation">.</span><span class="token function">remoteAddress</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">"]异常下线\n"</span><span class="token punctuation">;</span>
+            <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">print</span><span class="token punctuation">(</span>sendMsg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            clientChannels<span class="token punctuation">.</span><span class="token function">forEach</span><span class="token punctuation">(</span>clientChannel <span class="token operator">-&gt;</span> clientChannel<span class="token punctuation">.</span><span class="token function">writeAndFlush</span><span class="token punctuation">(</span>sendMsg<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">channelRead</span><span class="token punctuation">(</span><span class="token class-name">ChannelHandlerContext</span> ctx<span class="token punctuation">,</span> <span class="token class-name">Object</span> msg<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 接收到的对象的类型为EchoRequest</span>
+        <span class="token keyword">for</span> <span class="token punctuation">(</span><span class="token keyword">int</span> i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">50</span><span class="token punctuation">;</span> i<span class="token operator">++</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">EchoRequest</span> req <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">EchoRequest</span><span class="token punctuation">)</span> msg<span class="token punctuation">;</span>
+            <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span>req<span class="token punctuation">.</span><span class="token function">getRequestId</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">" : "</span> <span class="token operator">+</span> req<span class="token punctuation">.</span><span class="token function">getRequestObj</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 创建需要传输的user对象</span>
+            <span class="token class-name">User</span> user <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">User</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            user<span class="token punctuation">.</span><span class="token function">setName</span><span class="token punctuation">(</span><span class="token string">"server"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            user<span class="token punctuation">.</span><span class="token function">setAge</span><span class="token punctuation">(</span>i<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 创建传输的user对象载体EchoRequest对象</span>
+            <span class="token class-name">EchoResponse</span> resp <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">EchoResponse</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 设置responseId</span>
+            resp<span class="token punctuation">.</span><span class="token function">setResponseId</span><span class="token punctuation">(</span>UUID<span class="token punctuation">.</span><span class="token function">randomUUID</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 设置需要传输的对象</span>
+            resp<span class="token punctuation">.</span><span class="token function">setResponseObj</span><span class="token punctuation">(</span>user<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 设置需要传输的对象的类型</span>
+            resp<span class="token punctuation">.</span><span class="token function">setResponseObjClass</span><span class="token punctuation">(</span>resp<span class="token punctuation">.</span><span class="token function">getResponseObj</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getClass</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 调用writeAndFlush将数据发送到socketChannel</span>
+            ctx<span class="token punctuation">.</span><span class="token function">writeAndFlush</span><span class="token punctuation">(</span>resp<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">exceptionCaught</span><span class="token punctuation">(</span><span class="token class-name">ChannelHandlerContext</span> ctx<span class="token punctuation">,</span> <span class="token class-name">Throwable</span> cause<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Channel</span> channel <span class="token operator">=</span> ctx<span class="token punctuation">.</span><span class="token function">channel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        clientChannels<span class="token punctuation">.</span><span class="token function">remove</span><span class="token punctuation">(</span>channel<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">String</span> msg <span class="token operator">=</span> cause<span class="token punctuation">.</span><span class="token function">getMessage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">String</span> sendMsg <span class="token operator">=</span> <span class="token string">"客户["</span> <span class="token operator">+</span> channel<span class="token punctuation">.</span><span class="token function">remoteAddress</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">"]异常: "</span> <span class="token operator">+</span> msg <span class="token operator">+</span> <span class="token string">"\n"</span><span class="token punctuation">;</span>
+        <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">print</span><span class="token punctuation">(</span>sendMsg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        clientChannels<span class="token punctuation">.</span><span class="token function">forEach</span><span class="token punctuation">(</span>clientChannel <span class="token operator">-&gt;</span> clientChannel<span class="token punctuation">.</span><span class="token function">writeAndFlush</span><span class="token punctuation">(</span>sendMsg<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="29NettyChatClient_445"></a>2.9、NettyChatClient</h4> 
+<pre><code class="prism language-java">
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>decode<span class="token punctuation">.</span></span><span class="token class-name">ProtostuffDecoder</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>encode<span class="token punctuation">.</span></span><span class="token class-name">ProtostuffEncoder</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">EchoResponse</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>bootstrap<span class="token punctuation">.</span></span><span class="token class-name">Bootstrap</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span></span><span class="token class-name">ChannelFuture</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span></span><span class="token class-name">ChannelInitializer</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span></span><span class="token class-name">ChannelPipeline</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span></span><span class="token class-name">EventLoopGroup</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span>nio<span class="token punctuation">.</span></span><span class="token class-name">NioEventLoopGroup</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span>socket<span class="token punctuation">.</span></span><span class="token class-name">SocketChannel</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span>socket<span class="token punctuation">.</span>nio<span class="token punctuation">.</span></span><span class="token class-name">NioSocketChannel</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>handler<span class="token punctuation">.</span>codec<span class="token punctuation">.</span></span><span class="token class-name">LengthFieldBasedFrameDecoder</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>handler<span class="token punctuation">.</span>codec<span class="token punctuation">.</span></span><span class="token class-name">LengthFieldPrepender</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">java<span class="token punctuation">.</span>io<span class="token punctuation">.</span></span><span class="token class-name">UnsupportedEncodingException</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">java<span class="token punctuation">.</span>net<span class="token punctuation">.</span></span><span class="token class-name">InetSocketAddress</span><span class="token punctuation">;</span>
+
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">NettyChatClient</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token keyword">int</span> PORT <span class="token operator">=</span> <span class="token number">8080</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token keyword">void</span> <span class="token function">main</span><span class="token punctuation">(</span><span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">InterruptedException</span><span class="token punctuation">,</span> <span class="token class-name">UnsupportedEncodingException</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token keyword">final</span> <span class="token class-name">ClientHandler</span> clientHandler <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ClientHandler</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">EventLoopGroup</span> workerGroup <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">NioEventLoopGroup</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">try</span><span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">Bootstrap</span> bootstrap <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">Bootstrap</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            bootstrap<span class="token punctuation">.</span><span class="token function">group</span><span class="token punctuation">(</span>workerGroup<span class="token punctuation">)</span>
+                    <span class="token punctuation">.</span><span class="token function">channel</span><span class="token punctuation">(</span><span class="token class-name">NioSocketChannel</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span>
+                    <span class="token punctuation">.</span><span class="token function">remoteAddress</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">InetSocketAddress</span><span class="token punctuation">(</span>PORT<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                    <span class="token punctuation">.</span><span class="token function">handler</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ChannelInitializer</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">SocketChannel</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token annotation punctuation">@Override</span>
+                        <span class="token keyword">protected</span> <span class="token keyword">void</span> <span class="token function">initChannel</span><span class="token punctuation">(</span><span class="token class-name">SocketChannel</span> ch<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token class-name">ChannelPipeline</span> pipeline <span class="token operator">=</span> ch<span class="token punctuation">.</span><span class="token function">pipeline</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 发送数据包的最大长度</span>
+                            <span class="token keyword">int</span> maxFrameLength <span class="token operator">=</span> <span class="token number">1024</span><span class="token operator">*</span><span class="token number">1024</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 长度域的偏移量</span>
+                            <span class="token keyword">int</span> lengthFieldOffset <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 长度域的字节数长度</span>
+                            <span class="token keyword">int</span> lengthFieldLength <span class="token operator">=</span> <span class="token number">2</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 长度域的偏移量矫正</span>
+                            <span class="token keyword">int</span> lengthAdjustment <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 丢弃的起始字节数</span>
+                            <span class="token keyword">int</span> initialBytesToStrip <span class="token operator">=</span><span class="token number">2</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 固定长度字段报文来分包</span>
+                            ch<span class="token punctuation">.</span><span class="token function">pipeline</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">addLast</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">LengthFieldBasedFrameDecoder</span><span class="token punctuation">(</span>maxFrameLength<span class="token punctuation">,</span> lengthFieldOffset<span class="token punctuation">,</span>
+                                    lengthFieldLength<span class="token punctuation">,</span> lengthAdjustment<span class="token punctuation">,</span> initialBytesToStrip<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token comment">// LengthFieldPrepender是一个编码器，主要是在响应字节数据前面添加字节长度字段</span>
+                            ch<span class="token punctuation">.</span><span class="token function">pipeline</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">addLast</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">LengthFieldPrepender</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 自定义解码器</span>
+                            pipeline<span class="token punctuation">.</span><span class="token function">addLast</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ProtostuffDecoder</span><span class="token punctuation">(</span><span class="token class-name">EchoResponse</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token comment">// 自定义编码器</span>
+                            pipeline<span class="token punctuation">.</span><span class="token function">addLast</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ProtostuffEncoder</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            pipeline<span class="token punctuation">.</span><span class="token function">addLast</span><span class="token punctuation">(</span>clientHandler<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                        <span class="token punctuation">}</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token class-name">ChannelFuture</span> channelFuture <span class="token operator">=</span> bootstrap<span class="token punctuation">.</span><span class="token function">connect</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">sync</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            channelFuture<span class="token punctuation">.</span><span class="token function">channel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">closeFuture</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">sync</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+            workerGroup<span class="token punctuation">.</span><span class="token function">shutdownGracefully</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="210ClientHandler_514"></a>2.10、ClientHandler</h4> 
+<pre><code class="prism language-java">
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">EchoRequest</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">EchoResponse</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">com<span class="token punctuation">.</span>example<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>protostuff<span class="token punctuation">.</span></span><span class="token class-name">User</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">io<span class="token punctuation">.</span>netty<span class="token punctuation">.</span>channel<span class="token punctuation">.</span></span><span class="token operator">*</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">lombok<span class="token punctuation">.</span>extern<span class="token punctuation">.</span>slf4j<span class="token punctuation">.</span></span><span class="token class-name">Slf4j</span><span class="token punctuation">;</span>
+<span class="token keyword">import</span> <span class="token namespace">java<span class="token punctuation">.</span>util<span class="token punctuation">.</span></span>UUID<span class="token punctuation">;</span>
+
+<span class="token comment">/**
+ * @author
+ */</span>
+<span class="token annotation punctuation">@Slf4j</span>
+<span class="token annotation punctuation">@ChannelHandler.Sharable</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">ClientHandler</span>  <span class="token keyword">extends</span> <span class="token class-name">SimpleChannelInboundHandler</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">EchoResponse</span><span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">channelRead0</span><span class="token punctuation">(</span><span class="token class-name">ChannelHandlerContext</span> ctx<span class="token punctuation">,</span> <span class="token class-name">EchoResponse</span> resp<span class="token punctuation">)</span><span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span>resp<span class="token punctuation">.</span><span class="token function">getResponseId</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">" : "</span> <span class="token operator">+</span> resp<span class="token punctuation">.</span><span class="token function">getResponseObj</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">User</span> user <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">User</span><span class="token punctuation">)</span> resp<span class="token punctuation">.</span><span class="token function">getResponseObj</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">println</span><span class="token punctuation">(</span>user<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">exceptionCaught</span><span class="token punctuation">(</span><span class="token class-name">ChannelHandlerContext</span> ctx<span class="token punctuation">,</span> <span class="token class-name">Throwable</span> cause<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Channel</span> channel <span class="token operator">=</span> ctx<span class="token punctuation">.</span><span class="token function">channel</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">String</span> msg <span class="token operator">=</span> cause<span class="token punctuation">.</span><span class="token function">getMessage</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">System</span><span class="token punctuation">.</span>out<span class="token punctuation">.</span><span class="token function">print</span><span class="token punctuation">(</span><span class="token string">"群聊["</span> <span class="token operator">+</span> channel<span class="token punctuation">.</span><span class="token function">remoteAddress</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">"]异常: "</span> <span class="token operator">+</span> msg<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">channelActive</span><span class="token punctuation">(</span><span class="token class-name">ChannelHandlerContext</span> ctx<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 创建需要传输的user对象</span>
+        <span class="token class-name">User</span> user <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">User</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        user<span class="token punctuation">.</span><span class="token function">setName</span><span class="token punctuation">(</span><span class="token string">"client"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        user<span class="token punctuation">.</span><span class="token function">setAge</span><span class="token punctuation">(</span><span class="token number">11</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 创建传输的user对象载体EchoRequest对象</span>
+        <span class="token class-name">EchoRequest</span> req <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">EchoRequest</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 设置requestId</span>
+        req<span class="token punctuation">.</span><span class="token function">setRequestId</span><span class="token punctuation">(</span>UUID<span class="token punctuation">.</span><span class="token function">randomUUID</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 设置需要传输的对象</span>
+        req<span class="token punctuation">.</span><span class="token function">setRequestObj</span><span class="token punctuation">(</span>user<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 设置需要传输的对象的类型</span>
+        req<span class="token punctuation">.</span><span class="token function">setRequestObjClass</span><span class="token punctuation">(</span>req<span class="token punctuation">.</span><span class="token function">getRequestObj</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getClass</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 调用writeAndFlush将数据发送到socketChannel</span>
+        ctx<span class="token punctuation">.</span><span class="token function">writeAndFlush</span><span class="token punctuation">(</span>req<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p><img src="https://images2.imgbox.com/29/d7/bb3AvSzP_o.png" alt="在这里插入图片描述"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/262f48872817418df233f854acdffd12/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Linux设备树 01 ———— 内核笔记</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/731764ceae03f70d195f909824edc49a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">启动Hive初始化MySQL报错：MySQLSyntaxErrorException : Unknown database ‘hive‘SQL Error code: 1049</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

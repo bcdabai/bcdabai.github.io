@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>k8s的“前端”——ingress - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="k8s的“前端”——ingress" />
+<meta property="og:description" content="目录
+Ingress 简介
+Ingress 组成
+Ingress 工作原理
+部署 nginx-ingress-controller
+ingress 暴露服务的方式
+DaemonSet&#43;HostNetwork&#43;nodeSelecto
+Deployment&#43;NodePort模式的Service
+创建虚拟主机资源
+Ingress HTTPS 代理访问
+Nginx 进行重写
+Nginx 进行 BasicAuth
+总结
+Ingress 简介 service的作用体现在两个方面，对集群内部，它不断跟踪pod的变化，更新endpoint中对应pod的对象，提供了ip不断变化的pod的服务发现机制；对集群外部，他类似负载均衡器，可以在集群内外部对pod进行访问。
+在Kubernetes中，Pod的IP地址和service的ClusterIP仅可以在集群网络内部使用，对于集群外的应用是不可见的。为了使外部的应用能够访问集群内的服务，Kubernetes目前提供了以下几种方案：
+●NodePort：将service暴露在节点网络上，NodePort背后就是Kube-Proxy，Kube-Proxy是沟通service网络、Pod网络和节点网络的桥梁。 测试环境使用还行，当有几十上百的服务在集群中运行时，NodePort的端口管理就是个灾难。因为每个端口只能是一种服务，端口范围只能是 30000-32767。
+●LoadBalancer：通过设置LoadBalancer映射到云服务商提供的LoadBalancer地址。这种用法仅用于在公有云服务提供商的云平台上设置 Service 的场景。受限于云平台，且通常在云平台部署LoadBalancer还需要额外的费用。 在service提交后，Kubernetes就会调用CloudProvider在公有云上为你创建一个负载均衡服务，并且把被代理的Pod的IP地址配置给负载均衡服务做后端。
+externalIPs：service允许为其分配外部IP，如果外部IP路由到集群中一个或多个Node上，Service会被暴露给这些externalIPs。通过外部IP进入到集群的流量，将会被路由到Service的Endpoint上。
+●Ingress：只需一个或者少量的公网IP和LB，即可同时将多个HTTP服务暴露到外网，七层反向代理。 可以简单理解为service的service，它其实就是一组基于域名和URL路径，把用户的请求转发到一个或多个service的规则。
+Ingress 组成 ●ingress： ingress是一个API对象，通过yaml文件来配置，ingress对象的作用是定义请求如何转发到service的规则，可以理解为配置模板。 ingress通过http或https暴露集群内部service，给service提供外部URL、负载均衡、SSL/TLS能力以及基于域名的反向代理。ingress要依靠 ingress-controller 来具体实现以上功能。
+●ingress-controller： ingress-controller是具体实现反向代理及负载均衡的程序，对ingress定义的规则进行解析，根据配置的规则来实现请求转发。 ingress-controller并不是k8s自带的组件，实际上ingress-controller只是一个统称，用户可以选择不同的ingress-controller实现，目前，由k8s维护的ingress-controller只有google云的GCE与ingress-nginx两个，其他还有很多第三方维护的ingress-controller，具体可以参考官方文档。但是不管哪一种ingress-controller，实现的机制都大同小异，只是在具体配置上有差异。 一般来说，ingress-controller的形式都是一个pod，里面跑着daemon程序和反向代理程序。daemon负责不断监控集群的变化，根据 ingress对象生成配置并应用新配置到反向代理，比如ingress-nginx就是动态生成nginx配置，动态更新upstream，并在需要的时候reload程序应用新配置。为了方便，后面的例子都以k8s官方维护的ingress-nginx为例。
+Ingress-Nginx github 地址：GitHub - kubernetes/ingress-nginx: NGINX Ingress Controller for Kubernetes
+Ingress-Nginx 官方网站：Welcome - NGINX Ingress Controller
+总结：ingress-controller才是负责具体转发的组件，通过各种方式将它暴露在集群入口，外部对集群的请求流量会先到 ingress-controller， 而ingress对象是用来告诉ingress-controller该如何转发请求，比如哪些域名、哪些URL要转发到哪些service等等。
+Ingress 工作原理 （1）ingress-controller通过和 kubernetes APIServer 交互，动态的去感知集群中ingress规则变化，" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/5df91bcd69027c1f1fec3dc5b0cce06f/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-05-28T22:01:30+08:00" />
+<meta property="article:modified_time" content="2022-05-28T22:01:30+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">k8s的“前端”——ingress</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="-toc" style="margin-left:0px;"></p> 
+<p id="Ingress%20%E7%AE%80%E4%BB%8B-toc" style="margin-left:0px;"><a href="#Ingress%20%E7%AE%80%E4%BB%8B" rel="nofollow">Ingress 简介</a></p> 
+<p id="Ingress%20%E7%BB%84%E6%88%90-toc" style="margin-left:0px;"><a href="#Ingress%20%E7%BB%84%E6%88%90" rel="nofollow">Ingress 组成</a></p> 
+<p id="Ingress%20%E5%B7%A5%E4%BD%9C%E5%8E%9F%E7%90%86-toc" style="margin-left:0px;"><a href="#Ingress%20%E5%B7%A5%E4%BD%9C%E5%8E%9F%E7%90%86" rel="nofollow">Ingress 工作原理</a></p> 
+<p id="%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%E9%83%A8%E7%BD%B2%20nginx-ingress-controller-toc" style="margin-left:80px;"><a href="#%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%E9%83%A8%E7%BD%B2%20nginx-ingress-controller" rel="nofollow">                部署 nginx-ingress-controller</a></p> 
+<p id="%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0ingress%20%E6%9A%B4%E9%9C%B2%E6%9C%8D%E5%8A%A1%E7%9A%84%E6%96%B9%E5%BC%8F-toc" style="margin-left:40px;"><a href="#%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0ingress%20%E6%9A%B4%E9%9C%B2%E6%9C%8D%E5%8A%A1%E7%9A%84%E6%96%B9%E5%BC%8F" rel="nofollow">        ingress 暴露服务的方式</a></p> 
+<p id="%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0DaemonSet%2BHostNetwork%2BnodeSelecto-toc" style="margin-left:80px;"><a href="#%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0DaemonSet%2BHostNetwork%2BnodeSelecto" rel="nofollow">                DaemonSet+HostNetwork+nodeSelecto</a></p> 
+<p id="%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0Deployment%2BNodePort%E6%A8%A1%E5%BC%8F%E7%9A%84Service-toc" style="margin-left:80px;"><a href="#%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0Deployment%2BNodePort%E6%A8%A1%E5%BC%8F%E7%9A%84Service" rel="nofollow">                Deployment+NodePort模式的Service</a></p> 
+<p id="%E5%88%9B%E5%BB%BA%E8%99%9A%E6%8B%9F%E4%B8%BB%E6%9C%BA%E8%B5%84%E6%BA%90-toc" style="margin-left:0px;"><a href="#%E5%88%9B%E5%BB%BA%E8%99%9A%E6%8B%9F%E4%B8%BB%E6%9C%BA%E8%B5%84%E6%BA%90" rel="nofollow">创建虚拟主机资源</a></p> 
+<p id="Ingress%20HTTPS%20%E4%BB%A3%E7%90%86%E8%AE%BF%E9%97%AE-toc" style="margin-left:0px;"><a href="#Ingress%20HTTPS%20%E4%BB%A3%E7%90%86%E8%AE%BF%E9%97%AE" rel="nofollow">Ingress HTTPS 代理访问</a></p> 
+<p id="Nginx%20%E8%BF%9B%E8%A1%8C%E9%87%8D%E5%86%99-toc" style="margin-left:0px;"><a href="#Nginx%20%E8%BF%9B%E8%A1%8C%E9%87%8D%E5%86%99" rel="nofollow">Nginx 进行重写</a></p> 
+<p id="Nginx%20%E8%BF%9B%E8%A1%8C%20BasicAuth-toc" style="margin-left:0px;"><a href="#Nginx%20%E8%BF%9B%E8%A1%8C%20BasicAuth" rel="nofollow">Nginx 进行 BasicAuth</a></p> 
+<p id="%C2%A0%E6%80%BB%E7%BB%93-toc" style="margin-left:0px;"><a href="#%C2%A0%E6%80%BB%E7%BB%93" rel="nofollow"> 总结</a></p> 
+<hr id="hr-toc"> 
+<p></p> 
+<h2 id="Ingress%20%E7%AE%80%E4%BB%8B">Ingress 简介</h2> 
+<p>        service的作用体现在两个方面，对集群内部，它不断跟踪pod的变化，更新endpoint中对应pod的对象，提供了ip不断变化的pod的服务发现机制；对集群外部，他类似负载均衡器，可以在集群内外部对pod进行访问。</p> 
+<p>在Kubernetes中，Pod的IP地址和service的ClusterIP仅可以在集群网络内部使用，对于集群外的应用是不可见的。为了使外部的应用能够访问集群内的服务，Kubernetes目前提供了以下几种方案：</p> 
+<p><strong><span style="background-color:#ffd900;">●NodePort</span></strong>：将service暴露在节点网络上，NodePort背后就是Kube-Proxy，Kube-Proxy是沟通service网络、Pod网络和节点网络的桥梁。 测试环境使用还行，当有几十上百的服务在集群中运行时，NodePort的端口管理就是个灾难。因为每个端口只能是一种服务，端口范围只能是 30000-32767。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/10/55/7gwMk0Tl_o.png"></p> 
+<p> </p> 
+<p></p> 
+<p><strong><span style="background-color:#ffd900;">●LoadBalancer</span></strong>：通过设置LoadBalancer映射到云服务商提供的LoadBalancer地址。这种用法仅用于在公有云服务提供商的云平台上设置 Service 的场景。受限于云平台，且通常在云平台部署LoadBalancer还需要额外的费用。 在service提交后，Kubernetes就会调用CloudProvider在公有云上为你创建一个负载均衡服务，并且把被代理的Pod的IP地址配置给负载均衡服务做后端。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/7e/2d/8u3nNoVy_o.png"></p> 
+<p> </p> 
+<p></p> 
+<p><strong><span style="background-color:#ffd900;">externalIPs</span></strong>：service允许为其分配外部IP，如果外部IP路由到集群中一个或多个Node上，Service会被暴露给这些externalIPs。通过外部IP进入到集群的流量，将会被路由到Service的Endpoint上。</p> 
+<p></p> 
+<p><strong><span style="background-color:#ffd900;">●Ingress：</span></strong>只需一个或者少量的公网IP和LB，即可同时将多个HTTP服务暴露到外网，七层反向代理。 可以简单理解为service的service，它其实就是一组基于域名和URL路径，把用户的请求转发到一个或多个service的规则。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/de/6e/LRPfUs5G_o.png"></p> 
+<p> </p> 
+<p></p> 
+<h2 id="Ingress%20%E7%BB%84%E6%88%90">Ingress 组成</h2> 
+<p>●ingress： ingress是一个API对象，通过yaml文件来配置，ingress对象的作用是定义请求如何转发到service的规则，可以理解为配置模板。 ingress通过http或https暴露集群内部service，给service提供外部URL、负载均衡、SSL/TLS能力以及基于域名的反向代理。ingress要依靠 ingress-controller 来具体实现以上功能。</p> 
+<p>●ingress-controller： ingress-controller是具体实现反向代理及负载均衡的程序，对ingress定义的规则进行解析，根据配置的规则来实现请求转发。 ingress-controller并不是k8s自带的组件，实际上ingress-controller只是一个统称，用户可以选择不同的ingress-controller实现，目前，由k8s维护的ingress-controller只有google云的GCE与ingress-nginx两个，其他还有很多第三方维护的ingress-controller，具体可以参考官方文档。但是不管哪一种ingress-controller，实现的机制都大同小异，只是在具体配置上有差异。 一般来说，ingress-controller的形式都是一个pod，里面跑着daemon程序和反向代理程序。daemon负责不断监控集群的变化，根据 ingress对象生成配置并应用新配置到反向代理，比如ingress-nginx就是动态生成nginx配置，动态更新upstream，并在需要的时候reload程序应用新配置。为了方便，后面的例子都以k8s官方维护的ingress-nginx为例。</p> 
+<p>Ingress-Nginx github 地址：<a href="https://github.com/kubernetes/ingress-nginx" title="GitHub - kubernetes/ingress-nginx: NGINX Ingress Controller for Kubernetes">GitHub - kubernetes/ingress-nginx: NGINX Ingress Controller for Kubernetes</a></p> 
+<p>Ingress-Nginx 官方网站：<a href="https://kubernetes.github.io/ingress-nginx/" rel="nofollow" title="Welcome - NGINX Ingress Controller">Welcome - NGINX Ingress Controller</a></p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/6d/bf/TwfWofKK_o.png"></p> 
+<p> </p> 
+<p></p> 
+<p>总结：ingress-controller才是负责具体转发的组件，通过各种方式将它暴露在集群入口，外部对集群的请求流量会先到 ingress-controller， 而ingress对象是用来告诉ingress-controller该如何转发请求，比如哪些域名、哪些URL要转发到哪些service等等。</p> 
+<h2 id="Ingress%20%E5%B7%A5%E4%BD%9C%E5%8E%9F%E7%90%86">Ingress 工作原理</h2> 
+<p>（1）ingress-controller通过和 kubernetes APIServer 交互，动态的去感知集群中ingress规则变化，</p> 
+<p>（2）然后读取它，按照自定义的规则，规则就是写明了哪个域名对应哪个service，生成一段nginx配置，</p> 
+<p>（3）再写到nginx-ingress-controller的pod里，这个ingress-controller的pod里运行着一个Nginx服务，控制器会把生成的 nginx配置写入 /etc/nginx.conf文件中，</p> 
+<p>（4）然后reload一下使配置生效。以此达到域名区分配置和动态更新的作用。</p> 
+<h4 id="%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%E9%83%A8%E7%BD%B2%20nginx-ingress-controller">                部署 nginx-ingress-controller</h4> 
+<p>1、部署ingress-controller pod及相关资源</p> 
+<pre><code>mkdir /opt/ingress 
+
+cd /opt/ingress</code></pre> 
+<p>官方下载地址： wget <a href="https://raw.githubusercontent.com/kubernetes/ingress-nginx/nginx-0.25.0/deploy/static/mandatory.yaml" rel="nofollow" title="https://raw.githubusercontent.com/kubernetes/ingress-nginx/nginx-0.25.0/deploy/static/mandatory.yaml">https://raw.githubusercontent.com/kubernetes/ingress-nginx/nginx-0.25.0/deploy/static/mandatory.yaml</a></p> 
+<p>上面可能无法下载，可用国内的 gitee</p> 
+<p>wget <a href="https://gitee.com/mirrors/ingress-nginx/raw/nginx-0.25.0/deploy/static/mandatory.yaml" rel="nofollow" title="https://gitee.com/mirrors/ingress-nginx/raw/nginx-0.25.0/deploy/static/mandatory.yaml">https://gitee.com/mirrors/ingress-nginx/raw/nginx-0.25.0/deploy/static/mandatory.yaml</a></p> 
+<p>wget <a href="https://gitee.com/mirrors/ingress-nginx/raw/nginx-0.30.0/deploy/static/mandatory.yaml" rel="nofollow" title="https://gitee.com/mirrors/ingress-nginx/raw/nginx-0.30.0/deploy/static/mandatory.yaml">https://gitee.com/mirrors/ingress-nginx/raw/nginx-0.30.0/deploy/static/mandatory.yaml</a></p> 
+<p><strong><span style="background-color:#38d8f0;">#mandatory.yaml文件中包含了很多资源的创建，包括namespace、ConfigMap、role，ServiceAccount等等所有部署ingress-controller需要的资源。</span></strong></p> 
+<p></p> 
+<h3 id="%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0ingress%20%E6%9A%B4%E9%9C%B2%E6%9C%8D%E5%8A%A1%E7%9A%84%E6%96%B9%E5%BC%8F">        ingress 暴露服务的方式</h3> 
+<p><strong><span style="background-color:#ffd900;">●方式一：Deployment+LoadBalancer 模式</span></strong>的 Service 如果要把ingress部署在公有云，那用这种方式比较合适。用Deployment部署ingress-controller，创建一个 type为 LoadBalancer 的 service 关联这组 pod。大部分公有云，都会为 LoadBalancer 的 service 自动创建一个负载均衡器，通常还绑定了公网地址。 只要把域名解析指向该地址，就实现了集群服务的对外暴露</p> 
+<p><strong><span style="background-color:#ffd900;">●方式二：DaemonSet+HostNetwork+nodeSelector</span></strong> 用DaemonSet结合nodeselector来部署ingress-controller到特定的node上，然后使用HostNetwork直接把该pod与宿主机node的网络打通，直接使用宿主机的80/433端口就能访问服务。这时，ingress-controller所在的node机器就很类似传统架构的边缘节点，比如机房入口的nginx服务器。该方式整个请求链路最简单，性能相对NodePort模式更好。缺点是由于直接利用宿主机节点的网络和端口，一个node只能部署一个ingress-controller pod。 比较适合大并发的生产环境使用。</p> 
+<p><strong><span style="background-color:#ffd900;">●方式三：Deployment+NodePort模式</span></strong>的Service 同样用deployment模式部署ingress-controller，并创建对应的service，但是type为NodePort。这样，ingress就会暴露在集群节点ip的特定端口上。由于nodeport暴露的端口是随机端口，一般会在前面再搭建一套负载均衡器来转发请求。该方式一般用于宿主机是相对固定的环境ip地址不变的场景。 NodePort方式暴露ingress虽然简单方便，但是NodePort多了一层NAT，在请求量级很大时可能对性能会有一定影响。</p> 
+<h4 id="%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0DaemonSet%2BHostNetwork%2BnodeSelecto">                DaemonSet+HostNetwork+nodeSelecto</h4> 
+<p>上传mandatory.yaml文件，并修改</p> 
+<pre><code>[root@master01 /opt/ingress]# vim mandatory.yaml
+...
+#apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
+#RBAC相关资源从1.17版本开始改用rbac.authorization.k8s.io/v1，rbac.authorization.k8s.io/v1beta1在1.22版本即将弃用
+kind: ClusterRole
+metadata:
+  name: nginx-ingress-clusterrole
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - endpoints
+      - nodes
+      - pods
+      - secrets
+    verbs:
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - "extensions"
+      - "networking.k8s.io"    # （0.25版本）增加 networking.k8s.io Ingress 资源的 api 
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  - apiGroups:
+      - "extensions"
+      - "networking.k8s.io"   # （0.25版本）增加 networking.k8s.io/v1 Ingress 资源的 api 
+    resources:
+      - ingresses/status
+    verbs:
+      - update
+apiVersion: apps/v1
+# 修改 kind
+# kind: Deployment
+kind: DaemonSet
+metadata:
+  name: nginx-ingress-controller
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+spec:
+# 删除Replicas
+# replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ingress-nginx
+      app.kubernetes.io/part-of: ingress-nginx
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ingress-nginx
+        app.kubernetes.io/part-of: ingress-nginx
+      annotations:
+        prometheus.io/port: "10254"
+        prometheus.io/scrape: "true"
+    spec:
+      # 使用主机网络
+      hostNetwork: true
+      # 选择节点运行
+      nodeSelector:
+        ingress: devops
+      serviceAccountName: nginx-ingress-serviceaccount</code></pre> 
+<p>指定 nginx-ingress-controller 运行在 node02 节点</p> 
+<pre><code>[root@master01 /opt/ingress]# kubectl label nodes node02 ingress=devops
+node/node02 labeled
+​
+[root@master01 /opt/ingress]# kubectl get nodes --show-labels
+NAME       STATUS   ROLES                  AGE     VERSION    LABELS
+master01   Ready    control-plane,master   3d21h   v1.20.11   beta.kubernetes.io/arch=amd64,beta.kubernetes.io/os=linux,kubernetes.io/arch=amd64,kubernetes.io/hostname=master01,kubernetes.io/os=linux,node-role.kubernetes.io/control-plane=,node-role.kubernetes.io/master=
+node01     Ready    &lt;none&gt;                 3d21h   v1.20.11   beta.kubernetes.io/arch=amd64,beta.kubernetes.io/os=linux,kubernetes.io/arch=amd64,kubernetes.io/hostname=node01,kubernetes.io/os=linux
+node02     Ready    &lt;none&gt;                 3d21h   v1.20.11   beta.kubernetes.io/arch=amd64,beta.kubernetes.io/os=linux,ingress=devops,kubernetes.io/arch=amd64,kubernetes.io/hostname=node02,kubernetes.io/os=linux
+在 node2 节点上传 nginx-ingress-controller 镜像压缩包 ingree.contro.tar.gz 并解压和加载镜像
+
+[root@node02 ~]# tar -zxf ingree.contro.tar.gz
+[root@node02 ~]# docker load -i ingree.contro.tar
+861ac8268e83: Loading layer [==================================================&gt;]     54MB/54MB
+65108a495798: Loading layer [==================================================&gt;]  26.45MB/26.45MB
+b0f2b459d4e3: Loading layer [==================================================&gt;]  1.931MB/1.931MB
+dc166b174efb: Loading layer [==================================================&gt;]  330.1MB/330.1MB
+e3e97f070635: Loading layer [==================================================&gt;]  728.6kB/728.6kB
+b87f06926b0d: Loading layer [==================================================&gt;]  43.05MB/43.05MB
+17b3679fe89a: Loading layer [==================================================&gt;]  8.192kB/8.192kB
+2bb74ea2be4a: Loading layer [==================================================&gt;]   2.56kB/2.56kB
+f1980a0b3af3: Loading layer [==================================================&gt;]  6.144kB/6.144kB
+74e8ef22671f: Loading layer [==================================================&gt;]  35.78MB/35.78MB
+6dd0b74b8a3e: Loading layer [==================================================&gt;]  21.37MB/21.37MB
+6bcbfd84ac45: Loading layer [==================================================&gt;]  7.168kB/7.168kB
+Loaded image: quay.io/kubernetes-ingress-controller/nginx-ingress-controller:0.25.0</code></pre> 
+<p>启动 nginx-ingress-controller</p> 
+<pre><code>[root@master01 /opt/ingress]# kubectl apply -f mandatory.yaml
+namespace/ingress-nginx created
+configmap/nginx-configuration created
+configmap/tcp-services created
+configmap/udp-services created
+serviceaccount/nginx-ingress-serviceaccount created
+clusterrole.rbac.authorization.k8s.io/nginx-ingress-clusterrole created
+role.rbac.authorization.k8s.io/nginx-ingress-role created
+rolebinding.rbac.authorization.k8s.io/nginx-ingress-role-nisa-binding created
+clusterrolebinding.rbac.authorization.k8s.io/nginx-ingress-clusterrole-nisa-binding created
+daemonset.apps/nginx-ingress-controller created</code></pre> 
+<p>nginx-ingress-controller 已经运行 node02 节点</p> 
+<pre><code>[root@master01 /opt/ingress]# kubectl get pods -n ingress-nginx -o wide
+NAME                             READY   STATUS    RESTARTS   AGE   IP               NODE     NOMINATED NODE   READINESS GATES
+nginx-ingress-controller-dv69n   1/1     Running   0          17m   192.168.37.105   node02   &lt;none&gt;           &lt;none&gt;</code></pre> 
+<p>此时，查看node02的nginx服务</p> 
+<pre><code>[root@node02 ~]# netstat -natp |grep nginx
+tcp        0      0 0.0.0.0:80              0.0.0.0:*               LISTEN      97117/nginx: master
+tcp        0      0 0.0.0.0:8181            0.0.0.0:*               LISTEN      97117/nginx: master
+tcp        0      0 0.0.0.0:443             0.0.0.0:*               LISTEN      97117/nginx: master
+tcp        0      0 10.96.0.1:36154         10.96.0.1:443           ESTABLISHED 97071/nginx-ingress
+tcp6       0      0 :::10254                :::*                    LISTEN      97071/nginx-ingress</code></pre> 
+<p>        由于配置了 hostnetwork，nginx 已经在 node 主机本地监听 80/443/8181 端口。其中 8181 是 nginx-controller 默认配置的一个 default backend（Ingress 资源没有匹配的 rule 对象时，流量就会被导向这个 default backend）。 这样，只要访问 node 主机有公网 IP，就可以直接映射域名来对外网暴露服务了。如果要 nginx 高可用的话，可以在多个 node 上部署，并在前面再搭建一套 LVS+keepalived 做负载均衡。</p> 
+<p><strong>创建 ingress 规则</strong></p> 
+<pre><code>[root@master01 /opt/ingress]# vim svc-nginx.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: nginx
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-app-svc
+spec:
+  type: ClusterIP
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+  selector:
+    app: nginx
+​
+​</code></pre> 
+<pre><code>[root@master01 /opt/ingress]# kubectl apply -f svc-nginx.yaml
+deployment.apps/nginx-app created
+service/nginx-app-svc created
+[root@master01 /opt/ingress]# kubectl get pods
+NAME                         READY   STATUS    RESTARTS   AGE
+nginx-app-845d4d9dff-b6vs5   1/1     Running   0          5s
+nginx-app-845d4d9dff-phbq7   1/1     Running   0          5s
+[root@master01 /opt/ingress]# kubectl get svc
+NAME            TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)   AGE
+kubernetes      ClusterIP   10.96.0.1     &lt;none&gt;        443/TCP   3d22h
+nginx-app-svc   ClusterIP   10.96.50.67   &lt;none&gt;        80/TCP    9s
+[root@master01 /opt/ingress]# curl 10.96.50.67
+&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;
+&lt;title&gt;Welcome to nginx!&lt;/title&gt;
+&lt;style&gt;
+html { color-scheme: light dark; }
+body { width: 35em; margin: 0 auto;
+font-family: Tahoma, Verdana, Arial, sans-serif; }
+&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;h1&gt;Welcome to nginx!&lt;/h1&gt;
+&lt;p&gt;If you see this page, the nginx web server is successfully installed and
+working. Further configuration is required.&lt;/p&gt;
+​
+&lt;p&gt;For online documentation and support please refer to
+&lt;a href="http://nginx.org/"&gt;nginx.org&lt;/a&gt;.&lt;br/&gt;
+Commercial support is available at
+&lt;a href="http://nginx.com/"&gt;nginx.com&lt;/a&gt;.&lt;/p&gt;
+​
+&lt;p&gt;&lt;em&gt;Thank you for using nginx.&lt;/em&gt;&lt;/p&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+​</code></pre> 
+<p>为什么能访问？</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/63/4b/UZRsVu45_o.png"></p> 
+<p> </p> 
+<p></p> 
+<p><strong>创建 ingress</strong></p> 
+<pre><code>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx-ingress
+spec:
+  rules:
+  - host: www.xiaobin.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: nginx-app-svc
+            port:
+              number: 80</code></pre> 
+<pre><code>[root@master01 /opt/ingress]# kubectl apply -f ingress-app.yaml
+ingress.networking.k8s.io/nginx-ingress created
+[root@master01 /opt/ingress]# kubectl get ingress
+NAME            CLASS    HOSTS             ADDRESS   PORTS   AGE
+nginx-ingress   &lt;none&gt;   www.xiaobin.com             80      6s</code></pre> 
+<pre>​</pre> 
+<p><strong>打开hosts文件，添加映射</strong></p> 
+<pre><code>192.168.37.105 www.xiaobin.com</code></pre> 
+<p>访问浏览器</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/11/37/HDvzaAMe_o.png"></p> 
+<p> </p> 
+<p></p> 
+<p>也可以将两个node节点全作为标签！！!</p> 
+<h4 id="%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0%C2%A0Deployment%2BNodePort%E6%A8%A1%E5%BC%8F%E7%9A%84Service">                Deployment+NodePort模式的Service</h4> 
+<p>下载 nginx-ingress-controller 和 ingress-nginx 暴露端口配置文件</p> 
+<p>官方下载地址：</p> 
+<p>wget <a href="https://raw.githubusercontent.com/kubernetes/ingress-nginx/nginx-0.30.0/deploy/static/mandatory.yaml" rel="nofollow" title="https://raw.githubusercontent.com/kubernetes/ingress-nginx/nginx-0.30.0/deploy/static/mandatory.yaml">https://raw.githubusercontent.com/kubernetes/ingress-nginx/nginx-0.30.0/deploy/static/mandatory.yaml</a></p> 
+<p>wget <a href="https://raw.githubusercontent.com/kubernetes/ingress-nginx/nginx-0.30.0/deploy/static/provider/baremetal/service-nodeport.yaml" rel="nofollow" title="https://raw.githubusercontent.com/kubernetes/ingress-nginx/nginx-0.30.0/deploy/static/provider/baremetal/service-nodeport.yaml">https://raw.githubusercontent.com/kubernetes/ingress-nginx/nginx-0.30.0/deploy/static/provider/baremetal/service-nodeport.yaml</a></p> 
+<p>国内 gitee 资源地址：</p> 
+<p>wget <a href="https://gitee.com/mirrors/ingress-nginx/raw/nginx-0.30.0/deploy/static/mandatory.yaml" rel="nofollow" title="https://gitee.com/mirrors/ingress-nginx/raw/nginx-0.30.0/deploy/static/mandatory.yaml">https://gitee.com/mirrors/ingress-nginx/raw/nginx-0.30.0/deploy/static/mandatory.yaml</a></p> 
+<p>wget <a href="https://gitee.com/mirrors/ingress-nginx/raw/nginx-0.30.0/deploy/static/provider/baremetal/service-nodeport.yaml" rel="nofollow" title="https://gitee.com/mirrors/ingress-nginx/raw/nginx-0.30.0/deploy/static/provider/baremetal/service-nodeport.yaml">https://gitee.com/mirrors/ingress-nginx/raw/nginx-0.30.0/deploy/static/provider/baremetal/service-nodeport.yaml</a></p> 
+<pre><code>[root@master01 /opt/ingress]# mkdir ingress3.0
+[root@master01 /opt/ingress]# cd ingress3.0/
+[root@master01 /opt/ingress/ingress3.0]# wget https://raw.githubusercontent.com/kubernetes/ingress-nginx/nginx-0.30.0/deploy/static/mandatory.yaml
+[root@master01 /opt/ingress/ingress3.0]# wget https://raw.githubusercontent.com/kubernetes/ingress-nginx/nginx-0.30.0/deploy/static/provider/baremetal/service-nodeport.yaml</code></pre> 
+<p>为了好区分，把hostwork 的mandatory.yaml删除</p> 
+<pre><code>[root@master01 /opt/ingress]# kubectl delete -f mandatory.yaml
+namespace "ingress-nginx" deleted
+configmap "nginx-configuration" deleted
+configmap "tcp-services" deleted
+configmap "udp-services" deleted
+serviceaccount "nginx-ingress-serviceaccount" deleted
+clusterrole.rbac.authorization.k8s.io "nginx-ingress-clusterrole" deleted
+role.rbac.authorization.k8s.io "nginx-ingress-role" deleted
+rolebinding.rbac.authorization.k8s.io "nginx-ingress-role-nisa-binding" deleted
+clusterrolebinding.rbac.authorization.k8s.io "nginx-ingress-clusterrole-nisa-binding" deleted</code></pre> 
+<p>启动 nginx-ingress-controller </p> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# kubectl apply -f mandatory.yaml
+[root@master01 /opt/ingress/ingress3.0]# kubectl apply -f service-nodeport.yaml</code></pre> 
+<p><img alt="" src="https://images2.imgbox.com/49/53/tVaNtNgs_o.png"></p> 
+<p></p> 
+<p>其实此时，已经实现nodeport转发了</p> 
+<p><img alt="" src="https://images2.imgbox.com/51/32/PSKMAsMU_o.png"></p> 
+<p></p> 
+<p>浏览器访问，加端口</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/e3/6d/pnop5abb_o.png"></p> 
+<p></p> 
+<p>流程： </p> 
+<blockquote> 
+ <p><a href="http://www.xiaobin.com:32584/" rel="nofollow" title="http://www.xiaobin.com:32584/">http://www.xiaobin.com:32584/</a> -&gt;ingress-nginx service资源[-&gt; nginx-ingress-controller pod-&gt;根据主机名转发到绑定的业务service nginx-svc -&gt;业务pod demo-nginx</p> 
+</blockquote> 
+<h2 id="%E5%88%9B%E5%BB%BA%E8%99%9A%E6%8B%9F%E4%B8%BB%E6%9C%BA%E8%B5%84%E6%BA%90">创建虚拟主机资源</h2> 
+<p>再重新创建两个pod，删除之前做过的所有pod和svc（也可以不删，我是出了点状况）</p> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# kubectl delete deployments.apps nginx-app
+deployment.apps "nginx-app" deleted
+[root@master01 /opt/ingress/ingress3.0]# kubectl delete svc nginx-app-svc
+service "nginx-app-svc" deleted
+[root@master01 /opt/ingress/ingress3.0]# kubectl get pod,svc
+NAME                 TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+service/kubernetes   ClusterIP   10.96.0.1    &lt;none&gt;        443/TCP   4d</code></pre> 
+<p>重新创建俩个pods</p> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# kubectl create deployment myapp01 --image=nginx --replicas=2 --dry-run=client -o yaml &gt; demo1.yaml</code></pre> 
+<p><strong>vim demo1.yaml</strong></p> 
+<pre><code>apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    app: myapp01
+  name: myapp01
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: myapp01
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: myapp01
+    spec:
+      containers:
+      - image: nginx
+        name: myapp
+vim demo2.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    app: myapp02
+  name: myapp02
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: myapp02
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: myapp02
+    spec:
+      containers:
+      - image: nginx
+        name: myapp
+~</code></pre> 
+<pre>​</pre> 
+<p><strong>创建svc</strong></p> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# kubectl expose deployment myapp01 --port=80 --target-port=80 --name=myapp01-svc --dry-run=client -o yaml &gt;svc1.yaml</code></pre> 
+<pre><code>apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: myapp01
+  name: myapp01-svc
+spec:
+  ports:
+  - port: 80
+    protocol: TCP
+    targetPort: 80
+  selector:
+    app: myapp01
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: myapp02
+  name: myapp02-svc
+spec:
+  ports:
+  - port: 80
+    protocol: TCP
+    targetPort: 80
+  selector:
+    app: myapp02</code></pre> 
+<p></p> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# kubectl apply -f demo1.yaml
+deployment.apps/myapp01 created
+[root@master01 /opt/ingress/ingress3.0]# kubectl apply -f demo2.yaml
+deployment.apps/myapp02 created
+[root@master01 /opt/ingress/ingress3.0]# kubectl apply -f svc1.yaml
+service/myapp01-svc created
+[root@master01 /opt/ingress/ingress3.0]# kubectl apply -f svc2.yaml
+service/myapp02-svc created
+[root@master01 /opt/ingress/ingress3.0]# kubectl get pod,svc
+NAME                           READY   STATUS    RESTARTS   AGE
+pod/myapp01-7d6f8bbdc9-6b826   1/1     Running   0          7m40s
+pod/myapp01-7d6f8bbdc9-hn2jh   1/1     Running   0          7m40s
+pod/myapp02-7f546496d-d4dwh    1/1     Running   0          7m36s
+pod/myapp02-7f546496d-qqvzr    1/1     Running   0          7m36s
+​
+NAME                  TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)   AGE
+service/kubernetes    ClusterIP   10.96.0.1       &lt;none&gt;        443/TCP   4d
+service/myapp01-svc   ClusterIP   10.96.69.249    &lt;none&gt;        80/TCP    13s
+service/myapp02-svc   ClusterIP   10.96.218.200   &lt;none&gt;        80/TCP    10s
+​</code></pre> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# kubectl get endpoints
+NAME          ENDPOINTS                     AGE
+kubernetes    192.168.37.100:6443           4d
+myapp01-svc   10.244.1.5:80,10.244.2.4:80   8m43s
+myapp02-svc   10.244.1.6:80,10.244.2.5:80   8m40s</code></pre> 
+<pre>​</pre> 
+<p><strong>创建ingress资源</strong></p> 
+<pre><code>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress1
+spec:
+  rules:
+    - host: www.xiaobin1.com
+      http:
+        paths:
+        - path: /
+          pathType: Prefix
+          backend:
+            service:
+              name: myapp01-svc
+              port:
+                number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress2
+spec:
+  rules:
+    - host: www.xiaobin2.com
+      http:
+        paths:
+        - path: /
+          pathType: Prefix
+          backend:
+            service:
+              name: myapp02-svc
+              port:
+                number: 80
+​
+[root@master01 /opt/ingress/ingress3.0]# kubectl apply -f ingress-nginx.yaml
+ingress.networking.k8s.io/ingress1 created
+ingress.networking.k8s.io/ingress2 created</code></pre> 
+<p><strong>查看svc 端口</strong></p> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# kubectl get ingress
+NAME            CLASS    HOSTS              ADDRESS        PORTS   AGE
+ingress1        &lt;none&gt;   www.xiaobin1.com   10.96.218.69   80      37s
+ingress2        &lt;none&gt;   www.xiaobin2.com   10.96.218.69   80      37s
+[root@master01 /opt/ingress/ingress3.0]# kubectl get svc -n ingress-nginx
+NAME            TYPE       CLUSTER-IP     EXTERNAL-IP   PORT(S)                      AGE
+ingress-nginx   NodePort   10.96.218.69   &lt;none&gt;        80:32584/TCP,443:31775/TCP   47m</code></pre> 
+<p>访问测试</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/3a/26/CvVmyO2K_o.png"></p> 
+<p style="text-align:center;"> <img alt="" src="https://images2.imgbox.com/16/91/H6NJzM2g_o.png"></p> 
+<p> </p> 
+<p></p> 
+<p></p> 
+<h2 id="Ingress%20HTTPS%20%E4%BB%A3%E7%90%86%E8%AE%BF%E9%97%AE">Ingress HTTPS 代理访问</h2> 
+<p>创建ssl证书</p> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# mkdir ssl
+[root@master01 /opt/ingress/ingress3.0]# cd ssl/
+[root@master01 /opt/ingress/ingress3.0/ssl]# openssl req -x509 -sha256 -nodes -days 365 -newkey rsa:2048 -keyout tls.key -out tls.crt -subj "/CN=nginxsvc/O=nginxsvc"Generating a 2048 bit RSA private key
+.........................................................+++
+.....................+++
+writing new private key to 'tls.key'
+-----
+[root@master01 /opt/ingress/ingress3.0/ssl]# ls
+tls.crt  tls.key
+​</code></pre> 
+<p><strong>创建 secret 资源进行存储</strong></p> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0/ssl]# kubectl create secret tls tls-secret --key tls.key --cert tls.crt
+secret/tls-secret created</code></pre> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0/ssl]# kubectl get secrets
+NAME                  TYPE                                  DATA   AGE
+default-token-c47tg   kubernetes.io/service-account-token   3      4d
+tls-secret            kubernetes.io/tls                     2      34s</code></pre> 
+<pre>
+</pre> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0/ssl]# kubectl describe secret tls-secret
+Name:         tls-secret
+Namespace:    default
+Labels:       &lt;none&gt;
+Annotations:  &lt;none&gt;
+​
+Type:  kubernetes.io/tls
+​
+Data
+====
+tls.key:  1704 bytes
+tls.crt:  1143 bytes
+​</code></pre> 
+<p><strong>创建ingress资源</strong></p> 
+<pre><code>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx-https
+spec:
+  tls:
+    - hosts:
+      - www.xiaobin3.com
+      secretName: tls-secret
+  rules:
+    - host: www.xiaobin3.com
+      http:
+        paths:
+        - path: /
+          pathType: Prefix
+          backend:
+            service:
+              name: myapp02-svc
+              port:
+                number: 80</code></pre> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# kubectl apply -f ingress-https.yaml
+ingress.networking.k8s.io/nginx-https created
+[root@master01 /opt/ingress/ingress3.0]# kubectl get svc -n ingress-nginx
+NAME            TYPE       CLUSTER-IP     EXTERNAL-IP   PORT(S)                      AGE
+ingress-nginx   NodePort   10.96.218.69   &lt;none&gt;        80:32584/TCP,443:31775/TCP   65m</code></pre> 
+<p>访问测试</p> 
+<blockquote> 
+ <p>在宿主机的 C:\Windows\System32\drivers\etc\hosts 文件中添加 192.168.37.105 <a href="www.xiaobin3.com" rel="nofollow">www.xiaobin3.com</a> 记录。</p> 
+</blockquote> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/7f/3a/IfeVJ1p7_o.png"></p> 
+<p> </p> 
+<p></p> 
+<h2 id="Nginx%20%E8%BF%9B%E8%A1%8C%E9%87%8D%E5%86%99">Nginx 进行重写</h2> 
+<pre><code>#metadata.annotations 配置说明
+●nginx.ingress.kubernetes.io/rewrite-target: &lt;字符串&gt; #必须重定向流量的目标URI
+●nginx.ingress.kubernetes.io/ssl-redirect: &lt;布尔值&gt; #指示位置部分是否仅可访问SSL(当Ingress包含证书时，默认为true)
+●nginx.ingress.kubernetes.io/force-ssl-redirect: &lt;布尔值&gt; #即使Ingress未启用TLS，也强制重定向到HTTPS
+●nginx.ingress.kubernetes.io/app-root: &lt;字符串&gt; #定义Controller必须重定向的应用程序根，如果它在'/'上下文中
+●nginx.ingress.kubernetes.io/use-regex: &lt;布尔值&gt; #指示Ingress上定义的路径是否使用正则表达式</code></pre> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# vim ingress-rewrite.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-rewrite
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: http://www.xiaobin1.com:32584
+spec:
+  rules:
+  - host: www.123.com #这个有没有无所谓，最后重写到www.xiaobin1.com中
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: test #由于re.kgc.com只是用于跳转不需要真实站点存在，因此svc资源名称可随意定义
+            port:
+              number: 80
+~
+​</code></pre> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# kubectl apply -f ingress-rewrite.yaml
+ingress.networking.k8s.io/ingress-rewrite created
+[root@master01 /opt/ingress/ingress3.0]# kubectl get ingress
+NAME              CLASS    HOSTS              ADDRESS        PORTS     AGE
+ingress-rewrite   &lt;none&gt;   www.123.com                       80        13s
+ingress1          &lt;none&gt;   www.xiaobin1.com   10.96.218.69   80        35m
+ingress2          &lt;none&gt;   www.xiaobin2.com   10.96.218.69   80        35m
+nginx-https       &lt;none&gt;   www.xiaobin3.com   10.96.218.69   80, 443   17m
+nginx-ingress     &lt;none&gt;   www.xiaobin.com    10.96.218.69   80        122m</code></pre> 
+<pre>​</pre> 
+<blockquote> 
+ <p>添加<a href="www.123.com" rel="nofollow">www.123.com</a>映射，访问浏览器，输入<a href="http://www.123.com:32584" rel="nofollow" title="http://www.123.com:32584">http://www.123.com:32584</a>,会跳转到<a href="http://www.xiaobin1.com:32584" rel="nofollow" title="http://www.xiaobin1.com:32584">http://www.xiaobin1.com:32584</a></p> 
+</blockquote> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/9f/09/KUoX9O0m_o.png"> </p> 
+<p> </p> 
+<p></p> 
+<h2 id="Nginx%20%E8%BF%9B%E8%A1%8C%20BasicAuth">Nginx 进行 BasicAuth</h2> 
+<p></p> 
+<p>生成用户密码认证文件，创建 secret 资源进行存储</p> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# vim ingress-rewrite.yaml
+[root@master01 /opt/ingress/ingress3.0]# mkdir basic-auth
+[root@master01 /opt/ingress/ingress3.0]# cd basic-auth/
+[root@master01 /opt/ingress/ingress3.0/basic-auth]# yum install httpd-tools.x86_64 -y</code></pre> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0/basic-auth]# htpasswd -c auth  zhangsan
+New password:
+Re-type new password:
+Adding password for user zhangsan
+[root@master01 /opt/ingress/ingress3.0/basic-auth]# kubectl create secret generic basic-auth --from-file=auth
+secret/basic-auth created</code></pre> 
+<p><strong>创建 ingress 资源</strong></p> 
+<pre><code>apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ingress-auth
+  annotations:   #设置认证类型basic
+​
+    nginx.ingress.kubernetes.io/auth-type: basic   #设置secret资源名称basic-auth
+​
+    nginx.ingress.kubernetes.io/auth-secret: basic-auth   #设置认证窗口提示信息
+​
+    nginx.ingress.kubernetes.io/auth-realm: 'Authentication Required - zhangsan'
+spec:
+  rules:
+  - host: www.bin.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: myapp01-svc
+            port:
+              number: 80
+​</code></pre> 
+<p>详情参考： <a href="https://kubernetes.github.io/ingress-nginx/examples/auth/basic/" rel="nofollow" title="Basic Authentication - NGINX Ingress Controller (kubernetes.github.io)">Basic Authentication - NGINX Ingress Controller (kubernetes.github.io)</a></p> 
+<pre><code>[root@master01 /opt/ingress/ingress3.0]# kubectl apply -f auth-ingress.yaml
+ingress.networking.k8s.io/ingress-auth created
+[root@master01 /opt/ingress/ingress3.0]# kubectl get secrets
+NAME                  TYPE                                  DATA   AGE
+basic-auth            Opaque                                1      7m2s
+default-token-c47tg   kubernetes.io/service-account-token   3      4d1h
+tls-secret            kubernetes.io/tls                     2      44m</code></pre> 
+<blockquote> 
+ <p>访问测试</p> 
+ <p>添加映射文件，<a href="www.bin.com" rel="nofollow">www.bin.com</a></p> 
+ <p>访问<a href="http://www.bin.com:32584/" rel="nofollow" title="http://www.bin.com:32584/">http://www.bin.com:32584/</a></p> 
+</blockquote> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/95/4e/ZuAXjPZb_o.png"> </p> 
+<p></p> 
+<p></p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/c9/9b/ouIi9Sv4_o.png"></p> 
+<h2 id="%C2%A0%E6%80%BB%E7%BB%93"> 总结</h2> 
+<p>        Ingress 是对集群中服务的外部访问进行管理的 API 对象，典型的访问方式是 HTTP。</p> 
+<p>        Ingress 可以提供负载均衡、SSL 终结和基于名称的虚拟托管。</p> 
+<p>        ingress是k8s集群的请求入口，可以理解为对多个service的再次抽象 通常说的ingress一般包括ingress资源对象及ingress-controller两部分组成 ingress-controller有多种实现，社区原生的是ingress-nginx，根据具体需求选择 ingress自身的暴露有多种方式，需要根据基础环境及业务类型选择合适的方式</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/0a45c5e39d604d90da106bb6f2e1aa34/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">带着问题看源码 —— BeanFactory和ApplicationContext的区别</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/0fd6c4985db10a7089bd64449a5bd3d4/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">解决打开IEAD提示Your idea evaluation has expired. Your session will be limited to 30 minutes方法</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

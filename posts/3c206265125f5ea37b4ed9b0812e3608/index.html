@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>读写分离中间件案例 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="读写分离中间件案例" />
+<meta property="og:description" content="一、背景
+二、Robustdb 原理
+三、性能
+参考
+公司 DBA 一直埋怨 Atlas 的难用，希望从客户端层出一个读写分离的方案。开源市场上在客户端做读写分离的开源软件基本上没有。业务方利用 Spring 自带的路由数据源能实现部分读写分离的功能，但是功能不够完善。部分参考 Sharing-JDBC 源码思想，利用部分业余时间，写了这个 Robustdb，总共只使用了十多个类，两千多行代码左右。
+一、背景 随着业务量的增长，所有公司都不是直接选择分库分表设计方案的。很长一段时间内，会采用 库垂直拆分和分区表 来解决库表数据量比较大的问题，采用读写分离来解决访问压力比较大的问题。我们公司也是一样。目前绝大部分业务还是使用读写分离的方案。我相信很多公司和我们公司的架构一样，采用中间代理层做读写分离。结构如下：
+第一层是 VIP 曾。通过 VIP 做中间映射层，避免了应用绑定数据库的真实 IP，这样在数据库故障时，可以通过 VIP 飘移来将流量打到另一个库。但是 VIP 无法跨机房，为未来的异地多活设计埋下绕不过去的坎。
+VIP 下面一层是读写分离代理，我们公司使用的是 360 的 Atlas。Atlas 通过将 SQL 解析为 DML（Data Modify Language）和 DQL（Data Query Language），DML 的请求全部发到主库，DQL 根据配置比例分发到读库（读库包括主库和从库）。
+使用 Atlas 有以下不足：
+Altas 不再维护更新，现存一些 bug，bug 网上很多描述；
+Altas 中没有具体应用请求 IP 与具体数据库 IP 之间的映射数据，所以无法准确查到访问DB的请求是来自哪个应用；
+Altas 控制的粒度是 SQL 语句，只能指定某条查询 SQL 语句走主库，不能根据场景指定；
+DB 在自动关闭某个与 Altas 之间的连接时，Altas 不会刷新，它仍有可能把这个失效的连接给下次请求的应用使用；" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/3c206265125f5ea37b4ed9b0812e3608/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-10-23T12:15:05+08:00" />
+<meta property="article:modified_time" content="2022-10-23T12:15:05+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">读写分离中间件案例</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <ul><li> <p>一、背景</p> </li><li> <p>二、Robustdb 原理</p> </li><li> <p>三、性能</p> </li><li> <p>参考</p> </li></ul> 
+<hr> 
+<p>公司 DBA 一直埋怨 Atlas 的难用，希望从客户端层出一个读写分离的方案。开源市场上在客户端做读写分离的开源软件基本上没有。业务方利用 Spring 自带的路由数据源能实现部分读写分离的功能，但是功能不够完善。部分参考 Sharing-JDBC 源码思想，利用部分业余时间，写了这个 Robustdb，总共只使用了十多个类，两千多行代码左右。</p> 
+<h3><strong>一、背景</strong></h3> 
+<p>随着业务量的增长，所有公司都不是直接选择分库分表设计方案的。很长一段时间内，会采用 库垂直拆分和分区表 来解决库表数据量比较大的问题，采用读写分离来解决访问压力比较大的问题。我们公司也是一样。目前绝大部分业务还是使用读写分离的方案。我相信很多公司和我们公司的架构一样，采用中间代理层做读写分离。结构如下：</p> 
+<p><img alt="" height="420" src="https://images2.imgbox.com/ab/be/x5G9EyPw_o.png" width="640"> </p> 
+<p> </p> 
+<p></p> 
+<p>第一层是 VIP 曾。通过 VIP 做中间映射层，避免了应用绑定数据库的真实 IP，这样在数据库故障时，可以通过 VIP 飘移来将流量打到另一个库。但是 VIP 无法跨机房，为未来的异地多活设计埋下绕不过去的坎。</p> 
+<p>VIP 下面一层是读写分离代理，我们公司使用的是 360 的 Atlas。Atlas 通过将 SQL 解析为 DML（Data Modify Language）和 DQL（Data Query Language），DML 的请求全部发到主库，DQL 根据配置比例分发到读库（读库包括主库和从库）。</p> 
+<p>使用 Atlas 有以下不足：</p> 
+<ul><li> <p>Altas 不再维护更新，现存一些 bug，bug 网上很多描述；</p> </li><li> <p>Altas 中没有具体应用请求 IP 与具体数据库 IP 之间的映射数据，所以无法准确查到访问DB的请求是来自哪个应用；</p> </li><li> <p>Altas 控制的粒度是 SQL 语句，只能指定某条查询 SQL 语句走主库，不能根据场景指定；</p> </li><li> <p>DB 在自动关闭某个与 Altas 之间的连接时，Altas 不会刷新，它仍有可能把这个失效的连接给下次请求的应用使用；</p> </li><li> <p>使用 Altas，对后期增加其他功能模会比较麻烦。</p> </li></ul> 
+<p>基于 Atlas 以上问题，以及我们需要将数据库账号和连接配置集中管控。我们设计了下面这套方案：</p> 
+<p><img alt="" height="290" src="https://images2.imgbox.com/27/23/7UARZCaQ_o.png" width="640"> </p> 
+<p> </p> 
+<p></p> 
+<p>通过在客户端做读写分离可以解决 Atlas 上面存在的不足。整个流程如下图所示：</p> 
+<p> <img alt="" height="254" src="https://images2.imgbox.com/ba/d6/Z2Ok0CEr_o.png" width="640"></p> 
+<p> </p> 
+<p></p> 
+<h3><strong>二、Robustdb 原理</strong></h3> 
+<p><strong>1、读写分离设计核心点——路由</strong></p> 
+<p>支持每条 SQL 按照 DML、DQL 类型的默认路由。</p> 
+<p><strong>需求描述</strong></p> 
+<p>目前公司采用读写分离的方案来增强数据库的性能，所有的 DML（insert、updata、delete）操作在主库，通过 MySQL 的 binlog 同步，将数据同步到多个读库。所有的 DQL（select） 操作主库或从库，从而增强数据的读能力。</p> 
+<p>支持方法级别的指定路由</p> 
+<p><strong>需求描述</strong></p> 
+<p>在 Service 中指定方法中所有 DB 操作方法操作同一个数据库（主要是主库），保证方法中的 DB 读写都操作主库，避免数据同步延迟导致读从库数据异常。从而保证整个方法的事务属性。</p> 
+<p><strong>解决思路</strong></p> 
+<p>我们将获取真实数据库（主库还是哪个从库）放到需要建立连接时的地方，为此我们创建了 BackendConnection（传统是先连接数据库，然后再创建连接）。</p> 
+<p>在获取数据库连接时，通过对请求的 SQL 进行解析和类型判别，识别为 DML 和 DQL。如果是 DML，则在线程的单 SQL 线程本地变量上设置为 master，DQL 则设置为 slave，为后续选择数据库提供选择参考。</p> 
+<p>如果要支持方法级别的事务（也就是整个方法的 SQL 请求都发送到主库），需要借助拦截器，我们采用的是 AspectJ 方式的拦截器。会拦截所有带有类型为 dataSourceType 的 annotation 的方法。在执行方法前，在线程的多 SQL 线程本地变量上设置 dataSourceType 的 name 值（name 值为 master 代表走主库，name 值为 slave 代表走从库）。线程的多 SQL 线程本地变量为后续选择数据库提供选择参考。在方法执行完后，清理本地线程变量。</p> 
+<p>多 SQL 线程本地变量的优先级高于单 SQL 线程本地变量的优先级。</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/9c/fc/LKxFoTQw_o.png"></p> 
+<p>图片</p> 
+<p><img alt="" height="459" src="https://images2.imgbox.com/87/07/ldtf0Jd3_o.png" width="640"></p> 
+<p>图片</p> 
+<p><strong>注意点</strong></p> 
+<p>本地线程变量要使用阿里包装的 Ttl，防止用户在方法内部启动线程池，导致普通的线程本地变量丢失，从而导致选库异常。</p> 
+<p>使用 Ttl 之后，需要在公司的 JVM 启动参数中增加</p> 
+<pre><code>-javaagent:/{Path}/transmittable-thread-local-2.6.0-SNAPSHOT.jar
+</code></pre> 
+<p>原理就是在 JVM 启动时，加载 transmittable-thread-local 中的类替换逻辑，将以后的 Runnable、Callable、ExecuteService 等线程池相关类替换成增强后的 TtlRunnable、TtlCallable、TtlExecuteService 等。</p> 
+<p>下面展示一下时序图中类的核心代码，仅供参考：</p> 
+<p><strong>DataSoueceAspect</strong></p> 
+<pre><code>@Aspect
+@Component
+public class DataSourceAspect{
+  @Around("execution(* *(..)) &amp;&amp; @annotation(dataSourceType)")
+  public Object aroundMethod(ProceedingJoinPoint pjd, DataSourceType dataSourceType) throws Throwable {      DataSourceContextHolder.setMultiSqlDataSourceType(dataSourceType.name());
+    Object result = pjd.proceed();
+    DataSourceContextHolder.clearMultiSqlDataSourceType();
+    return result;
+  }
+}
+</code></pre> 
+<p><strong>BackendConnection</strong></p> 
+<pre><code>public final class BackendConnection extends AbstractConnectionAdapter {
+
+  private AbstractRoutingDataSource abstractRoutingDataSource;
+
+  //用于缓存一条sql（可能对应多个statement）或者一次事务中的连接
+  private final Map&lt;String, Connection&gt; connectionMap = new HashMap&lt;String, Connection&gt;();
+
+  //构造函数
+  public BackendConnection(AbstractRoutingDataSource abstractRoutingDataSource) {
+    this.abstractRoutingDataSource = abstractRoutingDataSource;
+  }
+
+  @Override
+  public PreparedStatement prepareStatement(String sql) throws SQLException {
+    return getConnectionInternal(sql).prepareStatement(sql);
+  }
+
+  @Override
+  public DatabaseMetaData getMetaData() throws SQLException {
+    if(connectionMap == null || connectionMap.isEmpty()){
+      return abstractRoutingDataSource.getResolvedDefaultDataSource().getConnection().getMetaData();
+    }
+    return fetchCachedConnection(connectionMap.keySet().iterator().next().toString()).get().getMetaData();
+  }
+
+  @Override
+  public PreparedStatement prepareStatement(String sql, int resultSetType, int resultSetConcurrency)
+          throws SQLException {
+    return getConnectionInternal(sql).prepareStatement(sql,resultSetType,resultSetConcurrency);
+  }
+
+  @Override
+  public PreparedStatement prepareStatement(String sql, int resultSetType, int resultSetConcurrency,
+                                            int resultSetHoldability) throws SQLException {
+    return getConnectionInternal(sql).prepareStatement(sql, resultSetType, resultSetConcurrency, resultSetHoldability);
+  }
+
+  @Override
+  public PreparedStatement prepareStatement(String sql, int autoGeneratedKeys) throws SQLException {
+    return getConnectionInternal(sql).prepareStatement(sql, autoGeneratedKeys);
+  }
+
+  @Override
+  public PreparedStatement prepareStatement(String sql, int[] columnIndexes) throws SQLException {
+    return getConnectionInternal(sql).prepareStatement(sql, columnIndexes);
+  }
+
+  @Override
+  public PreparedStatement prepareStatement(String sql, String[] columnNames) throws SQLException {
+    return getConnectionInternal(sql).prepareStatement(sql, columnNames);
+  }
+
+  @Override
+  protected Collection&lt;Connection&gt; getConnections() {
+    return connectionMap.values();
+  }
+
+  /**
+   * 根据sql获取连接，对连接进行缓存
+   * @param sql
+   * @return
+   * @throws SQLException
+   */
+  private Connection getConnectionInternal(final String sql) throws SQLException {
+    //设置线程环境遍历
+    if (ExecutionEventUtil.isDML(sql)) {
+      DataSourceContextHolder.setSingleSqlDataSourceType(DataSourceType.MASTER);
+    } else if (ExecutionEventUtil.isDQL(sql)) {
+      DataSourceContextHolder.setSingleSqlDataSourceType(DataSourceType.SLAVE);
+    }
+    //根据上面设置的环境变量，选择相应的数据源
+    Object dataSourceKey = abstractRoutingDataSource.determineCurrentLookupKey();
+    String dataSourceName = dataSourceKey.toString();
+
+    //看缓存中是否已经含有相应数据源的连接
+    Optional&lt;Connection&gt; connectionOptional = fetchCachedConnection(dataSourceName);
+    if (connectionOptional.isPresent()) {
+      return connectionOptional.get();
+    }
+    //缓存中没有相应连接，建立相应连接，并放入缓存
+    Connection connection = abstractRoutingDataSource.getTargetDataSource(dataSourceKey).getConnection();
+    connection.setAutoCommit(super.getAutoCommit());
+    connection.setTransactionIsolation(super.getTransactionIsolation());
+
+    connectionMap.put(dataSourceKey.toString(), connection);
+
+    return connection;
+  }
+
+  /**
+   * 从缓存中取数据源
+   * @param dataSourceName
+   * @return
+   */
+  private Optional&lt;Connection&gt; fetchCachedConnection(final String dataSourceName) {
+    if (connectionMap.containsKey(dataSourceName)) {
+      return Optional.of(connectionMap.get(dataSourceName));
+    }
+    return Optional.absent();
+  }
+
+}
+</code></pre> 
+<p><strong>AbstractRoutingDataSource</strong></p> 
+<pre><code>/**
+ *
+ * @Type AbstractRoutingDataSource
+ * @Desc 数据源路由器（spring的AbstractRoutingDataSource将resolvedDataSources的注入放在bean初始化）
+ * @Version V1.0
+ */
+public abstract class AbstractRoutingDataSource extends AbstractDataSource {
+
+  private boolean lenientFallback = true;
+
+  private Map&lt;Object, Object&gt; targetDataSources;
+
+  private Object defaultTargetDataSource;
+
+  private Map&lt;Object, DataSource&gt; resolvedDataSources = new HashMap&lt;Object, DataSource&gt;();
+
+  private DataSource resolvedDefaultDataSource;
+
+  private Logger logger = LoggerFactory.getLogger(AbstractRoutingDataSource.class);
+
+
+  public BackendConnection getConnection() throws SQLException {
+    return new BackendConnection(this);
+  }
+
+  public BackendConnection getConnection(String username, String password)
+          throws SQLException {
+    return new BackendConnection(this);
+
+  }
+
+  public void afterPropertiesSet() {
+    if (this.targetDataSources == null) {
+      throw new IllegalArgumentException("Property 'targetDataSources' is required");
+    }
+    this.resolvedDataSources = new HashMap&lt;Object, DataSource&gt;(this.targetDataSources.size());
+    for (Map.Entry entry : this.targetDataSources.entrySet()) {
+      Object lookupKey = resolveSpecifiedLookupKey(entry.getKey());
+      DataSource dataSource = resolveSpecifiedDataSource(entry.getValue());
+      this.resolvedDataSources.put(lookupKey, dataSource);
+    }
+    if (this.defaultTargetDataSource != null) {
+      this.resolvedDefaultDataSource = resolveSpecifiedDataSource(this.defaultTargetDataSource);
+    }
+  }
+
+  public void putNewDataSource(Object key, DataSource dataSource){
+    if(this.resolvedDataSources == null){
+      this.resolvedDataSources = new HashMap&lt;Object, DataSource&gt;();
+    }
+    if(this.resolvedDataSources.containsKey(key)){
+      this.resolvedDataSources.remove(key);
+      logger.info("remove old key:" + key);
+    }
+    logger.info("add key:" + key + ", value=" + dataSource);
+    this.resolvedDataSources.put(key, dataSource);
+  }
+
+  /**
+   * 数据源选择逻辑
+   */
+  public DataSource determineTargetDataSource() {
+    Assert.notNull(this.resolvedDataSources, "DataSource router not initialized");
+
+    Object lookupKey = determineCurrentLookupKey();
+    DataSourceContextHolder.clearSingleSqlDataSourceType();
+
+    int index = 0;
+    for (Entry&lt;Object, DataSource&gt; element : resolvedDataSources.entrySet()) {
+      logger.debug("myAbstractDS, index:" + index + ", key:" + element.getKey() + ", value:" + element.getValue().toString());
+      index++;
+    }
+    DataSource dataSource = this.resolvedDataSources.get(lookupKey);
+    if (dataSource == null &amp;&amp; (this.lenientFallback || lookupKey == null)) {
+      dataSource = this.resolvedDefaultDataSource;
+    }
+    if (dataSource == null) {
+      throw new IllegalStateException("Cannot determine target DataSource for lookup key [" + lookupKey + "]");
+    }
+    logger.debug("myAbstractDS, hit DS is " + dataSource.toString());
+    return dataSource;
+  }
+
+  public DataSource getTargetDataSource(Object lookupKey) {
+    Assert.notNull(this.resolvedDataSources, "DataSource router not initialized");
+
+    if(lookupKey == null){
+      lookupKey = determineCurrentLookupKey();
+    }
+    DataSourceContextHolder.clearSingleSqlDataSourceType();
+
+    int index = 0;
+    for (Entry&lt;Object, DataSource&gt; element : resolvedDataSources.entrySet()) {
+      logger.debug("myAbstractDS, index:" + index + ", key:" + element.getKey() + ", value:" + element.getValue().toString());
+      index++;
+    }
+    DataSource dataSource = this.resolvedDataSources.get(lookupKey);
+    if (dataSource == null &amp;&amp; (this.lenientFallback || lookupKey == null)) {
+      dataSource = this.resolvedDefaultDataSource;
+    }
+    if (dataSource == null) {
+      throw new IllegalStateException("Cannot determine target DataSource for lookup key [" + lookupKey + "]");
+    }
+    logger.debug("myAbstractDS, hit DS is " + dataSource.toString());
+    return dataSource;
+  }
+
+  public abstract Object determineCurrentLookupKey();
+
+  public abstract Object getCurrentSlaveKey();
+
+  @Override
+  public boolean isWrapperFor(Class&lt;?&gt; iface) throws SQLException {
+    return (iface.isInstance(this) || determineTargetDataSource().isWrapperFor(iface));
+  }
+
+  @SuppressWarnings("unchecked")
+  @Override
+  public &lt;T&gt; T unwrap(Class&lt;T&gt; iface) throws SQLException {
+    if (iface.isInstance(this)){
+      return (T) this;
+    }
+    return determineTargetDataSource().unwrap(iface);
+  }
+
+  protected Object resolveSpecifiedLookupKey(Object lookupKey) {
+    return lookupKey;
+  }
+
+  protected DataSource resolveSpecifiedDataSource(Object dataSource) throws IllegalArgumentException {
+    if (dataSource instanceof DataSource) {
+      return (DataSource) dataSource;
+    }
+    else {
+      throw new IllegalArgumentException(
+              "Illegal data source value - only [javax.sql.DataSource] and String supported: " + dataSource);
+    }
+  }
+  //get set方法省略
+}
+</code></pre> 
+<p><strong>DataSourceContextHolder</strong></p> 
+<pre><code>public class DataSourceContextHolder {
+
+  private static final TransmittableThreadLocal&lt;String&gt; singleSqlContextHolder = new TransmittableThreadLocal&lt;String&gt;();
+
+  private static final TransmittableThreadLocal&lt;String&gt; multiSqlContextHolder = new TransmittableThreadLocal&lt;String&gt;();
+
+  /**
+   * @Description: 设置单条sql数据源类型
+   * @param dataSourceType  数据库类型
+   * @return void
+   * @throws
+   */
+  public static void setSingleSqlDataSourceType(String dataSourceType) {
+    singleSqlContextHolder.set(dataSourceType);
+  }
+
+  /**
+   * @Description: 获取单条sql数据源类型
+   * @param
+   * @return String
+   * @throws
+   */
+  public static String getSingleSqlDataSourceType() {
+    return singleSqlContextHolder.get();
+  }
+
+  /**
+   * @Description: 清除单条sql数据源类型
+   * @param
+   * @return void
+   * @throws
+   */
+  public static void clearSingleSqlDataSourceType() {
+    singleSqlContextHolder.remove();
+  }
+
+  /**
+   * @Description: 设置多条sql数据源类型
+   * @param dataSourceType  数据库类型
+   * @return void
+   * @throws
+   */
+  public static void setMultiSqlDataSourceType(String dataSourceType) {
+    multiSqlContextHolder.set(dataSourceType);
+  }
+
+  /**
+   * @Description: 获取多条sql数据源类型
+   * @param
+   * @return String
+   * @throws
+   */
+  public static String getMultiSqlDataSourceType() {
+    return multiSqlContextHolder.get();
+  }
+
+  /**
+   * @Description: 清除多条sql数据源类型
+   * @param
+   * @return void
+   * @throws
+   */
+  public static void clearMultiSqlDataSourceType() {
+    multiSqlContextHolder.remove();
+  }
+
+  /**
+   * 判断当前线程是否为使用从库为数据源. 最外层service有slave的aop标签  或者 service没有aop标签且单条sql为DQL
+   *
+   * @return
+   */
+  public static boolean isSlave() {
+    return "slave".equals(multiSqlContextHolder.get()) || (multiSqlContextHolder.get()==null &amp;&amp; "slave".equals(singleSqlContextHolder.get())) ;
+  }
+
+}
+</code></pre> 
+<p><strong>DynamicDataSource</strong></p> 
+<pre><code>public class DynamicDataSource extends AbstractRoutingDataSource implements InitializingBean{
+
+  private static final Logger logger = LoggerFactory.getLogger(DynamicDataSource.class);
+
+  private Integer slaveCount = 0;
+
+  // 轮询计数,初始为-1,AtomicInteger是线程安全的  
+  private AtomicInteger counter = new AtomicInteger(-1);
+
+  // 记录读库的key  
+  private List&lt;Object&gt; slaveDataSources = new ArrayList&lt;Object&gt;(0);
+
+  // slave库的权重
+  private  Map&lt;Object,Integer&gt;  slaveDataSourcesWeight;
+
+  private Object currentSlaveKey;
+
+  public DynamicDataSource() {
+    super();
+  }
+
+  /**
+   * 构造函数
+   * @param defaultTargetDataSource
+   * @param targetDataSources
+   * @param slaveDataSourcesWeight
+   */
+  public DynamicDataSource(Object defaultTargetDataSource, Map&lt;Object,Object&gt; targetDataSources, Map&lt;Object,Integer&gt; slaveDataSourcesWeight) {
+    this.setResolvedDataSources(new HashMap&lt;Object, DataSource&gt;(targetDataSources.size()));
+    for (Map.Entry&lt;Object, Object&gt; entry : targetDataSources.entrySet()) {
+      DataSource dataSource = resolveSpecifiedDataSource(entry.getValue());
+      this.putNewDataSource(entry.getKey(), dataSource);
+    }
+    if (defaultTargetDataSource != null) {
+      this.setResolvedDefaultDataSource(resolveSpecifiedDataSource(defaultTargetDataSource));
+    }
+    this.setSlaveDataSourcesWeight(slaveDataSourcesWeight);
+    this.afterPropertiesSet();
+  }
+
+  @Override
+  public Object determineCurrentLookupKey() {
+    // 使用DataSourceContextHolder保证线程安全，并且得到当前线程中的数据源key  
+    if (DataSourceContextHolder.isSlave()) {
+      currentSlaveKey = getSlaveKey();
+      return currentSlaveKey;
+    }
+    //TODO
+    Object key = "master";
+    return key;
+  }
+
+
+  @Override
+  public void afterPropertiesSet() {
+    try {
+      super.afterPropertiesSet();
+      Map&lt;Object, DataSource&gt; resolvedDataSources = this.getResolvedDataSources();
+      //清空从库节点，重新生成
+      slaveDataSources.clear();
+      slaveCount = 0;
+      for (Map.Entry&lt;Object, DataSource&gt; entry : resolvedDataSources.entrySet()) {
+        if(slaveDataSourcesWeight.get(entry.getKey())==null){
+          continue;
+        }
+        for(int i=0; i&lt;slaveDataSourcesWeight.get(entry.getKey());i++){
+          slaveDataSources.add(entry.getKey());
+          slaveCount++;
+        }
+      }
+    } catch (Exception e) {
+      logger.error("afterPropertiesSet error! ", e);
+    }
+  }
+
+  /**
+   * 轮询算法实现 
+   *
+   * @return
+   */
+  public Object getSlaveKey() {
+    if(slaveCount &lt;= 0 || slaveDataSources == null || slaveDataSources.size() &lt;= 0){
+      return null;
+    }
+    Integer index = counter.incrementAndGet() % slaveCount;
+    if (counter.get() &gt; 9999) { // 以免超出Integer范围  
+      counter.set(-1); // 还原  
+    }
+    return slaveDataSources.get(index);
+  }
+
+  public Map&lt;Object, Integer&gt; getSlaveDataSourcesWeight() {
+    return slaveDataSourcesWeight;
+  }
+
+  public void setSlaveDataSourcesWeight(Map&lt;Object, Integer&gt; slaveDataSourcesWeight) {
+    this.slaveDataSourcesWeight = slaveDataSourcesWeight;
+  }
+
+  public Object getCurrentSlaveKey() {
+    return currentSlaveKey;
+  }
+}  
+</code></pre> 
+<p><strong>2、读库流量分配策略设计</strong></p> 
+<p>我们所有的数据库连接都是管控起来的，包括每个库的流量配置都是支持动态分配的。</p> 
+<p>支持读库按不同比例承接读请求。通过配置页面动态调整应用的数据库连接以及比例，支持随机或者顺序的方式将流量分配到相应的读库中去。</p> 
+<p>这里我们使用的配置管理下发中心是我们公司自己开发的 gconfig，当然替换成开源的 diamond 或者 applo 也是可以的。</p> 
+<p>当接收到配管中心的调整指令，会动态更新应用数据源连接，然后更新 beanFactory 中的 datasource。核心函数如下：</p> 
+<pre><code>/**
+ * 更新beanFactory
+ * @param properties
+ */
+public void refreshDataSource(String properties) {
+        YamlDynamicDataSource dataSource;
+        try {
+        dataSource = new YamlDynamicDataSource(properties);
+        } catch (IOException e) {
+        throw new RuntimeException("convert datasource config failed!");
+        }
+
+        // 验证必须字段是否存在
+        if (dataSource == null &amp;&amp; dataSource.getResolvedDataSources() == null
+        || dataSource.getResolvedDefaultDataSource() == null || dataSource.getSlaveDataSourcesWeight() == null) {
+        throw new RuntimeException("datasource config error!");
+        }
+        ConcurrentHashMap&lt;Object, DataSource&gt; newDataSource = new ConcurrentHashMap&lt;Object, DataSource&gt;(
+        dataSource.getResolvedDataSources());
+
+        //更新数据源的bean
+        DynamicDataSource dynamicDataSource = (DynamicDataSource) ((DefaultListableBeanFactory) beanFactory)
+        .getBean(dataSourceName);
+        dynamicDataSource.setResolvedDefaultDataSource(dataSource.getResolvedDefaultDataSource());
+        dynamicDataSource.setResolvedDataSources(new HashMap&lt;Object, DataSource&gt;());//将数据源清空，重新添加
+        for (Entry&lt;Object, DataSource&gt; element : newDataSource.entrySet()) {
+        dynamicDataSource.putNewDataSource(element.getKey(), element.getValue());
+        }
+        dynamicDataSource.setSlaveDataSourcesWeight(dataSource.getSlaveDataSourcesWeight());
+        dynamicDataSource.afterPropertiesSet();
+
+        }
+</code></pre> 
+<h3><strong>三、性能</strong></h3> 
+<p>我们经过性能测试，发现 Robustdb 的性能在一定层度上比 Atlas 性能更好。压测结果如下：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/32/fd/F1HeQh4V_o.png"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e6f3ced8aa8506407d9ca2d33e974de1/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Sql中in和exists详解</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/47c3bd509fd30f9567c2297c6a6bcfe6/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">队列的基本操作（全）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

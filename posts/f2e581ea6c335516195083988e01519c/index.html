@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Android Framework 包管理子系统（01）PackageManagerService启动分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Android Framework 包管理子系统（01）PackageManagerService启动分析" />
+<meta property="og:description" content="该系列文章总纲链接：专题分纲目录 Android Framework 包管理子系统
+本章关键点总结 &amp; 说明： 导图是不断迭代的，这里主要关注➕ PkgMS启动分析部分即可。在对PkgMS有一个基础了节的基础上，分析了SystemServer启动流程和构造器(对PkgMS来讲，这是核心部分)两部分。
+PackageManagerService（后面简称PkgMS）主要负责系统中Package的管理，应用程序的安装、卸载、信息查询等。
+特殊说明：
+这里 ApplicationPackageManager类继承自PackageManager类。它并没有直接参与Binder通信，而是通过mPM成员变量指向一个IPackageManager.Stub.Proxy类型的对象。源码中是没有IPackageManager.java文件的。该文件是经aidl工具处理IPackageManager.aidl后得到的，输出在Android源码/out/target/。。。目录下 在Andorid5.0种，PkgMS有两个重要的变量mInstallService(属于PackageInstallerService类型，用于管理应用程序安装)和mInstaller(属于InstallerConnection类型，和Daemon进程installd通过socket进行通信，实际上apk的格式转换、建立数据目录等工作都是由InstallD来完成)，都与应用安装有着密切的关系。关系如下图所示：
+PkgMS由SystemServer创建，在SystemServer中有关PkgMS的启动，分成几个部分
+@1 在SystemServer中startBootstrapServices中相关代码如下：
+//SS-&gt;startBootstrapServices private void startBootstrapServices() { Installer installer = mSystemServiceManager.startService(Installer.class); //... PackageManagerService m = new PackageManagerService(context, installer,...); ServiceManager.addService(&#34;package&#34;, m);//注册PkgMS到ServiceManager中 //... mPackageManagerService = PackageManagerService.main(mSystemContext, installer,...); mFirstBoot = mPackageManagerService.isFirstBoot();//这里mFirstBoot会传递到WMS中 mPackageManager = mSystemContext.getPackageManager(); //... } @2 在SystemServer中startCoreServices中相关代码如下：
+//SS-&gt;startCoreServices private void startCoreServices() { // Update after UsageStatsService is available, needed before performBootDexOpt. mPackageManagerService.getUsageStatsIfNoPackageUsageInfo(); } @3 在SystemServer中startOtherServices中相关代码如下：
+//SS-&gt;startOtherServices private void startOtherServices() { //." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/f2e581ea6c335516195083988e01519c/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-07-18T20:20:09+08:00" />
+<meta property="article:modified_time" content="2019-07-18T20:20:09+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Android Framework 包管理子系统（01）PackageManagerService启动分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>该系列文章总纲链接：<a href="https://blog.csdn.net/vviccc/article/details/104195000">专题分纲目录 Android Framework 包管理子系统</a></p> 
+<hr> 
+<h3>本章关键点总结 &amp; 说明：</h3> 
+<p style="text-align:center;"><img alt="" class="has" height="317" src="https://images2.imgbox.com/2a/55/aTps1eFH_o.png" width="600"></p> 
+<p>导图是不断迭代的，这里主要关注➕ PkgMS启动分析部分即可。在对PkgMS有一个基础了节的基础上，分析了SystemServer启动流程和构造器(对PkgMS来讲，这是核心部分)两部分。</p> 
+<p>PackageManagerService（后面简称PkgMS）主要负责系统中Package的管理，应用程序的安装、卸载、信息查询等。</p> 
+<p><br><img alt="" class="has" src="https://images2.imgbox.com/bc/3d/9HSUOaZ4_o.png"></p> 
+<p>特殊说明：</p> 
+<ol><li>这里 ApplicationPackageManager类继承自PackageManager类。它并没有直接参与Binder通信，而是通过mPM成员变量指向一个IPackageManager.Stub.Proxy类型的对象。</li><li>源码中是没有IPackageManager.java文件的。该文件是经aidl工具处理IPackageManager.aidl后得到的，输出在Android源码/out/target/。。。目录下</li></ol> 
+<p>在Andorid5.0种，PkgMS有两个重要的变量mInstallService<span style="color:#7c79e5;">(属于PackageInstallerService类型，用于管理应用程序安装)</span>和mInstaller<span style="color:#7c79e5;">(属于InstallerConnection类型，和Daemon进程installd通过socket进行通信，实际上apk的格式转换、建立数据目录等工作都是由InstallD来完成)</span>，都与应用安装有着密切的关系。关系如下图所示：</p> 
+<p style="text-align:center;"><img alt="" class="has" src="https://images2.imgbox.com/98/96/sfX6BOgu_o.png"></p> 
+<p>PkgMS由SystemServer创建，在SystemServer中有关PkgMS的启动，分成几个部分<br> @1 在SystemServer中startBootstrapServices中相关代码如下：</p> 
+<pre class="has"><code class="language-java">//SS-&gt;startBootstrapServices
+private void startBootstrapServices() {
+	Installer installer = mSystemServiceManager.startService(Installer.class);
+	//...
+	PackageManagerService m = new PackageManagerService(context, installer,...);
+	ServiceManager.addService("package", m);//注册PkgMS到ServiceManager中
+	//...
+	mPackageManagerService = PackageManagerService.main(mSystemContext, installer,...);
+	mFirstBoot = mPackageManagerService.isFirstBoot();//这里mFirstBoot会传递到WMS中
+	mPackageManager = mSystemContext.getPackageManager();
+	//...
+}</code></pre> 
+<p>@2 在SystemServer中startCoreServices中相关代码如下：</p> 
+<pre class="has"><code class="language-java">//SS-&gt;startCoreServices
+private void startCoreServices() {
+	// Update after UsageStatsService is available, needed before performBootDexOpt.
+	mPackageManagerService.getUsageStatsIfNoPackageUsageInfo();
+}</code></pre> 
+<p>@3 在SystemServer中startOtherServices中相关代码如下：</p> 
+<pre class="has"><code class="language-java">//SS-&gt;startOtherServices
+private void startOtherServices() {
+    //...
+	mPackageManagerService.performBootDexOpt();//dex优化
+	//...
+	mPackageManagerService.systemReady();//通知系统进入就绪状态
+    //...
+}</code></pre> 
+<p> 这里首先分析PkgMS的main函数，实现如下：</p> 
+<pre class="has"><code class="language-java">public static final PackageManagerService main(Context context, Installer installer,boolean factoryTest, boolean onlyCore) {
+    //调用PkgMS的构造函数，factoryTest和onlyCore的值均为false
+    PackageManagerService m = new PackageManagerService(context, installer,
+            factoryTest, onlyCore);
+    //向ServiceManager注册PKMS
+    ServiceManager.addService("package", m);
+    return m;
+}</code></pre> 
+<p>这里创建了pkgMS，之后向ServiceManager注册，但执行时间很长，因为在pkgMS构造器中做了很多事情，因此这里主要以分析pkgMS的构造方法为主，分析思路如下：</p> 
+<ol><li>扫描目标文件夹的前期工作</li><li>扫描目标文件夹</li><li>扫描后期工作</li></ol> 
+<p>接下来我们一步步分析。由于代码段比较长，这里通过分段分析的方式，集中分析关键点。</p> 
+<p><strong>1 扫描目标文件夹的前期工作</strong></p> 
+<p>分析构造函数第一阶段，代码如下：</p> 
+<pre class="has"><code class="language-java">public PackageManagerService(Context context, Installer installer,
+        boolean factoryTest, boolean onlyCore) {
+//第一阶段，start
+    EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_START,
+            SystemClock.uptimeMillis());
+    //mSdkVersion取自系统属性“ro.build.version.sdk” 即编译的SDK版本。
+    if (mSdkVersion &lt;= 0) {
+        Slog.w(TAG, "**** ro.build.version.sdk not set!");
+    }
+
+    mContext = context;
+    mFactoryTest = factoryTest; //false，运行在非工厂模式下
+    mOnlyCore = onlyCore; //为false，运行在普通模式下
+    mLazyDexOpt = "eng".equals(SystemProperties.get("ro.build.type"));
+    mMetrics = new DisplayMetrics();//显示相关属性
+	
+    mSettings = new Settings(context);
+    //关键点1：setting相关，分析addSharedUserLPw函数
+    mSettings.addSharedUserLPw("android.uid.system", Process.SYSTEM_UID,
+            ApplicationInfo.FLAG_SYSTEM|ApplicationInfo.FLAG_PRIVILEGED);
+    mSettings.addSharedUserLPw("android.uid.phone", RADIO_UID,
+            ApplicationInfo.FLAG_SYSTEM|ApplicationInfo.FLAG_PRIVILEGED);
+    mSettings.addSharedUserLPw("android.uid.log", LOG_UID,
+            ApplicationInfo.FLAG_SYSTEM|ApplicationInfo.FLAG_PRIVILEGED);
+    mSettings.addSharedUserLPw("android.uid.nfc", NFC_UID,
+            ApplicationInfo.FLAG_SYSTEM|ApplicationInfo.FLAG_PRIVILEGED);
+    mSettings.addSharedUserLPw("android.uid.bluetooth", BLUETOOTH_UID,
+            ApplicationInfo.FLAG_SYSTEM|ApplicationInfo.FLAG_PRIVILEGED);
+    mSettings.addSharedUserLPw("android.uid.shell", SHELL_UID,
+            ApplicationInfo.FLAG_SYSTEM|ApplicationInfo.FLAG_PRIVILEGED);
+//第一阶段，end
+</code></pre> 
+<p><strong>1.1 setting解读</strong></p> 
+<p>@1 addSharedUserLPw</p> 
+<p>分析addSharedUserLPw函数，调用代码如下：</p> 
+<pre class="has"><code class="language-java">mSettings.addSharedUserLPw(
+"android.uid.system", //字符串
+Process.SYSTEM_UID,//系统进程使用的用户id，值为1000
+ApplicationInfo.FLAG_SYSTEM|ApplicationInfo.FLAG_PRIVILEGED//标识系统Package
+);</code></pre> 
+<p id="3-哪些app属于privileged-app特权app"><span style="color:#3399ea;">ApplicationInfo.FLAG_PRIVILEGED标志说明：对应privileged app，那么哪些app属于privileged app（特权app）？</span></p> 
+<p><span style="color:#3399ea;">特权app首先是System app，然后要具有<code>ApplicationInfo.PRIVATE_FLAG_PRIVILEGED</code>标志。 有两类app属于privileged app：特定uid的app 和 <code>/system/framework</code>和<code>/system/priv-app</code>目录下的app</span></p> 
+<p>以上对addSharedUserLPw的几个参数进行说明，接下来分析addSharedUserLPw实现，代码如下：</p> 
+<pre class="has"><code class="language-java">SharedUserSetting addSharedUserLPw(String name, int uid, int pkgFlags) {
+    SharedUserSetting s = mSharedUsers.get(name);
+    if (s != null) {
+        if (s.userId == uid) {
+            return s;
+        }
+        return null;
+    }
+    //创建SharedUserSettings对象，并设置的userId为uid，
+    s = new SharedUserSetting(name, pkgFlags);
+    s.userId = uid;
+    if (addUserIdLPw(uid, s, name)) {
+        //mSharedUsers是一个HashMap：key为字符串，value为SharedUserSetting对象
+        mSharedUsers.put(name, s);
+        return s;
+    }
+    return null;
+}</code></pre> 
+<p>这里mSharedUsers是Setting中的成员变量，存储 字符串与SharedUserSetting键值对，也就是说以字符串为key得到对应的SharedUserSetting对象。下面对SharedUserSetting进行解读。</p> 
+<p>@2 SharedUserSetting分析</p> 
+<p>这里以 AndroidManifest.xml 为例，配置文件如下：</p> 
+<pre class="has"><code class="language-html">&lt;manifestxmlns:...
+       android:sharedUserId="android.uid.system"
+       android:process="system"&gt;</code></pre> 
+<p>在xml中，声明了一个名为android:sharedUserId的属性，其值为“android.uid.system”。sharedUserId和UID有关，有两个作用：</p> 
+<ol><li>两个以上声明了同一种sharedUserIds的APK可共享彼此的数据，可运行在同一进程</li><li>通过声明特定的sharedUserId，该APK所在进程将被赋予指定的UID(将该进程的uid设置为system的uid)</li></ol> 
+<p><span style="color:#f33b45;">特殊说明：除在AndroidManifest.xml中声明sharedUserId外，APK还需要在编译时还必须使用对应的证书进行签名。如果在Android.mk中，则需要额外声明LOCAL_CERTIFICATE := platform，如此，才可获得指定的UID。</span></p> 
+<p><span style="color:#3399ea;">如何组织一种数据结构来包括上面的内容？（关注下面3个关键点）</span></p> 
+<ol><li><span style="color:#3399ea;">XML 中 sharedUserId属性指定了一个字符串，是UID相关的字符串描述，故对应数据结构中也应该有这样一个字符串（源码和XML中属性联系起来了）。</span></li><li><span style="color:#3399ea;">Linux系统中UID是一个整数，所以该数据结构中必然有一个整型变量。</span></li><li><span style="color:#3399ea;">多个Package可声明同一个sharedUserId，因此该数据结构必然会保存那些声明了相同sharedUserId的Package的信息。</span></li></ol> 
+<p>接下来看Android是如何设计相应数据结构的，类图如下：</p> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/11/c2/076u9vK1_o.png"></p> 
+<p>类图说明：</p> 
+<ol><li>Settings类定义了一个mSharedUsers成员，HashMap类型，以字符串（如“android.uid.system”）为Key，对应Value是一个SharedUserSettings对象。</li><li>SharedUserSetting与权限相关，其成员变量packages，HashSet类型，保存声明了相同sharedUserId的Package权限设置的信息。每个Package有自己的权限设置。权限由PackageSetting类表达。</li></ol> 
+<p><strong>1.2 XML文件扫描</strong></p> 
+<p>这里继续分析构造函数第二阶段，代码如下：</p> 
+<pre class="has"><code class="language-java">//第二阶段，start
+    // TODO: add a property to control this?
+    long dexOptLRUThresholdInMinutes;
+    if (mLazyDexOpt) {
+        dexOptLRUThresholdInMinutes = 30; // only last 30 minutes of apps for eng builds.
+    } else {
+        dexOptLRUThresholdInMinutes = 7 * 24 * 60; // apps used in the 7 days for users.
+    }
+    mDexOptLRUThresholdInMills = dexOptLRUThresholdInMinutes * 60 * 1000;
+
+    //该值和调试有关，一般不设置
+    String separateProcesses = SystemProperties.get("debug.separate_processes");
+    if (separateProcesses != null &amp;&amp; separateProcesses.length() &gt; 0) {
+        if ("*".equals(separateProcesses)) {
+            mDefParseFlags = PackageParser.PARSE_IGNORE_PROCESSES;
+            mSeparateProcesses = null;
+        } else {
+            mDefParseFlags = 0;
+            mSeparateProcesses = separateProcesses.split(",");
+        }
+    } else {
+        mDefParseFlags = 0;
+        mSeparateProcesses = null;
+    }
+
+    mInstaller = installer; //初始化Native进程installd交互
+    apk的安装和卸载最终都是调用installd来实现
+    getDefaultDisplayMetrics(context, mMetrics);//获取当前设备的显示屏信息
+    
+    //创建SystemConfig，这里会调用readPermissions各种权限
+    SystemConfig systemConfig = SystemConfig.getInstance();
+    mGlobalGids = systemConfig.getGlobalGids();
+    mSystemPermissions = systemConfig.getSystemPermissions();
+    mAvailableFeatures = systemConfig.getAvailableFeatures();
+
+    //环境变量初始化
+    synchronized (mInstallLock) {
+    // writer
+    synchronized (mPackages) {
+        mHandlerThread = new ServiceThread(TAG,
+                Process.THREAD_PRIORITY_BACKGROUND, true /*allowIo*/);
+        //创建一个ThreadHandler对象，该线程的工作是：程序的安装和卸载
+        mHandlerThread.start();
+        mHandler = new PackageHandler(mHandlerThread.getLooper());
+        Watchdog.getInstance().addThread(mHandler, WATCHDOG_TIMEOUT);
+
+        File dataDir = Environment.getDataDirectory();
+        // mAppDataDir指向/data/data目录
+        mAppDataDir = new File(dataDir, "data");
+        mAppInstallDir = new File(dataDir, "app");
+        mAppLib32InstallDir = new File(dataDir, "app-lib");
+        mAsecInternalPath = new File(dataDir, "app-asec").getPath();
+        // mUserAppDataDir指向/data/user目录
+        mUserAppDataDir = new File(dataDir, "user");
+        // mDrmAppPrivateInstallDir指向/data/app-private目录
+        mDrmAppPrivateInstallDir = new File(dataDir, "app-private");
+
+        sUserManager = new UserManagerService(context, this,
+                mInstallLock, mPackages);
+
+        //权限注册到 package manager，一个权限与几个组ID对应，当一个APK授予这个权限时，它同属于这几个组
+        ArrayMap&lt;String, SystemConfig.PermissionEntry&gt; permConfig
+                = systemConfig.getPermissions();
+        //遍历权限配置文件
+        for (int i=0; i&lt;permConfig.size(); i++) {
+            SystemConfig.PermissionEntry perm = permConfig.valueAt(i);
+            //拿到权限
+            BasePermission bp = mSettings.mPermissions.get(perm.name);
+            if (bp == null) {
+                bp = new BasePermission(perm.name, "android", BasePermission.TYPE_BUILTIN);
+                //写入权限
+                mSettings.mPermissions.put(perm.name, bp);
+            }
+            if (perm.gids != null) {
+                bp.gids = appendInts(bp.gids, perm.gids);
+            }
+        }
+
+        ArrayMap&lt;String, String&gt; libConfig = systemConfig.getSharedLibraries();
+        for (int i=0; i&lt;libConfig.size(); i++) {
+            mSharedLibraries.put(libConfig.keyAt(i),
+                    new SharedLibraryEntry(libConfig.valueAt(i), null));
+        }
+
+        mFoundPolicyFile = SELinuxMMAC.readInstallPolicy();
+        mRestoredSettings = mSettings.readLPw(this, sUserManager.getUsers(false),
+                mSdkVersion, mOnlyCore);
+
+        String customResolverActivity = Resources.getSystem().getString(
+                R.string.config_customResolverActivity);
+        if (TextUtils.isEmpty(customResolverActivity)) {
+            customResolverActivity = null;
+        } else {
+            mCustomResolverComponentName = ComponentName.unflattenFromString(
+                    customResolverActivity);
+        }
+        long startTime = SystemClock.uptimeMillis();
+//第二阶段，end</code></pre> 
+<p>@1 这里关注➕ SystemConfig类的创建与构造，这里使用了getInstance，即单例模式，对应代码如下：</p> 
+<pre class="has"><code class="language-java">public static SystemConfig getInstance() {
+    synchronized (SystemConfig.class) {
+        if (sInstance == null) {
+            sInstance = new SystemConfig();
+        }
+        return sInstance;
+    }
+}</code></pre> 
+<p>继续分析，构造器实现代码如下：</p> 
+<pre class="has"><code class="language-java">SystemConfig() {
+    // Read configuration from system
+    readPermissions(Environment.buildPath(
+            Environment.getRootDirectory(), "etc", "sysconfig"), false);
+    // Read configuration from the old permissions dir
+    readPermissions(Environment.buildPath(
+            Environment.getRootDirectory(), "etc", "permissions"), false);
+    // Only read features from OEM config
+    readPermissions(Environment.buildPath(
+            Environment.getOemDirectory(), "etc", "sysconfig"), true);
+    readPermissions(Environment.buildPath(
+            Environment.getOemDirectory(), "etc", "permissions"), true);
+}</code></pre> 
+<p>继续分析readPermissions，代码如下：</p> 
+<pre class="has"><code class="language-java">void readPermissions(File libraryDir, boolean onlyFeatures) {
+    // Read permissions from given directory.
+    if (!libraryDir.exists() || !libraryDir.isDirectory()) {
+        if (!onlyFeatures) {
+            Slog.w(TAG, "No directory " + libraryDir + ", skipping");
+        }
+        return;
+    }
+    if (!libraryDir.canRead()) {
+        Slog.w(TAG, "Directory " + libraryDir + " cannot be read");
+        return;
+    }
+
+    // Iterate over the files in the directory and scan .xml files
+    File platformFile = null;
+    for (File f : libraryDir.listFiles()) {
+        //先处理该目录下的非platform.xml文件
+        if (f.getPath().endsWith("etc/permissions/platform.xml")) {
+            platformFile = f;
+            continue;
+        }
+
+        if (!f.getPath().endsWith(".xml")) {
+            Slog.i(TAG, "Non-xml file " + f + " in " + libraryDir + " directory, ignoring");
+            continue;
+        }
+
+        if (!f.canRead()) {
+            Slog.w(TAG, "Permissions library file " + f + " cannot be read");
+            continue;
+        }
+        //调用readPermissionFromXml解析XML后缀的文件
+        readPermissionsFromXml(f, onlyFeatures);
+    }
+
+    // Read platform permissions last so it will take precedence
+    //单独处理 /system/etc/permissions/platform.xml文件。
+    if (platformFile != null) {
+        readPermissionsFromXml(platformFile, onlyFeatures);
+    }
+}</code></pre> 
+<p>这里关键是调用readPermissionFromXml函数解析/system/etc/permissions，/system/etc/sysconfig目录下的文件以及vendor/etc/permissions，/vendor/etc/sysconfig目录下的文件，而这些文件都是在编译阶段由不同硬件平台根据自己的配置信息复制相关文件到目标目录中得来的，这里继续分析readPermissionsFromXml，代码如下：</p> 
+<pre class="has"><code class="language-java">private void readPermissionsFromXml(File permFile, boolean onlyFeatures) {
+    FileReader permReader = null;
+    try {
+        permReader = new FileReader(permFile);
+    } catch (FileNotFoundException e) {
+        Slog.w(TAG, "Couldn't find or open permissions file " + permFile);
+        return;
+    }
+
+    final boolean lowRam = ActivityManager.isLowRamDeviceStatic();
+
+    try {
+        XmlPullParser parser = Xml.newPullParser();
+        parser.setInput(permReader);
+
+        //XML解析相关...
+    } finally {
+        IoUtils.closeQuietly(permReader);
+    }
+    //...
+}</code></pre> 
+<p>这里主要是将XML中的标签转换成对应的数据结构，这些数据结构的目的是为了保存XML中各种标签及它们之间的关系。在分析和使用中，重要的是理解各标签的作用。</p> 
+<p>@2 mSettings.readLPw函数</p> 
+<p>readLPw的功能也是解析文件，只不过这些文件在PkgMS启动后生成，部分关注➕代码如下：</p> 
+<pre class="has"><code class="language-java">boolean readLPw(PackageManagerService service, List&lt;UserInfo&gt; users, int sdkVersion,
+        boolean onlyCore) {
+    FileInputStream str = null;
+    if (mBackupSettingsFilename.exists()) {
+        try {
+            str = new FileInputStream(mBackupSettingsFilename);
+            mReadMessages.append("Reading from backup settings file\n");
+            PackageManagerService.reportSettingsProblem(Log.INFO,
+                    "Need to read from backup settings file");
+            if (mSettingsFilename.exists()) {
+                mSettingsFilename.delete();
+            }
+        } catch (java.io.IOException e) {
+            // We'll try for the normal settings file.
+        }
+    }
+	//...
+    if (mBackupStoppedPackagesFilename.exists()
+            || mStoppedPackagesFilename.exists()) {
+        // Read old file
+        readStoppedLPw();
+        mBackupStoppedPackagesFilename.delete();
+        mStoppedPackagesFilename.delete();
+        // Migrate to new file format
+        writePackageRestrictionsLPr(0);
+    } else {
+        if (users == null) {
+            readPackageRestrictionsLPr(0);
+        } else {
+            for (UserInfo user : users) {
+                readPackageRestrictionsLPr(user.id);
+            }
+        }
+    }
+	//...
+    return true;
+}</code></pre> 
+<p>这里关注两组文件，说明如下：</p> 
+<ol><li>packages.xml和packages-backup.xml为一组，用于描述系统中所安装的Package的信息，其中backup是临时文件。PKMS先把数据写到backup中，信息都写成功后再改名成非backup的文件。其目的是防止在写文件过程中出错，导致信息丢失。</li><li>packages-stopped.xml和packages-stopped-backup.xml为一组，用于描述系统中强制停止运行的pakcage的信息，backup也是临时文件。如果此处存在该临时文件，表明此前系统因为某种原因中断了正常流程。</li></ol> 
+<p>readLPw的函数功能就是解析其中XML文件内容，建立并更新对应的数据结构，例如停止的package重启之后依然是stopped状态。同时，这里简单介绍一下这些文件（忽略backup文件）：</p> 
+<ol><li>packages.xml：PkgMS扫描完目标文件夹后创建。当系统进行程序安装、卸载和更新时会更新该文件。它保存了系统中与package相关的一些信息。</li><li>packages.list：描述系统中存在的所有非系统自带的APK的信息。当这些APK程序有变动时，PkgMS更新该文件。</li><li>packages-stopped.xml：从Setting程序中进入应用程序页面，然后在选择强制停止（ForceStop）某个应用时，系统会将该应用的相关信息记录到此文件中。该文件保存系统中被用户强制停止的Package的信息。</li></ol> 
+<p><strong>1.3 总结</strong></p> 
+<p>对以上部分进行简单总结：PkgMS扫描并解析XML文件，将其中的信息保存到特定的数据结构中。<br> 扫描的XML文件、权限、上一次扫描得到的Package信息有关，它为PkgMS下一阶段的工作提供了重要的参考信息。</p> 
+<p><strong>2 扫描目标文件夹</strong></p> 
+<p>扫描系统中的APK时，由于需要逐个扫描文件，因此手机上安装程序越多，PkgMS工作量越大，系统启动速度也就越慢。</p> 
+<p><strong>2.1 dex优化</strong></p> 
+<pre class="has"><code class="language-java">//第三阶段，start
+        EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_SYSTEM_SCAN_START,
+                startTime);
+        //定义扫描参数
+        final int scanFlags = SCAN_NO_PATHS | SCAN_DEFER_DEX | SCAN_BOOTING;
+
+        final ArraySet&lt;String&gt; alreadyDexOpted = new ArraySet&lt;String&gt;();
+
+        final String bootClassPath = System.getenv("BOOTCLASSPATH");
+        final String systemServerClassPath = System.getenv("SYSTEMSERVERCLASSPATH");
+
+        if (bootClassPath != null) {
+            String[] bootClassPathElements = splitString(bootClassPath, ':');
+            for (String element : bootClassPathElements) {
+                alreadyDexOpted.add(element);
+            }
+        }
+
+        if (systemServerClassPath != null) {
+            String[] systemServerClassPathElements = splitString(systemServerClassPath, ':');
+            for (String element : systemServerClassPathElements) {
+                alreadyDexOpted.add(element);
+            }
+        }
+
+        final List&lt;String&gt; allInstructionSets = getAllInstructionSets();
+        final String[] dexCodeInstructionSets =
+            getDexCodeInstructionSets(allInstructionSets.toArray(new String[allInstructionSets.size()]));
+
+        //Ensure all external libraries have had dexopt run on them.
+        if (mSharedLibraries.size() &gt; 0) {
+            for (String dexCodeInstructionSet : dexCodeInstructionSets) {
+                for (SharedLibraryEntry libEntry : mSharedLibraries.values()) {
+                    final String lib = libEntry.path;
+                    if (lib == null) {
+                        continue;
+                    }
+
+                    try {
+                        //判断该jar包是否需要重新做dex优化
+                        byte dexoptRequired = DexFile.isDexOptNeededInternal(lib, null,
+                                                                             dexCodeInstructionSet,
+                                                                             false);
+                        if (dexoptRequired != DexFile.UP_TO_DATE) {
+                            alreadyDexOpted.add(lib);
+
+                            // The list of "shared libraries" we have at this point is
+                            if (dexoptRequired == DexFile.DEXOPT_NEEDED) {
+                                //将该jar包文件路径保存到libFiles中，然后通过mInstall对象发送,命令给installd，让其对该jar包进行dex优化
+                                mInstaller.dexopt(lib, Process.SYSTEM_UID, true, dexCodeInstructionSet);
+                            } else {
+                                //如果是art模式，调用Install的patchoat转换成oat文件
+                                mInstaller.patchoat(lib, Process.SYSTEM_UID, true, dexCodeInstructionSet);
+                            }
+                        }
+                    } catch (FileNotFoundException e) {
+                        //...
+                    }
+                }
+            }
+        }
+
+        File frameworkDir = new File(Environment.getRootDirectory(), "framework");
+        alreadyDexOpted.add(frameworkDir.getPath() + "/framework-res.apk");
+        alreadyDexOpted.add(frameworkDir.getPath() + "/core-libart.jar");
+
+        //对framework下的文件执行dex到odex的转换
+        String[] frameworkFiles = frameworkDir.list();
+        if (frameworkFiles != null) {
+            for (String dexCodeInstructionSet : dexCodeInstructionSets) {
+                for (int i=0; i&lt;frameworkFiles.length; i++) {
+                    //判断该目录下的apk或jar文件是否需要做dex优化。
+                    File libPath = new File(frameworkDir, frameworkFiles[i]);
+                    String path = libPath.getPath();
+                    //忽略已经在alreadyDexOpted列表的文件
+                    if (alreadyDexOpted.contains(path)) {
+                        continue;
+                    }
+                    //忽略apk和jar意外的文件
+                    if (!path.endsWith(".apk") &amp;&amp; !path.endsWith(".jar")) {
+                        continue;
+                    }
+                    try {
+                        //判断该jar包是否需要重新做dex优化
+                        byte dexoptRequired = DexFile.isDexOptNeededInternal(path, null,
+                                                                             dexCodeInstructionSet,
+                                                                             false);
+                        if (dexoptRequired == DexFile.DEXOPT_NEEDED) {
+                            //转换成dex格式
+                            mInstaller.dexopt(path, Process.SYSTEM_UID, true, dexCodeInstructionSet);
+                        } else if (dexoptRequired == DexFile.PATCHOAT_NEEDED) {
+                            mInstaller.patchoat(path, Process.SYSTEM_UID, true, dexCodeInstructionSet);
+                        }
+                    } catch (FileNotFoundException e) {
+                        //...
+                    }
+                }
+            }
+        }
+//第三阶段，end</code></pre> 
+<p>这段代码主要是将必要的apk和jar文件进行优化<span style="color:#3399ea;">(优化通过installer来做)</span>。</p> 
+<p><strong>2.2 扫描系统pacakge</strong></p> 
+<pre class="has"><code class="language-java">//第四阶段，start
+        //扫描vendor/overlay目录，搜集目录中文件的信息
+        File vendorOverlayDir = new File(VENDOR_OVERLAY_DIR);
+        scanDirLI(vendorOverlayDir, PackageParser.PARSE_IS_SYSTEM
+                | PackageParser.PARSE_IS_SYSTEM_DIR, scanFlags | SCAN_TRUSTED_OVERLAY, 0);
+
+        //在第三个参数中设置了SCAN_NO_DEX标志，因为该目录下的package在前面的流程中已经过判断并根据需要做过dex优化了
+        //扫描system/framework目录，搜集目录中文件的信息
+        scanDirLI(frameworkDir, PackageParser.PARSE_IS_SYSTEM
+                | PackageParser.PARSE_IS_SYSTEM_DIR
+                | PackageParser.PARSE_IS_PRIVILEGED,
+                scanFlags | SCAN_NO_DEX, 0);
+
+        final File privilegedAppDir = new File(Environment.getRootDirectory(), "priv-app");
+        //扫描system/priv-app目录，搜集目录中文件的信息
+        scanDirLI(privilegedAppDir, PackageParser.PARSE_IS_SYSTEM
+                | PackageParser.PARSE_IS_SYSTEM_DIR
+                | PackageParser.PARSE_IS_PRIVILEGED, scanFlags, 0);
+
+        ///扫描system/app目录，搜集目录中文件的信息
+        final File systemAppDir = new File(Environment.getRootDirectory(), "app");
+        scanDirLI(systemAppDir, PackageParser.PARSE_IS_SYSTEM
+                | PackageParser.PARSE_IS_SYSTEM_DIR, scanFlags, 0);
+
+        //扫描vendor/app目录，搜集目录中文件的信息
+        File vendorAppDir = new File("/vendor/app");
+        try {
+            vendorAppDir = vendorAppDir.getCanonicalFile();
+        } catch (IOException e) {
+            // failed to look up canonical path, continue with original one
+        }
+        scanDirLI(vendorAppDir, PackageParser.PARSE_IS_SYSTEM
+                | PackageParser.PARSE_IS_SYSTEM_DIR, scanFlags, 0);
+
+        //扫描oem/app目录，搜集目录中文件的信息
+        final File oemAppDir = new File(Environment.getOemDirectory(), "app");
+        scanDirLI(oemAppDir, PackageParser.PARSE_IS_SYSTEM
+                | PackageParser.PARSE_IS_SYSTEM_DIR, scanFlags, 0);
+        //调用installd执行/system/etc/updatecmds下命令脚本
+        mInstaller.moveFiles();
+//第四阶段，end</code></pre> 
+<p>这里将扫描以下几个目录(这里只挑关键几个文件夹进行说明)：</p> 
+<ol><li>/system/frameworks：该目录文件都是系统库，例如framework.jar、services.jar、framework-res.apk。因为这里scanDirLI只扫描APK文件，这里只有framework-res.apk。</li><li>/system/app：该目录下存放系统级应用，例如Phone.apk、Contacts.apk等。</li><li>/system/priv-app:与/system/app功能类似，只不过拥有更多的权限，例如Setting，SystemUI等。</li><li>/vendor/app：该目录文件由厂商提供，即厂商特定的APK文件。</li></ol> 
+<p>因为主要调用scanDirLI函数对应用目录进行扫描，因此对该函数进行分析，代码如下：</p> 
+<pre class="has"><code class="language-java">private void scanDirLI(File dir, int parseFlags, int scanFlags, long currentTime) {
+    final File[] files = dir.listFiles();//列举该目录下的文件
+	//...
+
+    for (File file : files) {
+        final boolean isPackage = (isApkFile(file) || file.isDirectory())
+                &amp;&amp; !PackageInstallerService.isStageName(file.getName());
+        if (!isPackage) {//这里只扫描APK 文件
+            // Ignore entries which are not packages
+            continue;
+        }
+        try {
+            scanPackageLI(file, parseFlags | PackageParser.PARSE_MUST_BE_APK,
+                    scanFlags, currentTime, null);
+        } catch (PackageManagerException e) {
+            //... 删除安装失败的文件和目录
+            }
+        }
+    }
+}</code></pre> 
+<p>这里继续分析scanPackageLI，代码实现如下：</p> 
+<pre class="has"><code class="language-java">private PackageParser.Package scanPackageLI(File scanFile, int parseFlags, int scanFlags,
+        long currentTime, UserHandle user) throws PackageManagerException {
+    if (DEBUG_INSTALL) Slog.d(TAG, "Parsing: " + scanFile);
+    parseFlags |= mDefParseFlags;//默认的扫描标志，正常情况下为0
+    //创建一个PackageParser对象
+    PackageParser pp = new PackageParser();
+    pp.setSeparateProcesses(mSeparateProcesses);
+    pp.setOnlyCoreApps(mOnlyCore);
+    pp.setDisplayMetrics(mMetrics);
+
+    if ((scanFlags &amp; SCAN_TRUSTED_OVERLAY) != 0) {
+        parseFlags |= PackageParser.PARSE_TRUSTED_OVERLAY;
+    }
+
+    final PackageParser.Package pkg;
+    try {
+        //解析参数重传递的scanFile文件。
+        pkg = pp.parsePackage(scanFile, parseFlags);
+    } catch (PackageParserException e) {
+        throw PackageManagerException.from(e);
+    }
+
+    //...处理更改了包名的应用
+    //... 处理安装升级包的系统应用
+	
+    //扫描文件签名
+    collectCertificatesLI(pp, ps, pkg, scanFile, parseFlags);
+    //...
+	
+    if ((parseFlags &amp; PackageParser.PARSE_IS_SYSTEM_DIR) == 0) {
+        if (ps != null &amp;&amp; !ps.codePath.equals(ps.resourcePath)) {
+            parseFlags |= PackageParser.PARSE_FORWARD_LOCK;
+        }
+    }
+
+    String resourcePath = null;
+    String baseResourcePath = null;
+    if ((parseFlags &amp; PackageParser.PARSE_FORWARD_LOCK) != 0 &amp;&amp; !updatedPkgBetter) {
+        if (ps != null &amp;&amp; ps.resourcePathString != null) {
+            resourcePath = ps.resourcePathString;
+            baseResourcePath = ps.resourcePathString;
+        }
+    } else {
+        //...
+    }
+
+    //设置应用相关路径
+    pkg.applicationInfo.setCodePath(pkg.codePath);
+    pkg.applicationInfo.setBaseCodePath(pkg.baseCodePath);
+    pkg.applicationInfo.setSplitCodePaths(pkg.splitCodePaths);
+    pkg.applicationInfo.setResourcePath(resourcePath);
+    pkg.applicationInfo.setBaseResourcePath(baseResourcePath);
+    pkg.applicationInfo.setSplitResourcePaths(pkg.splitCodePaths);
+
+    //注意这里调用了另一个scanPackageLI函数，参数不同
+    PackageParser.Package scannedPkg = scanPackageLI(pkg, parseFlags, scanFlags
+            | SCAN_UPDATE_SIGNATURE, currentTime, user);
+
+    if (shouldHideSystemApp) {
+        synchronized (mPackages) {
+            //如果扫描的应用带有升级包，把它们的关系保存到mSettings中
+            grantPermissionsLPw(pkg, true, pkg.packageName);
+            mSettings.disableSystemPackageLPw(pkg.packageName);
+        }
+    }
+    return scannedPkg;
+}</code></pre> 
+<p>PackageParser的目的是完成从物理文件到对应数据结构的转换，在scanPackageLI的返回值 (即PackageParser的内部类Package类的实例)代表一个APK文件，它就是和APK文件对应的数据结构。</p> 
+<p>@1 解析APK文件(PackageParser函数)</p> 
+<p>这里首先对PackageParser进行解析，它主要负责解析APK文件中的AndroidManifest.xml，PackageParser.parsePackage方法代码实现如下：</p> 
+<pre class="has"><code class="language-java">public Package parsePackage(File packageFile, int flags) throws PackageParserException {
+    if (packageFile.isDirectory()) {
+        return parseClusterPackage(packageFile, flags);
+    } else {
+        return parseMonolithicPackage(packageFile, flags);
+    }
+}</code></pre> 
+<p>这里继续分析2个关键函数，parseClusterPackage和parseMonolithicPackage。由于这里面的调用关系并不简单，因此这里仅给出调用栈，整个函数执行的目的只有一个，那就是解析Androidmanifest，两个方法的调用栈分别如下：</p> 
+<p>@@1.1 parseClusterPackage解析，调用栈如下：</p> 
+<pre class="has"><code class="language-java">parseClusterPackage(File packageDir, int flags) 
+    parseClusterPackageLite(packageDir, 0);
+        循环处理：parseApkLite(file, flags);
+           openXmlResourceParser(cookie, ANDROID_MANIFEST_FILENAME);
+           parseApkLite(apkPath, res, parser, attrs, flags, signatures);//xml处理
+    parseBaseApk(baseApk, assets, flags);
+        openXmlResourceParser(cookie, ANDROID_MANIFEST_FILENAME);
+        parseBaseApk(Resources res, XmlResourceParser parser, int flags,String[] outError) //Parse the manifest of a &lt;em&gt;base APK&lt;/em&gt;.
+    循环处理：parseSplitApk(pkg, i, assets, flags);</code></pre> 
+<p>@@1.2 parseMonolithicPackage解析</p> 
+<pre class="has"><code class="language-java">parseMonolithicPackage(File apkFile, int flags)
+    parseMonolithicPackageLite(apkFile, flags);
+        parseApkLite(packageFile, flags);//xml处理
+            openXmlResourceParser(cookie, ANDROID_MANIFEST_FILENAME);
+            parseApkLite(apkPath, res, parser, attrs, flags, signatures);//xml处理
+    parseBaseApk(baseApk, assets, flags);
+        openXmlResourceParser(cookie, ANDROID_MANIFEST_FILENAME);
+        parseBaseApk(Resources res, XmlResourceParser parser, int flags,String[] outError) //Parse the manifest of a &lt;em&gt;base APK&lt;/em&gt;.
+    循环处理：parseSplitApk(pkg, i, assets, flags);</code></pre> 
+<p><span style="color:#3399ea;">说明：以上分析忽略AssetManager、Resource等相关代码。主要是调用parseApkLite 和 parsebaseApk 来解析AndroidMinfest。</span></p> 
+<p>PackageParser定了相当多的内部类，这些内部类的作用就是保存对应的信息。解析AndroidManifest.xml文件得到的信息由Package保存。从该类的成员变量可看出，和Android四大组件相关的信息分别由activites、receivers、providers、services保存。以PackageParser.Activity为例，它从Component&lt;ActivityIntentInfo&gt;派生。Component是一个模板类，元素类型是ActivityIntentInfo，此类的顶层基类是IntentFilter。PackageParser.Activity内部有一个ActivityInfo类型的成员变量，该变量保存的就是四大组件中Activity的信息。<span style="color:#7c79e5;">那么为什么不直接使用ActivityInfo，而是通过IntentFilter构造出一个使用模板的复杂类型PackageParser.Activity呢？</span></p> 
+<p><span style="color:#7c79e5;">因为Package除了保存信息外，还需要支持Intent匹配查询。</span></p> 
+<p><span style="color:#3399ea;">说明：PackageParser定了一个轻量级的数据结构PackageLite，该类仅存储Package的一些简单信息。我们在介绍Package安装的时候，会遇到PackageLite。</span></p> 
+<p>@2 scanPackageLI函数(再次被调用)</p> 
+<p>在PackageParser扫描完一个APK后，系统根据该APK中AndroidManifest.xml创建一个完整的Package对象，下一步就是将该Package加入到系统中。此时调用的函数就是另外一个scanPackageLI，其代码如下：</p> 
+<pre class="has"><code class="language-java">private PackageParser.Package scanPackageLI(PackageParser.Package pkg, int parseFlags,
+        int scanFlags, long currentTime, UserHandle user) throws PackageManagerException {
+    boolean success = false;
+    try {
+        final PackageParser.Package res = scanPackageDirtyLI(pkg, parseFlags, scanFlags,
+                currentTime, user);
+        success = true;
+        return res;
+    } finally {
+        if (!success &amp;&amp; (scanFlags &amp; SCAN_DELETE_DATA_ON_FAILURES) != 0) {
+            removeDataDirsLI(pkg.packageName);
+        }
+    }
+}</code></pre> 
+<p>这里主要关注scanPackageDirtyLI()函数(过长，因此这里仅作功能描述)，功能如下：</p> 
+<ol><li>建立ResolverActivity内存对象：当发出intent时，如果系统中存在多个可以响应该intent的Activity，android系统会弹出一个框让给用户选择，这个框就是ResolverActivity，保存在PkgMS的mResolverActivity变量中，相关代码位于framework-res.apk中</li><li>升级相关：处理&lt;original-package&gt;标签，且有升级包，则将包的信息加入到mSettings.mRenamedPackages变量中，这些信息保存到package.xml中的&lt;renamed-package&gt;标签下。</li><li>校验和整理工作：校验签名；检查ContentProvider名称；调用fixprocessName来确定将来进程名称；创建应用数据目录，有错误直接删除</li><li>安装系统库文件：应用中带了动态库，安装在/data/data/&lt;package-name&gt;/lib下，如果是系统应用，则展开动态库到/system/lib下</li><li>重新优化dex文件：动态库发生变化则重新生成odex文件。</li><li>提取应用中组件信息：把应用中的Activity信息、Service信息、Provider信息、Receiver信息、Permission信息。。。等都提取出来，加入到PkgMS的成员变量中，比如：</li><li> <pre class="has"><code class="language-java">    // All available activities, for your resolving pleasure.
+    final ActivityIntentResolver mActivities = new ActivityIntentResolver();
+
+    // All available receivers, for your resolving pleasure.
+    final ActivityIntentResolver mReceivers = new ActivityIntentResolver();
+
+    // All available services, for your resolving pleasure.
+    final ServiceIntentResolver mServices = new ServiceIntentResolver();
+
+    // All available providers, for your resolving pleasure.
+    final ProviderIntentResolver mProviders = new ProviderIntentResolver();</code></pre> <p> </p> </li></ol> 
+<p><strong>2.3 扫描非系统Package</strong></p> 
+<p>非系统Package就是指那些不存储在系统目录下的APK文件，该部分处理代码如下：</p> 
+<pre class="has"><code class="language-java">//第五阶段，start
+        //这里记录的是可能有升级包的系统应用
+        final List&lt;String&gt; possiblyDeletedUpdatedSystemApps = new ArrayList&lt;String&gt;();
+        final ArrayMap&lt;String, File&gt; expectingBetter = new ArrayMap&lt;&gt;();
+        if (!mOnlyCore) {mOnlyCore用于控制是否扫描非系统Package
+		    //循环处理mSettings.mPackages的应用信息
+            Iterator&lt;PackageSetting&gt; psit = mSettings.mPackages.values().iterator();
+            while (psit.hasNext()) {
+                //...
+            }
+        }
+
+        //扫描并删除未安装成功的apk包
+        ArrayList&lt;PackageSetting&gt; deletePkgsList = mSettings.getListOfIncompleteInstallPackagesLPr();
+        //clean up list
+        for(int i = 0; i &lt; deletePkgsList.size(); i++) {
+            //删除安装不成功的文件及临时文件
+            cleanupInstallFailedPackage(deletePkgsList.get(i));
+        }
+        deleteTempPackageFiles();
+        mSettings.pruneSharedUsersLPw();
+
+		//处理非系统应用
+        if (!mOnlyCore) {
+            EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_DATA_SCAN_START,
+                    SystemClock.uptimeMillis());
+            // 扫描/data/app，收集文件目录中的信息
+            scanDirLI(mAppInstallDir, 0, scanFlags, 0);
+			// 扫描/data/app_private，收集文件目录中的信息
+            scanDirLI(mDrmAppPrivateInstallDir, PackageParser.PARSE_FORWARD_LOCK,
+                    scanFlags, 0);
+			//...
+            for (int i = 0; i &lt; expectingBetter.size(); i++) {
+                final String packageName = expectingBetter.keyAt(i);
+                if (!mPackages.containsKey(packageName)) {
+                    final File scanFile = expectingBetter.valueAt(i);
+                    final int reparseFlags;
+					//确保应用位于下面的4个系统应用目录
+                    if (FileUtils.contains(privilegedAppDir, scanFile)) {
+                        reparseFlags = PackageParser.PARSE_IS_SYSTEM
+                                | PackageParser.PARSE_IS_SYSTEM_DIR
+                                | PackageParser.PARSE_IS_PRIVILEGED;
+                    } else if (FileUtils.contains(systemAppDir, scanFile)) {
+                        reparseFlags = PackageParser.PARSE_IS_SYSTEM
+                                | PackageParser.PARSE_IS_SYSTEM_DIR;
+                    } else if (FileUtils.contains(vendorAppDir, scanFile)) {
+                        reparseFlags = PackageParser.PARSE_IS_SYSTEM
+                                | PackageParser.PARSE_IS_SYSTEM_DIR;
+                    } else if (FileUtils.contains(oemAppDir, scanFile)) {
+                        reparseFlags = PackageParser.PARSE_IS_SYSTEM
+                                | PackageParser.PARSE_IS_SYSTEM_DIR;
+                    } else {
+                        continue;
+                    }
+                    mSettings.enableSystemPackageLPw(packageName);
+					//扫描并处理应用
+                    scanPackageLI(scanFile, reparseFlags, scanFlags, 0, null);
+                }
+            }
+        }
+		//更新所有应用的动态库路径
+        updateAllSharedLibrariesLPw();
+
+        for (SharedUserSetting setting : mSettings.getAllSharedUsersLPw()) {
+            adjustCpuAbisForSharedUserLPw(setting.packages, null /* scanned package */,
+                    false /* force dexopt */, false /* defer dexopt */);
+        }
+        mPackageUsage.readLP();
+
+        EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_SCAN_END,
+                SystemClock.uptimeMillis());
+//第五阶段，end</code></pre> 
+<p><strong>2.4 总结</strong></p> 
+<p>目录说明：</p> 
+<ol><li>系统Package目录包括：/system/frameworks、/system/app和/vendor/app。</li><li>非系统Package目录包括：/data/app、/data/app-private。</li></ol> 
+<p>PkgMS构造函数第三阶段 要创建比较多的对象，所以它是一个耗时耗内存的操作。</p> 
+<p><strong>3 扫描后期工作</strong></p> 
+<p>该部分主要是将第二部分收集的信息再集中整理一次，比如将有些信息保存到文件中，如下所示：</p> 
+<pre class="has"><code class="language-java">//第六阶段，start
+        final boolean regrantPermissions = mSettings.mInternalSdkPlatform
+                != mSdkVersion;
+        mSettings.mInternalSdkPlatform = mSdkVersion;
+         //汇总并更新和Permission相关的信息
+        updatePermissionsLPw(null, null, UPDATE_PERMISSIONS_ALL
+                | (regrantPermissions
+                        ? (UPDATE_PERMISSIONS_REPLACE_PKG|UPDATE_PERMISSIONS_REPLACE_ALL)
+                        : 0));
+        if (!mRestoredSettings &amp;&amp; !onlyCore) {
+            mSettings.readDefaultPreferredAppsLPw(this, 0);
+        }
+
+        // OTA后第一次启动，需要清除cache
+        mIsUpgrade = !Build.FINGERPRINT.equals(mSettings.mFingerprint);
+        if (mIsUpgrade &amp;&amp; !onlyCore) {
+            for (String pkgName : mSettings.mPackages.keySet()) {
+                deleteCodeCacheDirsLI(pkgName);
+            }
+            mSettings.mFingerprint = Build.FINGERPRINT;
+        }
+        //将信息写到package.xml、package.list及package-stopped.xml文件中
+        mSettings.updateInternalDatabaseVersion();
+        mSettings.writeLPr();
+        EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_READY,
+                SystemClock.uptimeMillis());
+
+
+        mRequiredVerifierPackage = getRequiredVerifierLPr();
+    } // synchronized (mPackages)
+    } // synchronized (mInstallLock)
+    //创建PackageInstallerService
+    mInstallerService = new PackageInstallerService(context, this, mAppInstallDir);
+    Runtime.getRuntime().gc();//启动内存垃圾回收
+}
+//第六阶段，end</code></pre> 
+<p>至此，整个PkgMS的 构造函数就分析结束了。代码很长，在这里使用分段分析的方式，忽略的地方很少，构造器的源码基本完整还原。</p> 
+<p> </p> 
+<p> </p> 
+<p> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e9b313f97914d6e824c5f3dfc4d79e7f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">RPC和Http的区别</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/330020d089ee970326a9853c21405b9e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Android Framework 包管理子系统（02）PackageManagerService关键文件解读</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

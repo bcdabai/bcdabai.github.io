@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【Java】DirectByteBuffer 堆外内存源码解读 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【Java】DirectByteBuffer 堆外内存源码解读" />
+<meta property="og:description" content="目录
+一、DirectByteBuffer直接缓冲区介绍
+1.1 如何使用DirectByteBuffer
+1.2 DirectByteBuffer对象实例化过程
+1.2.1 构造器
+1.2.2 判断是否有足够的空间可供申请java.nio.Bits#reserveMemory
+1.2.3 尝试申请内存
+1.2.4 为什么要手动调用System.gc()
+1.2.5 DirectByteBuffer实现内存分配
+1.2.6 内存分配失败回收内存计数：java.nio.Bits#unreserveMemory 1.2.7 内存分配小结
+1.3 DirectByteBuffer读写逻辑 二、堆外内存回收
+2.1 DirectByteBuffer及对应的堆外内存回收机制Cleaner
+2.1.1 Cleaner对象的创建
+2.2. 释放堆外内存
+2.2.1 守护线程处理对象引用Reference以及ReferenceQueue
+2.2.2 如何触发Cleaner中的Deallocator线程释放内存
+2.3 DirectByteBuffer有关的JVM选项
+三、JVM使用堆外内存的原因
+3.1 降低垃圾回收停顿提升性能
+3.2 避免JVM大堆常驻无法回收
+3.3 提升内存I/O减少内存数据拷贝
+四、本节总结
+作为Java程序开发者我们都知道编译好的程序需要在Java虚拟机中运行，需要分配内存空间指定堆的大小，通过-Xms2G -Xmx2G参数指定JVM启动堆内存的大小，这是堆内内存的分配。而Java程序往往在开发中需要通过JNI调用lib库，以及使用第三方开发框架，诸如mina,netty Nio框架，这些框架为了提高通信效率，减少内存拷贝减轻Jvm GC压力使用了堆外内存，我们从下图了解一下Java运行时所需内存的分配：
+根据上图很直观的发现Java程序运行需要的内存分堆内内存(Heap)和堆外内存(No Heap)，本次介绍的DirectByteBuffer只是堆外内存的其中一部分，除此之外还有字节码、本地native方法调用、JVM运行本身所需内存等。
+一、DirectByteBuffer直接缓冲区介绍 DirectByteBuffer是ByteBuffer的一个实现，ByteBuffer有两个类实现，一类是HeapBuffer（堆内内存），另一类是DirectBuffer(堆外内存)
+1.1 如何使用DirectByteBuffer 如果需要实例化一个DirectByteBuffer，可以使用java.nio.ByteBuffer#allocateDirect这个方法
+public static ByteBuffer allocateDirect(int capacity) { return new DirectByteBuffer(capacity); } 1.2 DirectByteBuffer对象实例化过程 1.2.1 构造器 我们来看一下DirectByteBuffer是如何构造，如何申请与释放内存的，先看看DirectByteBuffer的构造器" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/9d2360a9e300df2c606a455152c942c3/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-10-13T18:19:23+08:00" />
+<meta property="article:modified_time" content="2023-10-13T18:19:23+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【Java】DirectByteBuffer 堆外内存源码解读</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="%E4%B8%80%E3%80%81DirectByteBuffer%E7%9B%B4%E6%8E%A5%E7%BC%93%E5%86%B2%E5%8C%BA%E4%BB%8B%E7%BB%8D-toc" style="margin-left:0px;"><a href="#%E4%B8%80%E3%80%81DirectByteBuffer%E7%9B%B4%E6%8E%A5%E7%BC%93%E5%86%B2%E5%8C%BA%E4%BB%8B%E7%BB%8D" rel="nofollow">一、DirectByteBuffer直接缓冲区介绍</a></p> 
+<p id="1.1%20%E5%A6%82%E4%BD%95%E4%BD%BF%E7%94%A8DirectByteBuffer-toc" style="margin-left:40px;"><a href="#1.1%20%E5%A6%82%E4%BD%95%E4%BD%BF%E7%94%A8DirectByteBuffer" rel="nofollow">1.1 如何使用DirectByteBuffer</a></p> 
+<p id="1.2%20DirectByteBuffer%E5%AF%B9%E8%B1%A1%E5%AE%9E%E4%BE%8B%E5%8C%96%E8%BF%87%E7%A8%8B-toc" style="margin-left:40px;"><a href="#1.2%20DirectByteBuffer%E5%AF%B9%E8%B1%A1%E5%AE%9E%E4%BE%8B%E5%8C%96%E8%BF%87%E7%A8%8B" rel="nofollow">1.2 DirectByteBuffer对象实例化过程</a></p> 
+<p id="1.2.1%20%E6%9E%84%E9%80%A0%E5%99%A8-toc" style="margin-left:80px;"><a href="#1.2.1%20%E6%9E%84%E9%80%A0%E5%99%A8" rel="nofollow">1.2.1 构造器</a></p> 
+<p id="1.2.2%20%E5%88%A4%E6%96%AD%E6%98%AF%E5%90%A6%E6%9C%89%E8%B6%B3%E5%A4%9F%E7%9A%84%E7%A9%BA%E9%97%B4%E5%8F%AF%E4%BE%9B%E7%94%B3%E8%AF%B7java.nio.Bits%23reserveMemory-toc" style="margin-left:80px;"><a href="#1.2.2%20%E5%88%A4%E6%96%AD%E6%98%AF%E5%90%A6%E6%9C%89%E8%B6%B3%E5%A4%9F%E7%9A%84%E7%A9%BA%E9%97%B4%E5%8F%AF%E4%BE%9B%E7%94%B3%E8%AF%B7java.nio.Bits%23reserveMemory" rel="nofollow">1.2.2 判断是否有足够的空间可供申请java.nio.Bits#reserveMemory</a></p> 
+<p id="1.2.3%20%E5%B0%9D%E8%AF%95%E7%94%B3%E8%AF%B7%E5%86%85%E5%AD%98-toc" style="margin-left:80px;"><a href="#1.2.3%20%E5%B0%9D%E8%AF%95%E7%94%B3%E8%AF%B7%E5%86%85%E5%AD%98" rel="nofollow">1.2.3 尝试申请内存</a></p> 
+<p id="1.2.4%20%E4%B8%BA%E4%BB%80%E4%B9%88%E8%A6%81%E6%89%8B%E5%8A%A8%E8%B0%83%E7%94%A8System.gc()-toc" style="margin-left:80px;"><a href="#1.2.4%20%E4%B8%BA%E4%BB%80%E4%B9%88%E8%A6%81%E6%89%8B%E5%8A%A8%E8%B0%83%E7%94%A8System.gc%28%29" rel="nofollow">1.2.4 为什么要手动调用System.gc()</a></p> 
+<p id="1.2.5%20DirectByteBuffer%E5%AE%9E%E7%8E%B0%E5%86%85%E5%AD%98%E5%88%86%E9%85%8D-toc" style="margin-left:80px;"><a href="#1.2.5%20DirectByteBuffer%E5%AE%9E%E7%8E%B0%E5%86%85%E5%AD%98%E5%88%86%E9%85%8D" rel="nofollow">1.2.5 DirectByteBuffer实现内存分配</a></p> 
+<p id="1.2.6%20%E5%86%85%E5%AD%98%E5%88%86%E9%85%8D%E5%A4%B1%E8%B4%A5%E5%9B%9E%E6%94%B6%E5%86%85%E5%AD%98%E8%AE%A1%E6%95%B0%EF%BC%9Ajava.nio.Bits%23unreserveMemory%C2%A0-toc" style="margin-left:80px;"><a href="#1.2.6%20%E5%86%85%E5%AD%98%E5%88%86%E9%85%8D%E5%A4%B1%E8%B4%A5%E5%9B%9E%E6%94%B6%E5%86%85%E5%AD%98%E8%AE%A1%E6%95%B0%EF%BC%9Ajava.nio.Bits%23unreserveMemory%C2%A0" rel="nofollow">1.2.6 内存分配失败回收内存计数：java.nio.Bits#unreserveMemory </a></p> 
+<p id="1.2.7%20%E5%86%85%E5%AD%98%E5%88%86%E9%85%8D%E5%B0%8F%E7%BB%93-toc" style="margin-left:80px;"><a href="#1.2.7%20%E5%86%85%E5%AD%98%E5%88%86%E9%85%8D%E5%B0%8F%E7%BB%93" rel="nofollow">1.2.7 内存分配小结</a></p> 
+<p id="1.3%20DirectByteBuffer%E8%AF%BB%E5%86%99%E9%80%BB%E8%BE%91%C2%A0-toc" style="margin-left:40px;"><a href="#1.3%20DirectByteBuffer%E8%AF%BB%E5%86%99%E9%80%BB%E8%BE%91%C2%A0" rel="nofollow">1.3 DirectByteBuffer读写逻辑 </a></p> 
+<p id="%C2%A0%E4%BA%8C%E3%80%81%E5%A0%86%E5%A4%96%E5%86%85%E5%AD%98%E5%9B%9E%E6%94%B6-toc" style="margin-left:0px;"><a href="#%C2%A0%E4%BA%8C%E3%80%81%E5%A0%86%E5%A4%96%E5%86%85%E5%AD%98%E5%9B%9E%E6%94%B6" rel="nofollow"> 二、堆外内存回收</a></p> 
+<p id="2.1%20DirectByteBuffer%E5%8F%8A%E5%AF%B9%E5%BA%94%E7%9A%84%E5%A0%86%E5%A4%96%E5%86%85%E5%AD%98%E5%9B%9E%E6%94%B6%E6%9C%BA%E5%88%B6Cleaner-toc" style="margin-left:40px;"><a href="#2.1%20DirectByteBuffer%E5%8F%8A%E5%AF%B9%E5%BA%94%E7%9A%84%E5%A0%86%E5%A4%96%E5%86%85%E5%AD%98%E5%9B%9E%E6%94%B6%E6%9C%BA%E5%88%B6Cleaner" rel="nofollow">2.1 DirectByteBuffer及对应的堆外内存回收机制Cleaner</a></p> 
+<p id="2.1.1%20Cleaner%E5%AF%B9%E8%B1%A1%E7%9A%84%E5%88%9B%E5%BB%BA-toc" style="margin-left:80px;"><a href="#2.1.1%20Cleaner%E5%AF%B9%E8%B1%A1%E7%9A%84%E5%88%9B%E5%BB%BA" rel="nofollow">2.1.1 Cleaner对象的创建</a></p> 
+<p id="2.2.%20%E9%87%8A%E6%94%BE%E5%A0%86%E5%A4%96%E5%86%85%E5%AD%98-toc" style="margin-left:40px;"><a href="#2.2.%20%E9%87%8A%E6%94%BE%E5%A0%86%E5%A4%96%E5%86%85%E5%AD%98" rel="nofollow">2.2. 释放堆外内存</a></p> 
+<p id="2.2.1%20%E5%AE%88%E6%8A%A4%E7%BA%BF%E7%A8%8B%E5%A4%84%E7%90%86%E5%AF%B9%E8%B1%A1%E5%BC%95%E7%94%A8Reference%E4%BB%A5%E5%8F%8AReferenceQueue-toc" style="margin-left:80px;"><a href="#2.2.1%20%E5%AE%88%E6%8A%A4%E7%BA%BF%E7%A8%8B%E5%A4%84%E7%90%86%E5%AF%B9%E8%B1%A1%E5%BC%95%E7%94%A8Reference%E4%BB%A5%E5%8F%8AReferenceQueue" rel="nofollow">2.2.1 守护线程处理对象引用Reference以及ReferenceQueue</a></p> 
+<p id="%C2%A02.2.2%C2%A0%E5%A6%82%E4%BD%95%E8%A7%A6%E5%8F%91Cleaner%E4%B8%AD%E7%9A%84Deallocator%E7%BA%BF%E7%A8%8B%E9%87%8A%E6%94%BE%E5%86%85%E5%AD%98-toc" style="margin-left:80px;"><a href="#%C2%A02.2.2%C2%A0%E5%A6%82%E4%BD%95%E8%A7%A6%E5%8F%91Cleaner%E4%B8%AD%E7%9A%84Deallocator%E7%BA%BF%E7%A8%8B%E9%87%8A%E6%94%BE%E5%86%85%E5%AD%98" rel="nofollow"> 2.2.2 如何触发Cleaner中的Deallocator线程释放内存</a></p> 
+<p id="和DirectByteBuffer有关的JVM选项-toc" style="margin-left:40px;"><a href="#%E5%92%8CDirectByteBuffer%E6%9C%89%E5%85%B3%E7%9A%84JVM%E9%80%89%E9%A1%B9" rel="nofollow">2.3 DirectByteBuffer有关的JVM选项</a></p> 
+<p id="%E4%B8%89%E3%80%81JVM%E4%BD%BF%E7%94%A8%E5%A0%86%E5%A4%96%E5%86%85%E5%AD%98%E7%9A%84%E5%8E%9F%E5%9B%A0-toc" style="margin-left:0px;"><a href="#%E4%B8%89%E3%80%81JVM%E4%BD%BF%E7%94%A8%E5%A0%86%E5%A4%96%E5%86%85%E5%AD%98%E7%9A%84%E5%8E%9F%E5%9B%A0" rel="nofollow">三、JVM使用堆外内存的原因</a></p> 
+<p id="3.1%20%E9%99%8D%E4%BD%8E%E5%9E%83%E5%9C%BE%E5%9B%9E%E6%94%B6%E5%81%9C%E9%A1%BF%E6%8F%90%E5%8D%87%E6%80%A7%E8%83%BD-toc" style="margin-left:40px;"><a href="#3.1%20%E9%99%8D%E4%BD%8E%E5%9E%83%E5%9C%BE%E5%9B%9E%E6%94%B6%E5%81%9C%E9%A1%BF%E6%8F%90%E5%8D%87%E6%80%A7%E8%83%BD" rel="nofollow">3.1 降低垃圾回收停顿提升性能</a></p> 
+<p id="3.2%20%E9%81%BF%E5%85%8DJVM%E5%A4%A7%E5%A0%86%E5%B8%B8%E9%A9%BB%E6%97%A0%E6%B3%95%E5%9B%9E%E6%94%B6-toc" style="margin-left:40px;"><a href="#3.2%20%E9%81%BF%E5%85%8DJVM%E5%A4%A7%E5%A0%86%E5%B8%B8%E9%A9%BB%E6%97%A0%E6%B3%95%E5%9B%9E%E6%94%B6" rel="nofollow">3.2 避免JVM大堆常驻无法回收</a></p> 
+<p id="3.3%20%E6%8F%90%E5%8D%87%E5%86%85%E5%AD%98I%2FO%E5%87%8F%E5%B0%91%E5%86%85%E5%AD%98%E6%95%B0%E6%8D%AE%E6%8B%B7%E8%B4%9D-toc" style="margin-left:40px;"><a href="#3.3%20%E6%8F%90%E5%8D%87%E5%86%85%E5%AD%98I%2FO%E5%87%8F%E5%B0%91%E5%86%85%E5%AD%98%E6%95%B0%E6%8D%AE%E6%8B%B7%E8%B4%9D" rel="nofollow">3.3 提升内存I/O减少内存数据拷贝</a></p> 
+<p id="%E5%9B%9B%E3%80%81%E6%9C%AC%E8%8A%82%E6%80%BB%E7%BB%93-toc" style="margin-left:0px;"><a href="#%E5%9B%9B%E3%80%81%E6%9C%AC%E8%8A%82%E6%80%BB%E7%BB%93" rel="nofollow">四、本节总结</a></p> 
+<hr id="hr-toc"> 
+<p></p> 
+<p>作为Java程序开发者我们都知道编译好的程序需要在Java虚拟机中运行，需要分配内存空间指定堆的大小，通过-Xms2G -Xmx2G参数指定JVM启动堆内存的大小，这是堆内内存的分配。而Java程序往往在开发中需要通过JNI调用lib库，以及使用第三方开发框架，诸如mina,netty Nio框架，这些框架为了提高通信效率，减少内存拷贝减轻Jvm GC压力使用了堆外内存，我们从下图了解一下Java运行时所需内存的分配：</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/4f/70/5fggyywL_o.png"></p> 
+<p>根据上图很直观的发现Java程序运行需要的内存分堆内内存(Heap)和堆外内存(No Heap)，本次介绍的DirectByteBuffer只是堆外内存的其中一部分，除此之外还有字节码、本地native方法调用、JVM运行本身所需内存等。</p> 
+<h2 id="%E4%B8%80%E3%80%81DirectByteBuffer%E7%9B%B4%E6%8E%A5%E7%BC%93%E5%86%B2%E5%8C%BA%E4%BB%8B%E7%BB%8D">一、DirectByteBuffer直接缓冲区介绍</h2> 
+<p>        DirectByteBuffer是ByteBuffer的一个实现，ByteBuffer有两个类实现，一类是HeapBuffer（堆内内存），另一类是DirectBuffer(堆外内存)</p> 
+<p>        <img alt="" src="https://images2.imgbox.com/9f/46/JI9X3Cw0_o.png"></p> 
+<h3 id="1.1%20%E5%A6%82%E4%BD%95%E4%BD%BF%E7%94%A8DirectByteBuffer">1.1 如何使用DirectByteBuffer</h3> 
+<p>如果需要实例化一个DirectByteBuffer，可以使用<code>java.nio.ByteBuffer#allocateDirect</code>这个方法</p> 
+<pre><code class="language-java">public static ByteBuffer allocateDirect(int capacity) {
+
+    return new DirectByteBuffer(capacity);
+
+}</code></pre> 
+<h3 id="1.2%20DirectByteBuffer%E5%AF%B9%E8%B1%A1%E5%AE%9E%E4%BE%8B%E5%8C%96%E8%BF%87%E7%A8%8B">1.2 DirectByteBuffer对象实例化过程</h3> 
+<h4 id="1.2.1%20%E6%9E%84%E9%80%A0%E5%99%A8">1.2.1 构造器</h4> 
+<p>我们来看一下DirectByteBuffer是如何构造，如何申请与释放内存的，先看看DirectByteBuffer的构造器</p> 
+<pre><code class="language-java">    DirectByteBuffer(int cap) {                   // package-private
+        //初始化Buffer的四个核心属性
+        super(-1, 0, cap, cap);
+        //判断是否需要页面对齐，通过参数-XX:+PageAlignDirectMemory控制，默认为false
+        boolean pa = VM.isDirectMemoryPageAligned();
+        int ps = Bits.pageSize();
+        long size = Math.max(1L, (long)cap + (pa ? ps : 0));
+        //保留总分配内存(按页分配)的大小和实际内存的大小
+        Bits.reserveMemory(size, cap);
+
+        long base = 0;
+        try {
+            // 通过unsafe.allocateMemory分配堆外内存，并返回堆外内存的基地址
+            base = unsafe.allocateMemory(size);
+        } catch (OutOfMemoryError x) {
+            // 分配失败，释放内存
+            Bits.unreserveMemory(size, cap);
+            throw x;
+        }
+        // 初始化内存空间为0
+        unsafe.setMemory(base, size, (byte) 0);
+        // 设置内存起始地址
+        if (pa &amp;&amp; (base % ps != 0)) {
+            // Round up to page boundary
+            address = base + ps - (base &amp; (ps - 1));
+        } else {
+            address = base;
+        }
+        // 构建Cleaner对象用于跟踪DirectByteBuffer对象的垃圾回收，以实现当DirectByteBuffer被垃圾回收时，堆外内存也会被释放
+        cleaner = Cleaner.create(this, new Deallocator(base, size, cap));
+        att = null;
+
+    }</code></pre> 
+<h4 id="1.2.2%20%E5%88%A4%E6%96%AD%E6%98%AF%E5%90%A6%E6%9C%89%E8%B6%B3%E5%A4%9F%E7%9A%84%E7%A9%BA%E9%97%B4%E5%8F%AF%E4%BE%9B%E7%94%B3%E8%AF%B7java.nio.Bits%23reserveMemory">1.2.2 判断是否有足够的空间可供申请<code>java.nio.Bits#reserveMemory</code></h4> 
+<pre><code class="language-java">// 该方法主要用于判断申请的堆外内存是否超过了用例指定的最大值
+
+// 如果还有足够空间可以申请，则更新对应的变量
+
+// 如果已经没有空间可以申请，则抛出OutOfMemoryError
+// 参数解释：
+
+//     size：根据是否按页对齐，得到的真实需要申请的内存大小
+
+//     cap：用户指定需要的内存大小(&lt;=size)
+static void reserveMemory(long size, int cap) {
+        // 获取最大可以申请的对外内存大小，默认值是64MB
+        // 可以通过参数-XX:MaxDirectMemorySize=&lt;size&gt;设置这个大小
+        // -XX:MaxDirectMemorySize限制的是用户申请的大小，而不考虑对齐情况
+        if (!memoryLimitSet &amp;&amp; VM.isBooted()) {
+            maxMemory = VM.maxDirectMemory();
+            memoryLimitSet = true;
+        }
+
+        // optimist!
+        if (tryReserveMemory(size, cap)) {
+            return;
+        }
+
+        final JavaLangRefAccess jlra = SharedSecrets.getJavaLangRefAccess();
+
+        // retry while helping enqueue pending Reference objects
+        // which includes executing pending Cleaner(s) which includes
+        // Cleaner(s) that free direct buffer memory
+        while (jlra.tryHandlePendingReference()) {
+            if (tryReserveMemory(size, cap)) {
+                return;
+            }
+        }
+
+        // trigger VM's Reference processing
+        // 如果已经没有足够空间，则尝试手动触发一次Full GC，触发释放堆外内存
+        System.gc();
+
+        // a retry loop with exponential back-off delays
+        // (this gives VM some time to do it's job)
+        boolean interrupted = false;
+        try {
+            long sleepTime = 1;
+            int sleeps = 0;
+            while (true) {
+                if (tryReserveMemory(size, cap)) {
+                    return;
+                }
+                if (sleeps &gt;= MAX_SLEEPS) {
+                    break;
+                }
+                if (!jlra.tryHandlePendingReference()) {
+                    try {
+                        Thread.sleep(sleepTime);
+                        sleepTime &lt;&lt;= 1;
+                        sleeps++;
+                    } catch (InterruptedException e) {
+                        interrupted = true;
+                    }
+                }
+            }
+
+            // no luck
+            throw new OutOfMemoryError("Direct buffer memory");
+
+        } finally {
+            if (interrupted) {
+                // don't swallow interrupts
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+</code></pre> 
+<p>其中，如果系统中内存( 即，堆外内存 )不够的话：</p> 
+<pre><code class="language-java">        final JavaLangRefAccess jlra = SharedSecrets.getJavaLangRefAccess();
+
+        // retry while helping enqueue pending Reference objects
+        // which includes executing pending Cleaner(s) which includes
+        // Cleaner(s) that free direct buffer memory
+        while (jlra.tryHandlePendingReference()) {
+            if (tryReserveMemory(size, cap)) {
+                return;
+            }
+        }</code></pre> 
+<p>jlra.tryHandlePendingReference()会触发一次非堵塞的Reference#tryHandlePending(false)。该方法会将已经被JVM垃圾回收的DirectBuffer对象的堆外内存释放。</p> 
+<h4 id="1.2.3%20%E5%B0%9D%E8%AF%95%E7%94%B3%E8%AF%B7%E5%86%85%E5%AD%98">1.2.3 尝试申请内存</h4> 
+<p><code>java.nio.Bits#tryReserveMemory方法尝试计算可以分配的真实内存大小，如何可以申请，则更新以下参数：</code></p> 
+<ul><li><code>toalCapacity=toalCapacity+cap，目前用户已经申请的总空间大小；</code></li><li><code>reservedMemory=reservedMemory+size，目前保留堆外内存总空间的大小；</code></li><li><code>count：申请次数加1；</code></li></ul> 
+<pre><code class="language-java">    // 参数解释：
+    //     size：根据是否按页对齐，得到的真实需要申请的内存大小
+    //     cap：用户指定需要的内存大小(&lt;=size)
+    private static boolean tryReserveMemory(long size, int cap) {
+
+        // -XX:MaxDirectMemorySize limits the total capacity rather than the
+        // actual memory usage, which will differ when buffers are page aligned.
+        //     totalCapacity：目前用户已经申请的总空间
+        //     maxMemory：堆外内存设置最大值
+        //     reservedMemory：真实的目前保留的堆外内存空间
+        long totalCap;
+        while (cap &lt;= maxMemory - (totalCap = totalCapacity.get())) {
+            if (totalCapacity.compareAndSet(totalCap, totalCap + cap)) {
+                reservedMemory.addAndGet(size);
+                count.incrementAndGet();
+                return true;
+            }
+        }
+
+        return false;
+    }</code></pre> 
+<p>调用AtmoticLong#compareAndSet(long expect, long update)，最终实现通过Unsafe更新用户申请的总内存空间大小totalCapacity+cap，即unsafe.compareAndSwapLong(valueOffset,expect,update)</p> 
+<pre><code class="language-java">
+    /**
+     * Atomically sets the value to the given updated value
+     * if the current value {@code ==} the expected value.
+     *
+     * @param expect the expected value
+     * @param update the new value
+     * @return {@code true} if successful. False return indicates that
+     * the actual value was not equal to the expected value.
+     */
+    public final boolean compareAndSet(long expect, long update) {
+        return unsafe.compareAndSwapLong(this, valueOffset, expect, update);
+    }</code></pre> 
+<h4 id="1.2.4%20%E4%B8%BA%E4%BB%80%E4%B9%88%E8%A6%81%E6%89%8B%E5%8A%A8%E8%B0%83%E7%94%A8System.gc()">1.2.4 为什么要手动调用System.gc()</h4> 
+<pre><code class="language-java">        // trigger VM's Reference processing
+        System.gc();</code></pre> 
+<p>调用System.gc()，是想触发一次Full gc，当然前提是你没有显式的设置<span style="color:#fe2c24;"><strong>-XX:+DisableExplicitGC</strong></span>来禁用显式GC，否则System.gc()无效。并且你需要知道，调用System.gc()并不能够保证Full gc马上就能被执行。所以接下来while循环尝试了最大9次，如果还是没有足够内存则抛出OutOfMemoryError("Direct buffer memory”)异常。 </p> 
+<pre><code class="language-java">        try {
+            long sleepTime = 1;
+            int sleeps = 0;
+            while (true) {
+                if (tryReserveMemory(size, cap)) {
+                    return;
+                }
+                // MAX_SLEEPS=9
+                if (sleeps &gt;= MAX_SLEEPS) {
+                    break;
+                }
+                // 将已经被JVM垃圾回收的DirectBuffer对象的堆外内存释放
+                if (!jlra.tryHandlePendingReference()) {
+                    try {
+                        Thread.sleep(sleepTime);
+                        sleepTime &lt;&lt;= 1;
+                        sleeps++;
+                    } catch (InterruptedException e) {
+                        interrupted = true;
+                    }
+                }
+            }
+
+            // Full Gc后内存还是不足则抛出异常
+            throw new OutOfMemoryError("Direct buffer memory");
+
+        } finally {
+            if (interrupted) {
+                // don't swallow interrupts
+                Thread.currentThread().interrupt();
+            }
+        }</code></pre> 
+<blockquote> 
+ <p>通过Full gc操作来触发回收堆外内存，不过我想先说的是堆外内存不会对gc造成什么影响(这里的System.gc除外)，但是堆外内存的回收其实依赖于我们的gc机制，首先我们要知道在java层面和我们在堆外分配的这块内存关联的只有与之关联的DirectByteBuffer对象了，它记录了这块内存的基地址以及大小，那么既然和gc也有关，那就是gc能通过操作DirectByteBuffer对象来间接操作对应的堆外内存了。</p> 
+ <p>DirectByteBuffer对象在创建的时候关联了一个PhantomReference，说到PhantomReference它其实主要是用来跟踪对象何时被回收的，它不能影响gc决策，但是gc过程中如果发现某个对象除了只有PhantomReference引用它之外，并没有其他的地方引用它了，那将会把这个引用放到java.lang.ref.Reference.pending队列里，在gc完毕的时候通知ReferenceHandler这个守护线程去执行一些后置处理，而DirectByteBuffer关联的PhantomReference是PhantomReference的一个子类，在最终的处理里会通过Unsafe的free接口来释放DirectByteBuffer对应的堆外内存块</p> 
+ <p></p> 
+ <p>注意，这里之所以用使用full gc的很重要的一个原因是：System.gc()会对新生代的老生代都会进行内存回收，这样会比较彻底地回收DirectByteBuffer对象以及他们关联的堆外内存.<br> DirectByteBuffer对象本身其实是很小的，但是它后面可能关联了一个非常大的堆外内存，因此我们通常称之为冰山对象.<br> 我们做ygc的时候会将新生代里的不可达的DirectByteBuffer对象及其堆外内存回收了，但是无法对old里的DirectByteBuffer对象及其堆外内存进行回收，这也是我们通常碰到的最大的问题。( 并且堆外内存多用于生命期中等或较长的对象 )<br> 如果有大量的DirectByteBuffer对象移到了old，但是又一直没有做cms gc或者full gc，而只进行ygc，那么我们的物理内存可能被慢慢耗光，但是我们还不知道发生了什么，因为heap明明剩余的内存还很多(前提是我们禁用了System.gc – JVM参数DisableExplicitGC)。</p> 
+ <p>总的来说，Bits.reserveMemory(size, cap)方法在可用堆外内存不足以分配给当前要创建的堆外内存大小时，会实现以下的步骤来尝试完成本次堆外内存的创建：<br> ① 触发一次非堵塞的Reference#tryHandlePending(false)。该方法会将已经被JVM垃圾回收的DirectBuffer对象的堆外内存释放。<br> ② 如果进行一次堆外内存资源回收后，还不够进行本次堆外内存分配的话，则进行 System.gc()。System.gc()会触发一个full gc，但你需要知道，调用System.gc()并不能够保证full gc马上就能被执行。所以在后面打代码中，会进行最多9次尝试，看是否有足够的可用堆外内存来分配堆外内存。并且每次尝试之前，都对延迟等待时间，已给JVM足够的时间去完成full gc操作。<br><strong><span style="color:#fe2c24;">注意，如果你设置了-XX:+DisableExplicitGC，将会禁用显示GC，这会使System.gc()调用无效。</span></strong><br> ③ 如果9次尝试后依旧没有足够的可用堆外内存来分配本次堆外内存，则抛出OutOfMemoryError("Direct buffer memory”)异常。</p> 
+ <p></p> 
+</blockquote> 
+<h4 id="1.2.5%20DirectByteBuffer%E5%AE%9E%E7%8E%B0%E5%86%85%E5%AD%98%E5%88%86%E9%85%8D">1.2.5 DirectByteBuffer实现内存分配</h4> 
+<p>通过Bits.reserveMemory()方法判断可以分配内存，然后调用Unsafe.allocateMemory(cap)分配内存。</p> 
+<pre><code class="language-java">// 申请一块本地内存。内存空间是未初始化的，其内容是无法预期的。
+
+// 使用freeMemory释放内存，使用reallocateMemory修改内存大小
+
+public native long allocateMemory(long bytes);</code></pre> 
+<pre><code class="language-cpp">// openjdk8/hotspot/src/share/vm/prims/unsafe.cpp
+
+UNSAFE_ENTRY(jlong, Unsafe_AllocateMemory(JNIEnv *env, jobject unsafe, jlong size))
+
+  UnsafeWrapper("Unsafe_AllocateMemory");
+
+  size_t sz = (size_t)size;
+
+  if (sz != (julong)size || size &lt; 0) {
+
+    THROW_0(vmSymbols::java_lang_IllegalArgumentException());
+
+  }
+
+  if (sz == 0) {
+
+    return 0;
+
+  }
+
+  sz = round_to(sz, HeapWordSize);
+
+  // 调用os::malloc申请内存，内部使用malloc函数申请内存
+
+  void* x = os::malloc(sz, mtInternal);
+
+  if (x == NULL) {
+
+    THROW_0(vmSymbols::java_lang_OutOfMemoryError());
+
+  }
+
+  //Copy::fill_to_words((HeapWord*)x, sz / HeapWordSize);
+
+  return addr_to_java(x);
+
+UNSAFE_END</code></pre> 
+<p>可以看出DirectByteBuffer构造函数，创建DirectByteBuffer的时候，通过<code>sun.misc.Unsafe#allocateMemory</code>使用<code>malloc</code>这个C标准库的函数来分配内存。</p> 
+<p>那么堆外内存空间分配的内存是系统本地内存，并不在Java的内存中，也不属于JVM管控范围，通过堆内对象DirectByteBuffer是怎么被操作堆外内存的呢？我们在DirectByteBuffer构造函数发现如下代码：</p> 
+<pre><code class="language-java">        // 设置堆外内存起始地址address
+        if (pa &amp;&amp; (base % ps != 0)) {
+            // Round up to page boundary
+            address = base + ps - (base &amp; (ps - 1));
+        } else {
+            address = base;
+        }</code></pre> 
+<p>发现DirectByteBuffer的父类Buffer中有个address属性 ，在DirectByteBuffer初始化的时候进行赋值，address只会被DirectByteBuffer使用到。之所以将address属性升级放在Buffer中，是为了在JNI调用（native本地方法调用）GetDirectBufferAddress时提升它调用的速率。</p> 
+<h4 id="1.2.6%20%E5%86%85%E5%AD%98%E5%88%86%E9%85%8D%E5%A4%B1%E8%B4%A5%E5%9B%9E%E6%94%B6%E5%86%85%E5%AD%98%E8%AE%A1%E6%95%B0%EF%BC%9Ajava.nio.Bits%23unreserveMemory%C2%A0">1.2.6 内存分配失败回收内存计数：<code>java.nio.Bits#unreserveMemory</code> </h4> 
+<p><code>如果</code>unsafe.allocateMemory(bytes)分配内存失败，则<code>调用java.nio.Bits#unreserveMemory()方法恢复内存申请计数参数，则更新恢复以下参数：</code></p> 
+<ul><li><code>toalCapacity=toalCapacity-cap，目前用户已经申请的总空间大小；</code></li><li><code>reservedMemory=reservedMemory-size，目前保留堆外内存总空间的大小；</code></li><li><code>count：申请次数减1；</code></li></ul> 
+<pre><code class="language-java">    static void unreserveMemory(long size, int cap) {
+        long cnt = count.decrementAndGet();
+        long reservedMem = reservedMemory.addAndGet(-size);
+        long totalCap = totalCapacity.addAndGet(-cap);
+        assert cnt &gt;= 0 &amp;&amp; reservedMem &gt;= 0 &amp;&amp; totalCap &gt;= 0;
+    }</code></pre> 
+<h4 id="1.2.7%20%E5%86%85%E5%AD%98%E5%88%86%E9%85%8D%E5%B0%8F%E7%BB%93">1.2.7 内存分配小结</h4> 
+<p>查阅了DirectByteBuffer构造函数会发现整个初始化过程包括内存申请、分配、初始化、回收。堆外内存回收是通过跟踪DirectByteBuffer对象的垃圾回收，以实现当DirectByteBuffer被垃圾回收时，分配的堆外内存一起被释放，本节后边接着介绍。DirectByteBuffer对象整个初始化过程如下：</p> 
+<ol><li><code>Bits.reservedMemory();             申请真实的内存大小，并计数</code></li><li><code>Unsafe.allocateMemory(cap);        分配内存</code></li><li><code>Bits.unreserveMemory();            分配失败则重置申请参数</code></li><li><code>Unsafe.setMemory();                初始化内存</code></li><li>Unsafe.freeMemory();                                         释放内存</li></ol> 
+<h3 id="1.3%20DirectByteBuffer%E8%AF%BB%E5%86%99%E9%80%BB%E8%BE%91%C2%A0">1.3 DirectByteBuffer读写逻辑 </h3> 
+<p>DirectByteBuffer使用<code>sun.misc.Unsafe#getByte(long)</code>和<code>sun.misc.Unsafe#putByte(long, byte)</code>这两个方法来读写堆外内存空间的指定位置的字节数据。</p> 
+<pre><code class="language-java">//写入堆外内存
+public ByteBuffer put(int i, byte x) {
+
+    unsafe.putByte(ix(checkIndex(i)), ((x)));
+
+    return this;
+
+}
+
+ 
+//读取堆外内存数据
+public byte get(int i) {
+
+    return ((unsafe.getByte(ix(checkIndex(i)))));
+
+}
+
+ 
+
+private long ix(int i) {
+
+    return address + (i &lt;&lt; 0);
+
+}</code></pre> 
+<h2 id="%C2%A0%E4%BA%8C%E3%80%81%E5%A0%86%E5%A4%96%E5%86%85%E5%AD%98%E5%9B%9E%E6%94%B6"> 二、堆外内存回收</h2> 
+<h3 id="2.1%20DirectByteBuffer%E5%8F%8A%E5%AF%B9%E5%BA%94%E7%9A%84%E5%A0%86%E5%A4%96%E5%86%85%E5%AD%98%E5%9B%9E%E6%94%B6%E6%9C%BA%E5%88%B6Cleaner">2.1 DirectByteBuffer及对应的堆外内存回收机制Cleaner</h3> 
+<p>在DirectByteBuffer的构造函数的最后，我们看到了一行代码</p> 
+<pre><code class="language-java">// 使用Cleaner机制注册内存回收处理函数
+
+cleaner = Cleaner.create(this, new Deallocator(base, size, cap));</code></pre> 
+<p>这是使用Cleaner机制进行堆外内存回收。因为DirectByteBuffer申请的内存是在堆外，DirectByteBuffer本身支持保存了堆外内存的起始地址而已，所以DirectByteBuffer的内存占用是由堆内的DirectByteBuffer对象与堆外的对应内存空间共同构成。堆内的占用只是很小的一部分，这种对象被称为冰山对象。</p> 
+<p>堆内的DirectByteBuffer对象本身会被垃圾回收正常的处理，但是对外的内存就不会被GC回收了，所以需要一个机制，在DirectByteBuffer回收时，同时回收其堆外申请的内存。</p> 
+<p>Java中可选的特性有finalize函数，但是finalize机制是Java官方不推荐的，官方推荐的做法是使用虚引用来处理对象被回收时的后续处理工作，可以参考<a href="http://imushan.com/2018/08/19/java/language/JDK%E6%BA%90%E7%A0%81%E9%98%85%E8%AF%BB-Reference/" rel="nofollow" title="JDK源码阅读-Reference">JDK源码阅读-Reference</a>。同时Java提供了Cleaner类来简化这个实现，Cleaner是虚引用PhantomReference的子类，并通过自身的next和prev字段维护的一个双向链表。PhantomReference的作用在于跟踪垃圾回收过程，并不会对对象的垃圾回收过程造成任何的影响。</p> 
+<p>当DirectByteBuffer对象本身被GC时，DirectByteBuffer对象从pending状态 ——&gt; enqueue状态时，会触发Cleaner的clean()，而Cleaner的clean()的方法会实现通过unsafe对堆外内存的释放。我们来看一下其回收处理函数是如何实现的：</p> 
+<h4 id="2.1.1%20Cleaner%E5%AF%B9%E8%B1%A1%E7%9A%84%E5%88%9B%E5%BB%BA">2.1.1 Cleaner对象的创建</h4> 
+<p>从代码 cleaner = Cleaner.create(this, new Deallocator(base, size, cap));可以看到创建对象需要两个参数</p> 
+<ul><li>DirectByteBuffer：当前创建的buffer对象</li><li>Deallocator：是Runable接口的实现</li></ul> 
+<p>Deallocator类是DirectByteBuffer内部类，代码如下：</p> 
+<pre><code class="language-java">private static class Deallocator implements Runnable {
+        private static Unsafe unsafe = Unsafe.getUnsafe();
+        private long address;
+        private long size;
+        private int capacity;
+
+        private Deallocator(long address, long size, int capacity) {
+
+            assert (address != 0);
+
+            this.address = address;
+
+            this.size = size;
+
+            this.capacity = capacity;
+
+        }
+
+        public void run() {
+            if (this.address != 0L) {
+                //通过unsafe释放内存
+                unsafe.freeMemory(this.address);
+                this.address = 0L;
+                //更新内存参数统计
+                Bits.unreserveMemory(this.size, this.capacity);
+            }
+        }
+    }</code></pre> 
+<p> 此线程实现很简单，就是将DirectByteBuffer对象分配时的内存地址释放和内存统计参数还原，什么时候回调此线程方法，我们继续往下看Cleaner对象的创建过程。</p> 
+<pre><code class="language-java">    //  Cleaner对象属性thunk
+    private final Runnable thunk;
+
+    //Object referent  DirectByteBuffer对象
+    //Runnable thunk   Deallocator线程对象
+    private Cleaner(Object referent, Runnable thunk) {
+   
+        //  继续调用父类PhantomReference初始化参数referent, dummyQueue)
+        super(referent, dummyQueue);
+        //  将实例化的Deallocator赋值给thunk
+        this.thunk = thunk;
+    }</code></pre> 
+<p>继续调用Cleaner的父类PhantomReference实例化参数</p> 
+<pre><code class="language-java">    public PhantomReference(T referent, ReferenceQueue&lt;? super T&gt; q) {
+        super(referent, q);
+    }</code></pre> 
+<p>继续调用 PhantomReference父类Reference实例化参数，Reference代码不多，直接贴出来了。</p> 
+<pre><code class="language-java">public abstract class Reference&lt;T&gt; {
+
+    
+    //被监控的对象：DirectByteBuffer对象
+    private T referent;         /* Treated specially by GC */
+    //队列ReferenceQueue对象
+    volatile ReferenceQueue&lt;? super T&gt; queue;
+
+    /* When active:   NULL
+     *     pending:   this
+     *    Enqueued:   next reference in queue (or this if last)
+     *    Inactive:   this
+     */
+    @SuppressWarnings("rawtypes")
+    volatile Reference next;
+
+    /* When active:   next element in a discovered reference list maintained by GC (or this if last)
+     *     pending:   next element in the pending list (or null if last)
+     *   otherwise:   NULL
+     */
+    //即将要pending的下一个Reference
+    transient private Reference&lt;T&gt; discovered;  /* used by VM */
+
+
+    static private class Lock { }
+    private static Lock lock = new Lock();
+
+    //被Jvm赋值：DirectByteBuffer对象被GC回收后对应的Cleaner
+    private static Reference&lt;Object&gt; pending = null;
+
+    /* High-priority thread to enqueue pending References
+     * 优先级最高，由于需要线程调度
+     * 
+     */
+    private static class ReferenceHandler extends Thread {
+
+        private static void ensureClassInitialized(Class&lt;?&gt; clazz) {
+            try {
+                Class.forName(clazz.getName(), true, clazz.getClassLoader());
+            } catch (ClassNotFoundException e) {
+                throw (Error) new NoClassDefFoundError(e.getMessage()).initCause(e);
+            }
+        }
+
+        static {
+            ensureClassInitialized(InterruptedException.class);
+            ensureClassInitialized(Cleaner.class);
+        }
+
+        ReferenceHandler(ThreadGroup g, String name) {
+            super(g, name);
+        }
+
+        //  死循环，
+        //JVM GC回收某个DirectByteBuffer对象后，JVM会标记当前DirectByteBuffer对象所对应的引用Cleaner，将Cleaner属性pending赋值
+        //
+        public void run() {
+            while (true) {
+                tryHandlePending(true);
+            }
+        }
+    }
+
+        //  处理pending != null的引用Cleaner
+        static boolean tryHandlePending(boolean waitForNotify) {
+        Reference&lt;Object&gt; r;
+        Cleaner c;
+        try {
+            synchronized (lock) {
+                if (pending != null) {
+                    r = pending;
+                    // 'instanceof' might throw OutOfMemoryError sometimes
+                    // so do this before un-linking 'r' from the 'pending' chain...
+                    c = r instanceof Cleaner ? (Cleaner) r : null;
+                    // unlink 'r' from 'pending' chain
+                    pending = r.discovered;
+                    r.discovered = null;
+                } else {
+                    // The waiting on the lock may cause an OutOfMemoryError
+                    // because it may try to allocate exception objects.
+                    if (waitForNotify) {
+                        lock.wait();
+                    }
+                    // retry if waited
+                    return waitForNotify;
+                }
+            }
+        } catch (OutOfMemoryError x) {
+            // Give other threads CPU time so they hopefully drop some live references
+            // and GC reclaims some space.
+            // Also prevent CPU intensive spinning in case 'r instanceof Cleaner' above
+            // persistently throws OOME for some time...
+            Thread.yield();
+            // retry
+            return true;
+        } catch (InterruptedException x) {
+            // retry
+            return true;
+        }
+
+        // Fast path for cleaners
+        if (c != null) {
+        // 通过Cleaner对象回调其thunk(创建cleaner时创建的线程)线程，通过unsafe.freeMemory()
+        //释放被Cleaner引用的DirectByteBuffer对象对应的堆外内存；
+            c.clean();
+            return true;
+        }
+
+        //将Cleaner的队列queue
+        ReferenceQueue&lt;? super Object&gt; q = r.queue;
+        if (q != ReferenceQueue.NULL) q.enqueue(r);
+        return true;
+    }
+
+
+    //  静态代码块创建了ReferenceHandler并设置线程优先级最高，且为后台运行线程，并启动ReferenceHandler线程
+    static {
+        ThreadGroup tg = Thread.currentThread().getThreadGroup();
+        for (ThreadGroup tgn = tg;
+             tgn != null;
+             tg = tgn, tgn = tg.getParent());
+        Thread handler = new ReferenceHandler(tg, "Reference Handler");
+
+        handler.setPriority(Thread.MAX_PRIORITY);
+        handler.setDaemon(true);
+        handler.start();
+
+        // provide access in SharedSecrets
+        SharedSecrets.setJavaLangRefAccess(new JavaLangRefAccess() {
+            @Override
+            public boolean tryHandlePendingReference() {
+                return tryHandlePending(false);
+            }
+        });
+    }
+
+    /* -- Referent accessor and setters -- */
+
+    //  获取被Cleaner对象监控的DirectByteBuffer对象
+    public T get() {
+        return this.referent;
+    }
+
+    
+    //  将Cleaner监控的DirectByteBuffer对象移除
+    public void clear() {
+        this.referent = null;
+    }
+
+
+    /* -- Queue operations -- */
+    // 是否可以将Cleaner对象加入到队列
+    public boolean isEnqueued() {
+        return (this.queue == ReferenceQueue.ENQUEUED);
+    }
+
+    // 将Cleaner对象放入放入自己的queue，构建队列链表
+    public boolean enqueue() {
+        return this.queue.enqueue(this);
+    }
+
+
+    /* -- Constructors -- */
+
+    Reference(T referent) {
+        this(referent, null);
+    }
+
+    //  Cleaner对象实例化调用到父类的构造器初始化前面的两个参数
+    Reference(T referent, ReferenceQueue&lt;? super T&gt; queue) {
+        this.referent = referent;
+        this.queue = (queue == null) ? ReferenceQueue.NULL : queue;
+    }
+
+}</code></pre> 
+<p>通过Reference源码可知，创建Cleaner时会调用静态代码块创建ReferenceHandler线程对象，启动线程ReferenceHandler并设置为守护线程，当某个被Cleaner引用的对象将被回收时，JVM垃圾收集器会将此对象的引用放入到对象引用中的pending链表中，交给ReferenceHandler线程处理。ReferenceHandler线程死循环方法不断的处理pending链表中的对象引用，执行Cleaner的clean方法进行相关清理工作，如何清理继续往下看释放堆外内存部分。</p> 
+<h3 id="2.2.%20%E9%87%8A%E6%94%BE%E5%A0%86%E5%A4%96%E5%86%85%E5%AD%98">2.2. 释放堆外内存</h3> 
+<h4 id="2.2.1%20%E5%AE%88%E6%8A%A4%E7%BA%BF%E7%A8%8B%E5%A4%84%E7%90%86%E5%AF%B9%E8%B1%A1%E5%BC%95%E7%94%A8Reference%E4%BB%A5%E5%8F%8AReferenceQueue">2.2.1 守护线程处理对象引用Reference以及ReferenceQueue</h4> 
+<p>虚引用PhantomReference（Cleaner）与引用队列ReferenceQueue结合使用，可以实现虚引用关联对象被垃圾回收时能够进行系统通知、资源清理。通过启动</p> 
+<p>ReferenceHandler守护线程，通过while循环处理pending链表中的对象引用，pending和discovered都为Reference对象，即对象的引用—Cleaner对象，代码分解如下</p> 
+<pre><code class="language-java">/* High-priority thread to enqueue pending References
+     * 优先级最高，由于需要线程调度
+     * 
+     */
+    private static class ReferenceHandler extends Thread {
+
+        private static void ensureClassInitialized(Class&lt;?&gt; clazz) {
+            try {
+                Class.forName(clazz.getName(), true, clazz.getClassLoader());
+            } catch (ClassNotFoundException e) {
+                throw (Error) new NoClassDefFoundError(e.getMessage()).initCause(e);
+            }
+        }
+
+        static {
+            ensureClassInitialized(InterruptedException.class);
+            ensureClassInitialized(Cleaner.class);
+        }
+
+        ReferenceHandler(ThreadGroup g, String name) {
+            super(g, name);
+        }
+
+        //  死循环，
+        //JVM GC回收某个DirectByteBuffer对象后，JVM会设置当前DirectByteBuffer对象所对应的引用Cleaner，将Cleaner属性pending赋值
+        //
+        public void run() {
+            while (true) {
+                tryHandlePending(true);
+            }
+        }
+    }
+</code></pre> 
+<h4 id="%C2%A02.2.2%C2%A0%E5%A6%82%E4%BD%95%E8%A7%A6%E5%8F%91Cleaner%E4%B8%AD%E7%9A%84Deallocator%E7%BA%BF%E7%A8%8B%E9%87%8A%E6%94%BE%E5%86%85%E5%AD%98"> 2.2.2 如何触发Cleaner中的Deallocator线程释放内存</h4> 
+<p> 我们在查看Cleaner对象创建的时候发现Cleaner为其创建了Deallocator线程thunk，通过运行该线程释放内存，具体什么时候触发线程，继续分解代码：</p> 
+<pre><code class="language-java">        //  处理pending != null的引用Cleaner
+        static boolean tryHandlePending(boolean waitForNotify) {
+        Reference&lt;Object&gt; r;
+        Cleaner c;
+        
+        省略部分代码。。。
+        // Fast path for cleaners
+        if (c != null) {
+        // 通过Cleaner对象回调其thunk(创建cleaner时创建的线程)线程，通过unsafe.freeMemory()
+        //释放被Cleaner引用的DirectByteBuffer对象对应的堆外内存；
+            c.clean();
+            return true;
+        }
+
+        省略部分代码。。。
+    }</code></pre> 
+<p>发现tryHandlePending()调用了Cleaner#clean()方法，继续查看Cleaner的clean()方法，代码如下：</p> 
+<pre><code class="language-java">    public void clean() {
+        //将当前的Cleaner对象从Cleaner链表中移除，remove方法如下
+        if (!remove(this))
+            return;
+        try {
+            //  Cleaner调度了thunk线程
+            thunk.run();
+        } catch (final Throwable x) {
+            AccessController.doPrivileged(new PrivilegedAction&lt;Void&gt;() {
+                    public Void run() {
+                        if (System.err != null)
+                            new Error("Cleaner terminated abnormally", x)
+                                .printStackTrace();
+                        System.exit(1);
+                        return null;
+                    }});
+        }
+    }
+
+    
+    private static synchronized boolean remove(Cleaner cl) {
+
+        // If already removed, do nothing
+        if (cl.next == cl)
+            return false;
+
+        // Update list
+        if (first == cl) {
+            if (cl.next != null)
+                first = cl.next;
+            else
+                first = cl.prev;
+        }
+        if (cl.next != null)
+            cl.next.prev = cl.prev;
+        if (cl.prev != null)
+            cl.prev.next = cl.next;
+
+        // Indicate removal by pointing the cleaner to itself
+        cl.next = cl;
+        cl.prev = cl;
+        return true;
+
+    }
+</code></pre> 
+<p>从代码得知，虽然Cleaner不会调用到Reference.clear()，但Cleaner的clean()方法调用了remove(this)，即将当前Cleaner从Cleaner链表中移除，这样当clean()执行完后，Cleaner就是一个无引用指向的对象了，也就是可被GC回收的对象。</p> 
+<p>以上是DirectByteBuffer对象的创建、内存分配以及通过Cleaner对象实现对堆外内存回收，整个过程代码分析比较详细，关于如何通过虚引用PhantomReference（Cleaner对象）实现堆外内存回收，可参见如下图（此图来源美团技术团队）比较直观直接贴过来了。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/f3/66/bMZyZsTu_o.png"></p> 
+<h3 id="和DirectByteBuffer有关的JVM选项">2.3 DirectByteBuffer有关的JVM选项</h3> 
+<blockquote> 
+ <p>根据上文的分析，有两个JVM参数与DirectByteBuffer直接相关：</p> 
+ <ul><li><code>-XX:+PageAlignDirectMemory</code>：指定申请的内存是否需要按页对齐，默认不对其</li><li><code>-XX:MaxDirectMemorySize=&lt;size&gt;</code>，可以申请的最大DirectByteBuffer大小，默认与<code>-Xmx</code>相等 </li></ul> 
+</blockquote> 
+<h2 id="%E4%B8%89%E3%80%81JVM%E4%BD%BF%E7%94%A8%E5%A0%86%E5%A4%96%E5%86%85%E5%AD%98%E7%9A%84%E5%8E%9F%E5%9B%A0">三、JVM使用堆外内存的原因</h2> 
+<h3 id="3.1%20%E9%99%8D%E4%BD%8E%E5%9E%83%E5%9C%BE%E5%9B%9E%E6%94%B6%E5%81%9C%E9%A1%BF%E6%8F%90%E5%8D%87%E6%80%A7%E8%83%BD">3.1 降低垃圾回收停顿提升性能</h3> 
+<p>我们的Java程序需要依赖JVM去运行，会产生堆内垃圾数据需要通过YGC和FGC实现堆内内存垃圾回收（当然后边ZGC机制会有所不同）。例如CMS垃圾回收器FGC时，CMS会对所有分配的堆内内存进行完整的扫描，此刻Java程序是停滞运行的，也是大家常看到的STW（Stop The World）时间戳，也就是FGC回收程序暂停所耗时长。每次垃圾收集对Java应用造成的影响所产生的STW大小，跟堆的大小是成正比的。过大的堆FGC STW会更久影响Java应用的性能。</p> 
+<p>如果使用堆外内存的话，堆外内存是直接受操作系统管理( 而不是虚拟机 )。这样做的结果就是能保持一个较小的堆内内存，以减少垃圾收集对应用的影响。</p> 
+<p>至于未来垃圾回收器不断优化的情况下，通过GC回收堆内内存和通过弱引用回收堆外内存是否是一个最佳选择？相信未来会有一个答案，大家敬请期待吧！！！</p> 
+<h3 id="3.2%20%E9%81%BF%E5%85%8DJVM%E5%A4%A7%E5%A0%86%E5%B8%B8%E9%A9%BB%E6%97%A0%E6%B3%95%E5%9B%9E%E6%94%B6">3.2 避免JVM大堆常驻无法回收</h3> 
+<p>堆内内存对象大都是小对象，生命周期短，GC容易回收（如果是生命周期较短的对象，在YGC的时候就被回收了，就不存在大内存且生命周期较长的对象在FGC对应用造成的性能影响）。而堆外内存对象适合大对象，生命周期长，这样的对象如果放在堆内，则通过YGC和FGC有可能都无法回收，造成堆内内存持续飙升，也会频繁触发FGC。</p> 
+<h3 id="3.3%20%E6%8F%90%E5%8D%87%E5%86%85%E5%AD%98I%2FO%E5%87%8F%E5%B0%91%E5%86%85%E5%AD%98%E6%95%B0%E6%8D%AE%E6%8B%B7%E8%B4%9D">3.3 提升内存I/O减少内存数据拷贝</h3> 
+<p>Java应用程序在网络编程的需求下，往往需要发送数据到其他服务或者中间件，如果使用堆内内存需要切换线程，从用户线程拷贝数据到系统线程，然后通过系统线程将数据发送到网络缓冲区，发送数据后需要切换线程，从系统线程切换到用户线程，有时间大家可以查阅操作系统mmap和sendfile机制就可以理解线程切换和内存拷贝带来的开销。</p> 
+<p>所以在网络编程的今天为了提升程序I/O操纵的性能，避免数据内存I/O拷贝，使用堆外内存是一个不错的选择。</p> 
+<h2 id="%E5%9B%9B%E3%80%81%E6%9C%AC%E8%8A%82%E6%80%BB%E7%BB%93">四、本节总结</h2> 
+<p>本节主要通过源码分析DirectByteBuffer对象创建过程、内存分配、内存释放，总结如下：</p> 
+<ol><li>每次申请和释放需要调用调用Bits的<code>reserveMemory</code>或<code>unreserveMemory</code>方法，这两个方法根据内部维护的统计变量判断当前是否还有足够的空间可供申请，如果有足够的空间，更新统计变量，如果没有足够的空间，调用<code>System.gc()</code>尝试进行垃圾回收，回收后再次进行判断，如果还是没有足够的空间，抛出OOME。</li><li>Bits的<code>reserveMemory</code>方法判断是否有足够内存不是判断物理机是否有足够内存，而是判断JVM启动时，指定的堆外内存空间大小是否有剩余的空间。这个大小由参数<code>-XX:MaxDirectMemorySize=&lt;size&gt;</code>设置，具体<code>MaxDirectMemorySize大小后边文章分享</code>。</li><li>确定有足够的空间后，使用<code>sun.misc.Unsafe#allocateMemory</code>申请内存，申请完成后通过<code>sun.misc.Unsafe#setMemory初始化内存。</code></li><li>DirectByteBuffer使用Cleaner机制进行对外内存空间回收，内存回收有两部分，第一部分是堆内内存，由创建DirectByteBuffer对象时产生的，堆内内存回收由JVM GC完成，第二部分是堆外内存，由创建DirectByteBuffer对象所分配的内存空间，堆外内存回收是依赖堆内内存对象（DirectByteBuffer对象）被GC回收时触发的，通过堆内内存对象(DirectByteBuffer对象)引用的Cleaner对象调用Cleaner#clean()方法实现最终内存的释放。</li></ol> 
+<p>关于Reference后边文章再做详细介绍。</p> 
+<p></p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/77621eefe6dbeee67a45e58fde410a9f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">5G空口协议栈详解</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e7e092cad09a2f8546fe2bfe900b8fba/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">服务器全套基础知识：包含基本概念，作用，服务器选择，服务器管理等</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

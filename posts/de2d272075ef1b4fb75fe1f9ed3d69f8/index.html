@@ -1,0 +1,1129 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>理解ATL中的一些汇编代码 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="理解ATL中的一些汇编代码" />
+<meta property="og:description" content="我们知道ATL(活动模板库)是一套很小巧高效的COM开发库，它本身的核心文件其实没几个，COM相关的(主要是atlbase.h, atlcom.h)，另外还有一个窗口相关的(atlwin.h), 所以拿来学习应该是很方便的。但是因为ATL的代码充满了模板和宏，内部还夹杂着汇编，所以如果没有比较丰富的C&#43;&#43;模板和系统底层的知识，一般人会看得一头雾水。 下面我们主要分析一下ATL中的一些汇编代码。 ATL中出现汇编代码主要是2处，一处是通过Thunk技术来调用类成员函数处理消息；还有一处是通过打开_ATL_DEBUG_INTERFACES宏来跟踪接口的引用计数。 通过Thunk技术来调用类成员函数
+我们知道Windows窗口的消息处理函数要求是面向过程的C函数，所以我们C&#43;&#43;普通成员函数就不能作为窗口的消息处理函数，所以这里的问题就是如何让我们的C&#43;&#43;成员函数和Windows的窗口的消息处理函数关联起来？MFC是通过一个Map来实现的，而ATL选择了更为高效的Thunk技术来实现。
+我们将主要代码贴出来，然后介绍它的创建过程: template &lt; class TBase, class TWinTraits&gt; HWND CWindowImplBaseT&lt; TBase, TWinTraits &gt;::Create(HWND hWndParent, RECT&amp; rcPos, LPCTSTR szWindowName, DWORD dwStyle, DWORD dwExStyle, UINT nID, ATOM atom, LPVOID lpCreateParam) { ATLASSERT(m_hWnd == NULL); if (atom == 0) return NULL; _Module.AddCreateWndData( &amp; m_thunk.cd, this ); if (nID == 0 &amp;&amp; (dwStyle &amp; WS_CHILD)) nID = (UINT) this ; HWND hWnd = ::CreateWindowEx(dwExStyle, (LPCTSTR)MAKELONG(atom, 0), szWindowName, dwStyle, rcPos." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/de2d272075ef1b4fb75fe1f9ed3d69f8/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-07-05T07:40:32+08:00" />
+<meta property="article:modified_time" content="2019-07-05T07:40:32+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">理解ATL中的一些汇编代码</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="cnblogs_post_body" class="blogpost-body"> 
+ <div> 
+  <span style="font-family:Tahoma;font-size:10pt;">我们知道ATL(活动模板库)是一套很小巧高效的COM开发库，它本身的核心文件其实没几个，COM相关的(主要是atlbase.h, atlcom.h)，另外还有一个窗口相关的(atlwin.h), 所以拿来学习应该是很方便的。但是因为ATL的代码充满了模板和宏，内部还夹杂着汇编，所以如果没有比较丰富的C++模板和系统底层的知识，一般人会看得一头雾水。</span> 
+  <br> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">下面我们主要分析一下ATL中的一些汇编代码。</span> 
+  <br> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">ATL中出现汇编代码主要是2处，一处是通过Thunk技术来调用类成员函数处理消息；还有一处是通过打开_ATL_DEBUG_INTERFACES宏来跟踪接口的引用计数。</span> 
+  <br> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:14pt;"><strong>通过Thunk技术来调用类成员函数<br></strong></span> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">我们知道Windows窗口的消息处理函数要求是面向过程的C函数，所以我们C++普通成员函数就不能作为窗口的消息处理函数，所以这里的问题就是如何让我们的C++成员函数和Windows的窗口的消息处理函数关联起来？MFC是通过一个Map来实现的，而ATL选择了更为高效的Thunk技术来实现。<br></span> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">我们将主要代码贴出来，然后介绍它的创建过程:</span> 
+  <br> 
+  <div style="font-size:13px;border-top-width:1px;border-right-width:1px;border-bottom-width:1px;border-left-width:1px;border-top-style:solid;border-right-style:solid;border-bottom-style:solid;border-left-style:solid;border-top-color:#cccccc;border-right-color:#cccccc;border-bottom-color:#cccccc;border-left-color:#cccccc;"> 
+   <span style="font-family:Tahoma;font-size:10pt;">template &lt;</span> 
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">class</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> TBase, </span> 
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">class</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> TWinTraits&gt;</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">HWND CWindowImplBaseT&lt; TBase, TWinTraits &gt;::Create(HWND hWndParent, RECT&amp; rcPos, LPCTSTR szWindowName,</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">        DWORD dwStyle, DWORD dwExStyle, UINT nID, ATOM atom, LPVOID lpCreateParam)</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    ATLASSERT(m_hWnd == NULL);</span> 
+   <br> 
+   <br>     
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">if</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">(atom == 0)</span> 
+   <br>         
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">return</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> NULL;</span> 
+   <br> 
+   <br>    
+   <span style="font-family:Tahoma;font-size:10pt;"> _Module.AddCreateWndData(</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">&amp;</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">m_thunk.cd, </span> 
+   <span style="font-family:Tahoma;font-size:10pt;">this</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">);</span> 
+   <br> 
+   <br>     
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">if</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">(nID == 0 &amp;&amp; (dwStyle &amp; WS_CHILD))</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">        nID = (UINT)</span> 
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">this</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">;</span> 
+   <br> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    HWND hWnd = ::CreateWindowEx(dwExStyle, (LPCTSTR)MAKELONG(atom, 0), szWindowName,</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">        dwStyle, rcPos.left, rcPos.top, rcPos.right - rcPos.left,</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">        rcPos.bottom - rcPos.top, hWndParent, (HMENU)nID,</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">        _Module.GetModuleInstance(), lpCreateParam);</span> 
+   <br> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    ATLASSERT(m_hWnd == hWnd);</span> 
+   <br> 
+   <br>     
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">return</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> hWnd;</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+   <br> 
+   <div>
+          
+    <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">static</span> 
+    <span style="font-family:Tahoma;font-size:10pt;"> LRESULT CALLBACK StartWindowProc(HWND hWnd, UINT uMsg,</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">        WPARAM wParam, LPARAM lParam)</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">    {<!-- --></span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">        CContainedWindowT&lt; TBase &gt;* pThis = (CContainedWindowT&lt; TBase &gt;*)_Module.ExtractCreateWndData();</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">        ATLASSERT(pThis != NULL);</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">        pThis-&gt;m_hWnd = hWnd;</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">        pThis-&gt;m_thunk.Init(WindowProc, pThis);</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">        WNDPROC pProc = (WNDPROC)&amp;(pThis-&gt;m_thunk.thunk);</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">        WNDPROC pOldProc = (WNDPROC)::SetWindowLong(hWnd, GWL_WNDPROC, (LONG)pProc);</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">#ifdef _DEBUG</span> 
+    <br>         
+    <span style="color:#008000;font-family:Tahoma;font-size:10pt;">//</span> 
+    <span style="color:#008000;font-family:Tahoma;font-size:10pt;"> check if somebody has subclassed us already since we discard it</span> 
+    <span style="color:#008000;"><br></span>         
+    <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">if</span> 
+    <span style="font-family:Tahoma;font-size:10pt;">(pOldProc != StartWindowProc)</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">            ATLTRACE2(atlTraceWindowing, 0, _T("Subclassing through a hook discarded.\n"));</span> 
+    <br> 
+    <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">#else</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">        pOldProc;    </span> 
+    <span style="color:#008000;font-family:Tahoma;font-size:10pt;">//</span> 
+    <span style="color:#008000;font-family:Tahoma;font-size:10pt;"> avoid unused warning</span> 
+    <span style="color:#008000;"><br></span> 
+    <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">#endif</span> 
+    <br>         
+    <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">return</span> 
+    <span style="font-family:Tahoma;font-size:10pt;"> pProc(hWnd, uMsg, wParam, lParam);</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">    }</span> 
+    <br> 
+    <br> 
+    <div> 
+     <div> 
+      <span style="font-family:Tahoma;font-size:10pt;">class CWndProcThunk</span> 
+     </div> 
+     <div> 
+      <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+     </div> 
+     <div> 
+      <span style="font-family:Tahoma;font-size:10pt;">public:</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">union</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">_AtlCreateWndData cd;</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">_WndProcThunk thunk;</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">};</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">void Init(WNDPROC proc, void* pThis)</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+     </div> 
+     <div> 
+      <span style="font-family:Tahoma;font-size:10pt;">#if defined (_M_IX86)</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">thunk.m_mov = 0x042444C7;  //C7 44 24 0C</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">thunk.m_this = (DWORD)pThis;</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">thunk.m_jmp = 0xe9;</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">thunk.m_relproc = (int)proc - ((int)this+sizeof(_WndProcThunk));</span> 
+     </div> 
+     <div> 
+      <span style="font-family:Tahoma;font-size:10pt;">#elif defined (_M_ALPHA)</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">thunk.ldah_at = (0x279f0000 | HIWORD(proc)) + (LOWORD(proc)&gt;&gt;15);</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">thunk.ldah_a0 = (0x261f0000 | HIWORD(pThis)) + (LOWORD(pThis)&gt;&gt;15);</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">thunk.lda_at = 0x239c0000 | LOWORD(proc);</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">thunk.lda_a0 = 0x22100000 | LOWORD(pThis);</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">thunk.jmp = 0x6bfc0000;</span> 
+     </div> 
+     <div> 
+      <span style="font-family:Tahoma;font-size:10pt;">#endif</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">// write block from data cache and</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">//  flush from instruction cache</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">FlushInstructionCache(GetCurrentProcess(), &amp;thunk, sizeof(thunk));</span> 
+     </div> 
+     <div> 
+        
+      <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+     </div> 
+     <div> 
+      <span style="font-family:Tahoma;font-size:10pt;">};</span> 
+     </div> 
+    </div> 
+   </div> 
+   <div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">static LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">CContainedWindowT&lt; TBase &gt;* pThis = (CContainedWindowT&lt; TBase &gt;*)hWnd;</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">ATLASSERT(pThis-&gt;m_hWnd != NULL);</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">ATLASSERT(pThis-&gt;m_pObject != NULL);</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">// set a ptr to this message and save the old value</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">MSG msg = { pThis-&gt;m_hWnd, uMsg, wParam, lParam, 0, { 0, 0 } };</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">const MSG* pOldMsg = pThis-&gt;m_pCurrentMsg;</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">pThis-&gt;m_pCurrentMsg = &amp;msg;</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">// pass to the message map to process</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">LRESULT lRes;</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">BOOL bRet = pThis-&gt;m_pObject-&gt;ProcessWindowMessage(pThis-&gt;m_hWnd, uMsg, wParam, lParam, lRes, pThis-&gt;m_dwMsgMapID);</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">// restore saved value for the current message</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">ATLASSERT(pThis-&gt;m_pCurrentMsg == &amp;msg);</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">pThis-&gt;m_pCurrentMsg = pOldMsg;</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">// do the default processing if message was not handled</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">if(!bRet)</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">if(uMsg != WM_NCDESTROY)</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">lRes = pThis-&gt;DefWindowProc(uMsg, wParam, lParam);</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">else</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">// unsubclass, if needed</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">LONG pfnWndProc = ::GetWindowLong(pThis-&gt;m_hWnd, GWL_WNDPROC);</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">lRes = pThis-&gt;DefWindowProc(uMsg, wParam, lParam);</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">if(pThis-&gt;m_pfnSuperWindowProc != ::DefWindowProc &amp;&amp; ::GetWindowLong(pThis-&gt;m_hWnd, GWL_WNDPROC) == pfnWndProc)</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">::SetWindowLong(pThis-&gt;m_hWnd, GWL_WNDPROC, (LONG)pThis-&gt;m_pfnSuperWindowProc);</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">// clear out window handle</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">pThis-&gt;m_hWnd = NULL;</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">return lRes;</span> 
+    </div> 
+    <div> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+    </div> 
+   </div> 
+  </div> 
+  <span style="font-family:Tahoma;font-size:10pt;"><br>(1)通过调用类成员函数Create来创建窗口, Create时通过</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">_Module.AddCreateWndData(</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">&amp;</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">m_thunk.cd, </span> 
+  <span style="font-family:Tahoma;font-size:10pt;">this</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">)将this指针保存起来.<br><br></span> 
+  <span style="font-family:Tahoma;font-size:10pt;">(2)因为注册时将</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">StartWindowProc设为窗口消息的回调处理函数，所以第一个窗口消息会进入到</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">该函数，在函数入口通过</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">_Module.ExtractCreateWndData()将保存的This指针取出来。<br><br></span> 
+  <span style="font-family:Tahoma;font-size:10pt;">(3)将窗口函数</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">WindowProc和This指针传给Thunk进行初始化。<br></span> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">Thunk初始化时写入一些汇编代码</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">thunk.m_mov = 0x042444C7;</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">thunk.m_this = (DWORD)pThis;这2行代码表示汇编代码</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">mov dword ptr [esp+0x4], pThis, 而esp+0x4对应的是我们的第一个参数hWnd, 所以这个代码表示把我们的第一参数hWnd用This替代。<br></span> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">接下来汇编代码</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">thunk.m_jmp = 0xe9; </span> 
+  <span style="font-family:Tahoma;font-size:10pt;">thunk.m_relproc = (int)proc - ((int)this+sizeof(_WndProcThunk));表示通过相对地址JMP跳转到</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">WindowProc。<br></span> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">(4)回到</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">StartWindowProc， 将Thunk地址作为我们新的窗口消息处理函数地址， 这样以后有任何新的窗口消息，调用的都是我们新的Thunk代码了。<br></span> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">(5)下一个窗口消息到来，调用我们新的Thunk代码，我们的Thunk代码将第一个hWnd参数替换成This指针，然后跳转到</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">WindowProc<br></span> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">(6)在WindowProc函数中的第一参数已经被转成This指针，接下来我们就可以根据这个This指针调用它的虚函数</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">ProcessWindowMessage了。</span> 
+  <br> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">我们可以看到ATL这种通过Thunk关联类成员函数处理消息的方法非常高效，只是参数修改和跳转，基本上没有任何性能损失。</span> 
+  <br> 
+  <br> 
+  <div> 
+   <span style="font-family:Tahoma;font-size:14pt;"><strong>打开_ATL_DEBUG_INTERFACES宏来跟踪接口的引用计数<br><br></strong></span> 
+  </div> 
+  <span style="font-family:Tahoma;font-size:10pt;">我们知道COM中引用计数的管理一直是个难题，因为你的接口是大家共用的，如果你引用计数管理出错，就会导致一些非常难查的问题，因此ATL中我们可以通过打开</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">_ATL_DEBUG_INTERFACES宏 ，让我们通过Debug信息察看每个接口的引用计数情况。那么ATL是如何做到的呢？<br></span> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">相信用过ATL的人都会看到过这个代码：</span> 
+  <br> 
+  <div> 
+   <div style="font-size:13px;border-top-width:1px;border-right-width:1px;border-bottom-width:1px;border-left-width:1px;border-top-style:solid;border-right-style:solid;border-bottom-style:solid;border-left-style:solid;border-top-color:#cccccc;border-right-color:#cccccc;border-bottom-color:#cccccc;border-left-color:#cccccc;"> 
+    <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">struct</span> 
+    <span style="font-family:Tahoma;font-size:10pt;"> _QIThunk</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+    <br> 
+    <img src="https://images2.imgbox.com/a6/c4/XbASpupP_o.gif" alt=""> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">    STDMETHOD(f3)();</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">    STDMETHOD(f4)();</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">    STDMETHOD(f5)();</span> 
+    <br>          
+    <img src="https://images2.imgbox.com/b9/f2/mdL6jo51_o.gif" alt=""> 
+    <br>          
+    <img src="https://images2.imgbox.com/4f/a6/wuaqi8RV_o.gif" alt=""> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">    STDMETHOD(f1022)();</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">    STDMETHOD(f1023)();</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">    STDMETHOD(f1024)();</span> 
+    <br>         
+    <img src="https://images2.imgbox.com/b2/a5/RHs52wH6_o.gif" alt=""> 
+    <span style="font-family:Tahoma;font-size:10pt;">.</span> 
+    <br> 
+    <span style="font-family:Tahoma;font-size:10pt;">};</span> 
+   </div> 
+  </div> 
+  <span style="font-family:Tahoma;font-size:10pt;">里面有1000多个方法，相信很多人到现在还不知道这些东西有什么用，其实我以前一直也没看懂这个东西。</span> 
+  <br> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">下面我们来分析下ATL跟踪接口引用计数的过程，同样先贴代码:</span> 
+  <br> 
+  <div style="border-top-width:1px;border-right-width:1px;border-bottom-width:1px;border-left-width:1px;border-top-style:solid;border-right-style:solid;border-bottom-style:solid;border-left-style:solid;border-top-color:#cccccc;border-right-color:#cccccc;border-bottom-color:#cccccc;border-left-color:#cccccc;">
+         
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">static</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> HRESULT WINAPI InternalQueryInterface(</span> 
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">void</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">*</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> pThis,</span> 
+   <br>         
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">const</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> _ATL_INTMAP_ENTRY</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">*</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> pEntries, REFIID iid, </span> 
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">void</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">**</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> ppvObject)</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    {<!-- --></span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">        ATLASSERT(pThis </span> 
+   <span style="font-family:Tahoma;font-size:10pt;">!=</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> NULL);</span> 
+   <br>         
+   <span style="color:#008000;font-family:Tahoma;font-size:10pt;">//</span> 
+   <span style="color:#008000;font-family:Tahoma;font-size:10pt;"> First entry in the com map should be a simple map entry</span> 
+   <span style="font-size:13px;color:#008000;"><br></span> 
+   <span style="font-family:Tahoma;font-size:10pt;">        ATLASSERT(pEntries</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">-&gt;</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">pFunc </span> 
+   <span style="font-family:Tahoma;font-size:10pt;">==</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> _ATL_SIMPLEMAPENTRY);</span> 
+   <br>     
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">#if</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> defined(_ATL_DEBUG_INTERFACES) || defined(_ATL_DEBUG_QI)</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">        LPCTSTR pszClassName </span> 
+   <span style="font-family:Tahoma;font-size:10pt;">=</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> (LPCTSTR) pEntries[</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">-</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">1</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">].dw;</span> 
+   <br>     
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">#endif</span>  
+   <span style="color:#008000;font-family:Tahoma;font-size:10pt;">//</span> 
+   <span style="color:#008000;font-family:Tahoma;font-size:10pt;"> _ATL_DEBUG_INTERFACES</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">        HRESULT hRes </span> 
+   <span style="font-family:Tahoma;font-size:10pt;">=</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> AtlInternalQueryInterface(pThis, pEntries, iid, ppvObject);</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    #ifdef _ATL_DEBUG_INTERFACES</span> 
+   <br>         
+   <span style="color:#ff0000;font-family:Tahoma;font-size:10pt;">_Module.AddThunk((IUnknown</span> 
+   <span style="color:#ff0000;font-family:Tahoma;font-size:10pt;">**</span> 
+   <span style="color:#ff0000;font-family:Tahoma;font-size:10pt;">)ppvObject, pszClassName, iid);</span> 
+   <br>     
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">#endif</span>  
+   <span style="color:#008000;font-family:Tahoma;font-size:10pt;">//</span> 
+   <span style="color:#008000;font-family:Tahoma;font-size:10pt;"> _ATL_DEBUG_INTERFACES</span> 
+   <br>         
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">return</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> _ATLDUMPIID(iid, pszClassName, hRes);</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    }</span> 
+   <br> 
+   <br> 
+   <div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">HRESULT AddThunk(IUnknown** pp, LPCTSTR lpsz, REFIID iid)</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">if ((pp == NULL) || (*pp == NULL))</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">return E_POINTER;</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">IUnknown* p = *pp;</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">_QIThunk* pThunk = NULL;</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">EnterCriticalSection(&amp;m_csObjMap);</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">// Check if exists already for identity</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">if (InlineIsEqualUnknown(iid))</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">for (int i = 0; i &lt; m_paThunks-&gt;GetSize(); i++)</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">if (m_paThunks-&gt;operator[](i)-&gt;pUnk == p)</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">m_paThunks-&gt;operator[](i)-&gt;InternalAddRef();</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">pThunk = m_paThunks-&gt;operator[](i);</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">break;</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">if (pThunk == NULL)</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">++m_nIndexQI;</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">if (m_nIndexBreakAt == m_nIndexQI)</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">DebugBreak();</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="color:#ff0000;font-family:Tahoma;font-size:10pt;">ATLTRY(pThunk = new _QIThunk(p, lpsz, iid, m_nIndexQI, (m_nIndexBreakAt == m_nIndexQI)));</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">if (pThunk == NULL)</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">return E_OUTOFMEMORY;</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">pThunk-&gt;InternalAddRef();</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">m_paThunks-&gt;Add(pThunk);</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">LeaveCriticalSection(&amp;m_csObjMap);</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="color:#ff0000;font-family:Tahoma;font-size:10pt;">*pp = (IUnknown*)pThunk;</span> 
+    </div> 
+    <div style="font-size:13px;"> 
+       
+     <span style="font-family:Tahoma;font-size:10pt;">return S_OK;</span> 
+    </div> 
+    <div> 
+     <span style="font-size:13px;"> </span> 
+     <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+     <br> 
+     <br> 
+     <br> 
+     <div> 
+      <div> 
+       <span style="font-family:Tahoma;font-size:10pt;">struct _QIThunk</span> 
+      </div> 
+      <div> 
+       <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">STDMETHOD(QueryInterface)(REFIID iid, void** pp)</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">ATLASSERT(m_dwRef &gt;= 0);</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">return pUnk-&gt;QueryInterface(iid, pp);</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">STDMETHOD_(ULONG, AddRef)()</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">if (bBreak)</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">DebugBreak();</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">pUnk-&gt;AddRef();</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">return InternalAddRef();</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">ULONG InternalAddRef()</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">if (bBreak)</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">DebugBreak();</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">ATLASSERT(m_dwRef &gt;= 0);</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">long l = InterlockedIncrement(&amp;m_dwRef);</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">ATLTRACE(_T("%d&gt; "), m_dwRef);</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">AtlDumpIID(iid, lpszClassName, S_OK);</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">if (l &gt; m_dwMaxRef)</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">m_dwMaxRef = l;</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">return l;</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">STDMETHOD_(ULONG, Release)();</span> 
+      </div> 
+      <div></div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">STDMETHOD(f3)();</span> 
+      </div> 
+      <div> 
+         
+       <span style="font-family:Tahoma;font-size:10pt;">STDMETHOD(f4)();</span> 
+      </div> 
+      <div> 
+       <div> 
+        <div> 
+         <span style="font-family:Tahoma;font-size:10pt;">         ....</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">STDMETHOD(f1023)();</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">STDMETHOD(f1024)();</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">_QIThunk(IUnknown* pOrig, LPCTSTR p, const IID&amp; i, UINT n, bool b)</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">{<!-- --></span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">lpszClassName = p;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">iid = i;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">nIndex = n;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">m_dwRef = 0;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">m_dwMaxRef = 0;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">pUnk = pOrig;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">bBreak = b;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">bNonAddRefThunk = false;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">IUnknown* pUnk;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">long m_dwRef;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">long m_dwMaxRef;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">LPCTSTR lpszClassName;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">IID iid;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">UINT nIndex;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">bool bBreak;</span> 
+        </div> 
+        <div> 
+           
+         <span style="font-family:Tahoma;font-size:10pt;">bool bNonAddRefThunk;</span> 
+        </div> 
+        <div> 
+         <span style="font-family:Tahoma;font-size:10pt;">};</span> 
+         <br> 
+         <br> 
+         <br> 
+         <div> 
+          <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">#define</span> 
+          <span style="font-family:Tahoma;font-size:10pt;"> IMPL_THUNK(n)\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">__declspec(naked) inline HRESULT _QIThunk::f##n()\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">{\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">    __asm mov eax, [esp</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">+</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">4</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">]\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">    __asm cmp dword ptr [eax</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">+</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">8</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">], </span> 
+          <span style="font-family:Tahoma;font-size:10pt;">0</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">    __asm jg goodref\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">    __asm call atlBadThunkCall\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">    __asm goodref:\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">    __asm mov eax, [esp</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">+</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">4</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">]\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">    __asm mov eax, dword ptr [eax</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">+</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">4</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">]\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">    __asm mov [esp</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">+</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">4</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">], eax\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">    __asm mov eax, dword ptr [eax]\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">    __asm mov eax, dword ptr [eax</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">+</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">4</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">*</span> 
+          <span style="font-family:Tahoma;font-size:10pt;">n]\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">    __asm jmp eax\</span> 
+          <br style="font-size:13px;"> 
+          <span style="font-family:Tahoma;font-size:10pt;">}<br><br></span> 
+          <div> 
+           <div> 
+            <span style="font-family:Tahoma;font-size:10pt;">IMPL_THUNK(3)</span> 
+           </div> 
+           <div> 
+            <span style="font-family:Tahoma;font-size:10pt;">IMPL_THUNK(4)</span> 
+           </div> 
+           <div> 
+            <span style="font-family:Tahoma;font-size:10pt;">IMPL_THUNK(5)</span> 
+            <br> 
+            <span style="font-family:Tahoma;font-size:10pt;">....</span> 
+           </div> 
+          </div> 
+         </div> 
+        </div> 
+       </div> 
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+  </div> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">(1)ATL内部是通过调用</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">InternalQueryInterface来查询接口(QueryInterface)的，我们看到如果定义了宏</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">_ATL_DEBUG_INTERFACES</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">，它会增加一行代码</span>  
+  <span style="font-family:Tahoma;font-size:10pt;">_Module.AddThunk((IUnknown</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">**</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">)ppvObject, pszClassName, iid)。<br></span> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">(2)AddThunk会创建一个</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">_QIThunk，然后把我们的指针改成它新建的_QIThunk指针，这意味着我们上面</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">QueryInterface的得到的指针已经被改成</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">_QIThunk指针了, 因为我们所有的COM接口指针都是通过QueryInterface得到的，所以接下来任何COM接口的调用都会跑到_QIThunk中。<br></span> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">(3)_QIThunk是严格按照IUnknow布局的，它虚表函数依次是</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">QueryInterface，</span> 
+  <span style="font-family:Tahoma;font-size:10pt;"> AddRef， Release, f3, f4, ... f1023, f1024。现在任何</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">AddRef和</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">Release的调用我们都可以拦截到了，这样我们也就能跟踪每个接口的引用计数情况了。<br></span> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">(4)那如果调用其他接口函数怎么办？因为虚函数的调用实际上是根据虚表中索引位置来调用的，所以调用其他虚函数实际上就是调用f3, f4 ... f1024等。现在我们应该知道我们这1000多个虚函数的作用了。对，他们实际上只是占位函数，ATL假设任何接口都不会超过1024个方法。所以我们这些占位函数要实现的功能就是如何通过我们保存的原始</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">IUnknown* pUnk， </span> 
+  <span style="font-family:Tahoma;font-size:10pt;">转去调用它真正的虚函数。<br></span> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">(5)我们可以看到每个占位函数的实现都是一样的，他们会去调用一段汇编代码，我们看到这段汇编是裸代码（naked）,下面我们来分析这段汇编代码.</span> 
+  <br> 
+  <div> 
+   <span style="font-family:Tahoma;font-size:10pt;">根据</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">QIThunk的内存布局， 前4个字节是虚表指针，4-8字节是保存的原始接口指针</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">IUnknown* pUnk</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">，8-12字节是引用计数</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">long m_dwRef<br><br></span> 
+  </div> 
+  <div style="font-size:13px;border-top-width:1px;border-right-width:1px;border-bottom-width:1px;border-left-width:1px;border-top-style:solid;border-right-style:solid;border-bottom-style:solid;border-left-style:solid;border-top-color:#cccccc;border-right-color:#cccccc;border-bottom-color:#cccccc;border-left-color:#cccccc;"> 
+   <span style="color:#0000ff;font-family:Tahoma;font-size:10pt;">#define</span> 
+   <span style="font-family:Tahoma;font-size:10pt;"> IMPL_THUNK(n)\</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">__declspec(naked) inline HRESULT _QIThunk::f##n()\</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">{\</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    __asm mov eax, [esp</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">+</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">4</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">]\       //将第一参数，即pQIThunk保存到eax</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    __asm cmp dword ptr [eax</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">+</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">8</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">], </span> 
+   <span style="font-family:Tahoma;font-size:10pt;">0</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">\      //判断</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">QIThunk的引用计数是否为0</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    __asm jg goodref\       //大于0才是正确的</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    __asm call atlBadThunkCall\</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    __asm goodref:\</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    __asm mov eax, [esp</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">+</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">4</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">]\         //</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">将第一参数，即pQIThunk保存到eax</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    __asm mov eax, dword ptr [eax</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">+</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">4</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">]\        //取出QIThunk的原始接口指针</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">IUnknown* pUnk</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    __asm mov [esp</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">+</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">4</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">], eax\         //将原始接口指针保存替换刚调用过来的第一参数</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    __asm mov eax, dword ptr [eax]\        //取出原始接口指针保存的虚表地址，保存到eax</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    __asm mov eax, dword ptr [eax</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">+</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">4</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">*</span> 
+   <span style="font-family:Tahoma;font-size:10pt;">n]\       //根据索引，取出原始虚表中对应的函数地址</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">    __asm jmp eax\        //跳转到该函数地址</span> 
+   <br> 
+   <span style="font-family:Tahoma;font-size:10pt;">}</span> 
+  </div> 
+  <span style="font-family:Tahoma;font-size:10pt;"><br>可以看到，通过上面的汇编代码，将原来是针对QIThunk的调用又转回到了我们原始的接口中。呵呵， 实际上应该是</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">ATL拦截了我们原始的接口调用，转到了QIThunk中，而QIThunk最终又通过Thunk机制转回了原始的接口调用。</span> 
+  <br> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">通过上面一些介绍，希望可以帮助你理解ATL, 我们</span> 
+  <span style="font-family:Tahoma;font-size:10pt;">可以看到Thunk本质上只是通过汇编实现参数的修改和指令的跳转。</span> 
+  <br> 
+  <br> 
+  <span style="font-family:Tahoma;font-size:10pt;">以前我看ATL也很吃力，以我个人的经验，一些东西刚开始看不太懂就放一放，先去看一些基本的东西，比如不懂COM，先去学下C++ 中的虚函数；不懂C++模板，先去学下STL；不懂Thunk，先去看一下汇编，等有了一定的积累，回头再看，一切就觉得没这么难了。</span> 
+ </div> 
+</div> 
+<p>转载于:https://www.cnblogs.com/weiym/archive/2012/10/23/2734798.html</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/99e77fcd73f9ce73db68522da78322fb/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">落伍的感觉</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/62bfb6adf720d7b4c4ccb2f6aa15a262/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">关于Windows高DPI的一些简单总结</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

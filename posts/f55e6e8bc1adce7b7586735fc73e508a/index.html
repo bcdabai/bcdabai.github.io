@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>《MySQL实战45讲》——学习笔记18 “索引失效、函数/隐式转换“【建议收藏】 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="《MySQL实战45讲》——学习笔记18 “索引失效、函数/隐式转换“【建议收藏】" />
+<meta property="og:description" content="本文介绍几种MYSQL中索引失效的典型SQL用法，包括对索引字段使用函数、索引字段隐式类型转换（如字符串转数值类型，实质上也是使用CAST函数）、索引字段隐式字符编码转换（如utf8mb4字符集与utf8字符集的等值判断，实质上也是使用CONVERT函数）；
+并且，有的时候你可能发现explain执行计划中使用了索引，但是SQL的性能依然很慢，这时就要观察下rows判断是否走了全表扫描；并不是说查询走了索引就一定快；
+案例一：查询条件中对索引字段显示的使用函数 假设有一个交易系统，其中交易记录表tradelog包含交易流水号（tradeid）、交易员id（operator）、交易时间（t_modified）等字段，其中交易时间和流水号字段都加了索引；这个表的建表语句如下：
+mysql&gt; CREATE TABLE `tradelog` ( `id` int(11) NOT NULL, `tradeid` varchar(32) DEFAULT NULL, `operator` int(11) DEFAULT NULL, `t_modified` datetime DEFAULT NULL, PRIMARY KEY (`id`), KEY `tradeid` (`tradeid`), KEY `t_modified` (`t_modified`) ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4; 假设，现在已经记录了从2016年初到2018年底的所有数据，运营部门有一个需求是：要统计发生在所有年份中7月份的交易记录总数；这个逻辑看上去并不复杂，你的SQL语句可能会这么写：
+mysql&gt; select count(*) from tradelog where month(t_modified)=7; 由于t_modified字段上有索引，于是你就很放心地在生产库中执行了这条语句，但却发现执行了特别久，才返回了结果；DBA同事的解释可能是：如果对字段做了函数计算，就用不上索引了，这是MySQL的规定；
+现在分析下原因，下面是这个t_modified索引的示意图，方框上面的数字就是month()函数对应的值；
+如果你的SQL语句条件用的是where t_modified=&#39;2018-7-1’的话，引擎就会按照上面绿色箭头的路线，快速定位到t_modified=&#39;2018-7-1’需要的结果；实际上，B&#43;树提供的这个快速定位能力，来源于同一层兄弟节点的有序性；
+但是，如果计算month()函数的话，你会发现这颗B&#43;树的&#34;有序性&#34;被破坏了；例如当传入month(t_modified)=7的时候，在树的第一层就不知道该怎么办了——他不知道接下来往哪个方向找；也就是说，对索引字段做函数操作，可能会破坏索引值的有序性，因此优化器就决定放弃走树搜索功能，转而走全索引扫描（遍历整个索引树）；
+需要注意的是，&#34;放弃走树搜索功能&#34;并不意味着优化器放弃使用这个索引；
+在这个例子里，尽管优化器放弃了树搜索功能，但它遍历索引树获取t_modified字段，既可以选择遍历主键id索引，也可以选择遍历索引t_modified；优化器对比索引大小后发现，索引t_modified更小（覆盖索引），遍历这个索引比遍历主键索引来得更快；因此最终还是会选择索引t_modified；
+使用explain命令查看一下这条SQL语句的执行结果：
+key=&#34;t_modified&#34;表示的是，使用了t_modified这个索引；因为测试表数据中插入了10万行数据，这里统计rows=100335，说明这条语句扫描了整个索引的所有值；Extra字段的Using index，表示的是使用了覆盖索引，因为仅需要全表扫描t_modified字段；
+结论就是——由于在t_modified这个索引字段加了month()函数操作，导致了全索引扫描；
+根据上述结论，可以在语句中不对索引字段做函数运算，而是使用范围查询，如下；
+mysql&gt; select count(*) from tradelog where -&gt; (t_modified &gt;= &#39;2016-7-1&#39; and t_modified&lt;&#39;2016-8-1&#39;) or -&gt; (t_modified &gt;= &#39;2017-7-1&#39; and t_modified&lt;&#39;2017-8-1&#39;) or -&gt; (t_modified &gt;= &#39;2018-7-1&#39; and t_modified&lt;&#39;2018-8-1&#39;); 不过优化器在个问题上确实有“偷懒”行为——即使是对于不改变有序性的函数，也不会考虑使用索引；比如，对于 select * from tradelog where id&#43;1=10000 这个SQL语句，这个加1操作并不会改变有序性，但是MySQL优化器还是不能用id索引快速定位到9999这一行；所以，需要你在写SQL语句的时候，手动改写成 where id=10000-1 才可以；" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/f55e6e8bc1adce7b7586735fc73e508a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-12-04T23:09:54+08:00" />
+<meta property="article:modified_time" content="2022-12-04T23:09:54+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">《MySQL实战45讲》——学习笔记18 “索引失效、函数/隐式转换“【建议收藏】</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>本文介绍几种MYSQL中索引失效的典型SQL用法，包括对索引字段使用函数、索引字段隐式类型转换（如字符串转数值类型，实质上也是使用CAST函数）、索引字段隐式字符编码转换（如utf8mb4字符集与utf8字符集的等值判断，实质上也是使用CONVERT函数）；</p> 
+<p>并且，有的时候你可能发现explain执行计划中使用了索引，但是SQL的性能依然很慢，这时就要观察下rows判断是否走了全表扫描；并不是说查询走了索引就一定快；</p> 
+<p></p> 
+<h4>案例一：查询条件中对索引字段显示的使用函数</h4> 
+<p>假设有一个交易系统，其中交易记录表tradelog包含交易流水号（tradeid）、交易员id（operator）、交易时间（t_modified）等字段，其中交易时间和流水号字段都加了索引；这个表的建表语句如下：</p> 
+<pre><code class="language-sql">mysql&gt; CREATE TABLE `tradelog` (
+  `id` int(11) NOT NULL,
+  `tradeid` varchar(32) DEFAULT NULL,
+  `operator` int(11) DEFAULT NULL,
+  `t_modified` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `tradeid` (`tradeid`),
+  KEY `t_modified` (`t_modified`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;</code></pre> 
+<p>假设，现在已经记录了从2016年初到2018年底的所有数据，运营部门有一个需求是：<strong>要统计发生在所有年份中7月份的交易记录总数</strong>；这个逻辑看上去并不复杂，你的SQL语句可能会这么写：</p> 
+<pre><code class="language-sql">mysql&gt; select count(*) from tradelog where month(t_modified)=7;</code></pre> 
+<p>由于t_modified字段上有索引，于是你就很放心地在生产库中执行了这条语句，但却发现执行了特别久，才返回了结果；DBA同事的解释可能是：<span style="color:#ed7976;"><strong>如果对字段做了函数计算，就用不上索引了，这是MySQL的规定</strong></span>；</p> 
+<p>现在分析下原因，下面是这个t_modified索引的示意图，方框上面的数字就是month()函数对应的值；</p> 
+<p><img alt="" height="324" src="https://images2.imgbox.com/38/30/2oz7TsbZ_o.png" width="600"></p> 
+<p>如果你的SQL语句条件用的是where t_modified='2018-7-1’的话，引擎就会按照上面<span style="color:#1c7331;"><strong>绿色箭头</strong></span>的路线，快速定位到t_modified='2018-7-1’需要的结果；<span style="color:#1c7331;"><strong>实际上，B+树提供的这个快速定位能力，来源于同一层兄弟节点的有序性；</strong></span></p> 
+<p>但是，<span style="color:#ed7976;"><strong>如果计算month()函数的话，你会发现这颗B+树的"有序性"被破坏了</strong></span>；例如当传入month(t_modified)=7的时候，在树的第一层就不知道该怎么办了——<strong>他不知道接下来往哪个方向找</strong>；也就是说，<span style="color:#ed7976;"><strong>对索引字段做函数操作，可能会破坏索引值的有序性，因此优化器就决定放弃走树搜索功能，转而走全索引扫描（遍历整个索引树）</strong></span>；</p> 
+<p>需要注意的是，<span style="color:#ed7976;"><strong>"放弃走树搜索功能"并不意味着优化器放弃使用这个索引</strong></span>；</p> 
+<p>在这个例子里，尽管优化器放弃了树搜索功能，但它遍历索引树获取t_modified字段，既可以选择遍历主键id索引，也可以选择遍历索引t_modified；优化器对比索引大小后发现，索引t_modified更小（覆盖索引），遍历这个索引比遍历主键索引来得更快；因此最终还是会选择索引t_modified；</p> 
+<p>使用explain命令查看一下这条SQL语句的执行结果：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/77/85/neaVSY11_o.png"></p> 
+<p>key="t_modified"表示的是，使用了t_modified这个索引；因为测试表数据中插入了10万行数据，这里统计rows=100335，说明<span style="color:#1c7331;"><strong>这条语句扫描了整个索引的所有值</strong></span>；Extra字段的Using index，表示的是<span style="color:#1c7331;"><strong>使用了覆盖索引</strong></span>，因为仅需要全表扫描t_modified字段；</p> 
+<blockquote> 
+ <p>结论就是——<strong>由于在t_modified这个索引字段加了month()函数操作，导致了全索引扫描；</strong></p> 
+</blockquote> 
+<p>根据上述结论，可以在语句中不对索引字段做函数运算，而是使用范围查询，如下；</p> 
+<pre><code class="language-sql">mysql&gt; select count(*) from tradelog where
+    -&gt; (t_modified &gt;= '2016-7-1' and t_modified&lt;'2016-8-1') or
+    -&gt; (t_modified &gt;= '2017-7-1' and t_modified&lt;'2017-8-1') or 
+    -&gt; (t_modified &gt;= '2018-7-1' and t_modified&lt;'2018-8-1');</code></pre> 
+<p>不过优化器在个问题上确实有“偷懒”行为——<span style="color:#ed7976;"><strong>即使是对于不改变有序性的函数，也不会考虑使用索引</strong></span>；比如，对于 select * from tradelog where id+1=10000 这个SQL语句，这个加1操作并不会改变有序性，但是MySQL优化器还是不能用id索引快速定位到9999这一行；所以，需要你在写SQL语句的时候，手动改写成 where id=10000-1 才可以；</p> 
+<p></p> 
+<h4>案例二：对索引字段隐式的使用类型转换函数</h4> 
+<p>先看下下面的语句，交易编号 tradeid 这个字段上本来就有索引，但是 explain 的结果却显示，这条语句需要走全表扫描；</p> 
+<pre><code class="language-sql">mysql&gt; select * from tradelog where tradeid=110717;</code></pre> 
+<p>实际上，tradeid 的字段类型是 varchar(32)，而输入的参数110717却是整型，所以<span style="color:#ed7976;"><strong>这里一定需要做类型转换</strong></span>；</p> 
+<p>那么，现在这里就有两个问题：</p> 
+<p>（1）数据类型转换的规则是什么？<br> （2）为什么有数据类型转换，就需要走全索引扫描？</p> 
+<p>先来看第一个问题，尝试执行 select '10'&gt;9的结果：<span style="color:#1c7331;"><strong>结果是1</strong></span>，也就是说这里"<span style="color:#1c7331;"><strong>将字符串转成了数值</strong></span>"，也就是执行到"tradeid=110717"时MySQL将索引字段tradeid转成了数值型做比较；（字符串比较大小是逐位从高位到低位逐个比较（按ascii码），"10"的第一位字符"1"的ascii比"9"小，所以如果是数值转字符串那么结果应该为0）</p> 
+<p>所以，上述的语句对于优化器来说，相当于：</p> 
+<pre><code class="language-sql">mysql&gt; select * from tradelog where  CAST(tradid AS signed int) = 110717;</code></pre> 
+<p>也就是说，这条语句触发了我们上面说到的规则：<span style="color:#ed7976;"><strong>对索引字段做函数操作，优化器会放弃走树搜索功能</strong></span>；举个例子，反过来，假如主键id的类型是int，如果执行下面这个语句，是否会导致全表扫描呢？</p> 
+<pre><code class="language-sql">select * from tradelog where id="83126";</code></pre> 
+<p>答案是——<span style="color:#1c7331;"><strong>会走索引</strong></span>； <span style="color:#1c7331;"><strong>当字符串和数字比较时会把字符串转化为数字</strong></span>，所以这条语句里的隐式转换不会应用到索引字段上，而是作用于where等号后面的变量"83126"上，所以可以走索引；</p> 
+<p></p> 
+<h4>案例三：对索引字段隐式的使用字符编码转换</h4> 
+<p>假设系统里还有另外一个表 trade_detail，用于记录交易的操作细节；这个表与上面的交易日志表 tradelog 通过交易流水号关联；</p> 
+<pre><code class="language-sql">mysql&gt; CREATE TABLE `trade_detail` (
+  `id` int(11) NOT NULL,
+  `tradeid` varchar(32) DEFAULT NULL,
+  `trade_step` int(11) DEFAULT NULL, /*操作步骤*/
+  `step_info` varchar(32) DEFAULT NULL, /*步骤信息*/
+  PRIMARY KEY (`id`),
+  KEY `tradeid` (`tradeid`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+</code></pre> 
+<p>这时候，如果要查询 tradelog 表中id=2的交易记录的所有操作步骤信息，SQL语句可以这么写：</p> 
+<pre><code class="language-sql">select d.* from tradelog l, trade_detail d where d.tradeid=l.tradeid and l.id=2; /*语句Q1*/</code></pre> 
+<p>看下这条语句的执行计划：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/f1/50/7Lk3iaF9_o.png"></p> 
+<p>分析这个explain结果：</p> 
+<p>（1）第一行显示优化器会先在交易记录表tradelog上查到id=2的行，这个步骤用上了主键索引，rows=1表示只扫描一行；<br> （2）第二行key=NULL，表示没有用上交易详情表trade_detail上的tradeid索引，进行了全表扫描；</p> 
+<p>在这个执行计划里，是从tradelog表中取tradeid字段，再去trade_detail表里查询匹配字段；因此，我们把tradelog称为<strong>驱动表</strong>，把trade_detail称为<strong>被驱动表</strong>，把tradeid称为<strong>关联字段</strong>；接下来，我们看下这个explain结果表示的执行流程：</p> 
+<p><img alt="" height="553" src="https://images2.imgbox.com/ca/fe/RuDzraJo_o.png" width="765"></p> 
+<p><span style="color:#ed7976;"><strong>图中第3步不符合我们的预期</strong></span>；因为表trade_detail里tradeid字段上是有索引的，我们本来是希望通过使用tradeid索引能够快速定位到等值的行；但这里却走了全表扫描；</p> 
+<p>如果你去问DBA同学，他们可能会告诉你：<span style="color:#ed7976;"><strong>因为这两个表的字符集不同，一个是utf8，一个是utf8mb4，所以做表连接查询的时候用不上关联字段的索引</strong></span>；</p> 
+<p>utf8是utf8mb4的子集，utf8mb4在utf8支持的字符上做了扩展，所以当<span style="color:#ed7976;"><strong>这两个类型的字符串在做比较的时候会做隐式的字符类型转换</strong></span>——MySQL内部的操作是先把utf8字符串转成utf8mb4字符集（如果utf8mb4转成utf8会损失精度），再做比较；</p> 
+<p>因此，在执行上面这个语句的时候，需要将被驱动数据表trade_detail里的索引字段traideid一个个地转换成utf8mb4编码，再跟驱动表的关联字段的值做比较；也就是说，实际上这个语句等同于下面这个写法：</p> 
+<pre><code class="language-sql"> /*$L.tradeid.value 指tradelog表的tradeid字段值*/
+select * from trade_detail  where CONVERT(traideid USING utf8mb4)=$L.tradeid.value; </code></pre> 
+<p>CONVERT() 函数可以把输入的字符串转成utf8mb4字符集；这就再次触发了我们上面说到的原则：<span style="color:#ed7976;"><strong>对被驱动表的索引字段做了函数操作，优化器放弃走树搜索功能</strong></span>；</p> 
+<p>作为对比验证，现在执行另外一个需求，“查找trade_detail表里id=4的操作，对应的操作者是谁”，再来看下这个语句和它的执行计划；</p> 
+<pre><code class="language-sql">mysql&gt;select l.operator from tradelog l , trade_detail d where d.tradeid=l.tradeid and d.id=4;</code></pre> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/9a/c9/1Q02uzQZ_o.png"></p> 
+<p>这个语句里trade_detail表成了驱动表，explain结果的第二行显示，这次的查询操作用上了被驱动表tradelog里的索引(tradeid)，扫描行数是1；跟我们上面的结论对上了，这里被驱动表的tradeid字段是utf8mb4，无需做字符类型转换，而是where=后面的值做了隐式字符转换，即：</p> 
+<pre><code class="language-sql">/*$D.tradeid.value 指trade_detail 表的tradeid字段值*/
+select operator from tradelog where traideid =CONVERT($D.tradeid.value USING utf8mb4);</code></pre> 
+<p>这里的CONVERT函数是加在输入参数上的，这样就可以用上被驱动表的traideid索引；</p> 
+<p>理解了原理以后，就可以用来优化这条语句了：</p> 
+<p>（1）修改表结构，让字符集一致，都换成utf8mb4；</p> 
+<pre><code class="language-sql">alter table trade_detail modify tradeid varchar(32) CHARACTER SET utf8mb4 default null;</code></pre> 
+<p>（2）但如果数据量比较大，或者业务上暂时不能做这个DDL的话，那就只能采用修改SQL语句的方法了；在这个场景下，tradeid字段从utf8mb4强转uft8不会异常，但是其他场景可能在转换时发生异常，需要注意；</p> 
+<pre><code class="language-sql">mysql&gt; select d.* from tradelog l , trade_detail d where d.tradeid=CONVERT(l.tradeid USING utf8) and l.id=2; </code></pre> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/39/8b/6hxCUov2_o.png"></p> 
+<p></p> 
+<h4>补充案例：查询条件中的值的长度大于索引字段定义的长度</h4> 
+<p>场景条件（表结构）如下：</p> 
+<pre><code class="language-sql">mysql&gt; CREATE TABLE `table_a` (
+  `id` int(11) NOT NULL,
+  `b` varchar(10) DEFAULT NULL,
+  `c` varchar(10) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `b` (`b`)
+) ENGINE=InnoDB;</code></pre> 
+<p>假设现在表里面，有100万行数据，其中有10万行数据的b的值是'1234567890'，假设现在查询语句是这么写的：</p> 
+<pre><code class="language-sql">mysql&gt; select * from table_a where b='1234567890abcd';</code></pre> 
+<p>注意这里的查询条件值，'1234567890'是长度14位的字符串，而字段b定义的是varchar(10)，<span style="color:#ed7976;"><strong>最理想的情况是，MySQL看到条件目标值的长度与索引字段b定义长度不相等，直接返回空行</strong></span>；要不就是，直接遍历索引树b，拿'1234567890abcd'与索引字段b匹配，快速判断出上并没有这个值，也很快就能返回空结果；</p> 
+<p>实际上，MySQL没有采用上面的方式；结果是——这条SQL语句执行的很慢，最终还是返回了空行；流程是这样的：</p> 
+<p>1. 在传给引擎执行的时候，做了字符截断；因为引擎里面这个行只定义了长度是10，所以只截了前10个字节，就是’1234567890’进去与索引字段b做匹配；</p> 
+<p>2. 索引树b中查到满足b='1234567890'条件的数据有10万行；</p> 
+<p>3. 依然需要做10万次回表；（<span style="color:#ed7976;"><strong>仅查字段b尽管可以覆盖索引，但是毕竟这里对条件值"擅自"做了截断，因此最终server还是要"亲自"准确的判断一次</strong></span>）</p> 
+<p>4. 查出来的数据，到server层重新判断，b的值都不是'1234567890abcd'；</p> 
+<p>5. 返回结果是空；</p> 
+<p>通过explain可以看到，当where的值在索引字段长度内，执行计划的Extra则是'using index'，即覆盖索引，无需回表；当where的值大于索引字段长度，执行计划的Extra则是'Using where; Using index'，即使用了覆盖索引，<span style="color:#1c7331;"><strong>但存储引擎返回结果后mysql server还会再次筛选</strong></span>；</p> 
+<p></p> 
+<h4>小结</h4> 
+<p>1. 对索引字段做函数操作，可能会破坏索引值的有序性，因此优化器就决定放弃走树搜索功能；函数操作可以是显示的，也有隐式的，如索引字段的类型/字符集转换；</p> 
+<p>2. MySQL 的优化器确实有“偷懒”的嫌疑，即使简单地把 where id+1=1000 改写成 where id=1000-1 就能够用上索引快速查找，它也不会主动做这个语句重写；</p> 
+<p>3. explain显示用上了索引不一定就执行快，因为他可能还是需要全表扫描，只不过扫描的字段刚好被索引覆盖，因此选了索引而非走主键索引树；除了要关注key，还要关注扫描行数rows；</p> 
+<p></p> 
+<p></p> 
+<p></p> 
+<p>下篇文章：<a href="https://blog.csdn.net/minghao0508/article/details/127923852" title="《MySQL实战45讲》——学习笔记19 “SQL查一行执行慢的排查、锁等待/一致性读“【建议收藏】">《MySQL实战45讲》——学习笔记19 “SQL查一行执行慢的排查、锁等待/一致性读“【建议收藏】</a></p> 
+<p>本章参考：<a href="https://time.geekbang.org/column/article/74059?screen=full" rel="nofollow" title="18 | 为什么这些SQL语句逻辑相同，性能却差异巨大？-极客时间">18 | 为什么这些SQL语句逻辑相同，性能却差异巨大？-极客时间</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/33105b120e3541b66f74d953a312e88d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【泛函分析】压缩映射定理</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/b68d2596264f77ef23b3569bbdd02001/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">yolov5推理出大的错误框--一种简单粗暴但局限的规避方法</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>高并发-高可用-负载均衡LVS - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="高并发-高可用-负载均衡LVS" />
+<meta property="og:description" content="随着互联网的快速发展，越来越多的互联网服务面临着极其庞大的并发量，面对庞大的并发，现在的人们是如何解决的呢？本文是我了解到的处理高并发时使用负载均衡的一些知识，我将其写为一篇文章分享给大家，希望能够对大家学习负载均衡有点帮助。
+几个基本概念 高并发：短时间内对服务器进行大量的请求。高可用：高并发场景下要求服务器具有高可用性负载均衡：在高并发的场景下，我们会有专门的负载均衡服务器来将大量的请求分发到对应的应用服务器上，实现分而治之。 负载均衡 四层负载均衡：在高并发场景下，通常在真正的应用服务器前会有一台或多台四层负载均衡服务器，它只有物理层、链路层、网络层和传输层，负载均衡服务器的传输层和客户端的传输层间并不会建立TCP连接，它传输层的作用是拿到客户端请求的端口号，看一眼是否访问的是需要做负载均衡的服务的端口号，如果是会去做负载均衡相关操作，如果不是可能进行其他操作，丢弃或者交给上层处理。负载均衡是数据包级别的转发，相对于路由器来说，它只是会在传输层判断下端口号，因此它可以做到快速的处理大量的请求。做负载均衡时，多台应用服务器应该是镜像的（即完全一样）。做负载均衡时，用户知道的应用服务器的地址其实是负载均衡服务器的，并不是真正的应用服务器地址，当请求到达负载均衡服务器时，负载均衡服务器会将请求转到真正的应用服务器。
+不同的负载方式 D-NAT方式 基于4层的负载均衡。D-NAT的过程： 客户端请求-&gt;到达负载均衡服务器，通过D-NAT的方式将目标地址转换为真正的应用服务器地址-&gt;将请求给到真正的应用服务器，服务器处理-&gt; 将响应返回到负载均衡服务器，负载均衡服务器会将源地址替换为自己的IP地址返回给客户端-&gt; 客户端接收响应。这种方式需要将真正服务器的网关设置为负载均衡服务器，使得数据包能够返回负载均衡服务器。局限： 客户端的请求一般数据包比较小，而服务端的响应包数据量会比较大，请求和响应都经过负载均衡服务器，这将使得负载均衡服务器的带宽成为高并发的瓶颈。 DR方式 DR，翻译为中文为直接路由，通过Mac欺骗来完成；这种方式的负载均衡使得请求与响应成为一种环形，解决了D-NAT的带宽问题，相对于D-NAT，效率也有了一定的提升。这是一种基于2层的负载均衡。这种方式关键的两点就是 第一，在负载均衡服务器上的链路层，将数据包的目标Mac地址封装为真正的应用服务器的地址，使得数据包能到达真正的应用服务器；第二，对真正的应用服务器做处理，使得其持有负载均衡服务器的IP地址。局限： 对Mac地址做包装，充分的利用了Mac地址在节点间的作用，但这也使得负载均衡服务器和真正的服务器必须在同一局域网内。虽然真正的应用服务器持有负载均衡服务器的IP地址，但真正的应用服务器不会将负载均衡服务器的IP地址暴露在互联网上（需要在内核层面修改网络参数，做配置），客户端的所有请求只会到达负载均衡服务器。 TUN方式 TUN，翻译为中文为隧道，简单的理解这种方式即负载均衡服务器会在到来的请求数据包外再包一层IP地址（源IP为自己的分发IP，目标IP为真正的服务器IP），使得数据包可以跨网络传输到真正的应用服务器上，这种方式相当于给数据包又套了一层外包装使得其可以在不同网络间传输，我们给这种方式起了个名叫做隧道技术，VPN也是使用这种技术实现。这种方式的负载均衡服务器可以和真正的服务器跨网络。
+总结 这三种实现负载均衡的方式不同点就是负载均衡服务器对数据包的处理，D-NAT修改IP地址；DR修改Mac地址；TUN做外包装。负载均衡服务器并不会与客户端建立连接，它只做数据包级别的转发，但它确可以监测到客户端和真正服务器的通信状态（偷窥数据包）。 网络小知识 上述方式中的后两种关键点就是我们需要在真正的应用服务器上做到IP地址的隐藏（对外隐藏，对内可见），这种技术是怎么实现的呢，我在这做个简单介绍。
+我们的计算机中最少也会有两个网络接口，一个为真实的物理网络接口 eth0，另一个为内核的环回网络接口lo（loopback），真实的物理网络接口做向外网络通信，环回接口lo在计算机内部使用（我们在本机上测试部署在Tomcat上的程序时，IP地址通常会写localhost：port，其实这个过程就是使用了内核的环回接口，当请求到达内核时，内核发现IP是本机，则会走环回接口lo）。
+我们也可以通过已有网络接口新建许多的子接口 例如，使用命令 ifconfig eth0:8 192.168.120.11 可以创建出一个新的网络接口etho:8。
+我们可以更改内核的参数改变一些网络配置，修改当我们的计算机收到ARP请求时的响应级别和主动发送ARP请求时向外通告自己的地址信息级别，即当我们发送或收到ARP请求如何包装自己的IP地址信息（当本地配置有多个网络接口，也意味着有多个IP地址，此时我们向外公布哪一个）。
+这两个参数的配置信息在/proc/sys/net/ipv4/conf/对应的网卡/arp_ignore（响应级别） 和arp_announce（主动请求级别）中。 arp_ignore： 0：做IP包装时，包装本地配置中的任意的一个IP（包括环回网卡IP） 1：哪个网络接口收到，包装哪个网口上的IP arp_announce: 0：使用本地配置中任意的一个IP包装 1：试图使用一个与源IP地址属于同一个网络的IP地址做包装 2：哪个网口发请求包就用哪个网口上的IP地址 通过上述内容的描述，我们可以这样解决隐藏IP的问题：我们可以创建一个环回子接口，给其配置负载均衡的IP地址，然后设置arp_ignore的级别为1，arp_announce的级别为2。
+注：设置级别时，不能直接使用vim 来做，那样不会起作用，需要通过重定向来做，例如：echo 1 &gt; /proc/sys/net/ipv4/eth0/arp_ignore
+LVS 提到了负载均衡，那就必须得知道LVS，因为它就是一个专门用来做负载均衡内核级的软件，全称为Linux virtual server，Linux虚拟服务器，其实我们上面提到的3种实现方式正是LVS实现负载均衡的3种不同模式。可以这么说上面3种是原理，LVS是对它们的应用，Linux系统的内核里有LVS的实现代码（ipvs模块），因此只要服务器上安装了Linux系统，那么我们就可以将其做成一个负载均衡服务器。
+在虚拟机上搭建LVS node01做负载均衡服务器，node02、node03做真正的应用服务器。
+步骤参考下图：
+步骤一：配置网络
+步骤二：在node02、node03中安装一个http的服务，做应用服务器
+步骤三：为node01做LVS服务配置
+步骤四：验证
+注：
+-A 部分配置的是进入负载均衡服务器的请求相关参数 -a 配置的是请求在负载均衡服务器的具体分发
+LVS的具体实现在内核中，我们需要一个客户端的工具ipvsadm来操作内核中的ipvs模块
+高可用Keepalive 上边我们用LVS做了负载均衡服务器，有了它我们就可以面对高并发的场景了，但其实还会有一些问题，第一，负载均衡服务器可能会挂掉；第二，真正的应用服务器也可能出故障；这样我们服务的可用性就没有了保证。要使得我们的服务具备高可用，那么我们就得解决上述两个问题；对于第一个其实关键点就是单点问题，我们的负载均衡服务器只有一个，解决它的办法其实也简单，我们可以用多台（常使用的方式有主备），第二个我们可以通过发送请求根据相应状态码判断它是否故障。主备模式：双方要能交流（备服务器要能拿到主服务器的状态 ）为了解决这个问题，Keepalive这个第三方应用软件应运而生，我们可以使用它来搭建出高可用的系统，它可以操作内核中的ipvs模块（可以做LVS相关的配置工作）、可以给备用服务器发送消息（自己是否还存活）、可以发送请求给真正的应用服务器（判断服务是否正常），它的整个工作都通过配置文件来完成（配置好了，启动软件即可） 在虚拟机上搭建高可用的LVS 在上面LVS的基础上进行试验：
+第一步：清空node01的配置" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/981dc6bb603e8106df0c67c6f6b4301b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-05-26T21:54:19+08:00" />
+<meta property="article:modified_time" content="2020-05-26T21:54:19+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">高并发-高可用-负载均衡LVS</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>随着互联网的快速发展，越来越多的互联网服务面临着极其庞大的并发量，面对庞大的并发，现在的人们是如何解决的呢？本文是我了解到的处理高并发时使用负载均衡的一些知识，我将其写为一篇文章分享给大家，希望能够对大家学习负载均衡有点帮助。</p> 
+<h3><a id="_1"></a>几个基本概念</h3> 
+<ul><li>高并发：短时间内对服务器进行大量的请求。</li><li>高可用：高并发场景下要求服务器具有高可用性</li><li>负载均衡：在高并发的场景下，我们会有专门的负载均衡服务器来将大量的请求分发到对应的应用服务器上，实现分而治之。</li></ul> 
+<h3><a id="_6"></a>负载均衡</h3> 
+<ul><li>四层负载均衡：在高并发场景下，通常在真正的应用服务器前会有一台或多台四层负载均衡服务器，它只有物理层、链路层、网络层和传输层，负载均衡服务器的传输层和客户端的传输层间并不会建立TCP连接，它传输层的作用是拿到客户端请求的端口号，看一眼是否访问的是需要做负载均衡的服务的端口号，如果是会去做负载均衡相关操作，如果不是可能进行其他操作，丢弃或者交给上层处理。</li><li>负载均衡是数据包级别的转发，相对于路由器来说，它只是会在传输层判断下端口号，因此它可以做到快速的处理大量的请求。</li><li>做负载均衡时，多台应用服务器应该是镜像的（即完全一样）。</li><li>做负载均衡时，用户知道的应用服务器的地址其实是负载均衡服务器的，并不是真正的应用服务器地址，当请求到达负载均衡服务器时，负载均衡服务器会将请求转到真正的应用服务器。<br> <img src="https://images2.imgbox.com/57/59/T7zzU58v_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/02/23/RKL1Lrha_o.png" alt="在这里插入图片描述"></li></ul> 
+<h4><a id="_13"></a>不同的负载方式</h4> 
+<h5><a id="DNAT_14"></a>D-NAT方式</h5> 
+<ul><li>基于4层的负载均衡。</li><li><strong>D-NAT的过程：</strong> 客户端请求-&gt;到达负载均衡服务器，通过D-NAT的方式将目标地址转换为真正的应用服务器地址-&gt;将请求给到真正的应用服务器，服务器处理-&gt; 将响应返回到负载均衡服务器，负载均衡服务器会将源地址替换为自己的IP地址返回给客户端-&gt; 客户端接收响应。</li><li>这种方式需要将真正服务器的网关设置为负载均衡服务器，使得数据包能够返回负载均衡服务器。</li><li><strong>局限：</strong> 客户端的请求一般数据包比较小，而服务端的响应包数据量会比较大，请求和响应都经过负载均衡服务器，这将使得负载均衡服务器的带宽成为高并发的瓶颈。<img src="https://images2.imgbox.com/8e/f9/ekfiKRC5_o.png" alt="在这里插入图片描述"></li></ul> 
+<h5><a id="DR_19"></a>DR方式</h5> 
+<ul><li>DR，翻译为中文为直接路由，通过Mac欺骗来完成；这种方式的负载均衡使得请求与响应成为一种环形，解决了D-NAT的带宽问题，相对于D-NAT，效率也有了一定的提升。</li><li>这是一种基于2层的负载均衡。</li><li>这种方式关键的两点就是 第一，在负载均衡服务器上的链路层，将数据包的目标Mac地址封装为真正的应用服务器的地址，使得数据包能到达真正的应用服务器；第二，对真正的应用服务器做处理，使得其持有负载均衡服务器的IP地址。</li><li><strong>局限：</strong> 对Mac地址做包装，充分的利用了Mac地址在节点间的作用，但这也使得负载均衡服务器和真正的服务器必须在同一局域网内。</li><li>虽然真正的应用服务器持有负载均衡服务器的IP地址，但真正的应用服务器不会将负载均衡服务器的IP地址暴露在互联网上（需要在内核层面修改网络参数，做配置），客户端的所有请求只会到达负载均衡服务器。</li></ul> 
+<p><img src="https://images2.imgbox.com/67/4c/qeZZT65N_o.png" alt="在这里插入图片描述"></p> 
+<h5><a id="TUN_27"></a>TUN方式</h5> 
+<ul><li>TUN，翻译为中文为隧道，简单的理解这种方式即负载均衡服务器会在到来的请求数据包外再包一层IP地址（源IP为自己的分发IP，目标IP为真正的服务器IP），使得数据包可以跨网络传输到真正的应用服务器上，这种方式相当于给数据包又套了一层外包装使得其可以在不同网络间传输，我们给这种方式起了个名叫做隧道技术，VPN也是使用这种技术实现。</li><li>这种方式的负载均衡服务器可以和真正的服务器跨网络。<br> <img src="https://images2.imgbox.com/b7/c9/gFzg8iAR_o.png" alt="在这里插入图片描述"></li></ul> 
+<h5><a id="_31"></a>总结</h5> 
+<ul><li>这三种实现负载均衡的方式不同点就是负载均衡服务器对数据包的处理，D-NAT修改IP地址；DR修改Mac地址；TUN做外包装。</li><li>负载均衡服务器并不会与客户端建立连接，它只做数据包级别的转发，但它确可以监测到客户端和真正服务器的通信状态（偷窥数据包）。</li></ul> 
+<h5><a id="_34"></a>网络小知识</h5> 
+<p>上述方式中的后两种关键点就是我们需要在真正的应用服务器上做到IP地址的隐藏（对外隐藏，对内可见），这种技术是怎么实现的呢，我在这做个简单介绍。</p> 
+<ul><li> <p>我们的计算机中最少也会有两个网络接口，一个为真实的物理网络接口 eth0，另一个为内核的环回网络接口lo（loopback），真实的物理网络接口做向外网络通信，环回接口lo在计算机内部使用（我们在本机上测试部署在Tomcat上的程序时，IP地址通常会写localhost：port，其实这个过程就是使用了内核的环回接口，当请求到达内核时，内核发现IP是本机，则会走环回接口lo）。</p> </li><li> <p>我们也可以通过已有网络接口新建许多的子接口 例如，使用命令 ifconfig eth0:8 192.168.120.11 可以创建出一个新的网络接口etho:8。</p> </li><li> <p>我们可以更改内核的参数改变一些网络配置，修改当我们的计算机收到ARP请求时的响应级别和主动发送ARP请求时向外通告自己的地址信息级别，即当我们发送或收到ARP请求如何包装自己的IP地址信息（当本地配置有多个网络接口，也意味着有多个IP地址，此时我们向外公布哪一个）。</p> <pre><code>  这两个参数的配置信息在/proc/sys/net/ipv4/conf/对应的网卡/arp_ignore（响应级别）  和arp_announce（主动请求级别）中。
+  arp_ignore：
+  0：做IP包装时，包装本地配置中的任意的一个IP（包括环回网卡IP）
+  1：哪个网络接口收到，包装哪个网口上的IP
+  
+  arp_announce:
+  0：使用本地配置中任意的一个IP包装
+  1：试图使用一个与源IP地址属于同一个网络的IP地址做包装
+  2：哪个网口发请求包就用哪个网口上的IP地址
+</code></pre> </li></ul> 
+<p>通过上述内容的描述，我们可以这样解决隐藏IP的问题：我们可以创建一个环回子接口，给其配置负载均衡的IP地址，然后设置arp_ignore的级别为1，arp_announce的级别为2。</p> 
+<p><strong>注：设置级别时，不能直接使用vim 来做，那样不会起作用，需要通过重定向来做，例如：echo 1 &gt; /proc/sys/net/ipv4/eth0/arp_ignore</strong></p> 
+<h3><a id="LVS_53"></a>LVS</h3> 
+<p>提到了负载均衡，那就必须得知道LVS，因为它就是一个专门用来做负载均衡内核级的软件，全称为Linux virtual server，Linux虚拟服务器，其实我们上面提到的3种实现方式正是LVS实现负载均衡的3种不同模式。可以这么说上面3种是原理，LVS是对它们的应用，Linux系统的内核里有LVS的实现代码（ipvs模块），因此只要服务器上安装了Linux系统，那么我们就可以将其做成一个负载均衡服务器。</p> 
+<h5><a id="LVS_55"></a>在虚拟机上搭建LVS</h5> 
+<p>node01做负载均衡服务器，node02、node03做真正的应用服务器。<br> <img src="https://images2.imgbox.com/0e/50/s7p5FfW0_o.png" alt="在这里插入图片描述"></p> 
+<p>步骤参考下图：<br> 步骤一：配置网络<br> <img src="https://images2.imgbox.com/89/17/TJNYoLLP_o.png" alt="在这里插入图片描述"><br> 步骤二：在node02、node03中安装一个http的服务，做应用服务器<br> <img src="https://images2.imgbox.com/1d/77/f5MBo8vD_o.png" alt="在这里插入图片描述"><br> 步骤三：为node01做LVS服务配置<br> <img src="https://images2.imgbox.com/a5/e9/gx4ygBzj_o.png" alt="在这里插入图片描述"><br> 步骤四：验证<br> <img src="https://images2.imgbox.com/35/b7/GgODuIzA_o.png" alt="在这里插入图片描述"><br> <em>注：</em><br> <strong>-A 部分配置的是进入负载均衡服务器的请求相关参数 -a 配置的是请求在负载均衡服务器的具体分发</strong><br> <strong>LVS的具体实现在内核中，我们需要一个客户端的工具ipvsadm来操作内核中的ipvs模块</strong></p> 
+<h3><a id="Keepalive_71"></a>高可用Keepalive</h3> 
+<ul><li>上边我们用LVS做了负载均衡服务器，有了它我们就可以面对高并发的场景了，但其实还会有一些问题，第一，负载均衡服务器可能会挂掉；第二，真正的应用服务器也可能出故障；这样我们服务的可用性就没有了保证。</li><li>要使得我们的服务具备高可用，那么我们就得解决上述两个问题；对于第一个其实关键点就是单点问题，我们的负载均衡服务器只有一个，解决它的办法其实也简单，我们可以用多台（常使用的方式有主备），第二个我们可以通过发送请求根据相应状态码判断它是否故障。</li><li>主备模式：双方要能交流（备服务器要能拿到主服务器的状态 ）</li><li>为了解决这个问题，Keepalive这个第三方应用软件应运而生，我们可以使用它来搭建出高可用的系统，它可以操作内核中的ipvs模块（可以做LVS相关的配置工作）、可以给备用服务器发送消息（自己是否还存活）、可以发送请求给真正的应用服务器（判断服务是否正常），它的整个工作都通过配置文件来完成（配置好了，启动软件即可）</li></ul> 
+<h5><a id="LVS_76"></a>在虚拟机上搭建高可用的LVS</h5> 
+<p>在上面LVS的基础上进行试验：</p> 
+<p>第一步：清空node01的配置<br> node01:<br> ipvsadm -C<br> ifconfig eth0:8 down</p> 
+<hr> 
+<p>第二步：安装Keepalive，做配置文件</p> 
+<p>node01,node04:<br> yum install keepalived ipvsadm -y<br> cd /etc/keepalived/<br> cp keepalived.conf keepalived.conf.bak<br> vi keepalived.conf<br> node01的配置文件:</p> 
+<pre><code>		vrrp：虚拟路由冗余协议
+			vrrp_instance VI_1 {
+				state MASTER         // 标记主服务器   在node04上将MASTER改为 BACKUP标记备服务器
+				interface eth0           //用哪个网口   一台服务器可能有多个网口
+				virtual_router_id 51    //ID号
+				priority 100		 //	 权重，数值越大，权重越高，可以有多台备服务器，根据这个来确定主服务器挂掉后谁  来做主服务器
+				advert_int 1
+				authentication {
+					auth_type PASS
+					auth_pass 1111
+				}
+				virtual_ipaddress {
+					192.168.150.100/24 dev eth0 label  eth0:3       //配置做负载均衡的IP地址 
+				}
+			}
+		virtual_server 192.168.150.100 80 {    这个模块用来配置LVS的哪个IP需要做负载和一些负载策略和真正的应用服务器信息
+			delay_loop 6
+			lb_algo rr
+			lb_kind DR
+			nat_mask 255.255.255.0
+			persistence_timeout 0
+			protocol TCP
+
+			real_server 192.168.150.12 80 {     //真正的应用服务器信息
+				weight 1
+				HTTP_GET {       //定义请求，负载服务器判断真正的应用服务器是否有故障
+					url {
+					  path /
+					  status_code 200
+					}
+					connect_timeout 3
+					nb_get_retry 3
+					delay_before_retry 3
+				}   
+			}       
+			real_server 192.168.150.13 80 {
+				weight 1
+				HTTP_GET {
+					url {
+					  path /
+					  status_code 200
+					}
+					connect_timeout 3
+					nb_get_retry 3
+					delay_before_retry 3
+				}
+			}
+		scp  ./keepalived.conf  root@node04:`pwd`      //将node01中的配置拷贝到node04中
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a805e4fd8c8a15b7099ffbf372c0126e/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【博客260】RESTFUL API--REpresentational State Transfer</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/1305726521d444d3c7c64f77bc6b38d9/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">LaTeX新手半小时速成手册（不速成你打我</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

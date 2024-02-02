@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>brpc组件bvar源码解析（四）Sampler、SamplerCollector和Window类簇 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="brpc组件bvar源码解析（四）Sampler、SamplerCollector和Window类簇" />
+<meta property="og:description" content="1.Sampler类 Sampler是所有采样类的基类。采样类中最重要的是take_sample函数，采样类的schedule函数调用之后，它的take_sample函数将会被一个专门的线程每1秒定时调用。
+Sampler类的定义：
+Sampler是一个纯虚类，take_sample是纯虚函数需要子类实现。
+Sampler继承自LinkNode，即拥有了previous_和next_指针，可以作为双向链表的节点。
+Sampler有两个成员变量，一个是_used表示当前采样类是否生效；一个是_mutex保护_used。
+构造函数、析构函数和destroy函数 默认_used设为true。
+如果采样类不再使用，则调用其destroy函数，设置_used为false，实现延迟删除，至于从哪里删除，后面会讲到。
+schedule函数： 注册当前采样类的地址到全局单例SamplerCollector中，后面讲到SamplerCollector时再详细介绍内部实现。
+2.Sample类 定义：
+这个类很简单，保存了bvar的类型T的值data，和时间time_us。它用于保存一次采样的结果和采样时的时间。
+3.SamplerCollector类 定义：
+上面的注释可以帮助理解为什么SamplerCollector要设计成继承自Reducer。正常情况我们一般的实现是这样，用一个容器C保存所有注册的采样类和一个mutex M保护，设置定时线程来定期采样。但是这个性能不好，每次开始采样前都要用M加锁保护，以至于创建Window&lt;&gt;（创建Window&lt;&gt;是会创建sampler类、并注册到SamplerCollector中）需要等锁释放。如果想让创建Window&lt;&gt;的开销可以忽略不计，还需要更好的方案。
+这里就提供了一个更好的方案，就是继承自Reducer&lt;Sampler*, CombineSampler&gt;。这样SamplerCollector就是一个bvar，保存的是Sampler*，累加器是CombineSampler，看一下CombineSampler的实现：
+前面说了Sampler*是可以作为双向链表的节点的。CombineSampler的两个参数是2个双向链表，它的操作就是把两个双向链表连接起来。
+综合上面的信息，SamplerCollector继承自Reducer&lt;Sampler*, CombineSampler&gt;之后，调用operator&lt;&lt;函数可以轻易的添加Sampler到stl数据中，这个过程是没有锁的，就解决了前面说的问题：想让创建Window&lt;&gt;的开销可以忽略不计；调用get_value函数可以通过累加器CombineSampler将所有的Sampler组成一个双向链表。
+成员变量 _created：是否创建了采样线程
+_stop：是否需要退出采样线程中的循环
+_cumulated_time_us：采样线程中遍历所有的Sampler*进行采样花费的时间的总和
+_tid：采样线程id
+函数create_sampling_thread SamplerCollector类的构造函数中就调用了函数create_sampling_thread。
+实现：
+（1）创建采样线程执行函数sampling_thread
+（2）如果采样线程创建成功，则通过pthread_atfork注册当fork子进程时在子进程上下文中fork函数返回之前调用child_callback_atfork函数
+A）child_callback_atfork函数中创建全局SamplerCollector单例，并调用其after_forked_as_child函数
+B）after_forked_as_child中重置_created为false，并调用create_sampling_thread以实现在子进程中创建采样线程。
+采样线程执行run函数 采样线程首先调用的函数sampling_thread，它的实现很简单就是调用SamplerCollector::run函数：
+所以看run函数：
+1.获得所有的Sampler
+1）调用SamplerCollector::reset函数，Reducer::reset函数中执行了_combiner.reset_all_agents，通过前文知道它把所有stl保存的Sampler*连接成一个双向链表s返回，原来的保存的地方重置为null。
+2）reset函数返回的双向链表s和root连接到一起。即root是之前就已经获得的所有的Sampler构造的双向链表，s是最新加入的Sampler构造的双向链表。
+2.遍历所有的Sampler
+1）遍历root中的所有Sampler，判断是否被destroy（_used字段），如果是，则从root中删除、并delete，否则进行2）
+2）调用Sampler::take_sample进行采样操作，take_sample是Sampler具体子类实现的
+3.sleep
+1）如果上述全过程花费的时间不超过1s，则sleep多余的时间
+2）如果花费超过1s，则consecutive_nosleep&#43;1，consecutive_nosleep超过WARN_NOSLEEP_THRESHOLD（默认值2）时打印log
+4.ReducerSampler类 ReducerSampler是Sampler类的子类，定义如下：
+继承自Sampler，有4个模板参数：
+R：一般就是Reducer类或Reducer子类
+T、Op、InvOp：Reducer类的三个模板参数
+成员变量：
+_reducer：保存传入的R类型对象指针
+_window_size：窗口大小
+_q：保存所有Sample的有界队列（即循环队列）；当容量全部有值、再加入新增时将替换最早加入的值。
+构造函数 初始化_reducer，设置_window_size为1；调用take_sample。
+函数take_sample 函数是具体的采样操作。
+1._q容量不足_window_size，则扩容量
+2.获得_reducer最新值
+1）如果没有反向op，例如Maxer、Miner，则获得当前的最新值返回、并重置原保存的值
+2）如果有反向op，例如Adder，则获得当前的最新值返回即可，之后需要窗口内的值时可以通过反向op操作来得到
+3）无论有没有反向op都可以通过1）来实现，但是对于有反向op的，用2）效率会更高
+3.加入到_q中
+1）保存当前时间（采样时间）到time_us
+2）采样结果Sample保存到_q中
+函数get_value 1." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/23b7d05b8bcf08b2916c577dae2d28f8/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-06-01T01:05:19+08:00" />
+<meta property="article:modified_time" content="2022-06-01T01:05:19+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">brpc组件bvar源码解析（四）Sampler、SamplerCollector和Window类簇</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="1Sampler_0"></a>1.Sampler类</h2> 
+<p>Sampler是所有采样类的基类。采样类中最重要的是take_sample函数，采样类的schedule函数调用之后，它的take_sample函数将会被一个专门的线程每1秒定时调用。</p> 
+<p>Sampler类的定义：<br> <img src="https://images2.imgbox.com/95/79/sFGJq9jD_o.png" alt="在这里插入图片描述"></p> 
+<p>Sampler是一个纯虚类，take_sample是纯虚函数需要子类实现。</p> 
+<p>Sampler继承自LinkNode，即拥有了previous_和next_指针，可以作为双向链表的节点。</p> 
+<p>Sampler有两个成员变量，一个是_used表示当前采样类是否生效；一个是_mutex保护_used。</p> 
+<h3><a id="destroy_13"></a>构造函数、析构函数和destroy函数</h3> 
+<p>默认_used设为true。</p> 
+<p>如果采样类不再使用，则调用其destroy函数，设置_used为false，实现延迟删除，至于从哪里删除，后面会讲到。<br> <img src="https://images2.imgbox.com/ff/b5/5F0qebi6_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="schedule_20"></a>schedule函数：</h3> 
+<p><img src="https://images2.imgbox.com/8c/bd/24pfDAsF_o.png" alt="在这里插入图片描述"><br> 注册当前采样类的地址到全局单例SamplerCollector中，后面讲到SamplerCollector时再详细介绍内部实现。</p> 
+<h2><a id="2Sample_24"></a>2.Sample类</h2> 
+<p>定义：<br> <img src="https://images2.imgbox.com/e0/88/4YXkrRsW_o.png" alt="在这里插入图片描述"><br> 这个类很简单，保存了bvar的类型T的值data，和时间time_us。它用于保存一次采样的结果和采样时的时间。</p> 
+<h2><a id="3SamplerCollector_30"></a>3.SamplerCollector类</h2> 
+<p>定义：<br> <img src="https://images2.imgbox.com/1b/ac/3xFRIYKk_o.png" alt="在这里插入图片描述"><br> 上面的注释可以帮助理解为什么SamplerCollector要设计成继承自Reducer。正常情况我们一般的实现是这样，用一个容器C保存所有注册的采样类和一个mutex M保护，设置定时线程来定期采样。但是这个性能不好，每次开始采样前都要用M加锁保护，以至于创建Window&lt;&gt;（创建Window&lt;&gt;是会创建sampler类、并注册到SamplerCollector中）需要等锁释放。如果想让创建Window&lt;&gt;的开销可以忽略不计，还需要更好的方案。</p> 
+<p>这里就提供了一个更好的方案，就是继承自Reducer&lt;Sampler*, CombineSampler&gt;。这样SamplerCollector就是一个bvar，保存的是Sampler*，累加器是CombineSampler，看一下CombineSampler的实现：<br> <img src="https://images2.imgbox.com/83/87/Bq4D3s6Q_o.png" alt="在这里插入图片描述"></p> 
+<p>前面说了Sampler*是可以作为双向链表的节点的。CombineSampler的两个参数是2个双向链表，它的操作就是把两个双向链表连接起来。</p> 
+<p>综合上面的信息，SamplerCollector继承自Reducer&lt;Sampler*, CombineSampler&gt;之后，调用operator&lt;&lt;函数可以轻易的添加Sampler<em>到stl数据中，这个过程是没有锁的，就解决了前面说的问题：想让创建Window&lt;&gt;的开销可以忽略不计；调用get_value函数可以通过累加器CombineSampler将所有的Sampler</em>组成一个双向链表。</p> 
+<h3><a id="_42"></a>成员变量</h3> 
+<p><img src="https://images2.imgbox.com/d0/1a/NpgmfOlO_o.png" alt="在这里插入图片描述"><br> _created：是否创建了采样线程<br> _stop：是否需要退出采样线程中的循环<br> _cumulated_time_us：采样线程中遍历所有的Sampler*进行采样花费的时间的总和<br> _tid：采样线程id</p> 
+<h3><a id="create_sampling_thread_49"></a>函数create_sampling_thread</h3> 
+<p>SamplerCollector类的构造函数中就调用了函数create_sampling_thread。<br> 实现：<br> <img src="https://images2.imgbox.com/18/36/uHn4jSNx_o.png" alt="在这里插入图片描述"></p> 
+<p>（1）创建采样线程执行函数sampling_thread<br> （2）如果采样线程创建成功，则通过pthread_atfork注册当fork子进程时在子进程上下文中fork函数返回之前调用child_callback_atfork函数<br> A）child_callback_atfork函数中创建全局SamplerCollector单例，并调用其after_forked_as_child函数<br> B）after_forked_as_child中重置_created为false，并调用create_sampling_thread以实现在子进程中创建采样线程。</p> 
+<h3><a id="run_59"></a>采样线程执行run函数</h3> 
+<p>采样线程首先调用的函数sampling_thread，它的实现很简单就是调用SamplerCollector::run函数：<br> <img src="https://images2.imgbox.com/76/40/yhHuBhJZ_o.png" alt="在这里插入图片描述"></p> 
+<p>所以看run函数：<br> <img src="https://images2.imgbox.com/49/bd/Df1MPhnX_o.png" alt="在这里插入图片描述"><br> 1.获得所有的Sampler<br> 1）调用SamplerCollector::reset函数，Reducer::reset函数中执行了_combiner.reset_all_agents，通过前文知道它把所有stl保存的Sampler*连接成一个双向链表s返回，原来的保存的地方重置为null。<br> 2）reset函数返回的双向链表s和root连接到一起。即root是之前就已经获得的所有的Sampler构造的双向链表，s是最新加入的Sampler构造的双向链表。<br> 2.遍历所有的Sampler<br> 1）遍历root中的所有Sampler，判断是否被destroy（_used字段），如果是，则从root中删除、并delete，否则进行2）<br> 2）调用Sampler::take_sample进行采样操作，take_sample是Sampler具体子类实现的<br> 3.sleep<br> 1）如果上述全过程花费的时间不超过1s，则sleep多余的时间<br> 2）如果花费超过1s，则consecutive_nosleep+1，consecutive_nosleep超过WARN_NOSLEEP_THRESHOLD（默认值2）时打印log</p> 
+<h2><a id="4ReducerSampler_77"></a>4.ReducerSampler类</h2> 
+<p>ReducerSampler是Sampler类的子类，定义如下：<br> <img src="https://images2.imgbox.com/bc/67/8tL0Ld3C_o.png" alt="在这里插入图片描述"><br> 继承自Sampler，有4个模板参数：<br> R：一般就是Reducer类或Reducer子类<br> T、Op、InvOp：Reducer类的三个模板参数</p> 
+<p>成员变量：<br> <img src="https://images2.imgbox.com/8e/9f/ljHtI3YY_o.png" alt="在这里插入图片描述"><br> _reducer：保存传入的R类型对象指针<br> _window_size：窗口大小<br> _q：保存所有Sample的有界队列（即循环队列）；当容量全部有值、再加入新增时将替换最早加入的值。</p> 
+<h3><a id="_90"></a>构造函数</h3> 
+<p><img src="https://images2.imgbox.com/21/f3/SvWQTneq_o.png" alt="在这里插入图片描述"><br> 初始化_reducer，设置_window_size为1；调用take_sample。</p> 
+<h3><a id="take_sample_94"></a>函数take_sample</h3> 
+<p>函数是具体的采样操作。<br> <img src="https://images2.imgbox.com/0b/5b/MseWs73L_o.png" alt="在这里插入图片描述"><br> 1._q容量不足_window_size，则扩容量<br> 2.获得_reducer最新值<br> 1）如果没有反向op，例如Maxer、Miner，则获得当前的最新值返回、并重置原保存的值<br> 2）如果有反向op，例如Adder，则获得当前的最新值返回即可，之后需要窗口内的值时可以通过反向op操作来得到<br> 3）无论有没有反向op都可以通过1）来实现，但是对于有反向op的，用2）效率会更高<br> 3.加入到_q中<br> 1）保存当前时间（采样时间）到time_us<br> 2）采样结果Sample保存到_q中</p> 
+<h3><a id="get_value_106"></a>函数get_value</h3> 
+<p><img src="https://images2.imgbox.com/23/fc/ftFAJb5W_o.png" alt="在这里插入图片描述"><br> 1.获得窗口前后的采样值<br> 1）最新采样的值保存到latest<br> 2）从现在往过去数第window_size个采样结果保存到oldest；如果全部采样结果就不足window_size个，则保存最老的采样结果到oldest<br> 3）上述两个值作为窗口前后的采样值<br> 2.根据上述值计算窗口内的值<br> 1）如果没有反向op，那么就老老实实地从oldest依次到latest，依次执行op操作（op例如取最大值）<br> 2）如果有反向op，那么就可以根据inv_op、oldest、latest快速计算得到（例如对于Adder，latest - oldest就是窗口类的值）<br> 3）oldest、latest采样时间间隔保存到result-&gt;time_us</p> 
+<h3><a id="ReducerSampler_117"></a>使用ReducerSampler的地方</h3> 
+<p>ReducerSampler中有如下定义：<br> typedef detail::ReducerSampler&lt;Reducer, T, Op, InvOp&gt; sampler_type;</p> 
+<p>在Reducer::get_sampler首次被调用时将创建ReducerSampler对象（传入this指针）、并加入到全局单例SamplerCollector中：<br> <img src="https://images2.imgbox.com/33/47/C7LtE1pi_o.png" alt="在这里插入图片描述"></p> 
+<p>那么Reducer::get_sampler什么时候被调用呢，下面的Window&lt;&gt;创建的时候。下面会介绍到。</p> 
+<h2><a id="5WindowBase_127"></a>5.WindowBase类</h2> 
+<p>定义：<br> <img src="https://images2.imgbox.com/43/2b/PrM4I0d0_o.png" alt="在这里插入图片描述"><br> 模板参数：<br> R：具体的bvar类型<br> SeriesFrequency：和SeriesSampler有关，我们这次不介绍这个。</p> 
+<p>成员变量：<br> <img src="https://images2.imgbox.com/4d/2d/1iXfBNYC_o.png" alt="在这里插入图片描述"><br> _var：指针指向具体的bvar的对象<br> _window_size：窗口大小；根据前面我们知道，窗口是指采样点的窗口，虽然采样线程是每1s采样一次，但由于要遍历所有的Sampler的take_sample，所以对于每个Sampler而言不一定是每1s采样一次<br> _sampler：属于bvar对象_var的采样对象，弱引用<br> _series_sampler：我们这次不介绍SeriesSampler相关的。</p> 
+<h3><a id="_141"></a>构造函数</h3> 
+<p><img src="https://images2.imgbox.com/91/63/1KqbXuIn_o.png" alt="在这里插入图片描述"></p> 
+<p>WindowBase类的构造函数需要传2个内容：bvar对象的指针和窗口大小。<br> _sampler赋值bvar对象的sampler指针，这里是弱引用，并修改_sampler的窗口大小。</p> 
+<h3><a id="get_span_147"></a>get_span函数</h3> 
+<p><img src="https://images2.imgbox.com/96/db/UziNbQMX_o.png" alt="在这里插入图片描述"><br> 获得指定窗口大小的Sample对象值。</p> 
+<h3><a id="get_value_151"></a>get_value函数</h3> 
+<p><img src="https://images2.imgbox.com/af/32/D3BhH70g_o.png" alt="在这里插入图片描述"></p> 
+<p>调用get_span获得指定窗口大小的Sample对象值，然后返回Sample.data，即具体的bvar存储的类型的值。</p> 
+<h2><a id="6WindowBase_156"></a>6.WindowBase子类</h2> 
+<p>1.Window类继承自WindowBase，比较简单，不赘述<br> 2.PerSecond类也继承自WindowBase，特别的，它override了get_value函数：<br> <img src="https://images2.imgbox.com/70/55/kstP19R8_o.png" alt="在这里插入图片描述"><br> 它在获得了Sample.data之后，又除了一下窗口首末真正的采样时间间隔，正如类名一样表示每秒的采样值。</p> 
+<h2><a id="7_162"></a>7.最后</h2> 
+<p>其他的一些类，例如LatencyRecorder（时延），PassiveStatus（get_value时调用指定函数对象获得value）都比较简单，就不赘述了。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/fa6a2df4a8f04c2097cc35bccd7418d7/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Java实现双向链表</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/9891d88aec321b3be921bf0efc3a428c/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">mysql查询怎么区分大小写</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

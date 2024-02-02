@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>浅析SSL/TLS的会话流程和源码实现 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="浅析SSL/TLS的会话流程和源码实现" />
+<meta property="og:description" content="浅析SSL/TLS的会话流程和源码实现 一、SSL/TLS的概念二、SSL/TLS的会话交互流程(1) client_hello(2) server_hello &#43; certificate &#43; sever hello done(3) client key exchange &#43; change cipher spec &#43; encrypted handshake message(4) new session ticket&#43;change cipher spec&#43;envrypted handshake message 三、源码实现 一、SSL/TLS的概念 官方解释TLS叫做安全传输层协议（TLS）用于在两个通信应用程序之间提供保密性和数据完整性。SSL就是TLS的前身，从最初的SSL3到现在的TLS 1.3，其协议核心并没有大幅改变。只是为了解决几个安全性问题。TLS实际是在明文的上层和 TCP 层之间加上一层加密，这样就保证上层信息传输的安全，所以在网络模型中它运行于传输层之上，隶属于会话层。实际应用例如在浏览器访问中，在HTTP 协议中加上 SSL 层之后，就有了HTTPS。
+二、SSL/TLS的会话交互流程 ssl实际应用中具体的交互流程如下图所示：
+(1) client_hello 客户端发起协议交互请求，其中包含tls的版本信息，加密套件候选列表，随机数等相关信息，以我们的设备为例抓包来分析具体实况：
+tls的版本信息主要是当前客户端所支持的最高 TLS 协议版本 ，目前已有的TLS 协议版本总共有五种，从低到高依次 SSLv2, SSLv3, TLSv1, TLSv1.1, TLSv1.2客户端所支持的加密套件cipher suites， 每个加密套件对应TLS 原理中的四个功能的组合： 认证算法 Au (身份验证)密钥交换算法 KeyExchange (密钥协商)对称加密算法 Enc (信息加密)信息摘要 Mac (完整性校验) 随机数 random_C，用于后续的密钥的生成 (2) server_hello &#43; certificate &#43; sever hello done server_hello, 服务端返回协商的信息结果，包括选择使用的协议版本 version，选择的加密套件 cipher suite，选择的压缩算法 compression method、随机数 random_S 等，其中随机数用于后续的密钥协商server_certificates, 服务器端配置对应的证书链，用于身份验证与密钥交换server_hello_done，通知客户端 server_hello 信息发送结束 (3) client key exchange &#43; change cipher spec &#43; encrypted handshake message client_key_exchange: 合法性验证通过之后，客户端计算产生随机数字 pre-master，并用证书公钥加密，发送给服务器此时客户端已经获取全部的计算协商密钥需要的信息：两个明文随机数 random_C 和 random_S 与自己计算产生的 pre-master，计算得到协商密钥enc_key=Fuc(random_C, random_S, pre-master)change_cipher_spec: 客户端通知服务器后续的通信都采用协商的通信密钥和加密算法进行加密通信;encrypted_handshake_message: 结合之前所有通信参数的 hash 值与其它相关信息生成一段数据，采用协商密钥 session secret 与算法进行加密，然后发送给服务器用于数据与握手验证 (4) new session ticket&#43;change cipher spec&#43;envrypted handshake message session ticket,SessionTicket是一种不需要服务器端状态的，恢复TLS session的方式。SessionTicket可以用于任何CipherSuite,服务器如果使用 SessionTicket 机制，服务器需要把本地的 session 状态存入一个ticket中，ticket会被加密，并被MAC保护，无法篡改，加密和算MAC用的key只有服务器知道。加密并MAC过的ticket用 NewSessionTicket 消息分发给客户端， 客户端把收到的ticket和master secret等其它与当前session有关的参数一起，缓存起来。当客户端希望恢复会话时，就把ticket包含在 ClientHello 的 SessionTicket 扩展中发给服务器。服务器收到后，解密ticket，算MAC确认ticket没有被篡改过，然后从解密的内容里面，获取session 状态，用来恢复会话。如果服务器成功地验证了ticket，可以在 ServerHello 之后返回一个 NewSessionTicket 消息来更新ticket。服务器用私钥解密加密的 pre-master 数据，基于之前交换的两个明文随机数 random_C 和 random_S，计算得到协商密钥:enc_key=Fuc(random_C, random_S, pre-master); 计算之前所有接收信息的 hash 值，然后解密客户端发送的 encrypted_handshake_message，验证数据和密钥正确性;change_cipher_spec, 验证通过之后，服务器同样发送 change_cipher_spec 以告知客户端后续的通信都采用协商的密钥与算法进行加密通信;encrypted_handshake_message, 服务器也结合所有当前的通信参数信息生成一段数据并采用协商密钥 session secret 与算法加密并发送到客户端; 三、源码实现 这里针对ssl的交互流程，我们搭配openssl的库来实现一套具体的交互配置流程，前提是我们已经申请过了CA证书。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/fea5e32452170c9d4bacc6c13b532e21/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-11-30T15:26:17+08:00" />
+<meta property="article:modified_time" content="2021-11-30T15:26:17+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">浅析SSL/TLS的会话流程和源码实现</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>浅析SSL/TLS的会话流程和源码实现</h4> 
+ <ul><li><a href="#SSLTLS_2" rel="nofollow">一、SSL/TLS的概念</a></li><li><a href="#SSLTLS_7" rel="nofollow">二、SSL/TLS的会话交互流程</a></li><li><ul><li><a href="#1_client_hello_10" rel="nofollow">(1) client_hello</a></li><li><a href="#2_server_hello__certificate__sever_hello_done_25" rel="nofollow">(2) server_hello + certificate + sever hello done</a></li><li><a href="#3_client_key_exchange__change_cipher_spec__encrypted_handshake_message_34" rel="nofollow">(3) client key exchange + change cipher spec + encrypted handshake message</a></li><li><a href="#4_new_session_ticketchange_cipher_specenvrypted_handshake_message_43" rel="nofollow">(4) new session ticket+change cipher spec+envrypted handshake message</a></li></ul> 
+  </li><li><a href="#_53" rel="nofollow">三、源码实现</a></li></ul> 
+</div> 
+<p></p> 
+<h2><a id="SSLTLS_2"></a>一、SSL/TLS的概念</h2> 
+<p>   官方解释TLS叫做安全传输层协议（TLS）用于在两个通信应用程序之间提供保密性和数据完整性。SSL就是TLS的前身，从最初的SSL3到现在的TLS 1.3，其协议核心并没有大幅改变。只是为了解决几个安全性问题。TLS实际是在明文的上层和 TCP 层之间加上一层加密，这样就保证上层信息传输的安全，所以在网络模型中它运行于传输层之上，隶属于会话层。实际应用例如在浏览器访问中，在HTTP 协议中加上 SSL 层之后，就有了HTTPS。<br> <br></p> 
+<h2><a id="SSLTLS_7"></a>二、SSL/TLS的会话交互流程</h2> 
+<p>  ssl实际应用中具体的交互流程如下图所示：<br> <img src="https://images2.imgbox.com/65/d0/nJSinVBH_o.png" alt="ssl的会话流程图"></p> 
+<h3><a id="1_client_hello_10"></a>(1) client_hello</h3> 
+<p>  客户端发起协议交互请求，其中包含tls的版本信息，加密套件候选列表，随机数等相关信息，以我们的设备为例抓包来分析具体实况：<br> <br><br> <img src="https://images2.imgbox.com/f7/19/3ORglWm0_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>tls的版本信息主要是当前客户端所支持的最高 TLS 协议版本 ，目前已有的TLS 协议版本总共有五种，从低到高依次 SSLv2, SSLv3, TLSv1, TLSv1.1, TLSv1.2</li><li>客户端所支持的加密套件cipher suites， 每个加密套件对应TLS 原理中的四个功能的组合： 
+  <ul><li>认证算法 Au (身份验证)</li><li>密钥交换算法 KeyExchange (密钥协商)</li><li>对称加密算法 Enc (信息加密)</li><li>信息摘要 Mac (完整性校验)</li></ul> </li><li>随机数 random_C，用于后续的密钥的生成</li></ul> 
+<hr color="#000000" size='1"'> 
+<br> 
+<h3><a id="2_server_hello__certificate__sever_hello_done_25"></a>(2) server_hello + certificate + sever hello done</h3> 
+<p><img src="https://images2.imgbox.com/fe/83/S3hXF8um_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>server_hello, 服务端返回协商的信息结果，包括选择使用的协议版本 version，选择的加密套件 cipher suite，选择的压缩算法 compression method、随机数 random_S 等，其中随机数用于后续的密钥协商</li><li>server_certificates, 服务器端配置对应的证书链，用于身份验证与密钥交换</li><li>server_hello_done，通知客户端 server_hello 信息发送结束</li></ul> 
+<hr color="#000000" size='1"'> 
+<br> 
+<h3><a id="3_client_key_exchange__change_cipher_spec__encrypted_handshake_message_34"></a>(3) client key exchange + change cipher spec + encrypted handshake message</h3> 
+<p><img src="https://images2.imgbox.com/db/e9/BJiSqWoN_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>client_key_exchange: 合法性验证通过之后，客户端计算产生随机数字 pre-master，并用证书公钥加密，发送给服务器</li><li>此时客户端已经获取全部的计算协商密钥需要的信息：两个明文随机数 random_C 和 random_S 与自己计算产生的 pre-master，计算得到协商密钥enc_key=Fuc(random_C, random_S, pre-master)</li><li>change_cipher_spec: 客户端通知服务器后续的通信都采用协商的通信密钥和加密算法进行加密通信;</li><li>encrypted_handshake_message: 结合之前所有通信参数的 hash 值与其它相关信息生成一段数据，采用协商密钥 session secret 与算法进行加密，然后发送给服务器用于数据与握手验证</li></ul> 
+<hr color="#000000" size='1"'> 
+<br> 
+<h3><a id="4_new_session_ticketchange_cipher_specenvrypted_handshake_message_43"></a>(4) new session ticket+change cipher spec+envrypted handshake message</h3> 
+<p><img src="https://images2.imgbox.com/c4/80/qDwzdFgV_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>session ticket,SessionTicket是一种不需要服务器端状态的，恢复TLS session的方式。SessionTicket可以用于任何CipherSuite,服务器如果使用 SessionTicket 机制，服务器需要把本地的 session 状态存入一个ticket中，ticket会被加密，并被MAC保护，无法篡改，加密和算MAC用的key只有服务器知道。加密并MAC过的ticket用 NewSessionTicket 消息分发给客户端， 客户端把收到的ticket和master secret等其它与当前session有关的参数一起，缓存起来。当客户端希望恢复会话时，就把ticket包含在 ClientHello 的 SessionTicket 扩展中发给服务器。服务器收到后，解密ticket，算MAC确认ticket没有被篡改过，然后从解密的内容里面，获取session 状态，用来恢复会话。如果服务器成功地验证了ticket，可以在 ServerHello 之后返回一个 NewSessionTicket 消息来更新ticket。</li><li>服务器用私钥解密加密的 pre-master 数据，基于之前交换的两个明文随机数 random_C 和 random_S，计算得到协商密钥:enc_key=Fuc(random_C, random_S, pre-master); 计算之前所有接收信息的 hash 值，然后解密客户端发送的 encrypted_handshake_message，验证数据和密钥正确性;</li><li>change_cipher_spec, 验证通过之后，服务器同样发送 change_cipher_spec 以告知客户端后续的通信都采用协商的密钥与算法进行加密通信;</li><li>encrypted_handshake_message, 服务器也结合所有当前的通信参数信息生成一段数据并采用协商密钥 session secret 与算法加密并发送到客户端;</li></ul> 
+<hr color="#000000" size='1"'> 
+<br> 
+<h2><a id="_53"></a>三、源码实现</h2> 
+<p>这里针对ssl的交互流程，我们搭配openssl的库来实现一套具体的交互配置流程，前提是我们已经申请过了CA证书。</p> 
+<p>首先是ssl的参数CTX的创建，需要我们配置当前ssl的CA证书路径，验证链深度，加密套件等用于服务端的握手条件</p> 
+<pre><code class="prism language-c">SSL_CTX<span class="token operator">*</span> <span class="token function">config_ctx</span><span class="token punctuation">(</span>HPR_VOID<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    HPR_INT32 sdwRet <span class="token operator">=</span> HPR_ERROR<span class="token punctuation">;</span>
+    SSL_CTX <span class="token operator">*</span>pCtx           <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    SECURE_ENCRY_PARAM stSecureEncryParam <span class="token punctuation">;</span>
+
+
+    pCtx <span class="token operator">=</span> <span class="token function">SSL_CTX_new</span><span class="token punctuation">(</span><span class="token function">TLSv1_2_server_method</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token constant">NULL</span> <span class="token operator">==</span> pCtx<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">ERR_print_errors_fp</span><span class="token punctuation">(</span><span class="token constant">stdout</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"SSL_CTX_new fail\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">SSL_CTX_set_verify</span><span class="token punctuation">(</span>pCtx<span class="token punctuation">,</span> SSL_VERIFY_NONE<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//不验证</span>
+
+    <span class="token comment">/** 设置证书验证链的深度 默认深度为 9*/</span>
+    <span class="token function">SSL_CTX_set_verify_depth</span><span class="token punctuation">(</span>pCtx<span class="token punctuation">,</span> <span class="token number">9</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/** 设置使用或者需要禁止的安全套件*/</span>
+    <span class="token function">SSL_CTX_set_cipher_list</span><span class="token punctuation">(</span>pCtx<span class="token punctuation">,</span> <span class="token string">"TLSv1:!LOW:!MEDIUM:!MD5:!ADH:!NULL:!DH"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/** 设置证书加密的密码*/</span>
+    <span class="token function">SSL_CTX_set_default_passwd_cb_userdata</span><span class="token punctuation">(</span>pCtx<span class="token punctuation">,</span> pwd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">ssl_ctx_use_certificate_file_v2</span><span class="token punctuation">(</span>pCtx<span class="token punctuation">,</span> path<span class="token punctuation">,</span> SSL_FILETYPE_PEM<span class="token punctuation">)</span> <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">)</span>	<span class="token comment">//path为CA证书，即sever.crt</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">ERR_print_errors_fp</span><span class="token punctuation">(</span><span class="token constant">stderr</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"SSL_CTX_use_certificate_file fail\n"</span><span class="token punctuation">,</span>path<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">goto</span> EXIT_PORT<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">ssl_ctx_use_privatekey_file_v2</span><span class="token punctuation">(</span>pCtx<span class="token punctuation">,</span> PRI_KEY_FILE<span class="token punctuation">,</span> SSL_FILETYPE_PEM<span class="token punctuation">)</span> <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">)</span>	<span class="token comment">//PRI_KEY_FILE为证书私钥</span>
+	<span class="token punctuation">{<!-- --></span>
+		<span class="token function">ERR_print_errors_fp</span><span class="token punctuation">(</span><span class="token constant">stderr</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"ssl_ctx_use_privatekey_file_v2 %s fail\n"</span><span class="token punctuation">,</span> PRI_KEY_FILE<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">goto</span> EXIT_PORT<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+  
+    <span class="token comment">// 判断使用的证书秘钥对是否匹配有效</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token function">SSL_CTX_check_private_key</span><span class="token punctuation">(</span>pCtx<span class="token punctuation">)</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">ERR_print_errors_fp</span><span class="token punctuation">(</span><span class="token constant">stderr</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"Private key does not match the certificate public key\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">goto</span> EXIT_PORT<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">//安全地使用SSL_OP_ALL来启用错误解决方法选项</span>
+    <span class="token comment">//SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION  在作为服务器执行重新协商时，始终启动新会话（即，仅在初始握手中接受会话恢复请求）。客户端不需要此选项。*/</span>
+    <span class="token function">SSL_CTX_set_options</span><span class="token punctuation">(</span>pCtx<span class="token punctuation">,</span> SSL_OP_ALL <span class="token operator">|</span> SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token comment">/* SSL_CTX_set_options(pCtx, SSL_OP_NO_RENEGOTIATION); // 解决安全扫描出现的  TLS Client-initiated 重协商攻击(CVE-2011-1473) 漏洞,  禁用TLSv1.2及更早版本中的所有重新协商。不发送HelloRequest消息，并通过ClientHello忽略重新协商请求。, OpenSSL 1.1.1 版本开始支持, 1.1 之前使用 pSsl-&gt;s3-&gt;flags |= SSL3_FLAGS_NO_RENEGOTIATE_CIPHERS配置 */</span>
+
+    <span class="token comment">// 设置回掉函数，内部可以用来限制重协商的次数</span>
+    <span class="token function">SSL_CTX_set_info_callback</span><span class="token punctuation">(</span>pCtx<span class="token punctuation">,</span> ssl_info_callback<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">SSL_CTX_set_mode</span><span class="token punctuation">(</span>pCtx<span class="token punctuation">,</span> SSL_MODE_ENABLE_PARTIAL_WRITE <span class="token operator">|</span> SSL_MODE_AUTO_RETRY<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> pCtx<span class="token punctuation">;</span>
+
+EXIT_PORT<span class="token operator">:</span>
+
+    <span class="token comment">/* This will never  occur! */</span>
+    <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token constant">NULL</span> <span class="token operator">!=</span> pCtx <span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">SSL_CTX_free</span><span class="token punctuation">(</span>pCtx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        pCtx <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>其次是将fd的绑定到我们之前已经创建的ctx上，前面已经说过tls是工作在tcp之上，当我们创建一个tcp连接之后需要将fd绑定到ssl</p> 
+<pre><code class="prism language-c">SSL<span class="token operator">*</span> <span class="token function">bind_ssl_fd</span><span class="token punctuation">(</span>HPR_INT32 connfd<span class="token punctuation">,</span> SSL_CTX <span class="token operator">*</span>ctx<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    SSL             <span class="token operator">*</span>pSsl                     <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    HPR_INT32       sdwRet                       <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token constant">NULL</span> <span class="token operator">==</span> ctx <span class="token operator">||</span> <span class="token operator">-</span><span class="token number">1</span> <span class="token operator">==</span> connfd<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/* 基于 ctx 产生SSL*/</span>
+    pSsl <span class="token operator">=</span> <span class="token function">SSL_new</span><span class="token punctuation">(</span>ctx<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token constant">NULL</span> <span class="token operator">==</span> pSsl<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">" SSL_new fail \n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/* 将连接用户的 socket 加入SSL*/</span>
+    sdwRet <span class="token operator">=</span> <span class="token function">SSL_set_fd</span><span class="token punctuation">(</span>pSsl<span class="token punctuation">,</span> connfd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>sdwRet <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">" SSL_set_fd fail ret =%d \n"</span><span class="token punctuation">,</span> sdwRet<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">goto</span> EXIT_PORT<span class="token punctuation">;</span> 
+    <span class="token punctuation">}</span>
+    
+
+    <span class="token comment">/** 该函数若设置为 true, ssl 将会尽可能多地读取数据到ssl缓冲区, 若设置为false 则将只读取当前处理的record*/</span>
+    <span class="token function">SSL_set_read_ahead</span><span class="token punctuation">(</span>pSsl<span class="token punctuation">,</span> false<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/* SSL_set_accept_state(pSsl); */</span>
+
+    pSsl<span class="token operator">-&gt;</span>s3<span class="token operator">-&gt;</span>flags <span class="token operator">|=</span> SSL3_FLAGS_NO_RENEGOTIATE_CIPHERS<span class="token punctuation">;</span>
+
+    <span class="token comment">/*建立 SSL 连接*/</span>
+    sdwRet <span class="token operator">=</span> <span class="token function">SSL_accept</span><span class="token punctuation">(</span>pSsl<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span>sdwRet <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">ERR_print_errors_fp</span><span class="token punctuation">(</span><span class="token constant">stderr</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"SSL_accept fail ret =%d \n"</span><span class="token punctuation">,</span> sdwRet<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">goto</span> EXIT_PORT<span class="token punctuation">;</span> 
+    <span class="token punctuation">}</span>
+
+    <span class="token function">SSL_COM_INFO</span><span class="token punctuation">(</span><span class="token string">"server: Connected with %s encryption\n"</span><span class="token punctuation">,</span> <span class="token function">SSL_get_cipher</span><span class="token punctuation">(</span>pSsl<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">show_certs_info</span><span class="token punctuation">(</span>pSsl<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">return</span> pSsl<span class="token punctuation">;</span>
+
+EXIT_PORT<span class="token operator">:</span>
+
+    <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token constant">NULL</span> <span class="token operator">!=</span> pSsl<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">SSL_shutdown</span><span class="token punctuation">(</span>pSsl<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">SSL_free</span><span class="token punctuation">(</span>pSsl<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        pSsl <span class="token operator">=</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span> 
+
+    <span class="token keyword">return</span> <span class="token constant">NULL</span><span class="token punctuation">;</span>
+
+<span class="token punctuation">}</span> 
+</code></pre> 
+<br> 
+<p>这里我们的ssl连接已经创建完毕，当我们接受或者需要写入数据时调用ssl的读写接口就可以对数据进行加密传输了</p> 
+<pre><code class="prism language-c">HPR_INT32 <span class="token function">ssl_readn</span><span class="token punctuation">(</span>SSL <span class="token operator">*</span>ssl<span class="token punctuation">,</span> HPR_INT8<span class="token operator">*</span> buf<span class="token punctuation">,</span> HPR_INT32 len<span class="token punctuation">,</span> HPR_INT32 <span class="token operator">*</span>pdwSslStoreLen<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    HPR_INT32 nLeft         <span class="token operator">=</span> len<span class="token punctuation">;</span>
+    HPR_INT32 recvLen       <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    HPR_INT32 dwSslStoreLen <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    HPR_INT32 connfd        <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    HPR_INT32 err           <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+    <span class="token keyword">struct</span> <span class="token class-name">timeval</span>     select_timeout<span class="token punctuation">;</span>
+    fd_set rset<span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token constant">NULL</span> <span class="token operator">==</span> ssl <span class="token operator">||</span> <span class="token constant">NULL</span> <span class="token operator">==</span> buf <span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"err Param \n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> HPR_ERROR<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    connfd <span class="token operator">=</span> <span class="token function">SSL_get_fd</span><span class="token punctuation">(</span>ssl<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">-</span><span class="token number">1</span> <span class="token operator">==</span> connfd<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"SSL_get_ssl fail\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> HPR_ERROR<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token function">FD_ZERO</span><span class="token punctuation">(</span><span class="token operator">&amp;</span>rset<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token function">FD_SET</span><span class="token punctuation">(</span>connfd<span class="token punctuation">,</span> <span class="token operator">&amp;</span>rset<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">while</span> <span class="token punctuation">(</span>nLeft <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        select_timeout<span class="token punctuation">.</span>tv_sec <span class="token operator">=</span> <span class="token number">5</span><span class="token punctuation">;</span>
+        select_timeout<span class="token punctuation">.</span>tv_usec <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+        <span class="token comment">/** @brief: select 仅可检测到链路层的可读数据, 对于已经缓存在ssl缓冲区但是未接收到应用层的数据 无法检测，所以用dwSslStoreLen进行储值判断*/</span>
+        <span class="token comment">/** ssl 缓冲区没有数据才需要等待 select*/</span>
+        <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token number">0</span> <span class="token operator">==</span> dwSslStoreLen<span class="token punctuation">)</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token function">select</span><span class="token punctuation">(</span>connfd <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>rset<span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token constant">NULL</span><span class="token punctuation">,</span> <span class="token operator">&amp;</span>select_timeout<span class="token punctuation">)</span> <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+                 <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"readn: select failed, errno = 0x%x\n"</span><span class="token punctuation">,</span> <span class="token function">errnoGet</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                 <span class="token keyword">return</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">;</span> 
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">do</span>
+        <span class="token punctuation">{<!-- --></span>
+            <span class="token comment">/** @note: 无论SSL_read多少字节的数据(即便是0),SSL都会讲一个完整的recode 读进ssl缓冲区,这个recode的数据将不再存在于tcp层,无法被select到, SSL_read 再从ssl缓冲区读进应用层的buf */</span>
+            recvLen <span class="token operator">=</span> <span class="token function">SSL_read</span><span class="token punctuation">(</span>ssl<span class="token punctuation">,</span> buf <span class="token operator">+</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">,</span> nLeft<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>recvLen <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+                nLeft <span class="token operator">-=</span> recvLen<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">else</span>
+            <span class="token punctuation">{<!-- --></span>
+                err <span class="token operator">=</span> <span class="token function">SSL_get_error</span><span class="token punctuation">(</span>ssl<span class="token punctuation">,</span>  recvLen<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token comment">/** @brief: fd暂时无数据可读*/</span>
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>SSL_ERROR_WANT_READ <span class="token operator">==</span> err<span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    recvLen <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+                    <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"SSL_ERROR_WANT_READ, fd = %d , has recv %d len \n"</span><span class="token punctuation">,</span> connfd<span class="token punctuation">,</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token comment">/** @brief: 这里 ssl链路断开 就视为链路无效了,就退出链路*/</span>
+                <span class="token comment">/** @brief: ssl链路断开, 注意： 这不一定代表 tcp 链路已经断开*/</span>
+                <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>SSL_ERROR_ZERO_RETURN <span class="token operator">==</span> err<span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"SSL_ERROR_ZERO_RETURN, fd = %d, has recv %d len \n"</span><span class="token punctuation">,</span> connfd<span class="token punctuation">,</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">)</span><span class="token punctuation">;</span>    
+                    <span class="token keyword">return</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">;</span> 
+                <span class="token punctuation">}</span>
+                <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>SSL_ERROR_SYSCALL <span class="token operator">==</span> err<span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"SSL_ERROR_SYSCALL, fd = %d, has recv %d len \n"</span><span class="token punctuation">,</span> connfd<span class="token punctuation">,</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">)</span><span class="token punctuation">;</span>    
+                    <span class="token function">SSL_COM_ERR</span> <span class="token punctuation">(</span><span class="token string">"错误代码%d,错误信息是'%s'\n"</span><span class="token punctuation">,</span> errno<span class="token punctuation">,</span> <span class="token function">strerror</span><span class="token punctuation">(</span>errno<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">return</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">;</span> 
+                <span class="token punctuation">}</span>
+                <span class="token keyword">else</span>
+                <span class="token punctuation">{<!-- --></span>
+                    <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"select exit, err = %d, fd = %d, has recv %d len \n"</span><span class="token punctuation">,</span>errno<span class="token punctuation">,</span> connfd<span class="token punctuation">,</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">)</span><span class="token punctuation">;</span>    
+                    <span class="token keyword">return</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">;</span> 
+                <span class="token punctuation">}</span>
+            <span class="token punctuation">}</span>
+            dwSslStoreLen <span class="token operator">=</span> <span class="token function">SSL_pending</span><span class="token punctuation">(</span>ssl<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span><span class="token keyword">while</span> <span class="token punctuation">(</span>nLeft <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token operator">&amp;&amp;</span> dwSslStoreLen<span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">/** 需要读取的数据还没读完, 且ssl缓存区还有数据*/</span>
+
+    <span class="token punctuation">}</span>
+    <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token constant">NULL</span> <span class="token operator">!=</span> pdwSslStoreLen<span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token operator">*</span>pdwSslStoreLen <span class="token operator">=</span> dwSslStoreLen<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+    <span class="token keyword">return</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">;</span> 
+<span class="token punctuation">}</span>
+
+
+
+
+HPR_INT32 <span class="token function">ssl_writen</span><span class="token punctuation">(</span>SSL <span class="token operator">*</span>ssl<span class="token punctuation">,</span> HPR_INT8<span class="token operator">*</span> buf<span class="token punctuation">,</span> HPR_INT32 len<span class="token punctuation">)</span>
+<span class="token punctuation">{<!-- --></span>
+    HPR_INT32 nLeft    <span class="token operator">=</span> len<span class="token punctuation">;</span>
+    HPR_INT32 sendLen  <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    HPR_INT32 err         <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+    HPR_INT32 connfd   <span class="token operator">=</span> <span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">if</span><span class="token punctuation">(</span><span class="token constant">NULL</span> <span class="token operator">==</span> ssl <span class="token operator">||</span> <span class="token constant">NULL</span> <span class="token operator">==</span> buf <span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+        <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"err Param \n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>          
+        <span class="token keyword">return</span> HPR_ERROR<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">while</span> <span class="token punctuation">(</span>nLeft <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span>
+    <span class="token punctuation">{<!-- --></span>
+            sendLen <span class="token operator">=</span> <span class="token function">SSL_write</span><span class="token punctuation">(</span>ssl<span class="token punctuation">,</span> buf <span class="token operator">+</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">,</span> nLeft<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">if</span> <span class="token punctuation">(</span>sendLen <span class="token operator">&gt;=</span> <span class="token number">0</span><span class="token punctuation">)</span>
+            <span class="token punctuation">{<!-- --></span>
+                nLeft <span class="token operator">-=</span> sendLen<span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+            <span class="token keyword">else</span>
+            <span class="token punctuation">{<!-- --></span>
+                <span class="token comment">/** @brief: fd暂时不可写*/</span>
+                err <span class="token operator">=</span> <span class="token function">SSL_get_error</span><span class="token punctuation">(</span>ssl<span class="token punctuation">,</span>  sendLen<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                <span class="token keyword">if</span> <span class="token punctuation">(</span>SSL_ERROR_WANT_WRITE <span class="token operator">==</span> err<span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    sendLen <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+                    <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"SSL_ERROR_WANT_WRITE\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token punctuation">}</span>
+                <span class="token comment">/** @brief: ssl链路断开, 注意： 这不一定代表 tcp 链路已经断开*/</span>
+                <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>SSL_ERROR_ZERO_RETURN <span class="token operator">==</span> err<span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"SSL_ERROR_ZERO_RETURN\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">return</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">;</span> 
+                <span class="token punctuation">}</span>
+                <span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>SSL_ERROR_SYSCALL <span class="token operator">==</span> err<span class="token punctuation">)</span>
+                <span class="token punctuation">{<!-- --></span>
+                    <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"SSL_ERROR_SYSCALL\n"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"错误代码%d,错误信息是'%s'\n"</span><span class="token punctuation">,</span> errno<span class="token punctuation">,</span> <span class="token function">strerror</span><span class="token punctuation">(</span>errno<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">return</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">;</span> 
+                <span class="token punctuation">}</span>
+                <span class="token keyword">else</span>
+                <span class="token punctuation">{<!-- --></span>
+                    <span class="token function">SSL_COM_ERR</span><span class="token punctuation">(</span><span class="token string">"select exit, err = %d\n"</span><span class="token punctuation">,</span> err<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                    <span class="token keyword">return</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">;</span> 
+                <span class="token punctuation">}</span>
+
+            <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">return</span> len <span class="token operator">-</span> nLeft<span class="token punctuation">;</span> 
+<span class="token punctuation">}</span>
+</code></pre> 
+<hr color="#000000" size='1"'> 
+<br> 
+<p>参考文档: <a href="https://blog.csdn.net/ustccw/article/details/76691248">https://blog.csdn.net/ustccw/article/details/76691248</a>.</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e7cbc08b3c5c38ec7903b93299bbcc54/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">pandas如何进行优雅的列转行、行转列？</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/806037fd9f17ff7496e67f27d15f5763/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">变量命名缩写参考</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

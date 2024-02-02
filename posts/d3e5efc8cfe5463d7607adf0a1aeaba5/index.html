@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【面试系列】分布式缓存中一致性hash算法 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【面试系列】分布式缓存中一致性hash算法" />
+<meta property="og:description" content="这两天看到技术群里，有小伙伴在讨论一致性hash算法的问题，正愁没啥写的题目就来了，那就简单介绍下它的原理。下边我们以分布式缓存中经典场景举例，面试中也是经常提及的一些话题，看看什么是一致性hash算法以及它有那些过人之处。
+构建场景 假如我们有三台缓存服务器编号node0、node1、node2，现在有3000万个key，希望可以将这些个key均匀的缓存到三台机器上，你会想到什么方案呢？
+我们可能首先想到的方案，是取模算法hash（key）% N，对key进行hash运算后取模，N是机器的数量。key进行hash后的结果对3取模，得到的结果一定是0、1或者2，正好对应服务器node0、node1、node2，存取数据直接找对应的服务器即可，简单粗暴，完全可以解决上述的问题。
+hash的问题 取模算法虽然使用简单，但对机器数量取模，在集群扩容和收缩时却有一定的局限性，因为在生产环境中根据业务量的大小，调整服务器数量是常有的事；而服务器数量N发生变化后hash（key）% N计算的结果也会随之变化。
+比如：一个服务器节点挂了，计算公式从hash（key）% 3变成了hash（key）% 2，结果会发生变化，此时想要访问一个key，这个key的缓存位置大概率会发生改变，那么之前缓存key的数据也会失去作用与意义。
+大量缓存在同一时间失效，造成缓存的雪崩，进而导致整个缓存系统的不可用，这基本上是不能接受的，为了解决优化上述情况，一致性hash算法应运而生~
+那么，一致性哈希算法又是如何解决上述问题的？
+一致性hash 一致性hash算法本质上也是一种取模算法，不过，不同于上边按服务器数量取模，一致性hash是对固定值2^32取模。
+“ IPv4的地址是4组8位2进制数组成，所以用2^32可以保证每个IP地址会有唯一的映射
+hash环
+我们可以将这2^32个值抽象成一个圆环⭕️（不得意圆的，自己想个形状，好理解就行），圆环的正上方的点代表0，顺时针排列，以此类推，1、2、3、4、5、6……直到2^32-1，而这个由2的32次方个点组成的圆环统称为hash环。
+那么这个hash环和一致性hash算法又有什么关系嘞？我们还是以上边的场景为例，三台缓存服务器编号node0、node1、node2，3000万个key。
+服务器映射到hash环
+这个时候计算公式就从hash（key）% N 变成了hash（服务器ip）% 2^32，使用服务器IP地址进行hash计算，用哈希后的结果对2^32取模，结果一定是一个0到2^32-1之间的整数，而这个整数映射在hash环上的位置代表了一个服务器，依次将node0、node1、node2三个缓存服务器映射到hash环上。
+对象key映射到hash环
+接着在将需要缓存的key对象也映射到hash环上，hash（key）% 2^32，服务器节点和要缓存的key对象都映射到了hash环，那对象key具体应该缓存到哪个服务器上呢？
+对象key映射到服务器
+“ 从缓存对象key的位置开始，沿顺时针方向遇到的第一个服务器，便是当前对象将要缓存到的服务器。
+因为被缓存对象与服务器hash后的值是固定的，所以，在服务器不变的条件下，对象key必定会被缓存到固定的服务器上。根据上边的规则，下图中的映射关系：
+key-1 -&gt; node-1
+key-3 -&gt; node-2
+key-4 -&gt; node-2
+key-5 -&gt; node-2
+key-2 -&gt; node-0
+如果想要访问某个key，只要使用相同的计算方式，即可得知这个key被缓存在哪个服务器上了。
+一致性hash的优势 我们简单了解了一致性hash的原理，那它又是如何优化集群中添加节点和缩减节点，普通取模算法导致的缓存服务，大面积不可用的问题呢？
+先来看看扩容的场景，假如业务量激增，系统需要进行扩容增加一台服务器node-4，刚好node-4被映射到node-1和node-2之间，沿顺时针方向对象映射节点，发现原本缓存在node-2上的对象key-4、key-5被重新映射到了node-4上，而整个扩容过程中受影响的只有node-4和node-1节点之间的一小部分数据。
+反之，假如node-1节点宕机，沿顺时针方向对象映射节点，缓存在node-1上的对象key-1被重新映射到了node-4上，此时受影响的数据只有node-0和node-1之间的一小部分数据。
+从上边的两种情况发现，当集群中服务器的数量发生改变时，一致性hash算只会影响少部分的数据，保证了缓存系统整体还可以对外提供服务的。
+数据偏斜问题 前边为了便于理解原理，画图中的node节点都很理想化的相对均匀分布，但理想和实际的场景往往差别很大，就比如办了个健身年卡的我，只去过健身房两次，还只是洗了个澡。
+想要健身的你 在服务器节点数量太少的情况下，很容易因为节点分布不均匀而造成数据倾斜问题，如下图被缓存的对象大部分缓存在node-4服务器上，导致其他节点资源浪费，系统压力大部分集中在node-4节点上，这样的集群是非常不健康的。
+解决数据倾斜的办法也简单，我们就要想办法让节点映射到hash环上时，相对分布均匀一点。
+一致性Hash算法引入了一个虚拟节点机制，即对每个服务器节点计算出多个hash值，它们都会映射到hash环上，映射到这些虚拟节点的对象key，最终会缓存在真实的节点上。
+虚拟节点的hash计算通常可以采用，对应节点的IP地址加数字编号后缀 hash（10.24.23.227#1) 的方式，举个例子，node-1节点IP为10.24.23.227，正常计算node-1的hash值。
+hash（10.24.23.227#1）% 2^32
+假设我们给node-1设置三个虚拟节点，node-1#1、node-1#2、node-1#3，对它们进行hash后取模。
+hash（10.24.23.227#1）% 2^32
+hash（10.24.23.227#2）% 2^32" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/d3e5efc8cfe5463d7607adf0a1aeaba5/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-03-20T08:45:56+08:00" />
+<meta property="article:modified_time" content="2023-03-20T08:45:56+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【面试系列】分布式缓存中一致性hash算法</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <p style="text-align:left;"><a href="" rel="nofollow">这两天看到技术群里，有小伙伴在讨论一致性hash算法的问题，正愁没啥写的题目就来了，那就简单介绍下它的原理。下边我们以分布式缓存中经典场景举例，面试中也是经常提及的一些话题，看看什么是一致性hash算法以及它有那些过人之处。</a></p> 
+ <img src="https://images2.imgbox.com/1d/7b/qI48w0vN_o.png" alt="f9a522b9470431d88e895d5a229e0b66.png"> 
+ <h4>构建场景</h4> 
+ <p style="text-align:left;">假如我们有三台缓存服务器编号<code>node0</code>、<code>node1</code>、<code>node2</code>，现在有3000万个<code>key</code>，希望可以将这些个key均匀的缓存到三台机器上，你会想到什么方案呢？</p> 
+ <p style="text-align:left;">我们可能首先想到的方案，是取模算法<code>hash（key）% N</code>，对key进行hash运算后取模，N是机器的数量。key进行hash后的结果对3取模，得到的结果一定是0、1或者2，正好对应服务器<code>node0</code>、<code>node1</code>、<code>node2</code>，存取数据直接找对应的服务器即可，简单粗暴，完全可以解决上述的问题。</p> 
+ <img src="https://images2.imgbox.com/06/5b/q4KuqP0o_o.png" alt="fe5bc96208d2869eba03d218b2f79659.png"> 
+ <h4>hash的问题</h4> 
+ <p style="text-align:left;">取模算法虽然使用简单，但对机器数量取模，在集群扩容和收缩时却有一定的局限性，因为在生产环境中根据业务量的大小，调整服务器数量是常有的事；而服务器数量N发生变化后<code>hash（key）% N</code>计算的结果也会随之变化。</p> 
+ <img src="https://images2.imgbox.com/4d/2c/iFoFjHRA_o.png" alt="3a9af111fa95fbc6f2cb65be0c19b34c.png"> 
+ <p style="text-align:left;">比如：一个服务器节点挂了，计算公式从<code>hash（key）% 3</code>变成了<code>hash（key）% 2</code>，结果会发生变化，此时想要访问一个key，这个key的缓存位置大概率会发生改变，那么之前缓存key的数据也会失去作用与意义。</p> 
+ <p style="text-align:left;">大量缓存在同一时间失效，造成缓存的雪崩，进而导致整个缓存系统的不可用，这基本上是不能接受的，为了解决优化上述情况，一致性hash算法应运而生~</p> 
+ <p style="text-align:left;">那么，一致性哈希算法又是如何解决上述问题的？</p> 
+ <h4>一致性hash</h4> 
+ <p style="text-align:left;">一致性hash算法本质上也是一种取模算法，不过，不同于上边按服务器数量取模，一致性hash是对固定值2^32取模。</p> 
+ <blockquote> 
+  “ 
+  <p>IPv4的地址是4组8位2进制数组成，所以用2^32可以保证每个IP地址会有唯一的映射</p> 
+ </blockquote> 
+ <p style="text-align:left;"><strong>hash环</strong></p> 
+ <p style="text-align:left;">我们可以将这2^32个值抽象成一个圆环⭕️（<strong>不得意圆的，自己想个形状，好理解就行</strong>），圆环的正上方的点代表0，顺时针排列，以此类推，1、2、3、4、5、6……直到2^32-1，而这个由2的32次方个点组成的圆环统称为<code>hash环</code>。</p> 
+ <img src="https://images2.imgbox.com/62/6c/MUa8dYms_o.png" alt="881be5f403c827e3009d88d2ef43da51.png"> 
+ <p style="text-align:left;">那么这个hash环和一致性hash算法又有什么关系嘞？我们还是以上边的场景为例，三台缓存服务器编号<code>node0</code>、<code>node1</code>、<code>node2</code>，3000万个<code>key</code>。</p> 
+ <p style="text-align:left;"><strong>服务器映射到hash环</strong></p> 
+ <p style="text-align:left;">这个时候计算公式就从<strong>hash（key）% N</strong> 变成了<strong>hash（服务器ip）% 2^32</strong>，使用服务器IP地址进行hash计算，用哈希后的结果对2^32取模，结果一定是一个0到2^32-1之间的整数，而这个整数映射在hash环上的位置代表了一个服务器，依次将<code>node0</code>、<code>node1</code>、<code>node2</code>三个缓存服务器映射到hash环上。</p> 
+ <img src="https://images2.imgbox.com/8a/9e/EHigg0cT_o.png" alt="8a3493e12d279b24dd25dd84c484744e.png"> 
+ <p style="text-align:left;"><strong>对象key映射到hash环</strong></p> 
+ <p style="text-align:left;">接着在将需要缓存的key对象也映射到hash环上，<strong>hash（key）% 2^32</strong>，服务器节点和要缓存的key对象都映射到了hash环，那对象key具体应该缓存到哪个服务器上呢？</p> 
+ <img src="https://images2.imgbox.com/5f/fc/qwTm66gy_o.png" alt="924bc8164b03e64fa2371f9e473ddd61.png"> 
+ <p style="text-align:left;"><strong>对象key映射到服务器</strong></p> 
+ <blockquote> 
+  “ 
+  <p><strong>从缓存对象key的位置开始，沿顺时针方向遇到的第一个服务器，便是当前对象将要缓存到的服务器</strong>。</p> 
+ </blockquote> 
+ <p style="text-align:left;">因为被缓存对象与服务器hash后的值是固定的，所以，在服务器不变的条件下，对象key必定会被缓存到固定的服务器上。根据上边的规则，下图中的映射关系：</p> 
+ <ul><li><p><code>key-1 -&gt; node-1</code></p></li><li><p><code>key-3 -&gt; node-2</code></p></li><li><p><code>key-4 -&gt; node-2</code></p></li><li><p><code>key-5 -&gt; node-2</code></p></li><li><p><code>key-2 -&gt; node-0</code></p></li></ul> 
+ <img src="https://images2.imgbox.com/ad/3e/17xAeC9N_o.png" alt="91132ada4b86290d171c3a54fc00548c.png"> 
+ <p style="text-align:left;">如果想要访问某个key，只要使用相同的计算方式，即可得知这个key被缓存在哪个服务器上了。</p> 
+ <h4>一致性hash的优势</h4> 
+ <p style="text-align:left;">我们简单了解了一致性hash的原理，那它又是如何优化集群中添加节点和缩减节点，普通取模算法导致的缓存服务，大面积不可用的问题呢？</p> 
+ <p style="text-align:left;">先来看看扩容的场景，假如业务量激增，系统需要进行扩容增加一台服务器<code>node-4</code>，刚好<code>node-4</code>被映射到<code>node-1</code>和<code>node-2</code>之间，沿顺时针方向对象映射节点，发现原本缓存在<code>node-2</code>上的对象<code>key-4</code>、<code>key-5</code>被重新映射到了<code>node-4</code>上，而整个扩容过程中受影响的只有<code>node-4</code>和<code>node-1</code>节点之间的一小部分数据。</p> 
+ <img src="https://images2.imgbox.com/83/91/WhIUOujv_o.png" alt="6d62e75d6649614560e7653f665a6eaa.png"> 
+ <p style="text-align:left;">反之，假如<code>node-1</code>节点宕机，沿顺时针方向对象映射节点，缓存在<code>node-1</code>上的对象<code>key-1</code>被重新映射到了<code>node-4</code>上，此时受影响的数据只有<code>node-0</code>和<code>node-1</code>之间的一小部分数据。</p> 
+ <img src="https://images2.imgbox.com/c6/53/zaMDlInx_o.png" alt="dcd5fce110ddf4f1e9427410d3f8b07b.png"> 
+ <p style="text-align:left;"><a href="" rel="nofollow">从上边的两种情况发现，当集群中服务器的数量发生改变时，一致性hash算只会影响少部分的数据，保证了缓存系统整体还可以对外提供服务的。</a></p> 
+ <h4>数据偏斜问题</h4> 
+ <p style="text-align:left;">前边为了便于理解原理，画图中的node节点都很理想化的相对均匀分布，但理想和实际的场景往往差别很大，就比如办了个健身年卡的我，只去过健身房两次，还只是洗了个澡。</p> 
+ <img src="https://images2.imgbox.com/77/59/1GCc746V_o.png" alt="390cf3538c3a7ba6115aedd9f4ef1ae2.png"> 
+ <figcaption>
+   想要健身的你 
+ </figcaption> 
+ <p style="text-align:left;">在服务器节点数量太少的情况下，很容易因为节点分布不均匀而造成<strong>数据倾斜</strong>问题，如下图被缓存的对象大部分缓存在<code>node-4</code>服务器上，导致其他节点资源浪费，系统压力大部分集中在<code>node-4</code>节点上，这样的集群是非常不健康的。</p> 
+ <img src="https://images2.imgbox.com/44/58/cSsVJoFH_o.png" alt="7fdc209bfa691fafe6185656f201666b.png"> 
+ <p style="text-align:left;">解决数据倾斜的办法也简单，我们就要想办法让节点映射到hash环上时，相对分布均匀一点。</p> 
+ <p style="text-align:left;">一致性Hash算法引入了一个<strong>虚拟节点</strong>机制，即对每个服务器节点计算出多个hash值，它们都会映射到hash环上，映射到这些虚拟节点的对象key，最终会缓存在真实的节点上。</p> 
+ <p style="text-align:left;">虚拟节点的hash计算通常可以采用，对应节点的IP地址加数字编号后缀 <strong>hash（10.24.23.227#1)</strong> 的方式，举个例子，node-1节点IP为10.24.23.227，正常计算<code>node-1</code>的hash值。</p> 
+ <ul><li><p><code>hash（10.24.23.227#1）% 2^32</code></p></li></ul> 
+ <p style="text-align:left;">假设我们给node-1设置三个虚拟节点，<code>node-1#1</code>、<code>node-1#2</code>、<code>node-1#3</code>，对它们进行hash后取模。</p> 
+ <ul><li><p><code>hash（10.24.23.227#1）% 2^32</code></p></li><li><p><code>hash（10.24.23.227#2）% 2^32</code></p></li><li><p><code>hash（10.24.23.227#3）% 2^32</code></p></li></ul> 
+ <p style="text-align:left;">下图加入虚拟节点后，原有节点在hash环上分布的就相对均匀了，其余节点压力得到了分摊。</p> 
+ <img src="https://images2.imgbox.com/b8/ea/ThTZbpjE_o.png" alt="0c929be54f0c1b67d946c73d97a4ee15.png"> 
+ <blockquote> 
+  “ 
+  <p>但需要注意一点，分配的虚拟节点个数越多，映射在hash环上才会越趋于均匀，节点太少的话很难看出效果</p> 
+ </blockquote> 
+ <p style="text-align:left;">引入虚拟节点的同时也增加了新的问题，要做虚拟节点和真实节点间的映射，<code>对象key-&gt;虚拟节点-&gt;实际节点</code>之间的转换。</p> 
+ <img src="https://images2.imgbox.com/ac/b4/PyjKgLJ3_o.png" alt="ddf6bd20c63f473d755aa2f678b925f0.png"> 
+ <h4>一致性hash的应用场景</h4> 
+ <p style="text-align:left;">一致性hash在分布式系统中应该是实现负载均衡的首选算法，它的实现比较灵活，既可以在客户端实现，也可以在中间件上实现，比如日常使用较多的缓存中间件<code>memcached</code>和<code>redis</code>集群都有用到它。</p> 
+ <p style="text-align:left;"><a href="" rel="nofollow">一致性Hash介绍及使用场景</a></p> 
+ <p style="text-align:left;">memcached的集群比较特殊，严格来说它只能算是<strong>伪集群</strong>，因为它的服务器之间不能通信，请求的分发路由完全靠客户端来的计算出缓存对象应该落在哪个服务器上，而它的路由算法用的就是一致性hash。</p> 
+ <img src="https://images2.imgbox.com/ba/ca/49LUDfb3_o.png" alt="49faed8d4c63ae0316cfb1db80df2d8f.png"> 
+ <p style="text-align:left;">还有redis集群中hash槽的概念，虽然实现不尽相同，但思想万变不离其宗，看完本篇的一致性hash，你再去理解redis槽位就轻松多了。</p> 
+ <p style="text-align:left;">其它的应用场景还有很多：</p> 
+ <ul><li><p><code>RPC</code>框架<code>Dubbo</code>用来选择服务提供者</p></li><li><p>分布式关系数据库分库分表：数据与节点的映射关系</p></li><li><p><code>LVS</code>负载均衡调度器</p></li><li><p>.....................</p></li></ul> 
+ <h4>总结</h4> 
+ <p style="text-align:left;"><a href="" rel="nofollow">简单的阐述了下一致性hash，如果有不对的地方大家可以留言指正，任何技术都不会十全十美，一致性Hash算法也是有一些潜在隐患的，如果Hash环上的节点数量非常庞大或者更新频繁时，检索性能会比较低下，而且整个分布式缓存需要一个路由服务来做负载均衡，一旦路由服务挂了，整个缓存也就不可用了，还要考虑做高可用。</a></p> 
+ <p style="text-align:left;"><a href="" rel="nofollow">不过话说回来，只要是能解决问题的都是好技术，有点副作用还是可以忍受的。</a></p> 
+ <p style="text-align:center;">~~~~推荐阅读~~~~~</p> 
+ <p style="text-align:center;"><a href="" rel="nofollow">一致性Hash介绍及使用场景</a><br></p> 
+ <p style="text-align:center;"><a href="" rel="nofollow">大型分布式系统中，缓存应该怎么玩</a></p> 
+ <p style="text-align:center;"><a href="" rel="nofollow">聊聊「分布式架构」那些事儿</a><br></p> 
+ <p style="text-align:center;"><a href="" rel="nofollow">七种方案！探讨Redis分布式锁正确使用姿势</a><br></p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/ab/c9/QQv8WnkB_o.png" alt="5a7fe37a43be061450efa448cff3b632.jpeg"></p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/5c7d1b490ffb7c68f241c0cf7ab768c0/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">HFSS仿真PCB过孔及优化</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/03a596b48b995c6d67b461bd3bf2c66c/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">计算机课程设计大全 十万套源码可选【Java、.Net、Python等】</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

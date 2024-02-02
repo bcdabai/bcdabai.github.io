@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Android Framework 常见解决方案（25-2）定制CPUSET解决方案-system修改及编译部分调整 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Android Framework 常见解决方案（25-2）定制CPUSET解决方案-system修改及编译部分调整" />
+<meta property="og:description" content="1 原理说明 这个方案有如下基本需求：
+构建自定义CPUSET，/dev/cpuset中包含一个全新的cpuset分组。且可以通过set_cpuset_policy和set_sched_policy接口可以设置自定义CPUSET。开机启动后可以通过zygote判定来对特定的应用进程设置CPUSET，并一直保持，且保证自定义CPUSET不受其他CPUSET影响，持续独立。 原理上因为修改代码涉及部分较多，因此共分3个部分：
+framework修改：添加SCHED GROUP和THREAD GROUP（THREAD_GROUP_对应SP_）的支持，且支持开机启动后直接设置。applyOomAdjLSP的判定保持不变。system修改：添加SP_CUSTOM的支持及set_cpuset_policy和set_sched_policy接口等支持，同时修改task_profiles.json，添加SP_CUSTOM CPUSET的支持。init.rc修改及编译部分调整：对自定义cpuset节点进行操作，vndk部分编译需要重新调整方案以及不修改VNDK如何保证编译通过。 由于修改中涉及代码量过大，这里拆分成两节进行展示。本章节主要针对第2部分和第3部分修改进行说明。上一篇文章👇
+Android Framework 常见解决方案（25-1）定制CPUSET解决方案-framework部分修改
+主要对第1部分修改进行说明。
+2 修改方案（Android S） 2.1 system部分修改 针对system分区修改。具体修改方案如下（这里以S版本修改为主，Q和R有一些差异但原理不变）：
+在$AOSP/system/core/libprocessgroup/include/processgroup/sched_policy.h文件中修改：
+/* Keep in sync with THREAD_GROUP_* in frameworks/base/core/java/android/os/Process.java */ typedef enum { SP_DEFAULT = -1, SP_BACKGROUND = 0, SP_FOREGROUND = 1, SP_SYSTEM = 2, SP_AUDIO_APP = 3, SP_AUDIO_SYS = 4, SP_TOP_APP = 5, SP_RT_APP = 6, SP_RESTRICTED = 7, &#43; SP_CUSTOM = 8, SP_CNT, SP_MAX = SP_CNT - 1, SP_SYSTEM_DEFAULT = SP_FOREGROUND, } SchedPolicy; 这里注意，按照顺序填写修改相对简单，因为后续会用到SP_CNT和SP_MAX这两个变量，代码中还会有许多的遍历操作，因此最好采用累加方案，不要设置其他值。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/c1e5504567cb9129cb9f688e5e6e40e9/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-10T13:35:41+08:00" />
+<meta property="article:modified_time" content="2024-01-10T13:35:41+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Android Framework 常见解决方案（25-2）定制CPUSET解决方案-system修改及编译部分调整</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2>1 原理说明</h2> 
+<p>这个方案有如下基本需求：</p> 
+<ul><li>构建自定义CPUSET，/dev/cpuset中包含一个全新的cpuset分组。且可以通过set_cpuset_policy和set_sched_policy接口可以设置自定义CPUSET。</li><li>开机启动后可以通过zygote判定来对特定的应用进程设置CPUSET，并一直保持，且保证自定义CPUSET不受其他CPUSET影响，持续独立。</li></ul> 
+<p>原理上因为修改代码涉及部分较多，因此共分3个部分：</p> 
+<ol><li>framework修改：添加SCHED GROUP和THREAD GROUP（THREAD_GROUP_对应SP_）的支持，且支持开机启动后直接设置。applyOomAdjLSP的判定保持不变。</li><li>system修改：添加SP_CUSTOM的支持及set_cpuset_policy和set_sched_policy接口等支持，同时修改task_profiles.json，添加SP_CUSTOM CPUSET的支持。</li><li>init.rc修改及编译部分调整：对自定义cpuset节点进行操作，vndk部分编译需要重新调整方案以及不修改VNDK如何保证编译通过。</li></ol> 
+<p><span style="color:#956fe7;">由于修改中涉及代码量过大，这里拆分成两节进行展示。本章节主要针对第2部分和第3部分修改进行说明。上一篇文章👇</span></p> 
+<p><a href="https://blog.csdn.net/vviccc/article/details/135487983" title="Android Framework 常见解决方案（25-1）定制CPUSET解决方案-framework部分修改">Android Framework 常见解决方案（25-1）定制CPUSET解决方案-framework部分修改</a></p> 
+<p><span style="color:#956fe7;">主要对第1部分修改进行说明。</span></p> 
+<h2>2 修改方案<span style="color:#956fe7;">（Android S）</span></h2> 
+<h3>2.1 system部分修改</h3> 
+<p>针对system分区修改。具体修改方案如下<span style="color:#956fe7;">（这里以S版本修改为主，Q和R有一些差异但原理不变）</span>：</p> 
+<p>在$AOSP/system/core/libprocessgroup/include/processgroup/sched_policy.h文件中修改：</p> 
+<pre><code class="language-cpp">/* Keep in sync with THREAD_GROUP_* in frameworks/base/core/java/android/os/Process.java */
+typedef enum {
+    SP_DEFAULT = -1,
+    SP_BACKGROUND = 0,
+    SP_FOREGROUND = 1,
+    SP_SYSTEM = 2,
+    SP_AUDIO_APP = 3,
+    SP_AUDIO_SYS = 4,
+    SP_TOP_APP = 5,
+    SP_RT_APP = 6,
+    SP_RESTRICTED = 7,
++    SP_CUSTOM = 8,
+    SP_CNT,
+    SP_MAX = SP_CNT - 1,
+    SP_SYSTEM_DEFAULT = SP_FOREGROUND,
+} SchedPolicy;</code></pre> 
+<p>这里注意，按照顺序填写修改相对简单，因为后续会用到SP_CNT和SP_MAX这两个变量，代码中还会有许多的遍历操作，因此最好采用累加方案，不要设置其他值。</p> 
+<p>本方案的修改比较全面，即支持set_cpuset_policy，也兼容到set_sched_policy，在实际操作中，可根据需要只修改其中一个即可。</p> 
+<p>在$AOSP/system/core/libprocessgroup/sched_policy.cpp文件中修改：</p> 
+<pre><code class="language-cpp">//修改set_cpuset_policy，添加SP_CUSTOM的处理
+int set_cpuset_policy(int tid, SchedPolicy policy) {
+    if (tid == 0) {
+        tid = GetThreadId();
+    }
+    policy = _policy(policy);
+
+    switch (policy) {
+        case SP_BACKGROUND:
+            return SetTaskProfiles(tid, {"CPUSET_SP_BACKGROUND", "BlkIOBackground"}, true) ? 0 : -1;
+        case SP_FOREGROUND:
+            return SetTaskProfiles(tid, {"CPUSET_SP_FOREGROUND", "BlkIOForeground"}, true) ? 0 : -1;
+        case SP_AUDIO_APP:
+        case SP_AUDIO_SYS:
+            return SetTaskProfiles(tid, {"CPUSET_SP_FOREGROUND", "AudioAppCapacity", "BlkIOForeground"}, true) ? 0 : -1;
+        case SP_TOP_APP:
+            return SetTaskProfiles(tid, {"CPUSET_SP_TOP_APP", "BlkIOBackground"}, true) ? 0 : -1;
+        case SP_SYSTEM:
+            return SetTaskProfiles(tid, {"CPUSET_SP_SYSTEM", "BlkIOForeground"}, true) ? 0 : -1;
+        case SP_RESTRICTED:
+            return SetTaskProfiles(tid, {"CPUSET_SP_RESTRICTED"}, true) ? 0 : -1;
++        case SP_CUSTOM:
++            return SetTaskProfiles(tid, {"CPUSET_SP_CUSTOM"}, true) ? 0 : -1;
+        default:
+            break;
+    }
+
+    return 0;
+}
+
+//修改set_sched_policy，添加SP_CUSTOM的处理
+int set_sched_policy(int tid, SchedPolicy policy) {
+//...
+#if POLICY_DEBUG //注意：这一段的修改主要是调试使用，功能实现上可以不添加该部分
+//...
+    switch (policy) {
+        case SP_BACKGROUND:
+            SLOGD("vvv tid %d (%s)", tid, thread_name);
+            break;
+        case SP_FOREGROUND:
+        case SP_AUDIO_APP:
+        case SP_AUDIO_SYS:
+        case SP_TOP_APP:
+            SLOGD("^^^ tid %d policy %d (%s)", tid, policy, thread_name);
+            break;
+        case SP_SYSTEM:
+            SLOGD("/// tid %d (%s)", tid, thread_name);
+            break;
+        case SP_RT_APP:
+            SLOGD("RT  tid %d (%s)", tid, thread_name);
+            break;
++        case SP_CUSTOM:
++            SLOGD("CUSTOM|xxx tid %d (%s)", tid, thread_name);
++            break;
+        default:
+            SLOGD("??? tid %d (%s)", tid, thread_name);
+            break;
+    }
+#endif
+//...
+    switch (policy) {
+        case SP_BACKGROUND:
+            return SetTaskProfiles(tid, {"SCHED_SP_BACKGROUND", "BlkIOBackground"}, true) ? 0 : -1;
+        case SP_FOREGROUND:
+        case SP_AUDIO_APP:
+        case SP_AUDIO_SYS:
+            return SetTaskProfiles(tid, {"SCHED_SP_FOREGROUND", "BlkIOForeground"}, true) ? 0 : -1;
+        case SP_TOP_APP:
+            return SetTaskProfiles(tid, {"SCHED_SP_TOP_APP", "BlkIOForeground"}, true) ? 0 : -1;
+        case SP_SYSTEM:
+            return SetTaskProfiles(tid, {"SCHED_SP_SYSTEM"}, true) ? 0 : -1;
+        case SP_RT_APP:
+            return SetTaskProfiles(tid, {"SCHED_SP_RT_APP", "BlkIOForeground"}, true) ? 0 : -1;
+        case SP_CUSTOM:
+            return SetTaskProfiles(tid, {"SCHED_SP_CUSTOM"}, true) ? 0 : -1;
+        default:
+            return SetTaskProfiles(tid, {"SCHED_SP_DEFAULT"}, true) ? 0 : -1;
+    }
+
+    return 0;
+
+}
+//修改get_sched_policy_from_group，添加SP_CUSTOM的处理
+static int get_sched_policy_from_group(const std::string&amp; group, SchedPolicy* policy) {
+    if (group.empty()) {
+        *policy = SP_FOREGROUND;
+    } else if (group == "foreground") {
+        *policy = SP_FOREGROUND;
+    } else if (group == "system-background") {
+        *policy = SP_SYSTEM;
+    } else if (group == "background") {
+        *policy = SP_BACKGROUND;
+    } else if (group == "top-app") {
+        *policy = SP_TOP_APP;
+    } else if (group == "restricted") {
+        *policy = SP_RESTRICTED;
+    } else if (group == "audio-app") {
+        *policy = SP_AUDIO_APP;
+    } else if (group == "custom") {
+        *policy = SP_CUSTOM;
+    } else {
+        errno = ERANGE;
+        return -1;
+    }
+    return 0;
+}
+
+//修改get_sched_policy_name，添加SP_CUSTOM的处理
+const char* get_sched_policy_name(SchedPolicy policy) {
+    policy = _policy(policy);
+    static const char* const kSchedPolicyNames[] = {
+            [SP_BACKGROUND] = "bg", [SP_FOREGROUND] = "fg", [SP_SYSTEM] = "  ",
+            [SP_AUDIO_APP] = "aa",  [SP_AUDIO_SYS] = "as",  [SP_TOP_APP] = "ta",
+            [SP_RT_APP] = "rt",     [SP_RESTRICTED] = "rs",[SP_CUSTOM] = "ct",
+    };
+    static_assert(arraysize(kSchedPolicyNames) == SP_CNT, "missing name");
+    if (policy &lt; SP_BACKGROUND || policy &gt;= SP_CNT) {
+        return nullptr;
+    }
+    return kSchedPolicyNames[policy];
+}
+
+//修改get_cpuset_policy_profile_name，添加SP_CUSTOM的处理
+const char* get_cpuset_policy_profile_name(SchedPolicy policy) {
+    /*
+     *  cpuset profile array for:
+     *  SP_DEFAULT(-1), SP_BACKGROUND(0), SP_FOREGROUND(1),
+     *  SP_SYSTEM(2), SP_AUDIO_APP(3), SP_AUDIO_SYS(4),
+-     *  SP_TOP_APP(5), SP_RT_APP(6), SP_RESTRICTED(7),
++     *  SP_TOP_APP(5), SP_RT_APP(6), SP_RESTRICTED(7), SP_CUSTOM(8)
+     *  index is policy + 1
+     *  this need keep in sync with SchedPolicy enum
+     */
+    static constexpr const char* kCpusetProfiles[SP_CNT + 1] = {
+            "CPUSET_SP_DEFAULT", "CPUSET_SP_BACKGROUND", "CPUSET_SP_FOREGROUND",
+            "CPUSET_SP_SYSTEM",  "CPUSET_SP_FOREGROUND", "CPUSET_SP_FOREGROUND",
+-            "CPUSET_SP_TOP_APP", "CPUSET_SP_DEFAULT",    "CPUSET_SP_RESTRICTED"
++            "CPUSET_SP_TOP_APP", "CPUSET_SP_DEFAULT",    "CPUSET_SP_RESTRICTED","CPUSET_SP_CUSTOM"};
+    if (policy &lt; SP_DEFAULT || policy &gt;= SP_CNT) {
+        return nullptr;
+    }
+    return kCpusetProfiles[policy + 1];
+}
+
+//修改get_sched_policy_profile_name，添加SP_CUSTOM的处理
+const char* get_sched_policy_profile_name(SchedPolicy policy) {
+    /*
+     *  sched profile array for:
+     *  SP_DEFAULT(-1), SP_BACKGROUND(0), SP_FOREGROUND(1),
+     *  SP_SYSTEM(2), SP_AUDIO_APP(3), SP_AUDIO_SYS(4),
+-     *  SP_TOP_APP(5), SP_RT_APP(6), SP_RESTRICTED(7),
++     *  SP_TOP_APP(5), SP_RT_APP(6), SP_RESTRICTED(7),SP_CUSTOM(8)
+     *  index is policy + 1
+     *  this need keep in sync with SchedPolicy enum
+     */
+    static constexpr const char* kSchedProfiles[SP_CNT + 1] = {
+            "SCHED_SP_DEFAULT", "SCHED_SP_BACKGROUND", "SCHED_SP_FOREGROUND",
+            "SCHED_SP_SYSTEM",  "SCHED_SP_FOREGROUND", "SCHED_SP_FOREGROUND",
+-            "SCHED_SP_TOP_APP", "SCHED_SP_RT_APP",     "SCHED_SP_DEFAULT"
++            "SCHED_SP_TOP_APP", "SCHED_SP_RT_APP",     "SCHED_SP_DEFAULT","SCHED_SP_CUSTOM"};
+    if (policy &lt; SP_DEFAULT || policy &gt;= SP_CNT) {
+        return nullptr;
+    }
+    return kSchedProfiles[policy + 1];
+}</code></pre> 
+<p>以上2部分主要是逻辑的修改，接下来是配置文件的修改，在$AOSP/system/core/libprocessgroup/profiles/task_profiles.json文件中修改：</p> 
+<pre><code class="language-css">{
+  "Attributes": [
+    {
+      "Name": "LowCapacityCPUs",
+      "Controller": "cpuset",
+      "File": "background/cpus"
+    },
+    ...
++    {
++      "Name": "CustomCPUs",
++      "Controller": "cpuset",
++      "File": "custom/cpus"
++    },
+    ...
+    {
+      "Name": "FreezerState",
+      "Controller": "freezer",
+      "File": "cgroup.freeze"
+    }
+  ],
+  "Profiles": [
+    {
+      "Name": "HighEnergySaving",
+      "Actions": [
+        {
+          "Name": "JoinCgroup",
+          "Params":
+          {
+            "Controller": "cpu",
+            "Path": "background"
+          }
+        }
+      ]
+    },
+    ...
++    {
++      "Name": "CustomPerformance",
++      "Actions" : [
++        {
++          "Name" : "JoinCgroup",
++          "Params" :
++          {
++            "Controller": "cpuset",
++            "Path": "custom"
++          }
++        }
++      ]
++    },
+    ...
+    {
+      "Name": "SystemMemoryProcess",
+      "Actions": [
+        {
+          "Name": "JoinCgroup",
+          "Params":
+          {
+            "Controller": "memory",
+            "Path": "system"
+          }
+        }
+      ]
+    }
+  ],
+  
+  "AggregateProfiles": [
+    {
+      "Name": "SCHED_SP_DEFAULT",
+      "Profiles": [ "TimerSlackNormal" ]
+    },
+    ...
+    {
+      "Name": "SCHED_SP_RT_APP",
+      "Profiles": [ "RealtimePerformance", "MaxIoPriority", "TimerSlackNormal" ]
+    },
++    {
++      "Name": "SCHED_SP_CUSTOM",
++      "Profiles": [ "CUSTOMPerformance" ]
++    },
+    ...
++    {
++      "Name": "CPUSET_SP_CUSTOM",
++      "Profiles": [ "CUSTOMPerformance" ]
++    },
+    ...
+     {
+      "Name": "Dex2OatBootComplete",
+      "Profiles": [ "Dex2oatPerformance", "LowIoPriority", "TimerSlackHigh" ]
+    }
+  ]
+}</code></pre> 
+<p>至此，system相关修改就结束了。主要是SP_CUSTOM相关逻辑的添加，配置文件task_profiles.json的修改，接口set_cpuset_policy和set_sched_policy的支持等。</p> 
+<h3>2.2 init.rc及编译部分调整</h3> 
+<p> 为添加cpuset相关节点，需要修改init.rc文件，这里根据android源码的需要调整到对应的rc中添加即可。具体init.rc修改内容如下：</p> 
+<pre><code class="language-bash">#第一部分：on init中添加：
+...
++#custom add start
++    mkdir /dev/stune/custom
++    chown system system /dev/stune/custom
++    chown system system /dev/stune/custom/tasks
++    chmod 0664 /dev/stune/custom/tasks
++    mkdir /dev/cpuset/custom
++    copy /dev/cpuset/cpus /dev/cpuset/custom/cpus
++    copy /dev/cpuset/mems /dev/cpuset/custom/mems
++    chown system system /dev/cpuset/custom
++    chown system system /dev/cpuset/custom/tasks
++    chown system system /dev/cpuset/custom/cgroup.procs
++    chmod 0664 /dev/cpuset/custom/tasks
++    chmod 0664 /dev/cpuset/custom/cgroup.procs
++#custom add end
+...
+#第二部分：系统启动完成后添加, 这里绑定的是456，可根据需要调整：
++#custom add start
++on property:sys.boot_completed=1
++   write /dev/cpuset/custom/cpus 4-6
++   write /dev/cpuset/custom/mems 0
++#custom add end</code></pre> 
+<p>这里主要是通过init.rc文件添加cpuset相关节点，以及修改cpuset相关节点的权限和owner，以及写入值操作。这样，在开机启动后就可以在/dev/cpuset/目录下看到自定义cpuset对应的custom节点。</p> 
+<p>至此代码和配置文件都已经修改完了。</p> 
+<p>接下来就需要编译了，但是编译这里要避免vndk报错的问题，需要有先执行如下脚本内容：</p> 
+<pre><code class="language-bash">source build/envsetup.sh &amp;&amp; lunch xxx
+cd ./development/vndk/tools/header-checker/utils/
+#这里的xxx一般是指out/target/product之后的路径
+./create_reference_dumps.py -l libprocessgroup -product xxx</code></pre> 
+<p>重新编译vndk，否则会出现如下类似的编译错误，如下所示：</p> 
+<pre><code class="language-bash">error: VNDK library: XXX
+******************************************************
+error: Please update ABI references with: $ANDROID_BUILD_TOP/development/vndk/tools/header-checker/utils/create_reference_dumps.py  -l libprocessgroup
+ninja failed with: exit status 1
+#### failed to build some targets ####</code></pre> 
+<p></p> 
+<h3></h3>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3ea820f60ffd34cbab1c089062ba9e0b/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">如何在一张图里同时显示两个三维图</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/3a636474b983643f43935642bb4e06d7/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">docker之dockerFile</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,928 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Lsyncd：负载均衡之后，服务器的文件双向同步 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Lsyncd：负载均衡之后，服务器的文件双向同步" />
+<meta property="og:description" content="场景描述：
+在 Linux 服务器上，通过使用 Nginx 实现负载均衡，或者在阿里云直接购买负载均衡，根据配置的转发规则，不同的请求会被转发到其不同的服务器上进行处理。如果遇到需要上传图片的情况，那最后只有其中一台服务器存有这张图片，而其他服务器则没有。随后，如果请求获取这张图片，但是转发到的恰好是没有存有这张图片的服务器，那么请求就失败了。为了避免这类问题，就需要同步相应的目录上的文件。
+Lsyncd 简述：
+Lsyncd 是一个简单高效的文件同步工具，通过lua语言封装了 inotify 和 rsync 工具，采用了 Linux 内核（2.6.13 及以后）里的 inotify 触发机制，然后通过rsync去差异同步，达到实时的效果。
+安装过程：
+1、安装 lua 语言依赖包
+yum install lua yum install lua-devel 2、安装 Lsyncd yum install lsyncd 这里一定要注意，最好安装最新的版本，笔者安装的版本是 2.2.2 。网上很多教程的版本是2.1.5 ，这个版本有 bug ，但在后续的版本里已经修复，直接安装即可。之后，你可以发现在 etc 目录下，不但多了 lsyncd.conf 配置文件，而且还多了 rsync 工具的配置文件 rsyncd.conf 。这说明 Lsyncd 工具确是使用 rsync 工具创建起来的，通过 rsync 去进行目录的差异同步。
+远程前提：
+通过 Lsyncd 工具同步负载均衡转发规则下的服务器，需要在涉及的服务器上都安装好 Lsyncd ，一般通过 SSH 远程登录，进行远程同步。因此，在远端被同步的服务器上开启 SSH 无密码登录，请注意用户身份，将对应的用户 user 公钥 id_rsa.pub 复制到被同步的服务器的 .ssh 文件目录下的 authorized_keys 文件里，最后测试是否可以无密码登陆。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/8a42c3bede353c4719e9546134b317e1/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-05-04T22:48:09+08:00" />
+<meta property="article:modified_time" content="2018-05-04T22:48:09+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Lsyncd：负载均衡之后，服务器的文件双向同步</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p><span style="font-size:12px;"><strong>场景描述：</strong></span></p> 
+<p><span style="font-size:12px;"><strong>  </strong><span style="font-size:14px;">  在 Linux 服务器上，通过使用 Nginx 实现负载均衡，或者在阿里云直接购买负载均衡，根据配置的转发规则，不同的请求会被转发到其不同的服务器上进行处理。如果遇到需要上传图片的情况，那最后只有其中一台服务器存有这张图片，而其他服务器则没有。随后，如果请求获取这张图片，但是转发到的恰好是没有存有这张图片的服务器，那么请求就失败了。为了避免这类问题，就需要同步相应的目录上的文件。</span></span></p> 
+<p><strong><span style="font-size:12px;">Lsyncd 简述：</span></strong></p> 
+<p><span style="font-size:12px;"><span style="font-size:14px;">    Lsyncd 是一个简单高效的文件同步工具，通过lua语言封装了 inotify 和 rsync 工具，采用了 Linux 内核（2.6.13 及以后）里的 inotify 触发机制，然后通过rsync去差异同步，达到实时的效果。</span></span></p> 
+<p><strong><span style="font-size:12px;">安装过程：</span></strong></p> 
+<p><span style="font-size:12px;"><span style="font-size:14px;">1、安装 lua 语言依赖包</span></span></p> 
+<pre><code class="language-plain">yum install lua
+</code></pre> 
+<pre><code class="language-plain">yum install lua-devel</code></pre> 
+<p><span style="font-size:14px;">2、安装 Lsyncd </span></p> 
+<pre><code class="language-plain">yum install lsyncd</code></pre> 
+<p>    这里一定要注意，最好安装最新的版本，笔者安装的版本是 2.2.2 。网上很多教程的版本是2.1.5 ，这个版本有 bug ，但在后续的版本里已经修复，直接安装即可。之后，你可以发现在 etc 目录下，不但多了 lsyncd.conf 配置文件，而且还多了 rsync 工具的配置文件 rsyncd.conf 。这说明 Lsyncd 工具确是使用 rsync 工具创建起来的，通过 rsync 去进行目录的差异同步。</p> 
+<p><span style="font-size:12px;"><strong>远程前提：</strong></span></p> 
+<p>    通过 Lsyncd 工具同步负载均衡转发规则下的服务器，需要在涉及的服务器上都安装好 Lsyncd ，一般通过 SSH 远程登录，进行远程同步。因此，在远端被同步的服务器上开启 SSH 无密码登录，请注意用户身份，将对应的用户 user 公钥 id_rsa.pub 复制到被同步的服务器的 .ssh 文件目录下的 authorized_keys 文件里，最后测试是否可以无密码登陆。</p> 
+<p>    如果要实现文件的双向同步，那就要对两台服务器进行差不多的 SSH 配置操作，就可以相互进行无密码登陆了。<br></p> 
+<pre><code class="language-plain">chmod 600 /user/.ssh/id_rsa</code></pre> 
+<pre><code class="language-plain">ssh user@192.168.0.3</code></pre> 
+<p><strong><span style="font-size:12px;">配置文件：</span></strong></p> 
+<pre><code class="language-plain">vi /etc/lsyncd.conf</code></pre> 
+<pre><code class="language-plain">----
+-- User configuration file for lsyncd.
+--
+-- Simple example for default rsync, but executing moves through on the target.
+--
+-- For more examples, see /usr/share/doc/lsyncd*/examples/
+-- 
+settings{
+    logfile = "/var/log/lsyncd/lsyncd.log",
+    statusFile = "/var/log/lsyncd/lsyncd.status",
+    inotifyMode = "CloseWrite",
+    maxProcesses = 10,
+    nodaemon = false,
+    maxDelays = 7
+} 
+sync{
+    default.rsync, 
+    source = "/data/wwwroot/default/application",
+    target = "user@192.168.0.3:/data/wwwroot/default/application",
+    init = false,
+    delete = true,
+    delay = 3,
+    rsync = {
+        binary = "/usr/bin/rsync",
+        compress = true,
+        archive = true,
+        verbose = true
+    }
+}
+sync{
+    default.rsync,
+    source = "/data/wwwroot/default/public",
+    target = "user@192.168.0.3:/data/wwwroot/default/public",
+    init = false,
+    delete = true,
+    delay = 3,
+    rsync = {
+        binary = "/usr/bin/rsync",
+        compress = true,
+        archive = true,
+        verbose = true
+    }
+}</code></pre> 
+<pre><code class="language-plain">lsyncd /etc/lsyncd.conf</code></pre> 
+<p><span style="font-size:12px;"><strong>   </strong><span style="font-size:14px;"> 如果要实现文件的双向同步，那就要对两台服务器进行差不多的 Lsyncd 配置操作，下面列出具体需要更改的参数。</span></span></p> 
+<p><span style="font-size:12px;"><span style="font-size:14px;">   <span style="font-size:12px;"> logfile 本地存放 Lsyncd 日志的路径，一般直接使用默认的路径就可以了。</span></span></span></p> 
+<p><span style="font-size:12px;"><span style="font-size:14px;"><span style="font-size:12px;">    statusFile 本地存放 状态文件的路径<span style="font-size:12px;"><span style="font-size:14px;"><span style="font-size:12px;">，一般直接使用默认的路径就可以了。</span></span></span><br></span></span></span></p> 
+<p><span style="font-size:12px;"><span style="font-size:14px;"><span style="font-size:12px;">    source 本地源目录路径。</span></span></span></p> 
+<p><span style="font-size:12px;"><span style="font-size:14px;"><span style="font-size:12px;">    target 远程目的目录路径，注意这里的SSH远程同步写法。</span></span></span></p> 
+<p><span style="font-size:12px;"><span style="font-size:14px;"><span style="font-size:12px;">    其他参数具体解释（略）</span></span><strong><br></strong></span></p> 
+<p><span style="font-size:12px;"><strong>注意事项：</strong></span></p> 
+<p>    运行 Lsyncd 工具后，可以到源目录下创建几个文本，查看是否能成功同步到远程的目的目录下。如果没有成功，可以到 /var/log/lsyncd/lsyncd.log 文件查看详情。</p> 
+<p>    如果配置了 lsyncd.conf 文件，可以不配置 rsyncd.conf 了。</p> 
+<p><span style="font-size:12px;"><strong>操作环境：</strong></span></p> 
+<pre><code class="language-plain">Linux version 3.10.0-693.11.6.el7.x86_64 (builder@kbuilder.dev.centos.org) (gcc version 4.8.5 20150623 (Red Hat 4.8.5-16) (GCC) ) #1 SMP Thu Jan 4 01:06:37 UTC 2018</code></pre> 
+<br> 
+<p><span style="font-size:12px;"><strong>附（lua语言配置示例，可忽略不看）：</strong></span></p> 
+<p></p> 
+<div style="white-space:pre-wrap;text-align:left;line-height:1.75;font-size:14px;"> 
+ <span style="font-size:12px;">lalarm.lua</span> 
+</div> 
+<pre><code class="language-plain">-----
+-- User configuration file for lsyncd.
+--
+-- While this example does not do anything it shows
+-- how user custom alarms can be now. It will log
+-- "Beep!" every 5 seconds.
+--
+settings.nodaemon = true
+
+local function noAction (inlet)
+	-- just discard any events that happes in source dir.
+	inlet.discardEvent(inlet.getEvent())
+end
+
+-----
+-- Adds a watch to some not so large directory for this example.
+local in1 = sync{source="/usr/local/etc/", action = noAction }
+
+local function myAlarm(timestamp, extra)
+	log("Normal", extra.message)
+	spawn(extra.inlet.createBlanketEvent(), "/bin/echo", extra.message)
+	alarm(timestamp + 5, myAlarm, extra)
+end
+
+alarm(now() + 5, myAlarm, {inlet = in1, message = "Beep"})</code></pre> 
+<p></p> 
+<div style="white-space:pre-wrap;text-align:left;line-height:1.75;font-size:14px;"> 
+ <span style="font-size:12px;">lbash.lua </span> 
+</div> 
+<pre><code class="language-plain">-----
+-- User configuration file for lsyncd.
+--
+-- This example uses local bash commands to keep two local
+-- directory trees in sync.
+--
+settings {
+	logfile         = "/tmp/lsyncd.log",
+	statusFile      = "/tmp/lsyncd.stat",
+	statusIntervall = 1,
+	nodaemon        = true,
+}
+
+-----
+-- for testing purposes. prefix can be used to slow commands down.
+-- prefix = "sleep 5 &amp;&amp; "
+--
+prefix = ""
+
+-----
+-- for testing purposes. uses bash command to hold local dirs in sync.
+--
+bash = {
+	delay = 0,
+
+	maxProcesses = 1,
+
+	-- calls `cp -r SOURCE/* TARGET` only when there is something in SOURCE
+	-- otherwise it deletes contents in the target if there.
+	onStartup = [[
+if [ "$(ls -A ^source)" ]; then
+	cp -r ^source* ^target;
+else
+	if [ "$(ls -A ^target)" ]; then rm -rf ^target/*; fi
+fi]],
+
+	onCreate = prefix..[[cp -r ^sourcePath ^targetPathdir]],
+
+	onModify = prefix..[[cp -r ^sourcePath ^targetPathdir]],
+
+	onDelete = prefix..[[rm -rf ^targetPath]],
+
+	onMove   = prefix..[[mv ^o.targetPath ^d.targetPath]],
+}
+
+sync{bash, source="src", target="/path/to/trg/"}</code></pre> 
+<p></p> 
+<div style="white-space:pre-wrap;text-align:left;line-height:1.75;font-size:14px;"> 
+ <span style="font-size:12px;">lecho.lua </span> 
+</div> 
+<pre><code class="language-plain">-----
+-- User configuration file for lsyncd.
+--
+-- This example uses just echos the operations
+--
+
+-----
+-- for testing purposes. just echos what is happening.
+--
+echo = {
+	maxProcesses = 1,
+	delay = 1,
+	onStartup = "/bin/echo telling about ^source",
+	onAttrib  = "/bin/echo attrib ^pathname",
+	onCreate  = "/bin/echo create ^pathname",
+	onDelete  = "/bin/echo delete ^pathname",
+	onModify  = "/bin/echo modify ^pathname",
+	onMove    = "/bin/echo move ^o.pathname -&gt; ^d.pathname",
+}
+
+sync{echo, source="src", target="/path/to/trg/"}</code></pre> 
+<div style="white-space:pre-wrap;text-align:left;line-height:1.75;font-size:14px;"> 
+ <span style="font-size:12px;">lftp.lua </span> 
+</div> 
+<pre><code class="language-plain">--~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- User configuration file for lsyncd.
+--
+--    Syncs with 'lftp'.
+--
+--~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+lftp = {
+
+	-----
+	-- Spawns rsync for a list of events
+	--
+	action = function(inlet)
+
+		-- gets all events ready for syncing
+		local elist = inlet.getEvents(
+			function(event)
+				return event.etype ~= 'Init' and event.etype ~= 'Blanket'
+			end
+		)
+
+		-----
+		-- replaces filter rule by literals
+		--
+		local function sub(p)
+			if not p then
+				return
+			end
+			return p:gsub('%?', '\\?'):
+			         gsub('%*', '\\*'):
+			         gsub('%[', '\\['):
+			         gsub('%]', '\\]')
+		end
+
+		local config = inlet.getConfig()
+
+		local commands = elist.getPaths(
+			function(etype, path1, path2)
+				if etype == 'Delete' then
+					if string.byte(path1, -1) == 47 then
+						return 'rm -r '..
+							config.targetdir..sub(path1)
+					else
+						return 'rm '..
+							config.targetdir..sub(path1)
+					end
+				elseif
+					etype == 'Create' or
+					etype == 'Modify' or
+		 			etype == 'Attrib'
+		 		then
+					if string.byte(path1, -1) == 47 then
+						return 'mirror -R '..
+							config.source..sub(path1)..' '..
+							config.targetdir..sub(path1)
+					else
+						return 'put '..
+							config.source..sub(path1)..
+							' -o '..config.targetdir..sub(path1)
+					end
+				end
+			end
+		)
+
+		if #commands == 0 then
+			spawn(elist, '/bin/true')
+			return
+		end
+
+		commands = table.concat(commands, ';\n')
+
+		log('Normal', 'Calling lftp with commands\n', commands)
+
+		spawn(elist, '/usr/bin/lftp',
+			'&lt;', commands,
+			'-u', config.user..','..config.pass, config.host
+		)
+	end,
+
+	-----
+	-- Spawns the recursive startup sync
+	--
+	init = function(event)
+		local config = event.config
+		local inlet = event.inlet
+		local excludes = inlet.getExcludes()
+		local delete = nil
+		if config.delete then delete = { '--delete', '--ignore-errors' }; end
+
+		if #excludes ~= 0 then
+			error('lftp does not work with excludes', 4)
+		end
+
+		log('Normal', 'recursive startup lftp: ', config.source, ' to host: ', config.host)
+
+		spawn(event, '/usr/bin/lftp',
+			'-c',
+			'open -u '..config.user..','..config.pass..' '..config.host..'; '..
+			'mirror -R -e '..config.source..' '..config.targetdir..';'
+		)
+	end,
+
+	-----
+	-- Checks the configuration.
+	--
+	prepare = function(config)
+
+		if not config.host then
+			error('lftps needs "host" configured', 4);
+		end
+
+		if not config.user then
+			error('lftps needs "user" configured', 4);
+		end
+
+		if not config.pass then
+			error('lftps needs "pass" configured', 4);
+		end
+
+		if not config.targetdir then
+			error('lftp needs "targetdir" configured', 4)
+		end
+
+		if config.target then
+			error('lftp needs NOT "target" configured', 4)
+		end
+
+		if config.exclude then
+			error('lftp does not work with excludes', 4)
+		end
+
+		if config.rsyncOpts then
+			error('lftp needs NOT "rsyncOpts" configured', 4)
+		end
+
+		if string.sub(config.targetdir, -1) == '/' then
+			error('please make targetdir not end with a /', 4)
+		end
+
+	end,
+
+	-----
+	-- Exit codes for rsync.
+	--
+	exitcodes = {
+		[  0] = 'ok',
+		[  1] = 'ok',
+	},
+
+	-----
+	-- Default delay
+	--
+	delay = 1,
+}
+
+sync{
+	lftp,
+	host      = 'localhost',
+	user      = 'test',
+	pass      = 'test',
+	source    = 'src',
+	targetdir = '.',
+}</code></pre> 
+<div style="white-space:pre-wrap;text-align:left;line-height:1.75;font-size:14px;"> 
+ <span style="font-size:12px;">lgforce.lua</span> 
+</div> 
+<pre><code class="language-plain">-----
+-- User configuration file for lsyncd.
+--
+-- This example refers to one common challenge in multiuser unix systems.
+--
+-- You have a shared directory for a set of users and you want
+-- to ensure all users have read and write permissions on all
+-- files in there. Unfortunally sometimes users mess with their
+-- umask, and create files in there that are not read/write/deleteable
+-- by others. Usually this involves frequent handfixes by a sysadmin,
+-- or a cron job that recursively chmods/chowns the whole directory.
+--
+-- This is another approach to use lsyncd to continously fix permissions.
+--
+-- One second after a file is created/modified it checks for its permissions
+-- and forces group permissions on it.
+--
+-- This example regards more the handcraft of bash scripting than lsyncd.
+-- An alternative to this would be to load a Lua-Posix library and do the
+-- permission changes right within the onAction handlers.
+
+----
+-- forces this group.
+--
+fgroup = "staff"
+
+-----
+-- script for all changes.
+--
+command =
+-- checks if the group is the one enforced and sets them if not
+[[
+perm=`stat -c %A ^sourcePathname`
+if [ `stat -c %G ^sourcePathname` != ]]..fgroup..[[ ]; then
+	/bin/chgrp ]]..fgroup..[[ ^sourcePathname || /bin/true;
+fi
+]] ..
+
+-- checks if the group permissions are rw and sets them
+[[
+if [ `expr match $perm "....rw"` == 0 ]; then
+	/bin/chmod g+rw ^sourcePathname || /bin/true;
+fi
+]] ..
+
+-- and forces the executable bit for directories.
+[[
+if [ -d ^sourcePathname ]; then
+	if [ `expr match $perm "......x"` == 0 ]; then
+		/bin/chmod g+x ^^sourcePathname || /bin/true;
+	fi
+fi
+]]
+
+-- on startup recursevily sets all group ownerships
+-- all group permissions are set to rw
+-- and to executable flag for directories
+--
+-- the carret as first char tells Lsycnd to call a shell altough it
+-- starts with a slash otherwisw
+--
+startup =
+[[^/bin/chgrp -R ]]..fgroup..[[ ^source || /bin/true &amp;&amp;
+/bin/chmod -R g+rw ^source || /bin/true &amp;&amp;
+/usr/bin/find ^source -type d | xargs chmod g+x
+]]
+
+gforce = {
+	maxProcesses = 99,
+	delay        = 1,
+	onStartup    = startup,
+	onAttrib     = command,
+	onCreate     = command,
+	onModify     = command,
+	-- does nothing on moves, they won't change permissions
+	onMove       = true,
+}
+
+sync{gforce, source="/path/to/share"}</code></pre> 
+<div style="white-space:pre-wrap;text-align:left;line-height:1.75;font-size:14px;"> 
+ <span style="font-size:12px;">limagemagic.lua </span> 
+</div> 
+<pre><code class="language-plain">----
+-- Lsyncd user-script that creates a "magic" image converter directory.
+--
+-- This configuration will automatically convert all images that are placed
+-- in the directory 'magicdir' all resulting images are placed in the same
+-- directory!
+--
+-- Be sure to mkdir 'magicdir' first.
+
+-----
+-- Fileformats:   .jpg  .gif  .png
+--
+local formats = { jpg=true, gif=true, png=true,  }
+
+convert = {
+	delay = 0,
+
+	maxProcesses = 99,
+
+	action = function(inlet)
+		local event = inlet.getEvent()
+
+		if event.isdir then
+			-- ignores events on dirs
+			inlet.discardEvent(event)
+			return
+		end
+
+		-- extract extension and basefilename
+		local p    = event.pathname
+		local ext  = string.match(p, ".*%.([^.]+)$")
+		local base = string.match(p, "(.*)%.[^.]+$")
+		if not formats[ext] then
+			-- an unknown extenion
+			log("Normal", "not doing something on ."..ext)
+			inlet.discardEvent(event)
+			return
+		end
+
+		-- autoconvert on create and modify
+		if event.etype == "Create" or event.etype == "Modify" then
+			-- builds one bash command
+			local cmd = ""
+			-- do for all other extensions
+			for k, _ in pairs(formats) do
+				if k ~= ext then
+					-- excludes files to be created, so no
+					-- followup actions will occur
+					inlet.addExclude(base..'.'..k)
+					if cmd ~= ""  then
+						cmd = cmd .. " &amp;&amp; "
+					end
+					cmd = cmd..
+						'/usr/bin/convert "'..
+						event.source..p..'" "'..
+						event.source..base..'.'..k..
+						'" || /bin/true'
+				end
+			end
+			log("Normal", "Converting "..p)
+			spawnShell(event, cmd)
+			return
+		end
+
+		-- deletes all formats if you delete one
+		if event.etype == "Delete" then
+			-- builds one bash command
+			local cmd = ""
+			-- do for all other extensions
+			for k, _ in pairs(formats) do
+				if k ~= ext then
+					-- excludes files to be created, so no
+					-- followup actions will occur
+					inlet.addExclude(base..'.'..k)
+					if cmd ~= ""  then
+						cmd = cmd .. " &amp;&amp; "
+					end
+					cmd = cmd..
+						'rm "'..event.source..base..'.'..k..
+						'" || /bin/true'
+				end
+			end
+			log("Normal", "Deleting all "..p)
+			spawnShell(event, cmd)
+			return
+		end
+
+		-- ignores other events.
+		inlet.discardEvent(event)
+	end,
+
+	-----
+	-- Removes excludes when convertions are finished
+	--
+	collect = function(event, exitcode)
+		local p     = event.pathname
+		local ext   = string.match(p, ".*%.([^.]+)$")
+		local base  = string.match(p, "(.*)%.[^.]+$")
+		local inlet = event.inlet
+
+		if event.etype == "Create" or
+		   event.etype == "Modify" or
+		   event.etype == "Delete"
+		then
+			for k, _ in pairs(formats) do
+				inlet.rmExclude(base..'.'..k)
+			end
+		end
+	end,
+
+	-----
+	-- Does not collapse anything
+	collapse = function()
+		return 3
+	end,
+}
+
+sync{convert, source="magicdir", subdirs=false}</code></pre> 
+<div style="white-space:pre-wrap;text-align:left;line-height:1.75;font-size:14px;"> 
+ <span style="font-size:12px;">lpostcmd.lua </span> 
+</div> 
+<pre><code class="language-plain">-----
+-- User configuration file for lsyncd.
+-- This needs lsyncd &gt;= 2.0.3
+--
+-- This configuration will execute a command on the remote host
+-- after every successfullycompleted rsync operation.
+-- for example to restart servlets on the target host or so.
+
+local rsyncpostcmd = {
+
+	-- based on default rsync.
+	default.rsync,
+
+	checkgauge = {
+		default.rsync.checkgauge,
+		host = true,
+		targetdir = true,
+		target = true,
+		postcmd = true,
+	},
+
+	-- for this config it is important to keep maxProcesses at 1, so
+	-- the postcmds will only be spawned after the rsync completed
+	maxProcesses = 1,
+
+	-- called whenever something is to be done
+	action = function(inlet)
+		local event = inlet.getEvent()
+		local config = inlet.getConfig()
+		-- if the event is a blanket event and not the startup,
+		-- its there to spawn the webservice restart at the target.
+		if event.etype == "Blanket" then
+			-- uses rawget to test if "isPostcmd" has been set without
+			-- triggering an error if not.
+			local isPostcmd = rawget(event, "isPostcmd")
+			if isPostcmd then
+				spawn(event, "/usr/bin/ssh",
+					config.host, config.postcmd)
+        		return
+			else
+            	-- this is the startup, forwards it to default routine.
+            	return default.rsync.action(inlet)
+        	end
+			error("this should never be reached")
+		end
+		-- for any other event, a blanket event is created that
+		-- will stack on the queue and do the postcmd when its finished
+		local sync = inlet.createBlanketEvent()
+		sync.isPostcmd = true
+		-- the original event is simply forwarded to the normal action handler
+		return default.rsync.action(inlet)
+	end,
+
+	-- called when a process exited.
+	-- this can be a rsync command, the startup rsync or the postcmd
+	collect = function(agent, exitcode)
+		-- for the ssh commands 255 is network error -&gt; try again
+		local isPostcmd = rawget(agent, "isPostcmd")
+		if not agent.isList and agent.etype == "Blanket" and isPostcmd then
+			if exitcode == 255 then
+				return "again"
+			end
+			return
+		else
+			--- everything else, forward to default collection handler
+			return default.collect(agent,exitcode)
+		end
+		error("this should never be reached")
+	end,
+
+	-- called before anything else
+	-- builds the target from host and targetdir
+	prepare = function(config, level, skipTarget)
+		if not config.host then
+			error("rsyncpostcmd neets 'host' configured", 4)
+		end
+		if not config.targetdir then
+			error("rsyncpostcmd needs 'targetdir' configured", 4)
+		end
+		if not config.target then
+			config.target = config.host .. ":" .. config.targetdir
+		end
+		return default.rsync.prepare(config, level, skipTarget)
+	end
+}
+
+
+sync {
+	rsyncpostcmd,
+	source = "src",
+	host = "beetle",
+	targetdir = "/path/to/trg",
+	postcmd = "/usr/local/bin/restart-servelt.sh",
+}</code></pre> 
+<div style="white-space:pre-wrap;text-align:left;line-height:1.75;font-size:14px;"> 
+ <span style="font-size:12px;">lrsync.lua </span> 
+</div> 
+<pre><code class="language-plain">----
+-- User configuration file for lsyncd.
+--
+-- Simple example for default rsync.
+--
+settings {
+	statusFile = "/tmp/lsyncd.stat",
+	statusInterval = 1,
+}
+
+sync{
+	default.rsync,
+	source="src",
+	target="trg",
+}</code></pre> 
+<div style="white-space:pre-wrap;text-align:left;line-height:1.75;font-size:14px;"> 
+ <span style="font-size:12px;">lrsyncssh.lua </span> 
+</div> 
+<pre><code class="language-plain">----
+-- User configuration file for lsyncd.
+--
+-- Simple example for default rsync, but executing moves through on the target.
+--
+sync{default.rsyncssh, source="src", host="localhost", targetdir="dst/"}</code></pre> 
+<div style="white-space:pre-wrap;text-align:left;line-height:1.75;font-size:14px;"> 
+ <span style="font-size:12px;">lsayirc.lua </span> 
+</div> 
+<pre><code class="language-plain">-----
+-- An Lsyncd+IRC-Bot Config
+--
+-- Logs into an IRC channel and tells there everything that happens in the
+-- watched directory tree.
+--
+-- The challenge coding Lsyncd configs taking use of TCP sockets is
+-- that they must not block! Otherwise Lsyncd will block, no longer
+-- empty the kernels monitor queue, no longer collecting zombie processes,
+-- no longer spawning processes (this example doesnt do any, but maybe you
+-- might want to do that as well), blocking is just bad.
+--
+-- This demo codes just minimal IRC functionality.
+-- it does not respond to anything else than IRC PING messages.
+--
+-- There is no flood control, if a lot happens the IRC server will disconnect
+-- the bot.
+--
+-- Requires "luasocket" to be installed
+require("socket")
+
+-- For demo reasons, do not detach
+settings.nodaemon = true
+hostname = "irc.freenode.org"
+--hostname = "127.0.0.1"
+port = 6667
+nick = "lbot01"
+chan = "##lfile01"
+
+-- this blocks until the connection is established
+-- for once lets say this ok since Lsyncd didnt yet actually
+-- start.
+local ircSocket, err = socket.connect(hostname, port)
+if not ircSocket then
+	log("Error", "Cannot connect to IRC: ", err)
+	terminate(-1)
+end
+
+-- from now on, the socket must not block!
+ircSocket:settimeout(0)
+
+-- Buffers for stuff to send and receive on IRC:
+local ircWBuf = ""
+local ircRBuf = ""
+
+-- Predeclaration for functions calling each other
+local writeIRC
+
+-----
+-- Called when the IRC socket can be written again.
+-- This happens when writeIRC (see below) couldnt write
+-- its buffer in one go, call it again so it can continue its task.
+local function ircWritey(fd)
+	writeIRC()
+end
+
+----
+-- Called when there is data on the socket
+local function ircReady(socket)
+	local l, err, ircRBuf = ircSocket:receive("*l", ircRBuf)
+	if not l then
+		if err ~= "timeout" then
+			log("Error", "IRC connection failed: ", err)
+			terminate(-1)
+		end
+	else
+		ircRBuf = ""
+	end
+	log("Normal", "ircin :", l)
+
+	--- answers ping messages
+	local ping = l:match("PING :(.*)")
+	if ping then
+		writeIRC("PONG :", ping, "\n")
+	end
+end
+
+-----
+-- Writes on IRC socket
+-- Do not forget to add an "/n".
+function writeIRC(...)
+	-- Appends all arbuments into the write buffer
+	ircWBuf = ircWBuf..table.concat({...})
+	-- Gives it to the socket and sees how much it accepted
+	local s, err = ircSocket:send(ircWBuf)
+	-- If it cant the socket terminated.
+	if not s and err~="timeout" then
+		log("Error", "IRC connection failed: ", err)
+		terminate(-1)
+	end
+
+	--- logs what has been send, without the linefeed.
+	if (ircWBuf:sub(s, s) == "\n") then
+		log("Normal", "ircout:", ircWBuf:sub(1, s - 1))
+	else
+		log("Normal", "ircout: ", ircWBuf:sub(1, s), "\\")
+	end
+
+	---- reduces the buffer by the amount of data sent.
+	ircWBuf = ircWBuf:sub(s + 1, -1)
+
+	-- when the write buffer is empty tell the core to no longer
+	-- call ircWritey if data can be written on the socket. There
+	-- is nothing to be written. If there is data in the buffer
+	-- asks to be called as soon it can be written again
+	if ircWBuf == "" then
+		observefd(ircSocket:getfd(), ircReady, nil)
+	else
+		observefd(ircSocket:getfd(), ircReady, ircWritey)
+	end
+end
+
+-- Aquires the nick on IRC and joins the configured channel
+-- This will also register the ircReady/ircWritey function at the core
+-- to be called when the socket is ready to be read/written.
+writeIRC("NICK ", nick, "\n")
+writeIRC("USER ", nick, " 0 * :lsyncd-sayirc-bot", "\n")
+writeIRC("JOIN ", chan, "\n")
+
+-- As action tells on IRC what the action is, then instead of
+-- spawning somthing, it discards the event.
+local function action(inlet)
+	-- event2 is the target of a move event
+	local event, event2 = inlet.getEvent()
+	if not event2 then
+		writeIRC("PRIVMSG ",chan," :",event.etype," ",
+			event.path, "\n")
+	else
+		writeIRC("PRIVMSG ",chan," :",event.etype," ",
+			event.path," -&gt; ",event2.path, "\n")
+	end
+	inlet.discardEvent(event)
+end
+
+-- Watch a directory, and use a second for delay to aggregate events a little.
+sync{source = "src",
+     action = action,
+	 delay  = 1,
+	 onMove = true}</code></pre> 
+<br> 
+<br> 
+<div align="right"> 
+ <em><span style="color:#990000;"><span style="background-color:rgb(255,255,255);"><span style="font-size:10px;">转载本文，请注明出处、作者。</span></span></span></em> 
+ <br> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/fd6db414fce82ee208838c007d06c396/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">跨时钟域设置set_false_path的问题</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8e0450ddfc5a664ac22898ed5d8b884a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">InnoDB索引最通俗的解释</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

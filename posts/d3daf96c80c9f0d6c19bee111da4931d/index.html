@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Scrapy源码分析（一）：代码结构初探 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Scrapy源码分析（一）：代码结构初探" />
+<meta property="og:description" content="前言 很多朋友在使用scrapy编写爬虫的时候，都能感受到这个框架的在定制性方面的强大。我们完成一个爬虫只需要定义好Spider抽取规则即可。即使再复杂一点的需求，我们也可以通过pipeline来控制爬虫的输出，middleware来控制下载中的请求定制。可是大家有没有想过scrapy是如何将我们的初始种子url一步步的下载、解析、加入新队列，周而复始的运行呢？
+这篇文章我来带着大家通过阅读文档，源码，来一步步的理清我们的思路。
+阅读方法 直接阅读源码，往往会给人一头雾水的感觉，如果脑中没有一定架构概念的话，很容易陷入到代码的汪洋中。这里我们通过三个步骤来阅读他的源码：
+先看懂scrapy的官方文档，也就是架构页面。下载scrapy源码，从文件夹根目录开始看，选择重要的部分研究。使用pycharm执行爬虫，完整观察一个爬虫运行的周期。 下面开始按照步骤一步一步的来。
+scrapy的官方文档 scrapy的文档中内容很多，官网左侧的导航栏分为五个主题：
+First steps。不用说，这部分大家肯定学写爬虫时候都看过，主要是将安装和编写第一个爬虫Basic concepts。这一部分主要是scrapy的各个组件，包括命令行（Command line tool），选择器（Selectors）等等，这部分文档过于细化，只是一个各个组件的清单，没法帮我们理清“数据（种子url）的来龙去脉（下载、解析...）”Built-in services。这一部分主要是爬虫的监控方面，包括日志、状态收集等。Solving specific problems。这部分主要是一些专题，比如部署爬虫等。Extending Scrapy。这部分的第一个topic&#34;Architecture overview&#34;讲的主要是整个scrapy的数据流向，这部分就是这篇博客主要阅读的部分。剩下的部分讲的主要是针对各个部分如何进行扩展。All the rest。这部分主要是发布的记录等。 打开Architecture overview：
+我们主要分析下面的数据流图：
+我们写爬虫时候经常用到的就是图中浅蓝色的spiders和深蓝色的middlerwares，以及浅绿色的pipelines和一些定制话的downloader，因此相对于熟悉的组件也是这些。
+但是真正控制数据流向的是engine和scheduler两个部分，而scrapy完美的把他们隐藏了起来，让我们专注于开发爬虫业务。因此我们要格外主要这两个重要的组件。
+我第一次看见这个架构图时候第一个直观的感觉，engine应该是最复杂的部分，他从spider、downloader、pipeline、scheduler四个组件控制requests、responses、items三类数据，其中还要涉及到下载的异步问题，之前看网上说scrapy中使用了Twisted网络异步框架，应该用到的就是这里。
+而scheduler应该起到一个队列的作用，存储爬虫url列表。
+当然以上都是我的猜测，下面来看下官网对上图的数据流动介绍：
+&#34;引擎&#34;从&#34;爬虫&#34;获取种子url。&#34;引擎&#34;将种子url推入&#34;调度器&#34;，并向“调度器”请求一个url。“调度器”返回“引擎”一个url。”引擎“将url送入”下载器“，同时中间经过”下载器中间件“。”下载器“把下载的页面又通过”下载器中间件“，发送回”引擎“。”引擎“将下载的页面送入”爬虫“，同时中间经过”爬虫中间件“。”爬虫“解析下载的页面（这部分就是我们最经常写的解析方法），把结果和新链接发给”引擎“，同时经过”爬虫中间件“。”引擎“将结果发送给pipeline，把新链接发给”调度器“，并向“调度器”请求一个url。重复上述过程，直到”调度器“中没有剩余链接。 从上述过程我们就可以看出：
+”引擎“在scrapy中起到的是一个关键性的位置，从第2步开始到第8步就是一个大循环，终止条件就是”调度器“中不再有新的url链接。而”调度器“主要维护一个队列，相应”引擎“的需求。”下载器“专注于下载。”爬虫“主要是我们来编写，符合业务需求。pipeline主要将抓取结果持久化。”下载中间件“以及”爬虫中间件“主要应对于平时开发时候遇到的实际处理流程。 所以”引擎“和”调度器“是scrapy中最核心的东西，搞懂他们，scrapy的源码我们也就看懂了。
+在这页官方文档的最后，特意提到了异步编程与Twisted，因此我猜测”引擎“应该就是基于Twisted实现的，用来处理多线程问题以及异步下载。
+在看完文档中对于scrapy的架构介绍后，我们上github下载一下最新的scrapy源码，开始接下里的分析。
+scrapy的源码结构 一开始源码的时候，肯定是一片一片的不容易找到重点，我们按照前面的思路，先找到scrapy的心脏——”引擎“。
+打开源码文件夹：
+这里面core文件夹包含了引擎、调度器、以及下载组件，所以我们着重来看core中的内容：
+core中引擎和调度器分别写在两个单独的py文件中，下载器单独组成了一个包，里面根据不同的协议列出了不同的实现下载实现方法。另外两个scrapyer.py、spidermw.py分别是用于解析页面的模块和管理爬虫中间件的模块。
+我们在浏览这个core文件夹下每个py文件，会发现它们都在一开始引入了twisted包下面的模块，比如defer、task、reactor以及twisted自带的HTTPClient。因此到这里，我猜测scrapy就是一个披着twisted实现的爬虫框架，而上面爬虫架构图中各种异步同步的数据流动，应该就是借助twisted实现。
+后序 但是scrapy源码还是比较复杂的，这里先提供给大家一个TinyScrapy的例子，模仿Scrapy的类名进行了简化，大家可以先看这篇文章“Scrapy源码分析（二）：一个参考Scrapy实现的爬虫框架TinyScrapy”，对爬虫引擎、调度器有一个基本的认识。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/d3daf96c80c9f0d6c19bee111da4931d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-11-24T22:37:19+08:00" />
+<meta property="article:modified_time" content="2019-11-24T22:37:19+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Scrapy源码分析（一）：代码结构初探</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h4>前言</h4> 
+<hr> 
+<p>很多朋友在使用scrapy编写爬虫的时候，都能感受到这个框架的在定制性方面的强大。我们完成一个爬虫只需要定义好Spider抽取规则即可。即使再复杂一点的需求，我们也可以通过pipeline来控制爬虫的输出，middleware来控制下载中的请求定制。可是大家有没有想过scrapy是<strong>如何将我们的初始种子url一步步的下载、解析、加入新队列，周而复始的运行</strong>呢？</p> 
+<p>这篇文章我来带着大家通过阅读文档，源码，来一步步的理清我们的思路。</p> 
+<h4>阅读方法</h4> 
+<hr> 
+<p>直接阅读源码，往往会给人一头雾水的感觉，如果脑中没有一定架构概念的话，很容易陷入到代码的汪洋中。这里我们通过三个步骤来阅读他的源码：</p> 
+<ol><li>先看懂scrapy的官方文档，也就是<a href="https://docs.scrapy.org/en/latest/topics/architecture.html#data-flow" rel="nofollow">架构页面</a>。</li><li>下载scrapy<a href="https://github.com/scrapy/scrapy">源码</a>，从文件夹根目录开始看，选择重要的部分研究。</li><li>使用pycharm执行爬虫，完整观察一个爬虫运行的周期。</li></ol> 
+<p>下面开始按照步骤一步一步的来。</p> 
+<h4>scrapy的官方文档</h4> 
+<hr> 
+<p>scrapy的文档中内容很多，官网左侧的导航栏分为五个主题：</p> 
+<ol><li>First steps。不用说，这部分大家肯定学写爬虫时候都看过，主要是将安装和编写第一个爬虫</li><li>Basic concepts。这一部分主要是scrapy的各个组件，包括命令行（Command line tool），选择器（Selectors）等等，这部分文档过于细化，只是一个各个组件的清单，没法帮我们理清“数据（种子url）的来龙去脉（下载、解析...）”</li><li>Built-in services。这一部分主要是爬虫的监控方面，包括日志、状态收集等。</li><li>Solving specific problems。这部分主要是一些专题，比如部署爬虫等。</li><li>Extending Scrapy。这部分的第一个topic"<a href="https://docs.scrapy.org/en/latest/topics/architecture.html#" rel="nofollow">Architecture overview</a>"讲的主要是整个scrapy的数据流向，这部分就是这篇博客主要阅读的部分。剩下的部分讲的主要是针对各个部分如何进行扩展。</li><li>All the rest。这部分主要是发布的记录等。</li></ol> 
+<p>打开<a href="https://docs.scrapy.org/en/latest/topics/architecture.html#" rel="nofollow">Architecture overview</a>：</p> 
+<p>我们主要分析下面的数据流图：</p> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/6e/00/TO56HOdl_o.png"></p> 
+<p>我们写爬虫时候经常用到的就是图中浅蓝色的spiders和深蓝色的middlerwares，以及浅绿色的pipelines和一些定制话的downloader，因此相对于熟悉的组件也是这些。</p> 
+<p>但是真正控制数据流向的是engine和scheduler两个部分，而scrapy完美的把他们隐藏了起来，让我们专注于开发爬虫业务。因此我们要格外主要这两个重要的组件。</p> 
+<p>我第一次看见这个架构图时候第一个直观的感觉，engine应该是最复杂的部分，他从spider、downloader、pipeline、scheduler四个组件控制requests、responses、items三类数据，其中还要涉及到下载的异步问题，之前看网上说scrapy中使用了Twisted网络异步框架，应该用到的就是这里。</p> 
+<p>而scheduler应该起到一个队列的作用，存储爬虫url列表。</p> 
+<p>当然以上都是我的猜测，下面来看下官网对上图的数据流动介绍：</p> 
+<ol><li>"引擎"从"爬虫"获取种子url。</li><li>"引擎"将种子url推入"调度器"，并向“调度器”请求一个url。</li><li>“调度器”返回“引擎”一个url。</li><li>”引擎“将url送入”下载器“，同时中间经过”下载器中间件“。</li><li>”下载器“把下载的页面又通过”下载器中间件“，发送回”引擎“。</li><li>”引擎“将下载的页面送入”爬虫“，同时中间经过”爬虫中间件“。</li><li>”爬虫“解析下载的页面（<strong>这部分就是我们最经常写的解析方法</strong>），把结果和新链接发给”引擎“，同时经过”爬虫中间件“。</li><li>”引擎“将结果发送给pipeline，把新链接发给”调度器“，并向“调度器”请求一个url。</li><li>重复上述过程，直到”调度器“中没有剩余链接。</li></ol> 
+<p>从上述过程我们就可以看出：</p> 
+<ul><li>”引擎“在scrapy中起到的是一个关键性的位置，从第2步开始到第8步就是一个大循环，终止条件就是”调度器“中不再有新的url链接。</li><li>而”调度器“主要维护一个队列，相应”引擎“的需求。</li><li>”下载器“专注于下载。</li><li>”爬虫“主要是我们来编写，符合业务需求。</li><li>pipeline主要将抓取结果持久化。</li><li>”下载中间件“以及”爬虫中间件“主要应对于平时开发时候遇到的实际处理流程。</li></ul> 
+<p>所以”引擎“和”调度器“是scrapy中最核心的东西，搞懂他们，scrapy的源码我们也就看懂了。</p> 
+<p>在这页官方文档的最后，特意提到了异步编程与<a href="https://twistedmatrix.com/trac/" rel="nofollow">Twisted</a>，因此我猜测”引擎“应该就是基于Twisted实现的，用来处理多线程问题以及异步下载。</p> 
+<p>在看完文档中对于scrapy的架构介绍后，我们上github下载一下最新的scrapy源码，开始接下里的分析。</p> 
+<h4>scrapy的源码结构</h4> 
+<hr> 
+<p>一开始源码的时候，肯定是一片一片的不容易找到重点，我们按照前面的思路，先找到scrapy的心脏——”引擎“。</p> 
+<p>打开源码文件夹：</p> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/a0/ae/O3Nu2lKK_o.png"></p> 
+<p>这里面core文件夹包含了引擎、调度器、以及下载组件，所以我们着重来看core中的内容：</p> 
+<p><img alt="" class="has" src="https://images2.imgbox.com/24/f7/Gt4spct2_o.png"></p> 
+<p>core中引擎和调度器分别写在两个单独的py文件中，下载器单独组成了一个包，里面根据不同的协议列出了不同的实现下载实现方法。另外两个scrapyer.py、spidermw.py分别是用于解析页面的模块和管理爬虫中间件的模块。</p> 
+<p>我们在浏览这个core文件夹下每个py文件，会发现它们都在一开始引入了twisted包下面的模块，比如defer、task、reactor以及twisted自带的HTTPClient。因此到这里，我猜测scrapy就是一个披着twisted实现的爬虫框架，而上面爬虫架构图中各种异步同步的数据流动，应该就是借助twisted实现。</p> 
+<hr> 
+<h4>后序</h4> 
+<p>但是scrapy源码还是比较复杂的，这里先提供给大家一个TinyScrapy的例子，模仿Scrapy的类名进行了简化，大家可以先看这篇文章“<a href="https://blog.csdn.net/u011423145/article/details/103220087">Scrapy源码分析（二）：一个参考Scrapy实现的爬虫框架TinyScrapy</a>”，对爬虫引擎、调度器有一个基本的认识。</p> 
+<p> </p> 
+<p> </p> 
+<p> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/7dd0465c790877144f3243266957ffb9/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">OWASP top10 详解</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/4c0dd6fae53f9eb8141913c57cb1fbd0/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">滑动窗口处理（rolling）使用apply函数的一个小坑</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

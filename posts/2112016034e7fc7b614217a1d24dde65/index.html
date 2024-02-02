@@ -1,0 +1,1821 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>camera算法集成实现流程 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="camera算法集成实现流程" />
+<meta property="og:description" content="和你一起终身学习，这里是程序员Android
+经典好文推荐，通过阅读本文，您将收获以下知识点:
+算法概览
+一、算法集成前的准备
+二、 为算法选择feature
+三、 将算法对应的feature添加到scenario配置表
+四、挂载算法
+五、自定义metadata
+六、APP调用算法
+七、遇到的问题及解决方法
+八、结语
+算法概览 为了给用户提供更好的成像效果，现在的手机都会接入一些第三方的图像处理算法。MTK平台的HAL3也在P2这一层提供接入的plugin。按图像处理算法需要的帧数和摄像头数量，大体可以分为三类：
+单帧算法：
+常见的单帧算法有：美颜算法(瘦脸、磨皮、大眼)、广角镜头畸变校正算法、附加表情算法、单摄背景虚化算法(伪双摄算法)等等，仅需单帧图像输入的算法都属于单帧算法。一般情况下，输入一帧图像，算法处理完输出一帧处理后的图像。
+多帧算法：
+常见的多帧算法有：MFNR（多帧降噪）、HDR（高动态范围）等等，需要连续多帧图像输入的算法都属于多帧算法。一般情况下，输入连续多帧图像，算法处理完输出一帧处理后的图像。
+双摄算法：
+最常见的双摄算法是双摄景深算法或者叫双摄背景虚化算法，除此之外，也有彩色&#43;黑白用于增强夜拍效果的双摄算法。单帧算法和多帧算法仅需要获取一个摄像头的图像。而双摄算法需要获取主、辅两个摄像头的图像，并且一般还会要求主、辅摄像头同步。分别获取主、辅摄像头的两帧同步图像，处理后输出一帧主摄图像，用户也仅能看到主摄图像。
+根据这个大体上的分类，MTK HAL算法集成系列文章共三篇：
+MTK HAL算法集成之单帧算法
+MTK HAL算法集成之多帧算法
+MTK HAL算法集成之双摄算法
+本文是其中的第一篇。这个系列文章均基于Android 9.0，MT6763平台，HAL版本是HAL3。
+一、算法集成前的准备 在开展集成工作之前，首先要对算法有一个基本的评估，并且对于集成也应有一定的要求。
+1. 1 算法要求及评估 处理效果好，不能比竞品差，超过竞品更佳。（这条和camera调试的主观效果一样，主观性较强，往往一厢情愿，具体看项目要求吧）
+各个场景及压力测试下效果稳定。
+处理后照片无色差、锐度和饱和度无损失，或者损失在可接受范围。
+达到可接受的分辨率，最好可达到摄像头的最大分辨率。
+处理时间越快越好，不超过竞品时间、不超过项目和产品的目标时间。
+无内存泄露，占用内存少。
+提供必要的集成说明文档，包括算法类型、输入及输出图像要求、输入参数要求等等。
+注意：如果有条件，处理时间、内存占用、分辨率等等可量化的指标可要求算法提供方给出具体的参考数据，以便集成完后测试验证。
+1.2 算法集成要求 编译时可根据项目控制是否集成算法。
+运行时可以用参数控制是否启用算法。
+集成算法库正常运行、压力测试下效果稳定、无内存泄露。
+1.3 算法集成的步骤 (1). 根据算法选择feature类型，如果与MTK提供的feature不能对号入座，则需要添加自定义feature。
+(2). 将算法对应的feature类型添加到scenario配置表。
+(3). 根据算法选择plugin类型，编写CPP文件实现plugin，挂载算法。
+(4). 如果算法不能复用Android和MTK提供的metadata，则还需要为算法配置自定义的metadata以便APP控制是否启用算法。
+首先，我准备了一个libwatermark.so，它仅仅实现了一个添加水印的功能，用它来模拟第三方的单帧算法库。如果想了解添加水印的实现代码，可以参考我另外一篇文章：Android 实现图片加水印或logo。接下来，我们就按照集成步骤，逐步详细讲解。
+二、 为算法选择feature 2.1 MTK提供的feature MTK在mtk_feature_type.h和customer_feature_type.h已经提供了一些feature。
+vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/3rdparty/mtk/mtk_feature_type.h：
+NO_FEATURE_NORMAL = 0ULL, // MTK (bit 0-31) MTK_FEATURE_MFNR = 1ULL &lt;&lt; 0, MTK_FEATURE_HDR = 1ULL &lt;&lt; 1, MTK_FEATURE_REMOSAIC = 1ULL &lt;&lt; 2, MTK_FEATURE_ABF = 1ULL &lt;&lt; 3, MTK_FEATURE_NR = 1ULL &lt;&lt; 4, MTK_FEATURE_FB = 1ULL &lt;&lt; 5, MTK_FEATURE_CZ = 1ULL &lt;&lt; 6, MTK_FEATURE_DRE = 1ULL &lt;&lt; 7, MTK_FEATURE_DEPTH = 1ULL &lt;&lt; 8, MTK_FEATURE_BOKEH = 1ULL &lt;&lt; 9, MTK_FEATURE_VSDOF = (MTK_FEATURE_DEPTH|MTK_FEATURE_BOKEH), MTK_FEATURE_FSC = 1ULL &lt;&lt; 10, MTK_FEATURE_3DNR = 1ULL &lt;&lt; 11, MTK_FEATURE_EIS = 1ULL &lt;&lt; 12, MTK_FEATURE_AINR = 1ULL &lt;&lt; 13, MTK_FEATURE_DUAL_YUV = 1ULL &lt;&lt; 14, MTK_FEATURE_DUAL_HWDEPTH = 1ULL &lt;&lt; 15, MTK_FEATURE_AIS = 1ULL &lt;&lt; 16, MTK_FEATURE_HFG = 1ULL &lt;&lt; 17, MTK_FEATURE_DCE = 1ULL &lt;&lt; 18, vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/3rdparty/customer/customer_feature_type." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/2112016034e7fc7b614217a1d24dde65/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-15T07:58:19+08:00" />
+<meta property="article:modified_time" content="2024-01-15T07:58:19+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">camera算法集成实现流程</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/e8/a7/hS3FbZv7_o.gif" alt="11cedbeddadddee7be460ee16e1cfafb.gif"></p> 
+ <p style="text-align:left;"><strong>和你一起终身学</strong><strong></strong><strong>习，这里是程序员Android</strong></p> 
+ <p style="text-align:left;">经典好文推荐，通过阅读本文，您将收获以下知识点:</p> 
+ <blockquote> 
+  <p>算法概览<br>一、算法集成前的准备<br>二、 为算法选择feature<br>三、 将算法对应的feature添加到scenario配置表<br>四、挂载算法<br>五、自定义metadata<br>六、APP调用算法<br>七、遇到的问题及解决方法<br>八、结语</p> 
+ </blockquote> 
+ <h4>算法概览</h4> 
+ <p>为了给用户提供更好的成像效果，现在的手机都会接入一些第三方的图像处理算法。MTK平台的HAL3也在P2这一层提供接入的plugin。按图像处理算法需要的帧数和摄像头数量，大体可以分为三类：</p> 
+ <ul><li><p>单帧算法：<br>常见的单帧算法有：美颜算法(瘦脸、磨皮、大眼)、广角镜头畸变校正算法、附加表情算法、单摄背景虚化算法(伪双摄算法)等等，仅需单帧图像输入的算法都属于单帧算法。一般情况下，输入一帧图像，算法处理完输出一帧处理后的图像。</p></li><li><p>多帧算法：<br>常见的多帧算法有：MFNR（多帧降噪）、HDR（高动态范围）等等，需要连续多帧图像输入的算法都属于多帧算法。一般情况下，输入连续多帧图像，算法处理完输出一帧处理后的图像。</p></li><li><p>双摄算法：<br>最常见的双摄算法是双摄景深算法或者叫双摄背景虚化算法，除此之外，也有彩色+黑白用于增强夜拍效果的双摄算法。单帧算法和多帧算法仅需要获取一个摄像头的图像。而双摄算法需要获取主、辅两个摄像头的图像，并且一般还会要求主、辅摄像头同步。分别获取主、辅摄像头的两帧同步图像，处理后输出一帧主摄图像，用户也仅能看到主摄图像。</p></li></ul> 
+ <p>根据这个大体上的分类，MTK HAL算法集成系列文章共三篇：</p> 
+ <ul><li><p>MTK HAL算法集成之单帧算法</p></li><li><p>MTK HAL算法集成之多帧算法</p></li><li><p>MTK HAL算法集成之双摄算法</p></li></ul> 
+ <p>本文是其中的第一篇。这个系列文章均基于Android 9.0，MT6763平台，HAL版本是HAL3。</p> 
+ <h4>一、算法集成前的准备</h4> 
+ <p>在开展集成工作之前，首先要对算法有一个基本的评估，并且对于集成也应有一定的要求。</p> 
+ <h5>1. 1 算法要求及评估</h5> 
+ <ul><li><p>处理效果好，不能比竞品差，超过竞品更佳。（这条和camera调试的主观效果一样，主观性较强，往往一厢情愿，具体看项目要求吧）</p></li><li><p>各个场景及压力测试下效果稳定。</p></li><li><p>处理后照片无色差、锐度和饱和度无损失，或者损失在可接受范围。</p></li><li><p>达到可接受的分辨率，最好可达到摄像头的最大分辨率。</p></li><li><p>处理时间越快越好，不超过竞品时间、不超过项目和产品的目标时间。</p></li><li><p>无内存泄露，占用内存少。</p></li><li><p>提供必要的集成说明文档，包括算法类型、输入及输出图像要求、输入参数要求等等。</p></li></ul> 
+ <p>注意：如果有条件，处理时间、内存占用、分辨率等等可量化的指标可要求算法提供方给出具体的参考数据，以便集成完后测试验证。</p> 
+ <h5>1.2 算法集成要求</h5> 
+ <ul><li><p>编译时可根据项目控制是否集成算法。</p></li><li><p>运行时可以用参数控制是否启用算法。</p></li><li><p>集成算法库正常运行、压力测试下效果稳定、无内存泄露。</p></li></ul> 
+ <h5>1.3 算法集成的步骤</h5> 
+ <p>(1). 根据算法选择feature类型，如果与MTK提供的feature不能对号入座，则需要添加自定义feature。<br>(2). 将算法对应的feature类型添加到scenario配置表。<br>(3). 根据算法选择plugin类型，编写CPP文件实现plugin，挂载算法。<br>(4). 如果算法不能复用Android和MTK提供的metadata，则还需要为算法配置自定义的metadata以便APP控制是否启用算法。</p> 
+ <p>首先，我准备了一个libwatermark.so，它仅仅实现了一个添加水印的功能，用它来模拟第三方的单帧算法库。如果想了解添加水印的实现代码，可以参考我另外一篇文章：Android 实现图片加水印或logo。接下来，我们就按照集成步骤，逐步详细讲解。</p> 
+ <h4>二、 为算法选择feature</h4> 
+ <h5>2.1 MTK提供的feature</h5> 
+ <p>MTK在mtk_feature_type.h和customer_feature_type.h已经提供了一些feature。<br>vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/3rdparty/mtk/mtk_feature_type.h：</p> 
+ <pre class="has"><code class="language-go">NO_FEATURE_NORMAL       = 0ULL,
+    // MTK (bit 0-31)
+    MTK_FEATURE_MFNR        = 1ULL &lt;&lt; 0,
+    MTK_FEATURE_HDR         = 1ULL &lt;&lt; 1,
+    MTK_FEATURE_REMOSAIC    = 1ULL &lt;&lt; 2,
+    MTK_FEATURE_ABF         = 1ULL &lt;&lt; 3,
+    MTK_FEATURE_NR          = 1ULL &lt;&lt; 4,
+    MTK_FEATURE_FB          = 1ULL &lt;&lt; 5,
+    MTK_FEATURE_CZ          = 1ULL &lt;&lt; 6,
+    MTK_FEATURE_DRE         = 1ULL &lt;&lt; 7,
+    MTK_FEATURE_DEPTH       = 1ULL &lt;&lt; 8,
+    MTK_FEATURE_BOKEH       = 1ULL &lt;&lt; 9,
+    MTK_FEATURE_VSDOF       = (MTK_FEATURE_DEPTH|MTK_FEATURE_BOKEH),
+    MTK_FEATURE_FSC         = 1ULL &lt;&lt; 10,
+    MTK_FEATURE_3DNR        = 1ULL &lt;&lt; 11,
+    MTK_FEATURE_EIS         = 1ULL &lt;&lt; 12,
+    MTK_FEATURE_AINR        = 1ULL &lt;&lt; 13,
+    MTK_FEATURE_DUAL_YUV    = 1ULL &lt;&lt; 14,
+    MTK_FEATURE_DUAL_HWDEPTH  = 1ULL &lt;&lt; 15,
+    MTK_FEATURE_AIS         = 1ULL &lt;&lt; 16,
+    MTK_FEATURE_HFG         = 1ULL &lt;&lt; 17,
+    MTK_FEATURE_DCE         = 1ULL &lt;&lt; 18,</code></pre> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/3rdparty/customer/customer_feature_type.h：</p> 
+ <pre class="has"><code class="language-go">// ThirdParty (bit 32-63)
+    TP_FEATURE_HDR          = 1ULL &lt;&lt; 32,
+    TP_FEATURE_MFNR         = 1ULL &lt;&lt; 33,
+    TP_FEATURE_EIS          = 1ULL &lt;&lt; 34,
+    TP_FEATURE_FB           = 1ULL &lt;&lt; 35,
+    TP_FEATURE_FILTER       = 1ULL &lt;&lt; 36,
+    TP_FEATURE_DEPTH        = 1ULL &lt;&lt; 37,
+    TP_FEATURE_BOKEH        = 1ULL &lt;&lt; 38,
+    TP_FEATURE_VSDOF        = (TP_FEATURE_DEPTH|TP_FEATURE_BOKEH),
+    TP_FEATURE_FUSION       = 1ULL &lt;&lt; 39,
+    TP_FEATURE_HDR_DC       = 1ULL &lt;&lt; 40,   // used by DualCam
+    TP_FEATURE_DUAL_YUV     = 1ULL &lt;&lt; 41,
+    TP_FEATURE_DUAL_HWDEPTH = 1ULL &lt;&lt; 42,
+    TP_FEATURE_PUREBOKEH    = 1ULL &lt;&lt; 43,
+    TP_FEATURE_RAW_HDR      = 1ULL &lt;&lt; 44,
+    TP_FEATURE_RELIGHTING   = 1ULL &lt;&lt; 45,</code></pre> 
+ <p>MTK提供的这些feature可以满足绝大多数算法的集成，在可以对号入座的情况下，我们直接使用已有feature即可。如果不能够满足我们的要求，可以参考下节内容添加新的feature。</p> 
+ <h5>2.2 添加自定义feature</h5> 
+ <p>本来单帧算法对应的feature可以选择MTK提供的MTK_FEATURE_FB和TP_FEATURE_FB，但是为了讲解如何添加新feature，我们选择添加一个自定义feature：TP_FEATURE_WATERMARK。</p> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/3rdparty/customer/customer_feature_type.h：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/3rdparty/customer/customer_feature_type.h b/vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/3rdparty/customer/customer_feature_type.h
+old mode 100644
+new mode 100755
+index a41fd864f5..17bc35eea8
+--- a/vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/3rdparty/customer/customer_feature_type.h
++++ b/vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/3rdparty/customer/customer_feature_type.h
+@@ -59,6 +59,7 @@ enum eFeatureIndexCustomer {
+     TP_FEATURE_PUREBOKEH    = 1ULL &lt;&lt; 43,
+     TP_FEATURE_RAW_HDR      = 1ULL &lt;&lt; 44,
+     TP_FEATURE_RELIGHTING   = 1ULL &lt;&lt; 45,
++    TP_FEATURE_WATERMARK    = 1ULL &lt;&lt; 46,
+     // TODO: reserve for customer feature index (bit 32-63)
+ };</code></pre> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/CaptureFeature_Common.cpp：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/CaptureFeature_Common.cpp b/vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/CaptureFeature_Common.cpp
+old mode 100644
+new mode 100755
+index e32f80a609..47273b01c7
+--- a/vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/CaptureFeature_Common.cpp
++++ b/vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/CaptureFeature_Common.cpp
+@@ -599,6 +599,7 @@ const char* FeatID2Name(FeatureID_T fid)
+     case FID_FUSION_3RD_PARTY:      return "fusion_3rd_party";
+     case FID_PUREBOKEH_3RD_PARTY:   return "purebokeh_3rd_party";
+     case FID_RELIGHTING_3RD_PARTY:  return "relighting_3rd_party";
++    case FID_WATERMARK_3RD_PARTY:   return "watermark_3rd_party";
+
+     default:                        return "unknown";
+     };</code></pre> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/nodes/YUVNode.cpp：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/nodes/YUVNode.cpp b/vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/nodes/YUVNode.cpp
+index 8bb794ba02..d4343aaccf 100755
+--- a/vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/nodes/YUVNode.cpp
++++ b/vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/nodes/YUVNode.cpp
+@@ -779,7 +779,8 @@ MBOOL YUVNode::onInit()
+             featId = FID_FB_3RD_PARTY;
+         else if (rProperty.mFeatures &amp; TP_FEATURE_RELIGHTING)
+             featId = FID_RELIGHTING_3RD_PARTY;
+-
++        else if (rProperty.mFeatures &amp; TP_FEATURE_WATERMARK)
++            featId = FID_WATERMARK_3RD_PARTY;
+
+         if (featId != NULL_FEATURE) {
+             MY_LOGD_IF(mLogLevel, "%s finds plugin:%s, priority:%d",</code></pre> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/feature/featurePipe/ICaptureFeaturePipe.h：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/feature/featurePipe/ICaptureFeaturePipe.h b/vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/feature/featurePipe/ICaptureFeaturePipe.h
+old mode 100644
+new mode 100755
+index 2f1ad8a665..ab47aae456
+--- a/vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/feature/featurePipe/ICaptureFeaturePipe.h
++++ b/vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/feature/featurePipe/ICaptureFeaturePipe.h
+@@ -172,6 +172,7 @@ enum CaptureFeatureFeatureID {
+     FID_FUSION_3RD_PARTY,
+     FID_PUREBOKEH_3RD_PARTY,
+     FID_RELIGHTING_3RD_PARTY,
++    FID_WATERMARK_3RD_PARTY,
+     NUM_OF_FEATURE,
+     NULL_FEATURE = 0xFF,
+ };</code></pre> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam3/pipeline/hwnode/p2/P2_CaptureProcessor.cpp：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam3/pipeline/hwnode/p2/P2_CaptureProcessor.cpp b/vendor/mediatek/proprietary/hardware/mtkcam3/pipeline/hwnode/p2/P2_CaptureProcessor.cpp
+old mode 100644
+new mode 100755
+index cc1dc549fd..00559cbc30
+--- a/vendor/mediatek/proprietary/hardware/mtkcam3/pipeline/hwnode/p2/P2_CaptureProcessor.cpp
++++ b/vendor/mediatek/proprietary/hardware/mtkcam3/pipeline/hwnode/p2/P2_CaptureProcessor.cpp
+@@ -428,6 +428,9 @@ MBOOL CaptureProcessor::onEnque(const sp&lt;P2FrameRequest&gt; &amp;pP2Frame)
+                 pCapRequest-&gt;addFeature(FID_HFG);
+             if (feature &amp; MTK_FEATURE_DCE)
+                 pCapRequest-&gt;addFeature(FID_DCE);
++            if (feature &amp; TP_FEATURE_WATERMARK)
++                pCapRequest-&gt;addFeature(FID_WATERMARK_3RD_PARTY);
++
+         }
+     }</code></pre> 
+ <h4>三、 将算法对应的feature添加到scenario配置表</h4> 
+ <p>在我们打开camera进行预览和拍照的时候，MTK HAL3会执行vendor/mediatek/proprietary/hardware/mtkcam3/pipeline/policy/FeatureSettingPolicy.cpp的代码，会分别调用<br>vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/scenario_mgr.cpp的<br>get_streaming_scenario函数和get_capture_scenario函数。它们会读取一个scenario的feature配置表，遍历所有的feature，决定哪些feature会被执行。这个配置表中有许多的scenario，一个scenario可能对应多个feature。因此添加自定义feature后，还需将自定义的feature添加到配置表中。MTK feature 对应的配置表是 gMtkScenarioFeaturesMaps，customer feature 对应的配置表是 gCustomerScenarioFeaturesMaps。</p> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/customer_scenario_mgr.cpp：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/customer_scenario_mgr.cpp b/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/customer_scenario_mgr.cpp
+old mode 100644
+new mode 100755
+index f8d081e433..577f85797e
+--- a/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/customer_scenario_mgr.cpp
++++ b/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/customer_scenario_mgr.cpp
+@@ -93,30 +93,30 @@ using namespace NSCam::v3::pipeline::policy::scenariomgr;
+ // #define  &lt;feature combination&gt;              (key feature         | post-processing features | ...)
+ //
+ // single cam capture feature combination
+-#define TP_FEATURE_COMBINATION_SINGLE          (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB)
+-#define TP_FEATURE_COMBINATION_HDR             (TP_FEATURE_HDR      | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB)
+-#define TP_FEATURE_COMBINATION_AINR            (MTK_FEATURE_AINR    | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB)
+-#define TP_FEATURE_COMBINATION_MFNR            (MTK_FEATURE_MFNR    | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB)
+-#define TP_FEATURE_COMBINATION_REMOSAIC        (MTK_FEATURE_REMOSAIC| MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB)
++#define TP_FEATURE_COMBINATION_SINGLE          (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_WATERMARK)
++#define TP_FEATURE_COMBINATION_HDR             (TP_FEATURE_HDR      | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_WATERMARK)
++#define TP_FEATURE_COMBINATION_AINR            (MTK_FEATURE_AINR    | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_WATERMARK)
++#define TP_FEATURE_COMBINATION_MFNR            (MTK_FEATURE_MFNR    | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_WATERMARK)
++#define TP_FEATURE_COMBINATION_REMOSAIC        (MTK_FEATURE_REMOSAIC| MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_WATERMARK)
+ #define TP_FEATURE_COMBINATION_CSHOT           (NO_FEATURE_NORMAL   | MTK_FEATURE_CZ| MTK_FEATURE_HFG)
+-#define TP_FEATURE_COMBINATION_YUV_REPROCESS   (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| TP_FEATURE_FB)
+-#define TP_FEATURE_COMBINATION_RAW_REPROCESS   (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| TP_FEATURE_FB)
++#define TP_FEATURE_COMBINATION_YUV_REPROCESS   (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| TP_FEATURE_FB| TP_FEATURE_WATERMARK)
++#define TP_FEATURE_COMBINATION_RAW_REPROCESS   (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| TP_FEATURE_FB| TP_FEATURE_WATERMARK)
+ #define TP_FEATURE_COMBINATION_PRO             (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE)
+-#define TP_FEATURE_COMBINATION_SUPER_NIGHT_RAW_REPROCESS (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| TP_FEATURE_FB)
++#define TP_FEATURE_COMBINATION_SUPER_NIGHT_RAW_REPROCESS (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| TP_FEATURE_FB| TP_FEATURE_WATERMARK)
+
+ // dual cam capture feature combination
+ // the VSDOF means the combination of Bokeh feature and Depth feature
+-#define TP_FEATURE_COMBINATION_TP_VSDOF           (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_VSDOF)
+-#define TP_FEATURE_COMBINATION_TP_VSDOF_HDR       (TP_FEATURE_HDR_DC   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_VSDOF)
+-#define TP_FEATURE_COMBINATION_TP_VSDOF_MFNR      (MTK_FEATURE_MFNR    | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_VSDOF)
+-#define TP_FEATURE_COMBINATION_TP_FUSION          (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_FUSION)
+-#define TP_FEATURE_COMBINATION_TP_PUREBOKEH       (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_PUREBOKEH)
++#define TP_FEATURE_COMBINATION_TP_VSDOF           (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_VSDOF| TP_FEATURE_WATERMARK)
++#define TP_FEATURE_COMBINATION_TP_VSDOF_HDR       (TP_FEATURE_HDR_DC   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_VSDOF| TP_FEATURE_WATERMARK)
++#define TP_FEATURE_COMBINATION_TP_VSDOF_MFNR      (MTK_FEATURE_MFNR    | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_VSDOF| TP_FEATURE_WATERMARK)
++#define TP_FEATURE_COMBINATION_TP_FUSION          (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_FUSION| TP_FEATURE_WATERMARK)
++#define TP_FEATURE_COMBINATION_TP_PUREBOKEH       (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE| TP_FEATURE_FB| TP_FEATURE_PUREBOKEH| TP_FEATURE_WATERMARK)
+
+ // streaming feature combination (TODO: it should be refined by streaming scenario feature)
+-#define TP_FEATURE_COMBINATION_VIDEO_NORMAL       (MTK_FEATURE_FB|TP_FEATURE_FB)
+-#define TP_FEATURE_COMBINATION_VIDEO_DUAL_YUV     (MTK_FEATURE_FB|MTK_FEATURE_DUAL_YUV|TP_FEATURE_FB|TP_FEATURE_DUAL_YUV)
+-#define TP_FEATURE_COMBINATION_VIDEO_DUAL_HWDEPTH (MTK_FEATURE_FB|MTK_FEATURE_DUAL_HWDEPTH|TP_FEATURE_FB|TP_FEATURE_DUAL_HWDEPTH)
+-#define TP_FEATURE_COMBINATION_VIDEO_DUAL_HWVSDOF (MTK_FEATURE_FB|TP_FEATURE_FB)
++#define TP_FEATURE_COMBINATION_VIDEO_NORMAL       (MTK_FEATURE_FB|TP_FEATURE_FB|TP_FEATURE_WATERMARK)
++#define TP_FEATURE_COMBINATION_VIDEO_DUAL_YUV     (MTK_FEATURE_FB|MTK_FEATURE_DUAL_YUV|TP_FEATURE_FB|TP_FEATURE_DUAL_YUV|TP_FEATURE_WATERMARK)
++#define TP_FEATURE_COMBINATION_VIDEO_DUAL_HWDEPTH (MTK_FEATURE_FB|MTK_FEATURE_DUAL_HWDEPTH|TP_FEATURE_FB|TP_FEATURE_DUAL_HWDEPTH|TP_FEATURE_WATERMARK)
++#define TP_FEATURE_COMBINATION_VIDEO_DUAL_HWVSDOF (MTK_FEATURE_FB|TP_FEATURE_FB|TP_FEATURE_WATERMARK)
+ // ======================================================================================================
+ //
+ /******************************************************************************</code></pre> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/mtk/mtk_scenario_mgr.cpp：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/mtk/mtk_scenario_mgr.cpp b/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/mtk/mtk_scenario_mgr.cpp
+old mode 100644
+new mode 100755
+index 011f551354..f14ff8a6e2
+--- a/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/mtk/mtk_scenario_mgr.cpp
++++ b/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/mtk/mtk_scenario_mgr.cpp
+@@ -89,29 +89,29 @@ using namespace NSCam::v3::pipeline::policy::scenariomgr;
+ // #define  &lt;feature combination&gt;              (key feature         | post-processing features | ...)
+ //
+ // single cam capture feature combination
+-#define MTK_FEATURE_COMBINATION_SINGLE         (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB)
+-#define MTK_FEATURE_COMBINATION_HDR            (TP_FEATURE_HDR      | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB)
+-#define MTK_FEATURE_COMBINATION_AINR           (MTK_FEATURE_AINR    | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB)
+-#define MTK_FEATURE_COMBINATION_MFNR           (MTK_FEATURE_MFNR    | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB)
+-#define MTK_FEATURE_COMBINATION_REMOSAIC       (MTK_FEATURE_REMOSAIC| MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB)
++#define MTK_FEATURE_COMBINATION_SINGLE         (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_HDR            (TP_FEATURE_HDR      | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_AINR           (MTK_FEATURE_AINR    | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_MFNR           (MTK_FEATURE_MFNR    | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_REMOSAIC       (MTK_FEATURE_REMOSAIC| MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_WATERMARK)
+ #define MTK_FEATURE_COMBINATION_CSHOT          (NO_FEATURE_NORMAL   | MTK_FEATURE_CZ| MTK_FEATURE_HFG)
+-#define MTK_FEATURE_COMBINATION_YUV_REPROCESS  (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_FB)
+-#define MTK_FEATURE_COMBINATION_RAW_REPROCESS  (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_FB)
+-#define MTK_FEATURE_COMBINATION_SUPER_NIGHT_RAW_REPROCESS  (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_FB)
++#define MTK_FEATURE_COMBINATION_YUV_REPROCESS  (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_FB| TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_RAW_REPROCESS  (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_FB| TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_SUPER_NIGHT_RAW_REPROCESS  (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_FB| TP_FEATURE_WATERMARK)
+
+ // dual cam capture feature combination
+ // the VSDOF means the combination of Bokeh feature and Depth feature
+-#define MTK_FEATURE_COMBINATION_TP_VSDOF          (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_VSDOF)
+-#define MTK_FEATURE_COMBINATION_TP_VSDOF_HDR      (TP_FEATURE_HDR_DC   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_VSDOF)
+-#define MTK_FEATURE_COMBINATION_TP_VSDOF_MFNR     (MTK_FEATURE_MFNR    | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_VSDOF)
+-#define MTK_FEATURE_COMBINATION_TP_FUSION         (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_FUSION)
+-#define MTK_FEATURE_COMBINATION_TP_PUREBOKEH      (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_PUREBOKEH)
++#define MTK_FEATURE_COMBINATION_TP_VSDOF          (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_VSDOF| TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_TP_VSDOF_HDR      (TP_FEATURE_HDR_DC   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_VSDOF| TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_TP_VSDOF_MFNR     (MTK_FEATURE_MFNR    | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_VSDOF| TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_TP_FUSION         (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_FUSION| TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_TP_PUREBOKEH      (NO_FEATURE_NORMAL   | MTK_FEATURE_NR| MTK_FEATURE_ABF| MTK_FEATURE_CZ| MTK_FEATURE_DRE| MTK_FEATURE_HFG| MTK_FEATURE_DCE | MTK_FEATURE_FB| TP_FEATURE_PUREBOKEH| TP_FEATURE_WATERMARK)
+
+ // streaming feature combination (TODO: it should be refined by streaming scenario feature)
+-#define MTK_FEATURE_COMBINATION_VIDEO_NORMAL     (MTK_FEATURE_FB|TP_FEATURE_FB)
+-#define MTK_FEATURE_COMBINATION_VIDEO_DUAL_YUV   (MTK_FEATURE_FB|MTK_FEATURE_DUAL_YUV|TP_FEATURE_FB|TP_FEATURE_DUAL_YUV)
+-#define MTK_FEATURE_COMBINATION_VIDEO_DUAL_HWDEPTH (MTK_FEATURE_FB|MTK_FEATURE_DUAL_HWDEPTH|TP_FEATURE_FB|TP_FEATURE_DUAL_HWDEPTH)
+-#define MTK_FEATURE_COMBINATION_VIDEO_DUAL_HWVSDOF (MTK_FEATURE_FB|TP_FEATURE_FB)
++#define MTK_FEATURE_COMBINATION_VIDEO_NORMAL     (MTK_FEATURE_FB|TP_FEATURE_FB|TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_VIDEO_DUAL_YUV   (MTK_FEATURE_FB|MTK_FEATURE_DUAL_YUV|TP_FEATURE_FB|TP_FEATURE_DUAL_YUV|TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_VIDEO_DUAL_HWDEPTH (MTK_FEATURE_FB|MTK_FEATURE_DUAL_HWDEPTH|TP_FEATURE_FB|TP_FEATURE_DUAL_HWDEPTH|TP_FEATURE_WATERMARK)
++#define MTK_FEATURE_COMBINATION_VIDEO_DUAL_HWVSDOF (MTK_FEATURE_FB|TP_FEATURE_FB|TP_FEATURE_WATERMARK)
+ // ======================================================================================================
+ //
+ /******************************************************************************</code></pre> 
+ <p>注意：<br>MTK在Android Q（10.0）上优化了scenario配置表的客制化，Android Q及更高版本，scenario需要在：<br>vendor/mediatek/proprietary/custom/[platform]/hal/camera/camera_custom_feature_table.cpp中配置，[platform]是诸如mt6580，mt6763之类的。</p> 
+ <p>将自定义feature添加到scenario配置表时，不可贪多，只要添加到合适的scenario就行，多了可能多个算法会有冲突。如果仅在简单场景，添加到MTK_FEATURE_COMBINATION_SINGLE和TP_FEATURE_COMBINATION_SINGLE就可以满足绝大多数需求。(2021-02-02更新)</p> 
+ <h4>四、挂载算法</h4> 
+ <h5>4.1 为算法选择plugin</h5> 
+ <p>MTK HAL3在vendor/mediatek/proprietary/hardware/mtkcam3/include/mtkcam3/3rdparty/plugin/PipelinePluginType.h 中将三方算法的挂载点大致分为以下几类：</p> 
+ <ul><li><p>BokehPlugin： Bokeh算法挂载点，双摄景深算法的虚化部分。</p></li><li><p>DepthPlugin： Depth算法挂载点，双摄景深算法的计算深度部分。</p></li><li><p>FusionPlugin： Depth和Bokeh放在1个算法中，即合并的双摄景深算法挂载点。</p></li><li><p>JoinPlugin： Streaming相关算法挂载点，预览算法都挂载在这里。</p></li><li><p>MultiFramePlugin： 多帧算法挂载点，包括YUV与RAW，例如MFNR/HDR</p></li><li><p>RawPlugin： RAW算法挂载点，例如remosaic</p></li><li><p>YuvPlugin： Yuv单帧算法挂载点，例如美颜、广角镜头畸变校正等</p></li></ul> 
+ <p>对号入座，将要集成的算法选择相应的plugin。这里是单帧算法，所以预览我们选择JoinPlugin，拍照选择YuvPlugin。</p> 
+ <h5>4.2 编写算法集成文件</h5> 
+ <p>参照FBImpl.cpp和sample_streaming_fb.cpp中分别实现拍照和预览。目录结构如下：<br>vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/tp_watermark/<br>├── Android.mk<br>├── include<br>│ └── watermark.h<br>├── lib<br>│ ├── arm64-v8a<br>│ │ └── libwatermark.so<br>│ └── armeabi-v7a<br>│ └── libwatermark.so<br>├── res<br>│ └── watermark.rgba<br>├── WatermarkCapture.cpp<br>└── WatermarkPreview.cpp</p> 
+ <p>文件说明：</p> 
+ <ul><li><p>Android.mk中配置算法库、头文件、集成的源代码CPP文件编译成库libmtkcam.plugin.tp_watermark，供libmtkcam_3rdparty.customer依赖调用。</p></li><li><p>集成的源代码CPP文件，WatermarkCapture.cpp用于拍照，WatermarkPreview.cpp用于预览。</p></li><li><p>libwatermark.so实现了添加水印的功能，libwatermark.so用来模拟需要接入的第三方算法库。watermark.h是头文件。</p></li><li><p>watermark.rgba是对应的水印文件。</p></li></ul> 
+ <h6>4.2.1 添加全局宏控</h6> 
+ <p>为了能控制某个项目是否集成此算法，我们在device/mediateksample/k63v2_64_bsp/ProjectConfig.mk中添加一个宏，用于控制新接入算法的编译：</p> 
+ <pre class="has"><code class="language-go">QXT_WATERMARK_SUPPORT = yes</code></pre> 
+ <p>当某个项目不需要新接入的算法时，将device/mediateksample/[platform]/ProjectConfig.mk的QXT_WA_SUPPORT的值设为 no 就可以了。</p> 
+ <h6>4.2.2 mtkcam3/3rdparty/customer/tp_watermark/Android.mk</h6> 
+ <pre class="has"><code class="language-go">ifeq ($(QXT_WATERMARK_SUPPORT),yes)
+LOCAL_PATH := $(call my-dir)
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := libwatermark
+LOCAL_SRC_FILES_32 := lib/armeabi-v7a/libwatermark.so
+LOCAL_SRC_FILES_64 := lib/arm64-v8a/libwatermark.so
+LOCAL_MODULE_TAGS := optional
+LOCAL_MODULE_CLASS := SHARED_LIBRARIES
+LOCAL_MODULE_SUFFIX := .so
+LOCAL_PROPRIETARY_MODULE := true
+LOCAL_MULTILIB := both
+include $(BUILD_PREBUILT)
+################################################################################
+
+include $(CLEAR_VARS)
+
+#-----------------------------------------------------------
+include $(TOP)/$(MTK_PATH_SOURCE)/hardware/mtkcam/mtkcam.mk
+
+#-----------------------------------------------------------
+LOCAL_SRC_FILES += WatermarkCapture.cpp
+LOCAL_SRC_FILES += WatermarkPreview.cpp
+
+#-----------------------------------------------------------
+LOCAL_C_INCLUDES += $(MTKCAM_C_INCLUDES)
+LOCAL_C_INCLUDES += $(TOP)/$(MTK_PATH_SOURCE)/hardware/mtkcam3/include
+LOCAL_C_INCLUDES += $(TOP)/$(MTK_PATH_SOURCE)/hardware/mtkcam/include
+#
+LOCAL_C_INCLUDES += system/media/camera/include
+LOCAL_C_INCLUDES += $(TOP)/external/libyuv/files/include/
+LOCAL_C_INCLUDES += $(TOP)/$(MTK_PATH_SOURCE)/hardware/mtkcam3/3rdparty/customer/tp_watermark/include
+
+#-----------------------------------------------------------
+LOCAL_CFLAGS += $(MTKCAM_CFLAGS)
+#
+
+#-----------------------------------------------------------
+LOCAL_STATIC_LIBRARIES +=
+#
+LOCAL_WHOLE_STATIC_LIBRARIES +=
+
+#-----------------------------------------------------------
+LOCAL_SHARED_LIBRARIES += liblog
+LOCAL_SHARED_LIBRARIES += libutils
+LOCAL_SHARED_LIBRARIES += libcutils
+LOCAL_SHARED_LIBRARIES += libmtkcam_modulehelper
+LOCAL_SHARED_LIBRARIES += libmtkcam_stdutils
+LOCAL_SHARED_LIBRARIES += libmtkcam_pipeline
+LOCAL_SHARED_LIBRARIES += libmtkcam_metadata
+LOCAL_SHARED_LIBRARIES += libmtkcam_metastore
+LOCAL_SHARED_LIBRARIES += libmtkcam_streamutils
+LOCAL_SHARED_LIBRARIES += libmtkcam_imgbuf
+LOCAL_SHARED_LIBRARIES += libyuv.vendor
+#-----------------------------------------------------------
+LOCAL_HEADER_LIBRARIES := libutils_headers liblog_headers libhardware_headers
+
+#-----------------------------------------------------------
+LOCAL_MODULE := libmtkcam.plugin.tp_watermark
+LOCAL_PROPRIETARY_MODULE := true
+LOCAL_MODULE_OWNER := mtk
+LOCAL_MODULE_TAGS := optional
+include $(MTK_STATIC_LIBRARY)
+################################################################################
+
+include $(call all-makefiles-under,$(LOCAL_PATH))
+endif</code></pre> 
+ <h6>4.2.3 mtkcam3/3rdparty/customer/tp_watermark/WatermarkCapture.cpp</h6> 
+ <p>主要函数介绍：</p> 
+ <ul><li><p>在property函数中feature类型设置我们在第三步中添加的TP_FEATURE_WATERMARK，并设置名称、优先级等等属性。</p></li><li><p>在negotiate函数中配置算法需要的输入、输出图像的格式、尺寸。</p></li><li><p>在negotiate函数或者process函数中获取上层传下来的metadata参数，根据参数决定算法是否运行，或者将参数传给算法。</p></li><li><p>在process函数中接入算法。</p></li></ul> 
+ <p>注意：</p> 
+ <blockquote> 
+  <p>MTK原文：<br>negotiate函数设置格式时，一个挂载点如果挂载多个同类型的plugin，则只有第一个 plugin 中的 negotiate 中的 input buffer 设定有效。<br>在YUVNode 下挂载单帧 YUV plugin时，一定要确保 MTK 平台的SWNR plugin 的 negotiate 直接返回不OK，不做任何 accepted format 等的设定。否则，可能会出现因 SWNR plugin和三方plugin negotiate时设定的 accepted format 不一致而导致的三方 plugin 拿不到它想要的 format 的buffer。</p> 
+ </blockquote> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/mtk/swnr/SWNRImpl.cpp：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/mtk/swnr/SWNRImpl.cpp b/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/mtk/swnr/SWNRImpl.cpp
+old mode 100644
+new mode 100755
+index 0ae951cc83..c4819068f7
+--- a/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/mtk/swnr/SWNRImpl.cpp
++++ b/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/mtk/swnr/SWNRImpl.cpp
+@@ -340,7 +340,7 @@ negotiate(Selection&amp; sel)
+     sel.mOMetadataApp.setRequired(false);
+     sel.mOMetadataHal.setRequired(true);
+
+-    return OK;
++    return -EINVAL;//OK;
+ }</code></pre> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/tp_watermark/WatermarkCapture.cpp：</p> 
+ <pre class="has"><code class="language-go">#define LOG_TAG "WatermarkCapture"
+//
+#include &lt;mtkcam/utils/std/Log.h&gt;
+//
+#include &lt;stdlib.h&gt;
+#include &lt;utils/Errors.h&gt;
+#include &lt;utils/List.h&gt;
+#include &lt;utils/RefBase.h&gt;
+#include &lt;sstream&gt;
+//
+#include &lt;mtkcam/utils/metadata/client/mtk_metadata_tag.h&gt;
+#include &lt;mtkcam/utils/metadata/hal/mtk_platform_metadata_tag.h&gt;
+//
+//
+#include &lt;mtkcam/utils/imgbuf/IIonImageBufferHeap.h&gt;
+//
+#include &lt;mtkcam/drv/IHalSensor.h&gt;
+#include &lt;mtkcam/utils/std/Format.h&gt;
+//
+#include &lt;mtkcam3/pipeline/hwnode/NodeId.h&gt;
+
+#include &lt;mtkcam/utils/metastore/ITemplateRequest.h&gt;
+#include &lt;mtkcam/utils/metastore/IMetadataProvider.h&gt;
+#include &lt;mtkcam3/3rdparty/plugin/PipelinePlugin.h&gt;
+#include &lt;mtkcam3/3rdparty/plugin/PipelinePluginType.h&gt;
+
+#include &lt;stdlib.h&gt;
+#include &lt;watermark.h&gt;
+#include &lt;mtkcam/utils/std/Time.h&gt;
+#include &lt;time.h&gt;
+#include &lt;libyuv.h&gt;
+//
+using namespace NSCam;
+using namespace android;
+using namespace std;
+using namespace NSCam::NSPipelinePlugin;
+/******************************************************************************
+ *
+ ******************************************************************************/
+#define MY_LOGV(fmt, arg...)        CAM_LOGV("(%d)[%s] " fmt, ::gettid(), __FUNCTION__, ##arg)
+#define MY_LOGD(fmt, arg...)        CAM_LOGD("(%d)[%s] " fmt, ::gettid(), __FUNCTION__, ##arg)
+#define MY_LOGI(fmt, arg...)        CAM_LOGI("(%d)[%s] " fmt, ::gettid(), __FUNCTION__, ##arg)
+#define MY_LOGW(fmt, arg...)        CAM_LOGW("(%d)[%s] " fmt, ::gettid(), __FUNCTION__, ##arg)
+#define MY_LOGE(fmt, arg...)        CAM_LOGE("(%d)[%s] " fmt, ::gettid(), __FUNCTION__, ##arg)
+//
+#define FUNCTION_IN                 MY_LOGD("%s +", __FUNCTION__)
+#define FUNCTION_OUT                MY_LOGD("%s -", __FUNCTION__)
+//systrace
+#if 1
+#ifndef ATRACE_TAG
+#define ATRACE_TAG                           ATRACE_TAG_CAMERA
+#endif
+#include &lt;utils/Trace.h&gt;
+
+#define WATERMARK_TRACE_CALL()                      ATRACE_CALL()
+#define WATERMARK_TRACE_NAME(name)                  ATRACE_NAME(name)
+#define WATERMARK_TRACE_BEGIN(name)                 ATRACE_BEGIN(name)
+#define WATERMARK_TRACE_END()                       ATRACE_END()
+#else
+#define WATERMARK_TRACE_CALL()
+#define WATERMARK_TRACE_NAME(name)
+#define WATERMARK_TRACE_BEGIN(name)
+#define WATERMARK_TRACE_END()
+#endif
+
+template &lt;class T&gt;
+inline bool
+tryGetMetadata(IMetadata const *pMetadata, MUINT32 tag, T&amp; rVal)
+{
+    if(pMetadata == nullptr) return MFALSE;
+
+    IMetadata::IEntry entry = pMetadata-&gt;entryFor(tag);
+    if(!entry.isEmpty())
+    {
+        rVal = entry.itemAt(0,Type2Type&lt;T&gt;());
+        return true;
+    }
+    else
+    {
+#define var(v) #v
+#define type(t) #t
+        MY_LOGW("no metadata %s in %s", var(tag), type(pMetadata));
+#undef type
+#undef var
+    }
+    return false;
+}
+
+/******************************************************************************
+*
+******************************************************************************/
+class WatermarkCapture : public YuvPlugin::IProvider {
+
+public:
+    typedef YuvPlugin::Property Property;
+    typedef YuvPlugin::Selection Selection;
+    typedef YuvPlugin::Request::Ptr RequestPtr;
+    typedef YuvPlugin::RequestCallback::Ptr RequestCallbackPtr;
+
+private:
+    int mOpenid;
+
+    MBOOL mEnable = 1;
+    MBOOL mDump = 0;
+    unsigned char *mSrcRGBA = nullptr;
+    unsigned char *mWatermarkRGBA = nullptr;
+    int mWatermarkWidth = 0;
+    int mWatermarkHeight = 0;
+
+public:
+    WatermarkCapture();
+
+    ~WatermarkCapture();
+
+    void init();
+
+    void uninit();
+
+    void abort(vector &lt;RequestPtr&gt; &amp;pRequests);
+
+    void set(MINT32 iOpenId, MINT32 iOpenId2);
+
+    const Property &amp;property();
+
+    MERROR negotiate(Selection &amp;sel);
+
+    MERROR process(RequestPtr pRequest, RequestCallbackPtr pCallback);
+
+};
+
+WatermarkCapture::WatermarkCapture() : mOpenid(-1) {
+    FUNCTION_IN;
+    mEnable = property_get_bool("vendor.debug.camera.watermark.capture.enable", 1);
+    mDump = property_get_bool("vendor.debug.camera.watermark.capture.dump", 0);
+    FUNCTION_OUT;
+}
+
+WatermarkCapture::~WatermarkCapture() {
+    FUNCTION_IN;
+    FUNCTION_OUT;
+}
+
+void WatermarkCapture::init() {
+    FUNCTION_IN;
+    mWatermarkWidth = 180;
+    mWatermarkHeight = 640;
+    int watermarkSize = mWatermarkWidth * mWatermarkHeight * 4;
+    mWatermarkRGBA = (unsigned char *) malloc(watermarkSize);
+
+    FILE *fp;
+    char path[256];
+    snprintf(path, sizeof(path), "/vendor/res/images/watermark.rgba");
+    if ((fp = fopen(path, "r")) == NULL) {
+        MY_LOGE("Failed to open /vendor/res/images/watermark.rgba");
+    }
+    fread(mWatermarkRGBA, 1, watermarkSize, fp);
+    fclose(fp);
+    FUNCTION_OUT;
+}
+
+void WatermarkCapture::uninit() {
+    FUNCTION_IN;
+    free(mWatermarkRGBA);
+    FUNCTION_OUT;
+}
+
+void WatermarkCapture::abort(vector &lt;RequestPtr&gt; &amp;pRequests) {
+    FUNCTION_IN;
+    (void)pRequests;
+    FUNCTION_OUT;
+}
+
+void WatermarkCapture::set(MINT32 iOpenId, MINT32 iOpenId2) {
+    FUNCTION_IN;
+    MY_LOGD("set openId:%d openId2:%d", iOpenId, iOpenId2);
+    mOpenid = iOpenId;
+    FUNCTION_OUT;
+}
+
+const WatermarkCapture::Property &amp;WatermarkCapture::property() {
+    FUNCTION_IN;
+    static Property prop;
+    static bool inited;
+
+    if (!inited) {
+        prop.mName = "TP_WATERMARK";
+        prop.mFeatures = TP_FEATURE_WATERMARK;
+        prop.mInPlace = MTRUE;
+        prop.mFaceData = eFD_Current;
+        prop.mPosition = 0;
+        inited = true;
+    }
+    FUNCTION_OUT;
+    return prop;
+}
+
+MERROR WatermarkCapture::negotiate(Selection &amp;sel) {
+    FUNCTION_IN;
+    if (!mEnable) {
+        MY_LOGD("Force off TP_WATERMARK");
+        FUNCTION_OUT;
+        return -EINVAL;
+    }
+
+    sel.mIBufferFull
+            .setRequired(MTRUE)
+            .addAcceptedFormat(eImgFmt_I420)
+            .addAcceptedSize(eImgSize_Full);
+
+    sel.mIMetadataDynamic.setRequired(MTRUE);
+    sel.mIMetadataApp.setRequired(MTRUE);
+    sel.mIMetadataHal.setRequired(MTRUE);
+    sel.mOMetadataApp.setRequired(MTRUE);
+    sel.mOMetadataHal.setRequired(MTRUE);
+
+    FUNCTION_OUT;
+    return OK;
+}
+
+MERROR WatermarkCapture::process(RequestPtr pRequest,
+                               RequestCallbackPtr pCallback = nullptr) {
+    FUNCTION_IN;
+    WATERMARK_TRACE_CALL();
+
+    MBOOL needRun = MFALSE;
+    if (pRequest-&gt;mIBufferFull != nullptr &amp;&amp; pRequest-&gt;mOBufferFull != nullptr) {
+        IImageBuffer *pIBufferFull = pRequest-&gt;mIBufferFull-&gt;acquire();
+        IImageBuffer *pOBufferFull = pRequest-&gt;mOBufferFull-&gt;acquire();
+
+        if (pRequest-&gt;mIMetadataDynamic != nullptr) {
+            IMetadata *meta = pRequest-&gt;mIMetadataDynamic-&gt;acquire();
+            if (meta != NULL)
+                MY_LOGD("[IN] Dynamic metadata count: %d", meta-&gt;count());
+            else
+                MY_LOGD("[IN] Dynamic metadata empty");
+        }
+
+        int frameNo = 0, requestNo = 0;
+        if (pRequest-&gt;mIMetadataHal != nullptr) {
+            IMetadata *pIMetataHAL = pRequest-&gt;mIMetadataHal-&gt;acquire();
+            if (pIMetataHAL != NULL) {
+                MY_LOGD("[IN] HAL metadata count: %d", pIMetataHAL-&gt;count());
+                if (!tryGetMetadata&lt;int&gt;(pIMetataHAL, MTK_PIPELINE_FRAME_NUMBER, frameNo)) {
+                    frameNo = 0;
+                }
+                if (!tryGetMetadata&lt;int&gt;(pIMetataHAL, MTK_PIPELINE_REQUEST_NUMBER, requestNo)) {
+                    requestNo = 0;
+                }
+                MY_LOGD("frameNo: %d, requestNo: %d", frameNo, requestNo);
+            } else {
+                MY_LOGD("[IN] HAL metadata empty");
+            }
+        }
+
+        if (pRequest-&gt;mIMetadataApp != nullptr) {
+            IMetadata *pIMetadataApp = pRequest-&gt;mIMetadataApp-&gt;acquire();
+            MINT32 mode = 0;
+            if (!tryGetMetadata&lt;MINT32&gt;(pIMetadataApp, QXT_FEATURE_WATERMARK, mode)) {
+                mode = 0;
+            }
+            needRun = mode == 1 ? 1 : 0;
+        }
+        MY_LOGD("needRun: %d", needRun);
+
+        int width = pIBufferFull-&gt;getImgSize().w;
+        int height = pIBufferFull-&gt;getImgSize().h;
+        MINT inFormat = pIBufferFull-&gt;getImgFormat();
+
+        if (needRun &amp;&amp; inFormat == NSCam::eImgFmt_I420) {
+            uint32_t currentTime = (NSCam::Utils::TimeTool::getReadableTime()) % 1000;
+            time_t timep;
+            time (&amp;timep);
+            char currentDate[20];
+            strftime(currentDate, sizeof(currentDate), "%Y%m%d_%H%M%S", localtime(&amp;timep));
+
+            //dump input I420
+            if (mDump) {
+                char path[256];
+                snprintf(path, sizeof(path), "/data/vendor/camera_dump/capture_in_frame%d_%dx%d_%s_%d.i420",
+                    frameNo, width, height, currentDate, currentTime);
+                pIBufferFull-&gt;saveToFile(path);
+            }
+
+            nsecs_t t1 = systemTime(CLOCK_MONOTONIC);
+            if (mSrcRGBA == NULL) {
+                mSrcRGBA = (unsigned char *) malloc(width * height * 4);
+            }
+            //convert I420 to RGBA
+            libyuv::I420ToABGR((unsigned char *) (pIBufferFull-&gt;getBufVA(0)), width,
+                               (unsigned char *) (pIBufferFull-&gt;getBufVA(1)), width &gt;&gt; 1,
+                               (unsigned char *) (pIBufferFull-&gt;getBufVA(2)), width &gt;&gt; 1,
+                               mSrcRGBA, width * 4,
+                               width, height);
+            nsecs_t t2 = systemTime(CLOCK_MONOTONIC);
+            MY_LOGD("Prepare src cost %02ld ms", ns2ms(t2 - t1));
+
+            Watermark::add(mSrcRGBA, width, height, mWatermarkRGBA, mWatermarkWidth, mWatermarkHeight, (width - mWatermarkWidth) / 2, (height - mWatermarkHeight) / 2);
+            nsecs_t t3 = systemTime(CLOCK_MONOTONIC);
+            MY_LOGD("Add watermark cost %02ld ms", ns2ms(t3 - t2));
+
+            //convert RGBA to I420
+            libyuv::ABGRToI420(mSrcRGBA, width * 4,
+                               (unsigned char *) (pOBufferFull-&gt;getBufVA(0)), width,
+                               (unsigned char *) (pOBufferFull-&gt;getBufVA(1)), width &gt;&gt; 1,
+                               (unsigned char *) (pOBufferFull-&gt;getBufVA(2)), width &gt;&gt; 1,
+                               width, height);
+            nsecs_t t4 = systemTime(CLOCK_MONOTONIC);
+            MY_LOGD("Copy in to out cost %02ld ms", ns2ms(t4 - t3));
+
+            //dump output I420
+            if (mDump) {
+                char path[256];
+                snprintf(path, sizeof(path), "/data/vendor/camera_dump/capture_out_frame%d_%dx%d_%s_%d.i420",
+                    frameNo, width, height, currentDate, currentTime);
+                pOBufferFull-&gt;saveToFile(path);
+            }
+            free(mSrcRGBA);
+        } else {
+            if (!needRun) {
+                MY_LOGE("No need run, skip add watermark for capture.");
+            } else if (inFormat != NSCam::eImgFmt_YV12) {
+                MY_LOGE("Unsupported format, skip add watermark for capture.");
+            } else {
+                MY_LOGE("Unknown exception, skip add watermark for capture.");
+            }
+
+            memcpy((unsigned char *) (pOBufferFull-&gt;getBufVA(0)),
+                   (unsigned char *) (pIBufferFull-&gt;getBufVA(0)),
+                   pIBufferFull-&gt;getBufSizeInBytes(0));
+            memcpy((unsigned char *) (pOBufferFull-&gt;getBufVA(1)),
+                   (unsigned char *) (pIBufferFull-&gt;getBufVA(1)),
+                   pIBufferFull-&gt;getBufSizeInBytes(1));
+            memcpy((unsigned char *) (pOBufferFull-&gt;getBufVA(2)),
+                   (unsigned char *) (pIBufferFull-&gt;getBufVA(2)),
+                   pIBufferFull-&gt;getBufSizeInBytes(2));
+        }
+
+        pRequest-&gt;mIBufferFull-&gt;release();
+        pRequest-&gt;mOBufferFull-&gt;release();
+
+        if (pRequest-&gt;mIMetadataDynamic != nullptr) {
+            pRequest-&gt;mIMetadataDynamic-&gt;release();
+        }
+
+        if (pRequest-&gt;mIMetadataHal != nullptr) {
+            pRequest-&gt;mIMetadataHal-&gt;release();
+        }
+
+        if (pRequest-&gt;mIMetadataApp != nullptr) {
+            pRequest-&gt;mIMetadataApp-&gt;release();
+        }
+    }
+
+    if (pCallback != nullptr) {
+        MY_LOGD("callback request");
+        pCallback-&gt;onCompleted(pRequest, 0);
+    }
+    FUNCTION_OUT;
+    return OK;
+}
+
+REGISTER_PLUGIN_PROVIDER(Yuv, WatermarkCapture);</code></pre> 
+ <h6>4.2.4 mtkcam3/3rdparty/customer/tp_watermark/WatermarkPreview.cpp</h6> 
+ <pre class="has"><code class="language-go">#include &lt;mtkcam3/3rdparty/plugin/PipelinePluginType.h&gt;
+#include &lt;mtkcam/utils/metadata/hal/mtk_platform_metadata_tag.h&gt;
+#include &lt;mtkcam/utils/metadata/client/mtk_metadata_tag.h&gt;
+
+#include &lt;cutils/properties.h&gt;
+
+#include &lt;watermark.h&gt;
+#include &lt;mtkcam/utils/std/Time.h&gt;
+#include &lt;time.h&gt;
+#include &lt;libyuv.h&gt;
+#include &lt;dlfcn.h&gt;
+
+using NSCam::NSPipelinePlugin::Interceptor;
+using NSCam::NSPipelinePlugin::PipelinePlugin;
+using NSCam::NSPipelinePlugin::PluginRegister;
+using NSCam::NSPipelinePlugin::Join;
+using NSCam::NSPipelinePlugin::JoinPlugin;
+
+using namespace NSCam::NSPipelinePlugin;
+using NSCam::MSize;
+
+using NSCam::MERROR;
+using NSCam::IImageBuffer;
+using NSCam::IMetadata;
+using NSCam::Type2Type;
+
+#ifdef LOG_TAG
+#undef LOG_TAG
+#endif // LOG_TAG
+#define LOG_TAG "WatermarkPreview"
+
+#include &lt;log/log.h&gt;
+#include &lt;android/log.h&gt;
+
+#define MY_LOGI(fmt, arg...)  ALOGI("[%s] " fmt, __FUNCTION__, ##arg)
+#define MY_LOGD(fmt, arg...)  ALOGD("[%s] " fmt, __FUNCTION__, ##arg)
+#define MY_LOGW(fmt, arg...)  ALOGW("[%s] " fmt, __FUNCTION__, ##arg)
+#define MY_LOGE(fmt, arg...)  ALOGE("[%s] " fmt, __FUNCTION__, ##arg)
+#define FUNCTION_IN   MY_LOGD("%s +", __FUNCTION__)
+#define FUNCTION_OUT  MY_LOGD("%s -", __FUNCTION__)
+
+template &lt;class T&gt;
+inline bool
+tryGetMetadata(IMetadata const *pMetadata, MUINT32 tag, T&amp; rVal)
+{
+    if(pMetadata == nullptr) return MFALSE;
+
+    IMetadata::IEntry entry = pMetadata-&gt;entryFor(tag);
+    if(!entry.isEmpty())
+    {
+        rVal = entry.itemAt(0,Type2Type&lt;T&gt;());
+        return true;
+    }
+    else
+    {
+#define var(v) #v
+#define type(t) #t
+        MY_LOGW("no metadata %s in %s", var(tag), type(pMetadata));
+#undef type
+#undef var
+    }
+    return false;
+}
+
+class WatermarkPreview : public JoinPlugin::IProvider {
+public:
+    typedef JoinPlugin::Property Property;
+    typedef JoinPlugin::Selection Selection;
+    typedef JoinPlugin::Request::Ptr RequestPtr;
+    typedef JoinPlugin::RequestCallback::Ptr RequestCallbackPtr;
+
+private:
+    bool mDisponly = false;
+    bool mInplace = false;
+    int mOpenID1 = 0;
+    int mOpenID2 = 0;
+
+    MBOOL mEnable = 1;
+    MBOOL mDump = 0;
+    unsigned char *mSrcRGBA = nullptr;
+    unsigned char *mWatermarkRGBA = nullptr;
+    int mWatermarkWidth = 0;
+    int mWatermarkHeight = 0;
+
+public:
+    WatermarkPreview();
+
+    ~WatermarkPreview();
+
+    void init();
+
+    void uninit();
+
+    void abort(std::vector &lt;RequestPtr&gt; &amp;pRequests);
+
+    void set(MINT32 openID1, MINT32 openID2);
+
+    const Property &amp;property();
+
+    MERROR negotiate(Selection &amp;sel);
+
+    MERROR process(RequestPtr pRequest, RequestCallbackPtr pCallback);
+
+private:
+    MERROR getConfigSetting(Selection &amp;sel);
+
+    MERROR getP1Setting(Selection &amp;sel);
+
+    MERROR getP2Setting(Selection &amp;sel);
+};
+
+WatermarkPreview::WatermarkPreview() {
+    FUNCTION_IN;
+    mEnable = property_get_bool("vendor.debug.camera.watermark.preview.enable", 1);
+    mDump = property_get_bool("vendor.debug.camera.watermark.preview.dump", 0);
+    FUNCTION_OUT;
+}
+
+WatermarkPreview::~WatermarkPreview() {
+    FUNCTION_IN;
+    FUNCTION_OUT;
+}
+
+void WatermarkPreview::init() {
+    FUNCTION_IN;
+    mWatermarkWidth = 180;
+    mWatermarkHeight = 640;
+    int watermarkSize = mWatermarkWidth * mWatermarkHeight * 4;
+    mWatermarkRGBA = (unsigned char *) malloc(watermarkSize);
+
+    FILE *fp;
+    char path[256];
+    snprintf(path, sizeof(path), "/vendor/res/images/watermark.rgba");
+    if ((fp = fopen(path, "r")) == NULL) {
+        MY_LOGE("Failed to open /vendor/res/images/watermark.rgba");
+    }
+    fread(mWatermarkRGBA, 1, watermarkSize, fp);
+    fclose(fp);
+    FUNCTION_OUT;
+}
+
+void WatermarkPreview::uninit() {
+    FUNCTION_IN;
+    free(mSrcRGBA);
+    free(mWatermarkRGBA);
+    FUNCTION_OUT;
+}
+
+void WatermarkPreview::abort(std::vector &lt;RequestPtr&gt; &amp;pRequests) {
+    FUNCTION_IN;
+    (void)pRequests;
+    FUNCTION_OUT;
+}
+
+void WatermarkPreview::set(MINT32 openID1, MINT32 openID2) {
+    FUNCTION_IN;
+    MY_LOGD("set openID1:%d openID2:%d", openID1, openID2);
+    mOpenID1 = openID1;
+    mOpenID2 = openID2;
+    FUNCTION_OUT;
+}
+
+const WatermarkPreview::Property &amp;WatermarkPreview::property() {
+    FUNCTION_IN;
+    static Property prop;
+    static bool inited;
+
+    if (!inited) {
+        prop.mName = "TP_WATERMARK";
+        prop.mFeatures = TP_FEATURE_WATERMARK;
+        //prop.mInPlace = MTRUE;
+        //prop.mFaceData = eFD_Current;
+        //prop.mPosition = 0;
+        inited = true;
+    }
+    FUNCTION_OUT;
+    return prop;
+}
+
+MERROR WatermarkPreview::negotiate(Selection &amp;sel) {
+    FUNCTION_IN;
+    MERROR ret = OK;
+
+    if (sel.mSelStage == eSelStage_CFG) {
+        ret = getConfigSetting(sel);
+    } else if (sel.mSelStage == eSelStage_P1) {
+        ret = getP1Setting(sel);
+    } else if (sel.mSelStage == eSelStage_P2) {
+        ret = getP2Setting(sel);
+    }
+    FUNCTION_OUT;
+    return ret;
+}
+
+MERROR WatermarkPreview::process(RequestPtr pRequest, RequestCallbackPtr pCallback) {
+    FUNCTION_IN;
+    (void) pCallback;
+    MERROR ret = -EINVAL;
+    MBOOL needRun = MFALSE;
+    IImageBuffer *in = NULL, *out = NULL;
+
+    if (pRequest-&gt;mIBufferMain1 != NULL &amp;&amp; pRequest-&gt;mOBufferMain1 != NULL) {
+        in = pRequest-&gt;mIBufferMain1-&gt;acquire();
+        out = pRequest-&gt;mOBufferMain1-&gt;acquire();
+
+        int frameNo = 0, requestNo = 0;
+        if (pRequest-&gt;mIMetadataHal1 != nullptr) {
+            IMetadata *pIMetataHAL1 = pRequest-&gt;mIMetadataHal1-&gt;acquire();
+            if (pIMetataHAL1 != NULL) {
+                if (!tryGetMetadata&lt;int&gt;(pIMetataHAL1, MTK_PIPELINE_FRAME_NUMBER, frameNo)) {
+                    frameNo = 0;
+                }
+                if (!tryGetMetadata&lt;int&gt;(pIMetataHAL1, MTK_PIPELINE_REQUEST_NUMBER, requestNo)) {
+                    requestNo = 0;
+                }
+                pRequest-&gt;mIMetadataHal1-&gt;release();
+                MY_LOGD("frameNo: %d, requestNo: %d", frameNo, requestNo);
+            } else {
+                MY_LOGD("HAL metadata empty");
+            }
+        }
+
+        MY_LOGD("in[%d](%dx%d)=%p out[%d](%dx%d)=%p",
+                in-&gt;getPlaneCount(), in-&gt;getImgSize().w, in-&gt;getImgSize().h, in,
+                out-&gt;getPlaneCount(), out-&gt;getImgSize().w, out-&gt;getImgSize().h, out);
+
+        if (pRequest-&gt;mIMetadataApp != nullptr) {
+            IMetadata *pIMetadataApp = pRequest-&gt;mIMetadataApp-&gt;acquire();
+            MINT32 mode = 0;
+            if (!tryGetMetadata&lt;MINT32&gt;(pIMetadataApp, QXT_FEATURE_WATERMARK, mode)) {
+                mode = 0;
+            }
+            needRun = mode == 1 ? 1 : 0;
+            pRequest-&gt;mIMetadataApp-&gt;release();
+        }
+        MY_LOGD("needRun: %d", needRun);
+
+        int width = in-&gt;getImgSize().w;
+        int height = in-&gt;getImgSize().h;
+        MINT inFormat = in-&gt;getImgFormat();
+
+        if (needRun &amp;&amp; inFormat == NSCam::eImgFmt_YV12) {
+            uint32_t currentTime = (NSCam::Utils::TimeTool::getReadableTime()) % 1000;
+            time_t timep;
+            time (&amp;timep);
+            char currentDate[20];
+            strftime(currentDate, sizeof(currentDate), "%Y%m%d_%H%M%S", localtime(&amp;timep));
+
+            //dump input YV12
+            if (mDump) {
+                char path[256];
+                snprintf(path, sizeof(path), "/data/vendor/camera_dump/preview_in_frame%d_%dx%d_%s_%d.yv12",
+                    frameNo, width, height, currentDate, currentTime);
+                in-&gt;saveToFile(path);
+            }
+
+            nsecs_t t1 = systemTime(CLOCK_MONOTONIC);
+            if (mSrcRGBA == NULL) {
+                mSrcRGBA = (unsigned char *) malloc(width * height * 4);
+            }
+            //convert YV12 to RGBA
+            libyuv::I420ToABGR((unsigned char *)(in-&gt;getBufVA(0)), width,
+                               (unsigned char *)(in-&gt;getBufVA(2)), width &gt;&gt; 1,
+                               (unsigned char *)(in-&gt;getBufVA(1)), width &gt;&gt; 1,
+                               mSrcRGBA, width * 4,
+                               width, height);
+            nsecs_t t2 = systemTime(CLOCK_MONOTONIC);
+            MY_LOGD("Prepare src cost %02ld ms", ns2ms(t2 - t1));
+
+            Watermark::add(mSrcRGBA, width, height, mWatermarkRGBA, mWatermarkWidth, mWatermarkHeight, (width - mWatermarkWidth) / 2, (height - mWatermarkHeight) / 2);
+            nsecs_t t3 = systemTime(CLOCK_MONOTONIC);
+            MY_LOGD("Add watermark cost %02ld ms", ns2ms(t3 - t2));
+
+            //convert RGBA to YV12
+            libyuv::ABGRToI420(mSrcRGBA, width * 4,
+                               (unsigned char *)(out-&gt;getBufVA(0)), width,
+                               (unsigned char *)(out-&gt;getBufVA(2)), width &gt;&gt; 1,
+                               (unsigned char *)(out-&gt;getBufVA(1)), width &gt;&gt; 1,
+                               width, height);
+            nsecs_t t4 = systemTime(CLOCK_MONOTONIC);
+            MY_LOGD("Copy in to out cost %02ld ms", ns2ms(t4 - t3));
+
+            //dump output YV12
+            if (mDump) {
+                char path[256];
+                snprintf(path, sizeof(path), "/data/vendor/camera_dump/preview_out_frame%d_%dx%d_%s_%d.yv12",
+                    frameNo, width, height, currentDate, currentTime);
+                out-&gt;saveToFile(path);
+            }
+
+        } else {
+            if (!needRun) {
+                MY_LOGE("No need run, skip add watermark for preview.");
+            } else if (inFormat != NSCam::eImgFmt_YV12) {
+                MY_LOGE("Unsupported format, skip add watermark for preview.");
+            } else {
+                MY_LOGE("Unknown exception, skip add watermark for preview.");
+            }
+            memcpy((unsigned char *) (out-&gt;getBufVA(0)),
+                   (unsigned char *)(in-&gt;getBufVA(0)),
+                   in-&gt;getBufSizeInBytes(0));
+            memcpy((unsigned char *) (out-&gt;getBufVA(1)),
+                   (unsigned char *)(in-&gt;getBufVA(1)),
+                   in-&gt;getBufSizeInBytes(1));
+            memcpy((unsigned char *) (out-&gt;getBufVA(2)),
+                   (unsigned char *)(in-&gt;getBufVA(2)),
+                   in-&gt;getBufSizeInBytes(2));
+        }
+
+        pRequest-&gt;mIBufferMain1-&gt;release();
+        pRequest-&gt;mOBufferMain1-&gt;release();
+        ret = OK;
+    }
+
+    FUNCTION_OUT;
+    return ret;
+}
+
+MERROR WatermarkPreview::getConfigSetting(Selection &amp;sel) {
+    MY_LOGI("max out size(%dx%d)",
+            sel.mCfgInfo.mMaxOutSize.w, sel.mCfgInfo.mMaxOutSize.h);
+
+    mDisponly = property_get_bool("vendor.debug.tpi.s.fb.disponly", 0);
+    mInplace = mDisponly || property_get_bool("vendor.debug.tpi.s.fb.inplace", 0);
+
+    sel.mCfgOrder = 3;
+    sel.mCfgJoinEntry = eJoinEntry_S_YUV;
+    sel.mCfgInplace = mInplace;
+    sel.mCfgEnableFD = MTRUE;
+    sel.mCfgRun = mEnable;
+    sel.mIBufferMain1.setRequired(MTRUE);
+    if (!mDisponly &amp;&amp; property_get_bool("vendor.debug.tpi.s.fb.nv21", 0)) {
+        sel.mIBufferMain1.addAcceptedFormat(NSCam::eImgFmt_NV21);
+    }
+    if (!mDisponly &amp;&amp; property_get_bool("vendor.debug.tpi.s.fb.size", 0)) {
+        sel.mIBufferMain1.setSpecifiedSize(sel.mCfgInfo.mMaxOutSize);
+    }
+    sel.mOBufferMain1.setRequired(MTRUE);
+    sel.mIBufferMain1.addAcceptedFormat(NSCam::eImgFmt_YV12);
+    sel.mIBufferMain1.addAcceptedSize(eImgSize_Full);
+
+    IMetadata *meta = sel.mIMetadataApp.getControl().get();
+    MY_LOGD("sessionMeta=%p", meta);
+
+    return OK;
+}
+
+MERROR WatermarkPreview::getP1Setting(Selection &amp;sel) {
+    (void) sel;
+    return OK;
+}
+
+MERROR WatermarkPreview::getP2Setting(Selection &amp;sel) {
+    MBOOL run = MTRUE;
+    sel.mP2Run = run;
+    return OK;
+}
+
+REGISTER_PLUGIN_PROVIDER(Join, WatermarkPreview);</code></pre> 
+ <h6>4.2.5 mtkcam3/3rdparty/customer/Android.mk</h6> 
+ <p>最终vendor.img需要的目标共享库是libmtkcam_3rdparty.customer.so。因此，我们还需要修改Android.mk，使模块libmtkcam_3rdparty.customer依赖libmtkcam.plugin.tp_watermark。vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/Android.mk：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/Android.mk b/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/Android.mk
+old mode 100644
+new mode 100755
+index ce060c39f9..ff5763d3c2
+--- a/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/Android.mk
++++ b/vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/Android.mk
+@@ -70,6 +70,13 @@ LOCAL_WHOLE_STATIC_LIBRARIES += libmtkcam.plugin.tp_purebokeh
+ LOCAL_SHARED_LIBRARIES += libcam.iopipe
+ LOCAL_SHARED_LIBRARIES += libmtkcam_modulehelper
+ endif
++
++ifeq ($(QXT_WATERMARK_SUPPORT), yes)
++LOCAL_SHARED_LIBRARIES += libwatermark
++LOCAL_SHARED_LIBRARIES += libyuv.vendor
++LOCAL_WHOLE_STATIC_LIBRARIES += libmtkcam.plugin.tp_watermark
++endif
++
+ # for app super night ev decision (experimental for customer only)
+ LOCAL_WHOLE_STATIC_LIBRARIES += libmtkcam.control.customersupernightevdecision</code></pre> 
+ <h6>4.2.6 预置水印文件</h6> 
+ <pre class="has"><code class="language-go">diff --git a/device/mediateksample/k63v2_64_bsp/device.mk b/device/mediateksample/k63v2_64_bsp/device.mk
+index 2619000c72..048c33462e 100644
+--- a/device/mediateksample/k63v2_64_bsp/device.mk
++++ b/device/mediateksample/k63v2_64_bsp/device.mk
+@@ -98,6 +98,9 @@ PRODUCT_COPY_FILES += vendor/mediatek/proprietary/custom/k63v2_64_bsp/factory/re
+ PRODUCT_COPY_FILES += vendor/mediatek/proprietary/custom/k63v2_64_bsp/factory/res/images/lcd_test_01.png:$(TARGET_COPY_OUT_VENDOR)/res/images/lcd_test_01.png:mtk
+ PRODUCT_COPY_FILES += vendor/mediatek/proprietary/custom/k63v2_64_bsp/factory/res/images/lcd_test_02.png:$(TARGET_COPY_OUT_VENDOR)/res/images/lcd_test_02.png:mtk
+
++ifeq ($(QXT_WATERMARK_SUPPORT),yes)
++PRODUCT_COPY_FILES += vendor/mediatek/proprietary/hardware/mtkcam3/3rdparty/customer/tp_watermark/res/watermark.rgba::$(TARGET_COPY_OUT_VENDOR)/res/images/watermark.rgba
++endif
+
+ # overlay has priorities. high &lt;-&gt; low.</code></pre> 
+ <p>camera hal进程为mtk_camera_hal，它要读取/vendor/res/images/watermark.rgba，读取需要vendor_file SELinux权限。这里为mtk_camera_hal配置SELinux权限：</p> 
+ <pre class="has"><code class="language-go">diff --git a/device/mediatek/sepolicy/bsp/non_plat/mtk_hal_camera.te b/device/mediatek/sepolicy/bsp/non_plat/mtk_hal_camera.te
+index 8de5d0a437..7ebd9a03e5 100644
+--- a/device/mediatek/sepolicy/bsp/non_plat/mtk_hal_camera.te
++++ b/device/mediatek/sepolicy/bsp/non_plat/mtk_hal_camera.te
+@@ -92,6 +92,7 @@ allow mtk_hal_camera sysfs_boot_mode:file { read open };
+ # Purpose: NDD
+ allow mtk_hal_camera vendor_data_file:dir create_dir_perms;
+ allow mtk_hal_camera vendor_data_file:file create_file_perms;
++allow mtk_hal_camera vendor_file:file { read getattr open };</code></pre> 
+ <h4>五、自定义metadata</h4> 
+ <p>添加metadata是为了让APP层能够通过metadata传递相应的参数给HAL层。APP层是通过CaptureRequest.Builder.set(@NonNull Key&lt;T&gt; key, T value)来设置参数的。<br>由于我们是自定义的feature，无法复用MTK提供的metadata，因此，我们需要自定义metadata。<br>vendor/mediatek/proprietary/hardware/mtkcam/include/mtkcam/utils/metadata/client/mtk_metadata_tag.h：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam/include/mtkcam/utils/metadata/client/mtk_metadata_tag.h b/vendor/mediatek/proprietary/hardware/mtkcam/include/mtkcam/utils/metadata/client/mtk_metadata_tag.h
+index 22d4aa2bf2..b020352092 100755
+--- a/vendor/mediatek/proprietary/hardware/mtkcam/include/mtkcam/utils/metadata/client/mtk_metadata_tag.h
++++ b/vendor/mediatek/proprietary/hardware/mtkcam/include/mtkcam/utils/metadata/client/mtk_metadata_tag.h
+@@ -89,6 +89,7 @@ typedef enum mtk_camera_metadata_section {
+     MTK_BGSERVICE_FEATURE           = 12,
+     MTK_CONFIGURE_SETTING           = 13,
+     MTK_FLASH_FEATURE               = 14,
++    QXT_FEATURE                     = 15,
+     MTK_VENDOR_SECTION_COUNT,
+ } mtk_camera_metadata_section_t;
+
+@@ -146,6 +147,7 @@ typedef enum mtk_camera_metadata_section_start {
+     MTK_CONFIGURE_SETTING_START                 = (MTK_CONFIGURE_SETTING + MTK_VENDOR_TAG_SECTION) &lt;&lt; 16,
+     MTK_FLASH_FEATURE_START                     = (MTK_FLASH_FEATURE + MTK_VENDOR_TAG_SECTION) &lt;&lt; 16,
+
++    QXT_FEATURE_START                           = (QXT_FEATURE + MTK_VENDOR_TAG_SECTION) &lt;&lt; 16,
+ } mtk_camera_metadata_section_start_t;
+
+@@ -599,6 +601,8 @@ typedef enum mtk_camera_metadata_tag {
+     MTK_FLASH_FEATURE_CALIBRATION_RESULT,    // flash calibration result
+     MTK_FLASH_FEATURE_END,
+
++    QXT_FEATURE_WATERMARK = QXT_FEATURE_START,
++    QXT_FEATURE_END,
+ } mtk_camera_metadata_tag_t;
+
+ /**</code></pre> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam/include/mtkcam/utils/metadata/client/mtk_metadata_tag_info.inl：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam/include/mtkcam/utils/metadata/client/mtk_metadata_tag_info.inl b/vendor/mediatek/proprietary/hardware/mtkcam/include/mtkcam/utils/metadata/client/mtk_metadata_tag_info.inl
+index 15449c433d..1b4fc75a0e 100755
+--- a/vendor/mediatek/proprietary/hardware/mtkcam/include/mtkcam/utils/metadata/client/mtk_metadata_tag_info.inl
++++ b/vendor/mediatek/proprietary/hardware/mtkcam/include/mtkcam/utils/metadata/client/mtk_metadata_tag_info.inl
+@@ -91,6 +91,11 @@ _IMP_SECTION_INFO_(MTK_DISTORTION_CORRECTION_INFO,  "mtk.distortionCorrection")
+ _IMP_SECTION_INFO_(MTK_IOPIPE_INFO,                 "mtk.iopipe.info")
+ _IMP_SECTION_INFO_(MTK_HAL_INFO,                    "mtk.hal.info")
+
++_IMP_SECTION_INFO_(QXT_FEATURE,      "com.qxt.camera")
++
++_IMP_TAG_INFO_( QXT_FEATURE_WATERMARK,
++                MINT32,     "watermark")
++
+ /******************************************************************************
+  *
+  ******************************************************************************/</code></pre> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam/utils/metadata/vendortag/VendorTagTable.h：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam/utils/metadata/vendortag/VendorTagTable.h b/vendor/mediatek/proprietary/hardware/mtkcam/utils/metadata/vendortag/VendorTagTable.h
+index 2481492f90..33e581adfd 100755
+--- a/vendor/mediatek/proprietary/hardware/mtkcam/utils/metadata/vendortag/VendorTagTable.h
++++ b/vendor/mediatek/proprietary/hardware/mtkcam/utils/metadata/vendortag/VendorTagTable.h
+@@ -377,6 +377,16 @@ static auto&amp; _FlashFeature_()
+ }
+
++static auto&amp; _QxtFeature_()
++{
++    static const std::map&lt;uint32_t, VendorTag_t&gt;
++    sInst = {
++        _TAG_(QXT_FEATURE_WATERMARK,
++            "watermark",   TYPE_INT32),
++     };
++     //
++     return sInst;
++}
+
+ /******************************************************************************
+  *
+@@ -460,6 +470,10 @@ static auto&amp; getGlobalSections()
+                     MTK_FLASH_FEATURE_END,
+                     _FlashFeature_() ),
+
++        _SECTION_( "com.qxt.camera",
++                    QXT_FEATURE_START,
++                    QXT_FEATURE_END,
++                    _QxtFeature_() ),
+     };
+
+     // append custom vendor tags sections to mtk sections</code></pre> 
+ <p>vendor/mediatek/proprietary/hardware/mtkcam/utils/metastore/metadataprovider/constructStaticMetadata.cpp：</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam/utils/metastore/metadataprovider/constructStaticMetadata.cpp b/vendor/mediatek/proprietary/hardware/mtkcam/utils/metastore/metadataprovider/constructStaticMetadata.cpp
+index edd5b5f1b9..591b25b162 100755
+--- a/vendor/mediatek/proprietary/hardware/mtkcam/utils/metastore/metadataprovider/constructStaticMetadata.cpp
++++ b/vendor/mediatek/proprietary/hardware/mtkcam/utils/metastore/metadataprovider/constructStaticMetadata.cpp
+@@ -578,6 +578,19 @@ updateData(IMetadata &amp;rMetadata)
+         }
+     }
+ #endif
++
++#if 1
++    {
++        IMetadata::IEntry qxtAvailRequestEntry = rMetadata.entryFor(MTK_REQUEST_AVAILABLE_REQUEST_KEYS);
++        qxtAvailRequestEntry.push_back(QXT_FEATURE_WATERMARK , Type2Type&lt; MINT32 &gt;());
++        rMetadata.update(qxtAvailRequestEntry.tag(), qxtAvailRequestEntry);
++
++        IMetadata::IEntry qxtAvailSessionEntry = rMetadata.entryFor(MTK_REQUEST_AVAILABLE_SESSION_KEYS);
++        qxtAvailSessionEntry.push_back(QXT_FEATURE_WATERMARK , Type2Type&lt; MINT32 &gt;());
++        rMetadata.update(qxtAvailSessionEntry.tag(), qxtAvailSessionEntry);
++    }
++#endif
++
+     // update multi-cam feature mode to static metadata
+     // vendor tag
+     {<!-- --></code></pre> 
+ <p>前面这些步骤完成之后，集成工作就基本完成了。我们需要重新编译一下系统源码，为节约时间，也可以只编译vendor.img。趁着编译的时间，我们可以写一个demo来验证算法是否集成成功了。</p> 
+ <h4>六、APP调用算法</h4> 
+ <p>WatermarkActivity：</p> 
+ <pre class="has"><code class="language-go">public class WatermarkActivity extends BaseActivity {
+    private static final String TAG = WatermarkActivity.class.getSimpleName();
+
+    /*
+     * 16:9 picture size: 3840x2160  preview size 1280x720
+     * 4:3  picture size: 3264x2448  preview size 960x720
+     * Now is 4:3
+     */
+    private static final int PREVIEW_WIDTH = 1280;
+    private static final int PREVIEW_HEIGHT = 720;
+    private static final int CAPTURE_WIDTH = 3264;
+    private static final int CAPTURE_HEIGHT = 2448;
+
+    private static final String IMAGE_PATH =
+            Environment.getExternalStorageDirectory().getAbsolutePath()
+            + File.separator + "DCIM" + File.separator + "Camera";
+
+    private static final String CAMERA_ID = "0";
+    private static final String KEY_WATERMARK = "com.qxt.camera.watermark";
+
+    private static final String SP_NAME = "watermark";
+    private static final String SP_STATE_KEY = "state";
+
+    private AutoFitTextureView mTextureView;
+    private ProgressBar mProgressBar;
+    private Handler mMainHandler;
+    private Handler mCameraHandler;
+    private HandlerThread mCameraHandlerThread;
+
+    private CameraManager mCameraManager;
+    private CaptureRequest.Builder mPreviewBuilder;
+    private CameraDevice mCameraDevice;
+    private CameraCaptureSession mCameraCaptureSession;
+
+    private MediaActionSound mCameraSound;
+    private String mTakePictureTime;
+    private SimpleDateFormat mDateFormat = new SimpleDateFormat(
+            "yyyyMMdd_HHmmss", Locale.getDefault());
+
+    private ImageReader mCaptureImageReader;
+    private Surface mSurface;
+    public CaptureRequest.Key&lt;int[]&gt; mVendorKey;
+    private int mVendorKeyEnable;
+    private SharedPreferences mSharedPref;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        setContentView(R.layout.activity_watermark);
+        mProgressBar = findViewById(R.id.progressbar);
+        mTextureView = findViewById(R.id.texture);
+        mTextureView.setAspectRatio(PREVIEW_HEIGHT, PREVIEW_WIDTH);
+
+        mCameraSound = new MediaActionSound();
+        mCameraSound.load(MediaActionSound.SHUTTER_CLICK);
+
+        mCameraManager = (CameraManager) getSystemService(Context.CAMERA_SERVICE);
+        mMainHandler = new Handler();
+        initVendorTag();
+        mSharedPref = getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+        mVendorKeyEnable = mSharedPref.getInt(SP_STATE_KEY, 0);
+        getCameraCharacteristics(CAMERA_ID);
+    }
+
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        getMenuInflater().inflate(R.menu.menu_watermark, menu);
+
+        Switch s = menu.findItem(R.id.action_watermark)
+                .getActionView().findViewById(R.id.switch_watermark);
+        s.setChecked(mVendorKeyEnable &gt; 0);
+        s.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+
+            @Override
+            public void onCheckedChanged(CompoundButton btn, boolean isChecked) {
+                if (isChecked) {
+                    mVendorKeyEnable = 1;
+                } else {
+                    mVendorKeyEnable = 0;
+                }
+                mSharedPref.edit().putInt(SP_STATE_KEY, mVendorKeyEnable).commit();
+                if (mPreviewBuilder != null &amp;&amp; mCameraCaptureSession != null) {
+                    try {
+                        mCameraCaptureSession.stopRepeating();
+                        setVendorTag(mPreviewBuilder);
+                        mCameraCaptureSession.setRepeatingRequest(mPreviewBuilder.build(),
+                                mSessionCaptureCallback, mCameraHandler);
+                    } catch (CameraAccessException e) {
+                        e.printStackTrace();
+                    }
+                }
+                LogUtils.d(TAG, "[onCheckedChanged] isChecked=" + isChecked
+                        + ", mWideAngleEnable=" + mVendorKeyEnable);
+            }
+        });
+        return true;
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        initLooper();
+
+        if (mTextureView.isAvailable()) {
+            openCamera();
+        } else {
+            mTextureView.setSurfaceTextureListener(mSurfaceTextureListener);
+        }
+
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        closeCamera();
+        stopLooper();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+    }
+
+    public void onClick(View view) {
+        if (view != null &amp;&amp; view.getId() == R.id.btn_capture) {
+            takePicture();
+        }
+    }
+
+    private void initLooper() {
+        mCameraHandlerThread = new HandlerThread("WideAngleCamera");
+        mCameraHandlerThread.start();
+        mCameraHandler = new Handler(mCameraHandlerThread.getLooper());
+    }
+
+    private void stopLooper() {
+        try {
+            mCameraHandlerThread.quit();
+            mCameraHandlerThread.join();
+            mCameraHandlerThread = null;
+            mCameraHandler = null;
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private void openCamera() {
+        try {
+            mCameraManager.openCamera(CAMERA_ID, new CameraDevice.StateCallback() {
+                @Override
+                public void onOpened(@NonNull CameraDevice camera) {
+                    mCameraDevice = camera;
+                    createCameraPreviewSession();
+                }
+
+                @Override
+                public void onDisconnected(@NonNull CameraDevice camera) {
+                    LogUtils.d(TAG, "onDisconnected");
+                    camera.close();
+                    mCameraDevice = null;
+                }
+
+                @Override
+                public void onError(@NonNull CameraDevice camera, int error) {
+                    LogUtils.d(TAG, "onError error=" + error);
+                    camera.close();
+                    mCameraDevice = null;
+                }
+            }, mCameraHandler);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void closeCamera() {
+        try {
+            if (null != mCameraCaptureSession) {
+                mCameraCaptureSession.close();
+                mCameraCaptureSession = null;
+            }
+            if (null != mCameraDevice) {
+                mCameraDevice.close();
+                mCameraDevice = null;
+            }
+            if (null != mCaptureImageReader) {
+                mCaptureImageReader.close();
+                mCaptureImageReader = null;
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void createCameraPreviewSession() {
+        if (isFinishing() || isDestroyed() || mCameraDevice == null) {
+            return;
+        }
+
+        try {
+            mCaptureImageReader = ImageReader.newInstance(CAPTURE_WIDTH,
+                    CAPTURE_HEIGHT, ImageFormat.YUV_420_888, 2);
+            mCaptureImageReader.setOnImageAvailableListener(
+                    mCaptureOnImageAvailableListener, mCameraHandler);
+
+            mPreviewBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            setVendorTag(mPreviewBuilder);
+            mPreviewBuilder.addTarget(mSurface);
+            mCameraDevice.createCaptureSession(Arrays.asList(mSurface,
+                    mCaptureImageReader.getSurface()),
+                    new CameraCaptureSession.StateCallback() {
+                        @Override
+                        public void onConfigured(@NonNull CameraCaptureSession session) {
+                            if (isFinishing() || isDestroyed() || mCameraDevice == null) {
+                                return;
+                            }
+                            try {
+                                mCameraCaptureSession = session;
+                                mPreviewBuilder.set(CaptureRequest.CONTROL_AF_MODE,
+                                        CaptureRequest.CONTROL_AF_MODE_AUTO);
+                                mPreviewBuilder.set(CaptureRequest.CONTROL_AF_MODE,
+                                        CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                                mCameraCaptureSession.setRepeatingRequest(mPreviewBuilder.build(),
+                                        mSessionCaptureCallback, mCameraHandler);
+                            } catch (CameraAccessException e) {
+                                e.printStackTrace();
+                            }
+                        }
+
+                        @Override
+                        public void onConfigureFailed(@NonNull CameraCaptureSession session) {
+
+                        }
+                    }, mCameraHandler);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void takePicture() {
+        try {
+            mTakePictureTime = mDateFormat.format(System.currentTimeMillis());
+            final CaptureRequest.Builder captureBuilder =
+                    mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
+            setVendorTag(captureBuilder);
+            Surface surface = mCaptureImageReader.getSurface();
+            captureBuilder.addTarget(surface);
+            mCameraCaptureSession.capture(captureBuilder.build(),
+                    new CameraCaptureSession.CaptureCallback() {
+                @Override
+                public void onCaptureCompleted(@NonNull CameraCaptureSession session,
+                                               @NonNull CaptureRequest request,
+                                               @NonNull TotalCaptureResult result) {
+                    super.onCaptureCompleted(session, request, result);
+                }
+            }, mCameraHandler);
+            if (mCameraSound != null) {
+                mCameraSound.play(MediaActionSound.SHUTTER_CLICK);
+            }
+            mProgressBar.setVisibility(View.VISIBLE);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void notifyPictureTaken() {
+        mProgressBar.setVisibility(View.GONE);
+        Toast toast = Toast.makeText(WatermarkActivity.this,
+                getString(R.string.image_saved, IMAGE_PATH), Toast.LENGTH_SHORT);
+        toast.setGravity(Gravity.CENTER, 0, 0);
+        toast.show();
+    }
+
+    @SuppressWarnings("unused")
+    private void getCameraCharacteristics(String cameraId) {
+        try {
+            CameraCharacteristics cs = mCameraManager.getCameraCharacteristics(cameraId);
+            StreamConfigurationMap map = cs.get(
+                    CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            if (map != null) {
+                //获取图像输出的尺寸
+                Size[] pictureSize = map.getOutputSizes(ImageFormat.JPEG);
+                Size[] previewSize = map.getOutputSizes(SurfaceTexture.class);
+                StringBuilder pictureBuilder = new StringBuilder("picture sizes: ");
+                for (Size size : pictureSize) {
+                    pictureBuilder.append(size);
+                    pictureBuilder.append(", ");
+                }
+                LogUtils.d(TAG, pictureBuilder.toString());
+
+                StringBuilder previewBuilder = new StringBuilder("preview sizes: ");
+                for (Size size : previewSize) {
+                    previewBuilder.append(size);
+                    previewBuilder.append(", ");
+                }
+                LogUtils.d(TAG, previewBuilder.toString());
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    TextureView.SurfaceTextureListener mSurfaceTextureListener
+            = new TextureView.SurfaceTextureListener() {
+        @Override
+        public void onSurfaceTextureAvailable(SurfaceTexture surfaceTexture, int w, int h) {
+            LogUtils.d(TAG, "onSurfaceAvaliable, width:" + w + ", height:" + h);
+            surfaceTexture.setDefaultBufferSize(PREVIEW_WIDTH, PREVIEW_HEIGHT);
+            mSurface = new Surface(surfaceTexture);
+            openCamera();
+        }
+
+        @Override
+        public void onSurfaceTextureSizeChanged(SurfaceTexture surfaceTexture, int w, int h) {
+            LogUtils.d(TAG, "onSurfaceTextureSizeChanged, width:" + w + ", height:" + h);
+        }
+
+        @Override
+        public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
+            LogUtils.d(TAG, "onSurfaceTextureDestroyed");
+            mSurface = null;
+            return false;
+        }
+
+        @Override
+        public void onSurfaceTextureUpdated(SurfaceTexture surface) {
+
+        }
+    };
+
+    private final CameraCaptureSession.CaptureCallback mSessionCaptureCallback
+            = new CameraCaptureSession.CaptureCallback() {
+        @Override
+        public void onCaptureCompleted(@NonNull CameraCaptureSession session,
+                                       @NonNull CaptureRequest request,
+                                       @NonNull TotalCaptureResult result) {
+            super.onCaptureCompleted(session, request, result);
+            mCameraCaptureSession = session;
+        }
+    };
+
+    private final ImageReader.OnImageAvailableListener mCaptureOnImageAvailableListener
+            = new ImageReader.OnImageAvailableListener() {
+        @Override
+        public void onImageAvailable(final ImageReader reader) {
+            LogUtils.d(TAG, "capture onImageAvailable");
+            Image image = reader.acquireLatestImage();
+            if (image == null) return;
+            ImageUtils.saveImage(WatermarkActivity.this, image, IMAGE_PATH,
+                    "WIDE_" + mTakePictureTime, ImageUtils.ROTATE_90);
+            image.close();
+            LogUtils.d(TAG, "saved");
+            mMainHandler.post(new Runnable() {
+                @Override
+                public void run() {
+                    notifyPictureTaken();
+                }
+            });
+        }
+    };
+
+    private void initVendorTag() {
+        try {
+            CameraCharacteristics c = mCameraManager.getCameraCharacteristics(CAMERA_ID);
+            mVendorKey = CameraUtils.getSessionKey(c, KEY_WATERMARK);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void setVendorTag(CaptureRequest.Builder builder) {
+        if (mVendorKey != null) {
+            builder.set(mVendorKey, new int[]{mVendorKeyEnable});
+            LogUtils.d(TAG, "[setVendorTag] set watermark to " + mVendorKeyEnable);
+        }
+    }
+}</code></pre> 
+ <p>CameraUtils：</p> 
+ <pre class="has"><code class="language-go">public class CameraUtils {
+    private static final String TAG = CameraUtils.class.getSimpleName();
+
+    @RequiresApi(api = Build.VERSION_CODES.P)
+    public static CaptureRequest.Key&lt;int[]&gt; getSessionKey(
+            CameraCharacteristics cs, String key) {
+        if (cs == null) {
+            LogUtils.i(TAG, "[getSessionKey] CameraCharacteristics is null");
+            return null;
+        }
+        CaptureRequest.Key&lt;int[]&gt; targetKey = null;
+        List&lt;CaptureRequest.Key&lt;?&gt;&gt; sessionKeys = cs.getAvailableSessionKeys();
+        if (sessionKeys == null) {
+            LogUtils.i(TAG, "[getSessionKey] No keys!");
+            return null;
+        }
+        for (CaptureRequest.Key&lt;?&gt; sessionKey : sessionKeys) {
+            if (sessionKey.getName().equals(key)) {
+                LogUtils.i(TAG, "[getSessionKey] key :" + key);
+                targetKey = (CaptureRequest.Key&lt;int[]&gt;) sessionKey;
+                break;
+            }
+        }
+        return targetKey;
+    }
+}</code></pre> 
+ <p>为样机刷入系统整包或者vendor.img，开机后，安装demo验证。我们来拍一张电脑显示器看看效果：<br>预览：</p> 
+ <p><img src="https://images2.imgbox.com/4c/48/HxUaAJGd_o.jpg" alt="6d20dd80d4ea91fd39c7267dd54a4273.jpeg"></p> 
+ <p>image</p> 
+ <p>拍照：</p> 
+ <p><img src="https://images2.imgbox.com/97/d7/eyvjYKOk_o.jpg" alt="35ac9d6bef4d0ed359bd4e375f4e3160.jpeg"></p> 
+ <p>image</p> 
+ <h4>七、遇到的问题及解决方法</h4> 
+ <p>问题1：<br>如果process函数中buffer的acquire和release没有成对出现，也就是buffer没正常release，那么就会出现连续拍多张之后，算法未被调用的情况。<br>问题1解决方法：<br>YUVNode.cpp中加入一个保险的代码，万一集成代码中忘记release，在YUVNode中release。</p> 
+ <pre class="has"><code class="language-go">diff --git a/vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/nodes/YUVNode.cpp b/vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/nodes/YUVNode.cpp
+index 8bb794ba02..d4343aaccf 100755
+--- a/vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/nodes/YUVNode.cpp
++++ b/vendor/mediatek/proprietary/hardware/mtkcam3/feature/core/featurePipe/capture/nodes/YUVNode.cpp
+@@ -1050,9 +1051,11 @@ MBOOL YUVNode::onRequestProcess(RequestPtr&amp; pRequest)
+
+     auto pPlgRequest = mPlugin-&gt;createRequest();
+
+-    pPlgRequest-&gt;mIBufferFull  = (iBufferFullHandle == NULL) ? PluginHelper::CreateBuffer(pNodeReq, TID_MAN_FULL_YUV, INPUT) : iBufferFullHandle;
++    //pPlgRequest-&gt;mIBufferFull  = (iBufferFullHandle == NULL) ? PluginHelper::CreateBuffer(pNodeReq, TID_MAN_FULL_YUV, INPUT) : iBufferFullHandle;
++    pPlgRequest-&gt;mIBufferFull  = (iBufferFullHandle == NULL) ? PluginHelper::CreateBuffer(pNodeReq, TID_MAN_FULL_YUV, INPUT) : std::move(iBufferFullHandle);
+     pPlgRequest-&gt;mIBufferClean = PluginHelper::CreateBuffer(pNodeReq, TID_MAN_FULL_PURE_YUV, INPUT);
+-    pPlgRequest-&gt;mOBufferFull  = (oBufferFullHandle == NULL) ? PluginHelper::CreateBuffer(pNodeReq, TID_MAN_FULL_YUV, OUTPUT) : oBufferFullHandle;
++    //pPlgRequest-&gt;mOBufferFull  = (oBufferFullHandle == NULL) ? PluginHelper::CreateBuffer(pNodeReq, TID_MAN_FULL_YUV, OUTPUT) : oBufferFullHandle;
++    pPlgRequest-&gt;mOBufferFull  = (oBufferFullHandle == NULL) ? PluginHelper::CreateBuffer(pNodeReq, TID_MAN_FULL_YUV, OUTPUT) : std::move(oBufferFullHandle);
+
+     pPlgRequest-&gt;mIMetadataDynamic = PluginHelper::CreateMetadata(pNodeReq, MID_MAN_IN_P1_DYNAMIC);
+     pPlgRequest-&gt;mIMetadataApp = PluginHelper::CreateMetadata(pNodeReq, MID_MAN_IN_APP);</code></pre> 
+ <p>问题2：<br>算法需要RGB数据，HAL层是YUV数据，使用openGL和各类RGB转换公式进行YUV和RGB互转后，最终照片有色差。<br>问题2解决方法：<br>使用libyuv进行转换，libyuv转换效率非常高，经测试，libyuv比公式法和opencv都要快，并且没有色差。android源码本身已集成libyuv，使用起来也非常方便。<br>Android.mk:</p> 
+ <pre class="has"><code class="language-go">LOCAL_C_INCLUDES += $(TOP)/external/libyuv/files/include/
+LOCAL_SHARED_LIBRARIES += libyuv.vendor</code></pre> 
+ <p>如不清楚libyuv的使用，请参考本人的另外一篇文章：YUV420转RGBA之使用libyuv</p> 
+ <h4>八、结语</h4> 
+ <p>现公司是家ODM公司，2018年起公司开始做AI算法，我被招来做android平台上的算法集成工作。然而我虽有几年App和Frameworks的工作经验，之前却一直是以java作为主要开发语言，C/C++语言的开发工作甚至是大学时代的事情，而部门当中会android开发的也仅有我一人。在这种情形下，重新学C/C++，并摸索着开始集成算法，真的非常具有挑战性。</p> 
+ <p>当时我们公司与某公司有合作，我们刚开始寄希望于该公司可以提供技术支援，以帮助我们完成算法集成的工作。然而，该公司不但有手机OS，也有自家的AI算法部门，在技术支援上对方不愿意配合。</p> 
+ <p>在一段时间的学习和实践之后，我也终于基本掌握了算法集成的方法和步骤。很感激部门leader L老师能够给予我如此多的耐心和支持。回过头来看，算法集成并不复杂，甚至没有任何技术原理上的东西，只是一些繁琐的步骤。于是，在项目不忙的情况下，写下本文。希望以此记录自己的心路历程，也期待可以帮助到有需要的人。本文的主要内容最初于2019年就写好了，但是由于某些原因，时至今日才整理发出来，不管怎样，但愿好文不怕晚。</p> 
+ <p>原文链接：https://www.jianshu.com/p/bf385ff1dafe</p> 
+ <p><strong>友情推荐：</strong><br></p> 
+ <p><a href="" rel="nofollow">Android 开发干货集锦</a></p> 
+ <p>至此，本篇已结束。转载网络的文章，小编觉得很优秀，欢迎点击阅读原文，支持原创作者，如有侵权，恳请联系小编删除，欢迎您的建议与指正。同时期待您的关注，感谢您的阅读，谢谢！</p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/38/f4/SJ6wG7cf_o.jpg" alt="6d65890adc646a5a6f08f2d730857b14.jpeg"></p> 
+ <p style="text-align:right;"><em>点个在看，方便您使用时快速查找！</em></p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/1f55c636e0a13ab9a0ee88deb7fbcf11/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">详解SpringCloud微服务技术栈：强推！源码跟踪分析Ribbon负载均衡原理、Eureka服务部署</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/43566baa2e890c63dd822b096766998a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">性能优化2.0，新增缓存后，程序的秒开率不升反降</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

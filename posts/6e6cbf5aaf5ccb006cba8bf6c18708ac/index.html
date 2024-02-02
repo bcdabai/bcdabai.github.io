@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>如何二次封装一个Vue3组件库？ - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="如何二次封装一个Vue3组件库？" />
+<meta property="og:description" content="为什么要二次封装组件库 目前开源的Vue3组件库有很多，包括Element Plus、Ant Design Vue、Naive UI、Vuetify、Varlet等等。
+在大部分场景中，我们直接使用现有组件库中的组件即可实现功能。如果遇到部分组件的特殊配置或者特殊逻辑，或者当前的组件库不满足需求，需要部分组件组合成为一个更大的组件，例如IP输入框、带固定样式的对话框等等，甚至我们有一些和组件库无关的自定义组件。如果这些组件在工程中有多处复用，我们一般都会将组件单独写到工程的Components中，方便各个页面调用。
+假设这时候有多个独立的工程，这些工程都需要复用我们之前在Components中写的自定义组件。这时候，我们可以选择在每个工程都复制一份代码使用，但是这样做不方便维护。如果我们发现组件有一些BUG，我们需要在一个工程中修复，然后复制同步给其它工程。这样维护低效而且容易遗漏。而且如果其它工程的开发者修改了组件（也许有需求但是并未通知我们），那么我们同步复制代码之后，就会把其它开发者的代码覆盖掉。
+这时候，更好的方式是将这些在不同的工程中复用的组件抽出来，封装为一个独立的组件库。这样我们的可复用组件代码在一个地方修改和维护。同时也有文档和版本控制等功能，方便其它工程集成。
+甚至有时候可以做一个扩展组件库，扩展现有的组件库的能力，给大家提供更多的通用组件。
+依赖说明 依赖种类 开发npm包与开发前端页面工程不同，对于依赖有着更精细的控制：
+开发前端页面工程：安装到dependencies和devDependencies无区别。因为工程都要经过构建成dist成果物，本身是不需要依赖安装的。因此前端需要安装依赖的只有开发模式。开发npm包：开发模式，生产模式有区别，依赖还区分作为自身依赖还是宿主依赖。 注：上述描述是针对大部分工程，如果项目中配置了特殊模式，依赖安装方式也有区别。
+这里简述一下package.json中我们会使用的依赖种类：
+dependencies生产依赖 这类依赖在开发环境，生产环境都会被安装。在npm包被集成到宿主工程时，会作为npm包本身的依赖被安装。
+npm add vue devDependencies开发依赖 只在开发环境被安装的依赖，生产环境不安装。在npm包被集成到宿主工程时，也不会被安装。
+pnpm add -D vue peerDependencies对等依赖 我觉得也可以叫做“宿主依赖”。这类依赖在开发环境会被安装，但生产构建时不会打包进成果物中。在npm包被集成到宿主工程时，也不会被安装（npm部分版本会自动安装）。但是会提示要求宿主工程本身安装这个依赖。
+pnpm add --save-peer vue 如何选择依赖种类 以vue为例 既然是要作Vue3的库，肯定需要安装vue这个依赖了。那么我们应该怎么选择依赖种类呢？
+devDependencies 排除
+生产模式下，我们的组件库也是需要vue作为依赖的。（或许不用也行，但是目前不选择那种方式）dependencies 可以但不建议
+生产模式和开发模式下都会安装，可以保证我们的组件库一直都能引用到。peerDependencies 推荐
+生产模式下会安装，开发模式下被安装到宿主工程中，与宿主工程共享同一个vue依赖。 如果选择dependencies，那么我们的组件库本身会安装一个vue依赖，宿主工程也会安装一个vue依赖，实际上安装了两个vue。这明显会浪费开发者的磁盘空间，而且降低了依赖安装的效率。(现在大部分包管理器都能处理这种情况，不会实际安装两个，但是这种设计显然不好)因此我们选择peerDependencies。
+以@vueuse/core为例 那么，是不是宿主工程可能有的依赖，我们就一定要选择peerDependencies呢？并不是。比如@vueuse/core，这是一个基于vue的前端使用工具集合。我们在组件库中，仅需要使用其中的几个工具。例如useResizeObserver。这个依赖宿主工程可能会用，也可能用不到。
+peerDependencies 排除
+我们需要将其设定为peerDependencies，强制要求开发者必须安装么？当然不行。
+为什么不行？因为这样会影响开发者使用。试着想开发者装了一个包，会提示开发者再手动安装几个依赖包。装完这些依赖包之后又会提示开发者装一堆依赖。虽然这些依赖可能是必要的，但是都手动让开发者装也太不方便了。dependencies 可以
+生产模式和开发模式下都会安装，且在宿主工程中时，会作为依赖本身的包进行安装。devDependencies 可以
+仅仅开发模式安装也可以？？？ 是的，但是需要加入构建流程。通过构建使依赖中的代码打入我们的成果物中，就不再需要生产依赖了。 以Vite为例 Vite是一个前端构建工具，大部分Vue3页面工程就是用它打包的。同样的我们的组件库也会使用Vite打包。构建工具仅仅在开发和构建时需要安装，构建之后作为npm包引入时就不需要了。因此Vite适合作为devDependencies依赖安装。
+封装简单组件 我们先从最简单开始，实现一个不需要构建流程，也不需要引入组件库的简单组件。
+初始化工程 首先创建工程：
+# 初始化项目 pnpm init # 安装依赖 pnpm add --save-peer vue 创建必要的目录结构。我这里以一个简单的表示状态的圆圈组件功能为例。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/6e6cbf5aaf5ccb006cba8bf6c18708ac/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-12-03T17:48:34+08:00" />
+<meta property="article:modified_time" content="2023-12-03T17:48:34+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">如何二次封装一个Vue3组件库？</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>为什么要二次封装组件库</h2> 
+<p>目前开源的Vue3组件库有很多，包括Element Plus、Ant Design Vue、Naive UI、Vuetify、Varlet等等。</p> 
+<p>在大部分场景中，我们直接使用现有组件库中的组件即可实现功能。如果遇到部分组件的特殊配置或者特殊逻辑，或者当前的组件库不满足需求，需要部分组件组合成为一个更大的组件，例如IP输入框、带固定样式的对话框等等，甚至我们有一些和组件库无关的自定义组件。如果这些组件在工程中有多处复用，我们一般都会将组件单独写到工程的Components中，方便各个页面调用。</p> 
+<p>假设这时候有多个独立的工程，这些工程都需要复用我们之前在Components中写的自定义组件。这时候，我们可以选择在每个工程都复制一份代码使用，但是这样做不方便维护。如果我们发现组件有一些BUG，我们需要在一个工程中修复，然后复制同步给其它工程。这样维护低效而且容易遗漏。而且如果其它工程的开发者修改了组件（也许有需求但是并未通知我们），那么我们同步复制代码之后，就会把其它开发者的代码覆盖掉。</p> 
+<p>这时候，更好的方式是将这些在不同的工程中复用的组件抽出来，封装为一个独立的组件库。这样我们的可复用组件代码在一个地方修改和维护。同时也有文档和版本控制等功能，方便其它工程集成。</p> 
+<p>甚至有时候可以做一个扩展组件库，扩展现有的组件库的能力，给大家提供更多的通用组件。</p> 
+<h2><a id="_11"></a>依赖说明</h2> 
+<h3><a id="_12"></a>依赖种类</h3> 
+<p>开发npm包与开发前端页面工程不同，对于依赖有着更精细的控制：</p> 
+<ul><li>开发前端页面工程：安装到<code>dependencies</code>和<code>devDependencies</code>无区别。因为工程都要经过构建成dist成果物，本身是不需要依赖安装的。因此前端需要安装依赖的只有开发模式。</li><li>开发npm包：开发模式，生产模式有区别，依赖还区分作为自身依赖还是宿主依赖。</li></ul> 
+<p>注：上述描述是针对大部分工程，如果项目中配置了特殊模式，依赖安装方式也有区别。</p> 
+<p>这里简述一下<code>package.json</code>中我们会使用的依赖种类：</p> 
+<h4><a id="dependencies_21"></a><strong><code>dependencies</code>生产依赖</strong></h4> 
+<p>这类依赖在开发环境，生产环境都会被安装。在npm包被集成到宿主工程时，会作为npm包本身的依赖被安装。</p> 
+<pre><code class="prism language-sh"><span class="token function">npm</span> <span class="token function">add</span> vue
+</code></pre> 
+<h4><a id="devDependencies_27"></a><strong><code>devDependencies</code>开发依赖</strong></h4> 
+<p>只在开发环境被安装的依赖，生产环境不安装。在npm包被集成到宿主工程时，也不会被安装。</p> 
+<pre><code class="prism language-sh"><span class="token function">pnpm</span> <span class="token function">add</span> <span class="token parameter variable">-D</span> vue
+</code></pre> 
+<h4><a id="peerDependencies_33"></a><strong><code>peerDependencies</code>对等依赖</strong></h4> 
+<p>我觉得也可以叫做“宿主依赖”。这类依赖在开发环境会被安装，但生产构建时不会打包进成果物中。在npm包被集成到宿主工程时，也不会被安装（npm部分版本会自动安装）。但是会提示要求宿主工程本身安装这个依赖。</p> 
+<pre><code class="prism language-sh"><span class="token function">pnpm</span> <span class="token function">add</span> --save-peer vue
+</code></pre> 
+<h3><a id="_39"></a>如何选择依赖种类</h3> 
+<h4><a id="vue_41"></a>以vue为例</h4> 
+<p>既然是要作Vue3的库，肯定需要安装vue这个依赖了。那么我们应该怎么选择依赖种类呢？</p> 
+<ul><li><code>devDependencies</code> 排除<br> 生产模式下，我们的组件库也是需要vue作为依赖的。（或许不用也行，但是目前不选择那种方式）</li><li><code>dependencies</code> 可以但不建议<br> 生产模式和开发模式下都会安装，可以保证我们的组件库一直都能引用到。</li><li><code>peerDependencies</code> 推荐<br> 生产模式下会安装，开发模式下被安装到宿主工程中，与宿主工程共享同一个vue依赖。</li></ul> 
+<p>如果选择<code>dependencies</code>，那么我们的组件库本身会安装一个vue依赖，宿主工程也会安装一个vue依赖，实际上安装了两个vue。这明显会浪费开发者的磁盘空间，而且降低了依赖安装的效率。(现在大部分包管理器都能处理这种情况，不会实际安装两个，但是这种设计显然不好)因此我们选择<code>peerDependencies</code>。</p> 
+<h4><a id="vueusecore_53"></a>以<code>@vueuse/core</code>为例</h4> 
+<p>那么，是不是宿主工程可能有的依赖，我们就一定要选择<code>peerDependencies</code>呢？并不是。比如<code>@vueuse/core</code>，这是一个基于vue的前端使用工具集合。我们在组件库中，仅需要使用其中的几个工具。例如<code>useResizeObserver</code>。这个依赖宿主工程可能会用，也可能用不到。</p> 
+<ul><li><code>peerDependencies</code> 排除<br> 我们需要将其设定为<code>peerDependencies</code>，强制要求开发者必须安装么？当然不行。<br> 为什么不行？因为这样会影响开发者使用。试着想开发者装了一个包，会提示开发者再手动安装几个依赖包。装完这些依赖包之后又会提示开发者装一堆依赖。虽然这些依赖可能是必要的，但是都手动让开发者装也太不方便了。</li><li><code>dependencies</code> 可以<br> 生产模式和开发模式下都会安装，且在宿主工程中时，会作为依赖本身的包进行安装。</li><li><code>devDependencies</code> 可以<br> 仅仅开发模式安装也可以？？？ 是的，但是需要加入构建流程。通过构建使依赖中的代码打入我们的成果物中，就不再需要生产依赖了。</li></ul> 
+<h4><a id="Vite_65"></a>以Vite为例</h4> 
+<p>Vite是一个前端构建工具，大部分Vue3页面工程就是用它打包的。同样的我们的组件库也会使用Vite打包。构建工具仅仅在开发和构建时需要安装，构建之后作为npm包引入时就不需要了。因此Vite适合作为<code>devDependencies</code>依赖安装。</p> 
+<h2><a id="_68"></a>封装简单组件</h2> 
+<p>我们先从最简单开始，实现一个不需要构建流程，也不需要引入组件库的简单组件。</p> 
+<h3><a id="_71"></a>初始化工程</h3> 
+<p>首先创建工程：</p> 
+<pre><code class="prism language-sh"><span class="token comment"># 初始化项目</span>
+<span class="token function">pnpm</span> init
+<span class="token comment"># 安装依赖</span>
+<span class="token function">pnpm</span> <span class="token function">add</span> --save-peer vue
+</code></pre> 
+<p>创建必要的目录结构。我这里以一个简单的表示状态的圆圈组件功能为例。</p> 
+<pre><code>|-- .gitignore
+|-- package.json
+|-- pnpm-lock.yaml
+|-- src
+    |-- index.js
+    |-- components
+        |-- StatusCircle.vue
+</code></pre> 
+<h3><a id="_90"></a>组件实现</h3> 
+<p>首先是<code>src/components/StatusCircle.vue</code>的实现。我们先不使用TypeScript。通过代码可以看到，这就和正常写单文件组件一样。</p> 
+<pre><code class="prism language-js"><span class="token operator">&lt;</span>script setup<span class="token operator">&gt;</span>
+<span class="token function">defineProps</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span>
+  <span class="token literal-property property">type</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 类型 实际控制颜色</span>
+    <span class="token comment">// 'default' | 'error' | 'warning' | 'success' | 'info'</span>
+    <span class="token literal-property property">type</span><span class="token operator">:</span> String<span class="token punctuation">,</span>
+    <span class="token keyword">default</span><span class="token operator">:</span> <span class="token string">'default'</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token literal-property property">size</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 圆圈的大小</span>
+    <span class="token literal-property property">type</span><span class="token operator">:</span> Number<span class="token punctuation">,</span>
+    <span class="token keyword">default</span><span class="token operator">:</span> <span class="token number">10</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>script<span class="token operator">&gt;</span>
+
+<span class="token operator">&lt;</span>template<span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span>span <span class="token keyword">class</span><span class="token operator">=</span><span class="token string">"circle"</span> <span class="token operator">:</span><span class="token keyword">class</span><span class="token operator">=</span><span class="token string">"[type]"</span> <span class="token operator">:</span>style<span class="token operator">=</span><span class="token string">"{ width: `${size}px`, height: `${size}px` }"</span> <span class="token operator">/</span><span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+
+<span class="token operator">&lt;</span>style scoped<span class="token operator">&gt;</span>
+<span class="token punctuation">.</span>circle <span class="token punctuation">{<!-- --></span>
+  <span class="token literal-property property">display</span><span class="token operator">:</span> inline<span class="token operator">-</span>block<span class="token punctuation">;</span>
+  margin<span class="token operator">-</span>right<span class="token operator">:</span> 8px<span class="token punctuation">;</span>
+  border<span class="token operator">-</span>radius<span class="token operator">:</span> <span class="token number">50</span><span class="token operator">%</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token punctuation">.</span>default <span class="token punctuation">{<!-- --></span>
+  background<span class="token operator">-</span>color<span class="token operator">:</span> #<span class="token number">363636</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token punctuation">.</span>error <span class="token punctuation">{<!-- --></span>
+  background<span class="token operator">-</span>color<span class="token operator">:</span> #d03050<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token punctuation">.</span>warning <span class="token punctuation">{<!-- --></span>
+  background<span class="token operator">-</span>color<span class="token operator">:</span> #f0a020<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token punctuation">.</span>success <span class="token punctuation">{<!-- --></span>
+  background<span class="token operator">-</span>color<span class="token operator">:</span> #18a058<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token punctuation">.</span>info <span class="token punctuation">{<!-- --></span>
+  background<span class="token operator">-</span>color<span class="token operator">:</span> #2080f0<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>style<span class="token operator">&gt;</span>
+</code></pre> 
+<p>再写下<code>src/index.js</code>。</p> 
+<pre><code class="prism language-js"><span class="token keyword">export</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">default</span> <span class="token keyword">as</span> StatusCircle <span class="token punctuation">}</span> <span class="token keyword">from</span> <span class="token string">'./components/StatusCircle.vue'</span>
+</code></pre> 
+<p>如果还有其它给用户使用的辅助函数，其它单文件组件等等也可以在这里导出。</p> 
+<h3><a id="packagejson1_142"></a>package.json配置(1)</h3> 
+<ul><li>配置程序入口，module为ESModule引入方式的程序入口文件：</li></ul> 
+<pre><code class="prism language-json"><span class="token string-property property">"module"</span><span class="token operator">:</span> <span class="token string">"src/index.js"</span>
+</code></pre> 
+<ul><li>需要配置给用户使用的npm包中包含哪些文件，只有配置过的文件才会出现在发布包中。目前我们只有一个src文件夹。</li></ul> 
+<pre><code class="prism language-json"><span class="token string-property property">"files"</span><span class="token operator">:</span> <span class="token punctuation">[</span> <span class="token string">"src"</span> <span class="token punctuation">]</span>
+</code></pre> 
+<p>然后再修改下部分必要的配置，例如包名称和版本号。</p> 
+<pre><code class="prism language-json"><span class="token string-property property">"name"</span><span class="token operator">:</span> <span class="token string">"sec-test"</span><span class="token punctuation">,</span>
+<span class="token string-property property">"version"</span><span class="token operator">:</span> <span class="token string">"1.0.0"</span><span class="token punctuation">,</span>
+</code></pre> 
+<p>然后就可以直接发布npm包了：</p> 
+<pre><code class="prism language-sh"><span class="token function">pnpm</span> publish --no-git-checks
+</code></pre> 
+<h3><a id="_162"></a>工程中尝试引入</h3> 
+<p>发布之后，我们就可以在Vue3页面工程中尝试引用了。</p> 
+<pre><code class="prism language-sh"><span class="token comment"># 安装依赖</span>
+<span class="token function">pnpm</span> <span class="token function">add</span> <span class="token parameter variable">-D</span> sec-test
+</code></pre> 
+<pre><code class="prism language-js"><span class="token operator">&lt;</span>script setup<span class="token operator">&gt;</span>
+<span class="token keyword">import</span> <span class="token punctuation">{<!-- --></span> StatusCircle <span class="token punctuation">}</span> <span class="token keyword">from</span> <span class="token string">'sec-test'</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>script<span class="token operator">&gt;</span>
+
+<span class="token operator">&lt;</span>template<span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span>div<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>StatusCircle type<span class="token operator">=</span><span class="token string">"warning"</span> <span class="token operator">/</span><span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>StatusCircle type<span class="token operator">=</span><span class="token string">"success"</span> <span class="token operator">/</span><span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span><span class="token operator">/</span>div<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+</code></pre> 
+<p>此时页面工程中，就成功集成了我们自己的组件库了。</p> 
+<h2><a id="_182"></a>引入组件库</h2> 
+<p>我们的文章标题叫做“二次封装组件库”，那么需要引入一个“一次封装”的组件库作为组件来源。这里使用Naive UI组件库作为示例。</p> 
+<h3><a id="_185"></a>选择依赖种类</h3> 
+<p>“一次封装”的组件库应该作为哪种依赖呢？首先要明确使用场景。二次封装的组件库，一般都作为“一次封装”的主要组件库的补充，即可以理解为，使用二次封装组件库的开发者，在项目中都会引入主要组件库。</p> 
+<p>而且组件库包的体积一般都比较大。因此可以将“一次封装”的组件库作为<code>peerDependencies</code>引入。</p> 
+<pre><code class="prism language-sh"><span class="token function">pnpm</span> <span class="token function">add</span> --save-peer naive-ui
+</code></pre> 
+<h3><a id="1_194"></a>目录结构(1)</h3> 
+<p>我们保留上一节的代码为基础。再用一个很简单的，需要二次封装的场景来举例————带提示的按钮组件，由NButton, NPopover组合而成，为按钮添加悬浮提示文本。</p> 
+<pre><code>|-- .gitignore
+|-- package.json
+|-- pnpm-lock.yaml
+|-- src
+    |-- index.js
+    |-- components
+        |-- StatusCircle.vue
+        |-- TipButton.vue
+</code></pre> 
+<h3><a id="TipButton_208"></a>TipButton组件源码</h3> 
+<pre><code class="prism language-js"><span class="token operator">&lt;</span>script setup<span class="token operator">&gt;</span>
+<span class="token keyword">import</span> <span class="token punctuation">{<!-- --></span> NPopover<span class="token punctuation">,</span> NButton <span class="token punctuation">}</span> <span class="token keyword">from</span> <span class="token string">'naive-ui'</span>
+<span class="token keyword">import</span> <span class="token punctuation">{<!-- --></span> computed<span class="token punctuation">,</span> useSlots <span class="token punctuation">}</span> <span class="token keyword">from</span> <span class="token string">'vue'</span>
+
+<span class="token function">defineOptions</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span> <span class="token literal-property property">inheritAttrs</span><span class="token operator">:</span> <span class="token boolean">false</span> <span class="token punctuation">}</span><span class="token punctuation">)</span>
+
+<span class="token keyword">const</span> props <span class="token operator">=</span> <span class="token function">defineProps</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// popover 的触发方式</span>
+  <span class="token literal-property property">tipTrigger</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token literal-property property">type</span><span class="token operator">:</span> String<span class="token punctuation">,</span>
+    <span class="token keyword">default</span><span class="token operator">:</span> <span class="token string">'hover'</span><span class="token punctuation">,</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token comment">// popover 的弹出位置</span>
+  <span class="token literal-property property">tipPlacement</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token literal-property property">type</span><span class="token operator">:</span> String<span class="token punctuation">,</span>
+    <span class="token keyword">default</span><span class="token operator">:</span> <span class="token string">'top'</span><span class="token punctuation">,</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token comment">// popover 内容</span>
+  <span class="token literal-property property">tip</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token literal-property property">type</span><span class="token operator">:</span> String<span class="token punctuation">,</span>
+    <span class="token keyword">default</span><span class="token operator">:</span> <span class="token string">''</span><span class="token punctuation">,</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token comment">// 是否禁用 popover</span>
+  <span class="token literal-property property">tipDisabled</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token literal-property property">type</span><span class="token operator">:</span> Boolean<span class="token punctuation">,</span>
+    <span class="token keyword">default</span><span class="token operator">:</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token comment">// --- 剩余属性继承 HButton</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span>
+<span class="token keyword">const</span> slots <span class="token operator">=</span> <span class="token function">useSlots</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+<span class="token keyword">const</span> tipDisabledComp <span class="token operator">=</span> <span class="token function">computed</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 手动设置 禁用时肯定禁用</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>props<span class="token punctuation">.</span>tipDisabled<span class="token punctuation">)</span> <span class="token keyword">return</span> props<span class="token punctuation">.</span>tipDisabled
+  <span class="token comment">// slot有值不禁用</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>slots<span class="token punctuation">.</span>tip<span class="token punctuation">)</span> <span class="token keyword">return</span> <span class="token boolean">false</span>
+  <span class="token comment">// props有值不禁用</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>props<span class="token punctuation">.</span>tip<span class="token punctuation">)</span> <span class="token keyword">return</span> <span class="token boolean">false</span>
+  <span class="token comment">// 无值的时候禁用</span>
+  <span class="token keyword">return</span> <span class="token boolean">true</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>script<span class="token operator">&gt;</span>
+
+<span class="token operator">&lt;</span>template<span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span>NPopover <span class="token operator">:</span>trigger<span class="token operator">=</span><span class="token string">"tipTrigger"</span> <span class="token operator">:</span>placement<span class="token operator">=</span><span class="token string">"tipPlacement"</span> <span class="token operator">:</span>disabled<span class="token operator">=</span><span class="token string">"tipDisabledComp"</span><span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>template #trigger<span class="token operator">&gt;</span>
+      <span class="token operator">&lt;</span>NButton tag<span class="token operator">=</span><span class="token string">"div"</span> v<span class="token operator">-</span>bind<span class="token operator">=</span><span class="token string">"$attrs"</span><span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span>template v<span class="token operator">-</span><span class="token keyword">for</span><span class="token operator">=</span><span class="token string">"(item, key, index) in $slots"</span> <span class="token operator">:</span>key<span class="token operator">=</span><span class="token string">"index"</span> #<span class="token punctuation">[</span>key<span class="token punctuation">]</span><span class="token operator">&gt;</span>
+          <span class="token operator">&lt;</span>slot v<span class="token operator">-</span><span class="token keyword">if</span><span class="token operator">=</span><span class="token string">"key !== 'tip'"</span> <span class="token operator">:</span>name<span class="token operator">=</span><span class="token string">"key"</span> <span class="token operator">/</span><span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+      <span class="token operator">&lt;</span><span class="token operator">/</span>NButton<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>slot name<span class="token operator">=</span><span class="token string">"tip"</span><span class="token operator">&gt;</span>
+      <span class="token operator">&lt;</span>template v<span class="token operator">-</span><span class="token keyword">if</span><span class="token operator">=</span><span class="token string">"tip"</span><span class="token operator">&gt;</span>
+        <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> tip <span class="token punctuation">}</span><span class="token punctuation">}</span>
+      <span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>slot<span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span><span class="token operator">/</span>NPopover<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+</code></pre> 
+<p>在index.js中导出：</p> 
+<pre><code class="prism language-js"><span class="token keyword">export</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">default</span> <span class="token keyword">as</span> StatusCircle <span class="token punctuation">}</span> <span class="token keyword">from</span> <span class="token string">'./components/StatusCircle.vue'</span>
+<span class="token keyword">export</span> <span class="token punctuation">{<!-- --></span> <span class="token keyword">default</span> <span class="token keyword">as</span> TipButton <span class="token punctuation">}</span> <span class="token keyword">from</span> <span class="token string">'./components/TipButton.vue'</span>
+</code></pre> 
+<p>然后把版本号增加一下，直接发布版本即可。</p> 
+<h3><a id="TipButton_279"></a>TipButton使用方式</h3> 
+<p>我们把“一次封装”组件库中的NButton和NPopover组合而成了TipButton，给按钮提供了悬浮提示的扩展能力，而且不影响按钮原本的已有能力，即按钮本身的Props、事件、Slots都能正常使用。</p> 
+<pre><code class="prism language-js"><span class="token operator">&lt;</span>template<span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span><span class="token operator">!</span><span class="token operator">--</span> 多语言使用 <span class="token operator">--</span><span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span>TipButton style<span class="token operator">=</span><span class="token string">"margin-right: 8px"</span> <span class="token operator">:</span>tip<span class="token operator">-</span>disabled<span class="token operator">=</span><span class="token string">"true"</span> type<span class="token operator">=</span><span class="token string">"primary"</span> @click<span class="token operator">=</span><span class="token string">"addProject"</span><span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>template #icon<span class="token operator">&gt;</span>
+      <span class="token operator">&lt;</span>NIcon<span class="token operator">&gt;</span><span class="token operator">&lt;</span>AddOutline <span class="token operator">/</span><span class="token operator">&gt;</span><span class="token operator">&lt;</span><span class="token operator">/</span>NIcon<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>template #tip<span class="token operator">&gt;</span>创建项目<span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+    新增
+  <span class="token operator">&lt;</span><span class="token operator">/</span>TipButton<span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span>TipButton secondary tip<span class="token operator">=</span><span class="token string">"删除项目"</span> <span class="token operator">:</span>disabled<span class="token operator">=</span><span class="token string">"!keySelection.length"</span> @click<span class="token operator">=</span><span class="token string">"deleteProject(keySelection)"</span><span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>template #icon<span class="token operator">&gt;</span>
+      <span class="token operator">&lt;</span>n<span class="token operator">-</span>icon<span class="token operator">&gt;</span><span class="token operator">&lt;</span>TrashBinOutline <span class="token operator">/</span><span class="token operator">&gt;</span><span class="token operator">&lt;</span><span class="token operator">/</span>n<span class="token operator">-</span>icon<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+    删除
+  <span class="token operator">&lt;</span><span class="token operator">/</span>TipButton<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+
+<span class="token operator">&lt;</span>script setup<span class="token operator">&gt;</span>
+<span class="token keyword">import</span> <span class="token punctuation">{<!-- --></span> TipButton <span class="token punctuation">}</span> <span class="token keyword">from</span> <span class="token string">'sec-test'</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>script<span class="token operator">&gt;</span>
+</code></pre> 
+<p>可以看到在大部分场景下，我们只需要将之前写的NButton标签改名为TipButton，不用修改其它代码。再增加tip相关属性即可。</p> 
+<p>在tip属性方面，同时提供了prop形式和slot形式。Props形式适用于简单的一句话形式的悬浮提示，slot形式适用于更复杂的自定义提示内容。同时针对NPopover在提示内容为空时，依然展示空的悬浮提示的情况，我们根据prop和slot是否存在内容判断是否展示悬浮提示，如果都不存在则禁用。</p> 
+<p>有人会说，哪里的按钮需要提示就自己加NPopover就好了，这样封装多此一举。是的，如果只有一个地方的按钮需要用到悬浮提示，这样做确实多余。但是假设如果你有10-20个位置需要这种悬浮提示按钮，而且多个工程都需要，这样的封装就有意义了。这种封装简化了代码结构，并未增加多少心智负担。我们列出了最简单的使用情况，经过封装确实简洁很多。</p> 
+<pre><code class="prism language-html"><span class="token comment">&lt;!-- 使用封装 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>TipButton</span> <span class="token attr-name">tip</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>创建项目<span class="token punctuation">"</span></span><span class="token punctuation">&gt;</span></span>新增<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>TipButton</span><span class="token punctuation">&gt;</span></span>
+<span class="token comment">&lt;!-- 未封装 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NPopover</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>template</span> <span class="token attr-name">#trigger</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NButton</span><span class="token punctuation">&gt;</span></span>新增<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>NButton</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>template</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>span</span><span class="token punctuation">&gt;</span></span>创建项目<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>span</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>NPopover</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<h2><a id="_323"></a>透传能力</h2> 
+<p>像上面这样，在原有组件库的基础上进行封装和扩展的情况还有很多。在扩展能力的同时，也需要注意依然提供原有的组件库能力。通过上面的例子，我们来整理一下如何提供能力。</p> 
+<h3><a id="Props_326"></a>透传Props</h3> 
+<p>关于这部分我们可以参考Vue3文档中的<a href="https://cn.vuejs.org/guide/components/attrs.html" rel="nofollow">透传 Attributes</a>。这分为两种情况：</p> 
+<ol><li>希望透传Props的组件正好是二次封装组件的根元素上，那么可以直接利用Vue的透传attribute特性，透传到原有组件的Props上。</li></ol> 
+<pre><code class="prism language-html"><span class="token comment">&lt;!-- 封装后使用 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>SecButton</span> <span class="token attr-name">type</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>primary<span class="token punctuation">"</span></span> <span class="token punctuation">/&gt;</span></span>
+
+<span class="token comment">&lt;!-- 二次封装组件 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>template</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NButton</span> <span class="token punctuation">/&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>template</span><span class="token punctuation">&gt;</span></span>
+
+<span class="token comment">&lt;!-- 实际透传后效果 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NButton</span> <span class="token attr-name">type</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>primary<span class="token punctuation">"</span></span> <span class="token punctuation">/&gt;</span></span>
+</code></pre> 
+<ol start="2"><li>希望透传Props的组件并不是二次封装组件的根元素。这样需要禁用Attributes继承，然后手动指定继承位置。例如上面的TipButton就是这样。简化一下：</li></ol> 
+<pre><code class="prism language-js"><span class="token operator">&lt;</span><span class="token operator">!</span><span class="token operator">--</span> 二次封装组件 <span class="token operator">--</span><span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span>template<span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span>NPopover<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>template #trigger<span class="token operator">&gt;</span>
+      <span class="token operator">&lt;</span><span class="token operator">!</span><span class="token operator">--</span> 指定透传元素 <span class="token operator">--</span><span class="token operator">&gt;</span>
+      <span class="token operator">&lt;</span>NButton v<span class="token operator">-</span>bind<span class="token operator">=</span><span class="token string">"$attrs"</span> <span class="token operator">/</span><span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span><span class="token operator">/</span>NPopover<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+
+<span class="token operator">&lt;</span>script setup<span class="token operator">&gt;</span>
+<span class="token comment">// 禁用Attributes继承</span>
+<span class="token function">defineOptions</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span> <span class="token literal-property property">inheritAttrs</span><span class="token operator">:</span> <span class="token boolean">false</span> <span class="token punctuation">}</span><span class="token punctuation">)</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>script<span class="token operator">&gt;</span>
+</code></pre> 
+<p>可以看到，手动指定了继承位置，因此我们的attributes会透传给NButton，作为Props接收。</p> 
+<pre><code class="prism language-html"><span class="token comment">&lt;!-- 封装后使用 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>TipButton</span> <span class="token attr-name">type</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>primary<span class="token punctuation">"</span></span> <span class="token punctuation">/&gt;</span></span>
+
+<span class="token comment">&lt;!-- 实际透传后效果 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NPopover</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>template</span> <span class="token attr-name">#trigger</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NButton</span> <span class="token attr-name">type</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>primary<span class="token punctuation">"</span></span> <span class="token punctuation">/&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>template</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>NPopover</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<p>如果不禁止根元素Attributes继承，但同时指定了NButton继承，那么根元素（NPopover）和NButton会同时继承attributes。在大部分场景下，这是冲突的。看一个例子：</p> 
+<pre><code class="prism language-html"><span class="token comment">&lt;!-- 不禁止根元素Attributes继承的示例 --&gt;</span>
+<span class="token comment">&lt;!-- 封装后使用 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>TipButton</span> <span class="token attr-name">class</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>button-class<span class="token punctuation">"</span></span> <span class="token attr-name">:disabled</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>true<span class="token punctuation">"</span></span> <span class="token punctuation">/&gt;</span></span>
+
+<span class="token comment">&lt;!-- 实际透传后效果 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NPopover</span> <span class="token attr-name">class</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>button-class<span class="token punctuation">"</span></span> <span class="token attr-name">:disabled</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>true<span class="token punctuation">"</span></span> <span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>template</span> <span class="token attr-name">#trigger</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NButton</span> <span class="token attr-name">class</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>button-class<span class="token punctuation">"</span></span> <span class="token attr-name">:disabled</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>true<span class="token punctuation">"</span></span> <span class="token punctuation">/&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>template</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>NPopover</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<p>可以看到，class同时被绑定到了NPopover和NButton上。更严重的是，由于NPopover和NButton的禁用prop都是disabled，希望禁用NButton的时候，也会同时禁用NPopover。因此解决方案是禁止根元素Attributes继承，然后为NPopover的disabled重新起一个名字传递。</p> 
+<h3><a id="_393"></a>透传事件</h3> 
+<p>透传事件和透传Props的规则是一致的，都使用Attributes继承的规则，这里不重复描述了。但是事件和class、style类似，都有合并的规则。即自身定义了事件处理器，又透传了事件处理器，可以同时生效。</p> 
+<pre><code class="prism language-html"><span class="token comment">&lt;!-- 封装后使用 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>SecButton</span> <span class="token attr-name">@click</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>click1<span class="token punctuation">"</span></span> <span class="token punctuation">/&gt;</span></span>
+
+<span class="token comment">&lt;!-- 二次封装组件 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>template</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NButton</span> <span class="token attr-name">@click</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>click2<span class="token punctuation">"</span></span> <span class="token punctuation">/&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>template</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<p>可以看到在二次封装时，在NButton上定义了click事件处理器。我们透传的attributes又提供了一个click事件处理器。这两个并不会覆盖，而是会同时生效。对于手动继承Attributes的场景也一样，也会同时生效。</p> 
+<pre><code class="prism language-html"><span class="token comment">&lt;!-- 封装后使用 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>TipButton</span> <span class="token attr-name">@click</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>click1<span class="token punctuation">"</span></span> <span class="token punctuation">/&gt;</span></span>
+
+<span class="token comment">&lt;!-- 二次封装组件 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>template</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NPopover</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>template</span> <span class="token attr-name">#trigger</span><span class="token punctuation">&gt;</span></span>
+      <span class="token comment">&lt;!-- 指定透传元素 --&gt;</span>
+      <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NButton</span> <span class="token attr-name">v-bind</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>$attrs<span class="token punctuation">"</span></span> <span class="token attr-name">@click</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>click2<span class="token punctuation">"</span></span> <span class="token punctuation">/&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>template</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>NPopover</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>template</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<h3><a id="Slots_423"></a>透传插槽Slots</h3> 
+<p>对于插槽，Vue提供了$slots表示父组件所传入插槽的对象。我们遍历这个对象，用对象key来匹配原组件的slot，然后在内部抛出二次封装组件库的slot。（有点绕口，来看下例子）</p> 
+<pre><code class="prism language-html"><span class="token comment">&lt;!-- 封装后使用 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>SecButton</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>template</span> <span class="token attr-name">#icon</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>AddOutline</span> <span class="token punctuation">/&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>template</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>span</span><span class="token punctuation">&gt;</span></span>创建项目<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>span</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>SecButton</span><span class="token punctuation">&gt;</span></span>
+
+<span class="token comment">&lt;!-- 二次封装组件 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NButton</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>template</span> <span class="token attr-name">v-for</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>(item, key, index) in $slots<span class="token punctuation">"</span></span> <span class="token attr-name">:key</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>index<span class="token punctuation">"</span></span> <span class="token attr-name">#[key]</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>slot</span> <span class="token attr-name">:name</span><span class="token attr-value"><span class="token punctuation attr-equals">=</span><span class="token punctuation">"</span>key<span class="token punctuation">"</span></span> <span class="token punctuation">/&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>template</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>NButton</span><span class="token punctuation">&gt;</span></span>
+
+<span class="token comment">&lt;!-- 实际透传后效果 --&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>NButton</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>template</span> <span class="token attr-name">#icon</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>AddOutline</span> <span class="token punctuation">/&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>template</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>template</span> <span class="token attr-name">#default</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>span</span><span class="token punctuation">&gt;</span></span>创建项目<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>span</span><span class="token punctuation">&gt;</span></span>
+  <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>template</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>NButton</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<p>使用v-for遍历$slots，key是插槽的key。<code>&lt;template&gt;</code>那一层表示的是匹配NButton的slot，即<code>&lt;template&gt;</code>内部的内容就是被嵌入进NButton内部的插槽中。下一层的slot，是我们二次封装的组件抛出给外部的插槽。因此，外部实际传入的插槽内容就被展示到slot处，而slot被<code>&lt;template&gt;</code>包裹，实际上被嵌入进NButton内部的插槽中。</p> 
+<h3><a id="_455"></a>透传实例方法</h3> 
+<p>在Vue3的组合式写法中，我们使用defineExpose暴露属性和方法。然后使用ref访问。那么在二次封装的组件中，如果想要透传抛出给外部呢？</p> 
+<p>很遗憾，我没有在Vue3中找到类似<code>$slots,$attrs</code>这种可以获取到组件暴露的全部属性和方法的对象。因此只能手动一个一个转发了。</p> 
+<pre><code class="prism language-js"><span class="token operator">&lt;</span>script setup<span class="token operator">&gt;</span>
+<span class="token keyword">const</span> popoverRef <span class="token operator">=</span> <span class="token function">ref</span><span class="token punctuation">(</span><span class="token keyword">null</span><span class="token punctuation">)</span>
+<span class="token comment">// 手动转发</span>
+<span class="token function">defineExpose</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span>
+  <span class="token function-variable function">tipSetShow</span><span class="token operator">:</span> <span class="token punctuation">(</span><span class="token parameter">show</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> popoverRef<span class="token punctuation">.</span>value<span class="token operator">?.</span><span class="token function">setShow</span><span class="token punctuation">(</span>show<span class="token punctuation">)</span><span class="token punctuation">,</span>
+  <span class="token function-variable function">tipSyncPosition</span><span class="token operator">:</span> <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> popoverRef<span class="token punctuation">.</span>value<span class="token operator">?.</span><span class="token function">syncPosition</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>script<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span>template<span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span>NPopover ref<span class="token operator">=</span><span class="token string">"popoverRef"</span> <span class="token operator">/</span><span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+</code></pre> 
+<h2><a id="_474"></a>加入构建流程</h2> 
+<h3><a id="_476"></a>使用构建的理由</h3> 
+<p>既然不通过构建就能开发npm包，为何要进行构建呢？</p> 
+<ol><li>例如上面提到的<code>@vueuse/core</code>，将部分依赖直接集成到构建包中，减少生产时的依赖项。利用Treeshaking，只把依赖中用到的代码打进构建包中。</li><li>经过构建和压缩，可以减少代码体积，提高下载速度。</li><li>如果是非开源的代码库，可以隐藏源码。虽然即使经过打包和压缩依然是js代码，还是可以分析出来。但是至少分析的难度提高了一点。</li><li>通过构建时的polyfill等配置，可以提高代码在浏览器中运行的兼容性。</li><li>将typescript代码翻译为js代码，使开发者不需要ts也能正常使用。</li></ol> 
+<h3><a id="2_485"></a>目录结构(2)</h3> 
+<p>我们依然使用之前的代码，在此基础上加入构建模式。这是加入构建流程后的目录结构。</p> 
+<pre><code>|-- .gitignore
+|-- package.json
+|-- pnpm-lock.yaml
+|-- vite.config.js
+|-- dist
+|   |-- index.mjs
+|   |-- style.css
+|-- src
+    |-- index.js
+    |-- components
+        |-- StatusCircle.vue
+        |-- TipButton.vue
+</code></pre> 
+<h3><a id="Vite_503"></a>Vite构建配置</h3> 
+<p>我们使用vite作为构建工具。所有构建工具基本都是<code>devDependencies</code>。安装必要的依赖：</p> 
+<pre><code class="prism language-sh"><span class="token function">pnpm</span> <span class="token function">add</span> <span class="token parameter variable">-D</span> vite @vitejs/plugin-vue
+<span class="token comment"># CSS预处理器，用于扩展CSS的功能，可以安装其它工具，也可以不装</span>
+<span class="token function">pnpm</span> <span class="token function">add</span> <span class="token parameter variable">-D</span> sass
+</code></pre> 
+<p>创建根目录创建vite.config.js。</p> 
+<pre><code class="prism language-js"><span class="token keyword">import</span> <span class="token punctuation">{<!-- --></span> defineConfig <span class="token punctuation">}</span> <span class="token keyword">from</span> <span class="token string">'vite'</span>
+<span class="token keyword">import</span> vue <span class="token keyword">from</span> <span class="token string">'@vitejs/plugin-vue'</span>
+
+<span class="token keyword">export</span> <span class="token keyword">default</span> <span class="token function">defineConfig</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span>
+  <span class="token literal-property property">build</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">// 库模式配置</span>
+    <span class="token literal-property property">lib</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 入口文件</span>
+      <span class="token literal-property property">entry</span><span class="token operator">:</span> <span class="token string">'./src/index.js'</span><span class="token punctuation">,</span>
+      <span class="token comment">// ESModule模式 </span>
+      <span class="token literal-property property">formats</span><span class="token operator">:</span> <span class="token punctuation">[</span><span class="token string">'es'</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+      <span class="token comment">// 输出的文件名</span>
+      <span class="token literal-property property">fileName</span><span class="token operator">:</span> <span class="token string">'index'</span>
+    <span class="token punctuation">}</span><span class="token punctuation">,</span>
+    <span class="token literal-property property">rollupOptions</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token comment">// 外部化处理那些你不想打包进库的依赖</span>
+      <span class="token literal-property property">external</span><span class="token operator">:</span> <span class="token punctuation">[</span><span class="token string">'vue'</span><span class="token punctuation">,</span> <span class="token string">'naive-ui'</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+      <span class="token literal-property property">output</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token comment">// 为外部化的依赖提供一个全局变量</span>
+        <span class="token literal-property property">globals</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+          <span class="token literal-property property">vue</span><span class="token operator">:</span> <span class="token string">'Vue'</span>
+        <span class="token punctuation">}</span>
+      <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token comment">// 构建插件</span>
+  <span class="token literal-property property">plugins</span><span class="token operator">:</span> <span class="token punctuation">[</span><span class="token function">vue</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">]</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>在Vite中有一种库模式，是专门为了开发库工具的构建模式：<a href="https://cn.vitejs.dev/guide/build.html#library-mode" rel="nofollow">Vite文档-库模式</a></p> 
+<p>库模式不使用HTML作为入口，而是用一个js/ts文件做入口。我们还要配置模式（提供给浏览器的一般是es模式）以及一些其他配置。在<code>peerDependencies</code>中的那些不构建的依赖则需要在rollupOptions中声明。上面的配置中都写了对应的注释。</p> 
+<h3><a id="packagejson2_547"></a>package.json配置(2)</h3> 
+<p>配置好Vite之后，还要修改下项目package.json。首先增加执行构建的脚本：</p> 
+<pre><code class="prism language-json"><span class="token string-property property">"scripts"</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token string-property property">"build"</span><span class="token operator">:</span> <span class="token string">"vite build"</span>
+<span class="token punctuation">}</span><span class="token punctuation">,</span>
+</code></pre> 
+<p>然后就可以尝试进行构建了。执行脚本：</p> 
+<pre><code class="prism language-sh"><span class="token function">pnpm</span> build
+</code></pre> 
+<p>可以看到新增了dist文件夹，里面有构建后的代码逻辑和导出的css。这个dist文件夹属于成果物，并不属于代码，因此在<code>.gitignore</code>中要排除这个目录。</p> 
+<p>既然有了构建流程，那么我们提供给开发者集成的就是构建后的dist文件夹而不是src，因此还要继续修改导出配置。</p> 
+<pre><code class="prism language-json"><span class="token string-property property">"module"</span><span class="token operator">:</span> <span class="token string">"dist/index.mjs"</span><span class="token punctuation">,</span>
+<span class="token string-property property">"files"</span><span class="token operator">:</span> <span class="token punctuation">[</span> <span class="token string">"dist"</span> <span class="token punctuation">]</span><span class="token punctuation">,</span>
+</code></pre> 
+<p>这样发布包中就不包含src源码了。然后把版本号增加一下，直接发布版本即可。</p> 
+<p>注意，开发者在集成我们的npm包时，需要单独引入css，整个项目中引入一次即可。</p> 
+<pre><code class="prism language-js"><span class="token keyword">import</span> <span class="token string">'sec-test/dist/style.css'</span>
+</code></pre> 
+<h2><a id="TypeScript_573"></a>支持TypeScript</h2> 
+<p>很多人开发前端工程都喜欢使用TypeScript，它可以提供类型检查，提高代码的规范性和可维护性。虽然网络上对于TypeScript有些争议，但是既然有大量的开发者使用TS，那也应该提供对应的支持。</p> 
+<h3><a id="3_576"></a>目录结构(3)</h3> 
+<p>我们依然使用之前的代码，在此基础上增加对TypeScript的支持。这是完成后的目录结构。</p> 
+<pre><code>|-- .gitignore
+|-- package.json
+|-- pnpm-lock.yaml
+|-- tsconfig.json
+|-- tsconfig.tsbuildinfo
+|-- vite.config.ts
+|-- dist
+|   |-- index.mjs
+|   |-- style.css
+|-- dts
+|   |-- tsconfig.tsbuildinfo
+|   |-- src
+|       |-- index.d.ts
+|       |-- components
+|           |-- StatusCircle.vue.d.ts
+|           |-- TipButton.vue.d.ts
+|-- src
+    |-- index.ts
+    |-- components
+        |-- StatusCircle.vue
+        |-- TipButton.vue
+</code></pre> 
+<h3><a id="TypeScript_602"></a>配置TypeScript</h3> 
+<p>首先安装typescript依赖。TypeScript相关的依赖也只是开发模式下使用。还有安装一下vue相关的ts配置文件扩展。</p> 
+<pre><code class="prism language-sh"><span class="token function">pnpm</span> <span class="token function">add</span> <span class="token parameter variable">-D</span> typescript
+<span class="token function">pnpm</span> <span class="token function">add</span> <span class="token parameter variable">-D</span> @vue/tsconfig
+</code></pre> 
+<p>然后在根目录下创建<code>tsconfig.json</code>，写入相关配置。这里直接使用了<code>@vue/tsconfig</code>提供的配置预设。</p> 
+<pre><code class="prism language-json"><span class="token punctuation">{<!-- --></span>
+  <span class="token string-property property">"extends"</span><span class="token operator">:</span> <span class="token string">"@vue/tsconfig/tsconfig.dom.json"</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"include"</span><span class="token operator">:</span> <span class="token punctuation">[</span><span class="token string">"src/**/*"</span><span class="token punctuation">,</span> <span class="token string">"src/**/*.vue"</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"outDir"</span><span class="token operator">:</span> <span class="token string">"dts"</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"compilerOptions"</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string-property property">"composite"</span><span class="token operator">:</span> <span class="token boolean">true</span><span class="token punctuation">,</span>
+    <span class="token string-property property">"baseUrl"</span><span class="token operator">:</span> <span class="token string">"."</span><span class="token punctuation">,</span>
+    <span class="token string-property property">"paths"</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+      <span class="token string-property property">"@/*"</span><span class="token operator">:</span> <span class="token punctuation">[</span><span class="token string">"./src/*"</span><span class="token punctuation">]</span>
+    <span class="token punctuation">}</span>
+  <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>其中的outDir是类型文件的输出位置，下面会用到。</p> 
+<h3><a id="TypeScript_627"></a>使用TypeScript改写代码</h3> 
+<p>首先是<code>TipButton.vue</code>。</p> 
+<pre><code class="prism language-js"><span class="token operator">&lt;</span>script lang<span class="token operator">=</span><span class="token string">"ts"</span> setup<span class="token operator">&gt;</span>
+<span class="token keyword">import</span> <span class="token punctuation">{<!-- --></span> NPopover<span class="token punctuation">,</span> NButton <span class="token punctuation">}</span> <span class="token keyword">from</span> <span class="token string">'naive-ui'</span>
+<span class="token keyword">import</span> <span class="token punctuation">{<!-- --></span> computed<span class="token punctuation">,</span> useSlots <span class="token punctuation">}</span> <span class="token keyword">from</span> <span class="token string">'vue'</span>
+
+<span class="token function">defineOptions</span><span class="token punctuation">(</span><span class="token punctuation">{<!-- --></span> <span class="token literal-property property">inheritAttrs</span><span class="token operator">:</span> <span class="token boolean">false</span> <span class="token punctuation">}</span><span class="token punctuation">)</span>
+
+<span class="token keyword">interface</span> <span class="token class-name">Props</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// popover 的触发方式</span>
+  tipTrigger<span class="token operator">?</span><span class="token operator">:</span> <span class="token string">'hover'</span> <span class="token operator">|</span> <span class="token string">'click'</span> <span class="token operator">|</span> <span class="token string">'focus'</span> <span class="token operator">|</span> <span class="token string">'manual'</span>
+  <span class="token comment">// popover 的弹出位置</span>
+  tipPlacement<span class="token operator">?</span><span class="token operator">:</span> <span class="token string">'top-start'</span> <span class="token operator">|</span> <span class="token string">'top'</span> <span class="token operator">|</span> <span class="token string">'top-end'</span> <span class="token operator">|</span> <span class="token string">'right-start'</span> <span class="token operator">|</span> <span class="token string">'right'</span> <span class="token operator">|</span> <span class="token string">'right-end'</span> <span class="token operator">|</span> <span class="token string">'bottom-start'</span> <span class="token operator">|</span> <span class="token string">'bottom'</span> <span class="token operator">|</span> <span class="token string">'bottom-end'</span> <span class="token operator">|</span> <span class="token string">'left-start'</span> <span class="token operator">|</span> <span class="token string">'left'</span> <span class="token operator">|</span> <span class="token string">'left-end'</span>
+  <span class="token comment">// popover 内容</span>
+  tip<span class="token operator">?</span><span class="token operator">:</span> string
+  <span class="token comment">// 是否禁用 popover</span>
+  tipDisabled<span class="token operator">?</span><span class="token operator">:</span> boolean
+  <span class="token comment">// --- 剩余属性继承 HButton</span>
+<span class="token punctuation">}</span>
+
+<span class="token keyword">const</span> props <span class="token operator">=</span> <span class="token function">withDefaults</span><span class="token punctuation">(</span>defineProps<span class="token operator">&lt;</span>Props<span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token literal-property property">tipTrigger</span><span class="token operator">:</span> <span class="token string">'hover'</span><span class="token punctuation">,</span>
+  <span class="token literal-property property">tipPlacement</span><span class="token operator">:</span> <span class="token string">'top'</span><span class="token punctuation">,</span>
+  <span class="token literal-property property">tip</span><span class="token operator">:</span> <span class="token string">''</span><span class="token punctuation">,</span>
+  <span class="token literal-property property">tipDisabled</span><span class="token operator">:</span> <span class="token boolean">false</span><span class="token punctuation">,</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span>
+<span class="token keyword">const</span> slots <span class="token operator">=</span> <span class="token function">useSlots</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+<span class="token keyword">const</span> tipDisabledComp <span class="token operator">=</span> <span class="token function">computed</span><span class="token punctuation">(</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">=&gt;</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 手动设置 禁用时肯定禁用</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>props<span class="token punctuation">.</span>tipDisabled<span class="token punctuation">)</span> <span class="token keyword">return</span> props<span class="token punctuation">.</span>tipDisabled
+  <span class="token comment">// slot有值不禁用</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>slots<span class="token punctuation">.</span>tip<span class="token punctuation">)</span> <span class="token keyword">return</span> <span class="token boolean">false</span>
+  <span class="token comment">// props有值不禁用</span>
+  <span class="token keyword">if</span> <span class="token punctuation">(</span>props<span class="token punctuation">.</span>tip<span class="token punctuation">)</span> <span class="token keyword">return</span> <span class="token boolean">false</span>
+  <span class="token comment">// 无值的时候禁用</span>
+  <span class="token keyword">return</span> <span class="token boolean">true</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>script<span class="token operator">&gt;</span>
+
+<span class="token operator">&lt;</span>template<span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span>NPopover <span class="token operator">:</span>trigger<span class="token operator">=</span><span class="token string">"tipTrigger"</span> <span class="token operator">:</span>placement<span class="token operator">=</span><span class="token string">"tipPlacement"</span> <span class="token operator">:</span>disabled<span class="token operator">=</span><span class="token string">"tipDisabledComp"</span><span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>template #trigger<span class="token operator">&gt;</span>
+      <span class="token operator">&lt;</span>NButton tag<span class="token operator">=</span><span class="token string">"div"</span> v<span class="token operator">-</span>bind<span class="token operator">=</span><span class="token string">"$attrs"</span><span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span>template v<span class="token operator">-</span><span class="token keyword">for</span><span class="token operator">=</span><span class="token string">"(item, key, index) in $slots"</span> <span class="token operator">:</span>key<span class="token operator">=</span><span class="token string">"index"</span> #<span class="token punctuation">[</span>key<span class="token punctuation">]</span><span class="token operator">&gt;</span>
+          <span class="token operator">&lt;</span>slot v<span class="token operator">-</span><span class="token keyword">if</span><span class="token operator">=</span><span class="token string">"key !== 'tip'"</span> <span class="token operator">:</span>name<span class="token operator">=</span><span class="token string">"key"</span> <span class="token operator">/</span><span class="token operator">&gt;</span>
+        <span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+      <span class="token operator">&lt;</span><span class="token operator">/</span>NButton<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span>slot name<span class="token operator">=</span><span class="token string">"tip"</span><span class="token operator">&gt;</span>
+      <span class="token operator">&lt;</span>template v<span class="token operator">-</span><span class="token keyword">if</span><span class="token operator">=</span><span class="token string">"tip"</span><span class="token operator">&gt;</span>
+        <span class="token punctuation">{<!-- --></span><span class="token punctuation">{<!-- --></span> tip <span class="token punctuation">}</span><span class="token punctuation">}</span>
+      <span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+    <span class="token operator">&lt;</span><span class="token operator">/</span>slot<span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span><span class="token operator">/</span>NPopover<span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+</code></pre> 
+<p>然后是<code>StatusCircle.vue</code>。</p> 
+<pre><code class="prism language-js"><span class="token operator">&lt;</span>script lang<span class="token operator">=</span><span class="token string">"ts"</span> setup<span class="token operator">&gt;</span>
+<span class="token keyword">interface</span> <span class="token class-name">Props</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token comment">// 类型 实际控制颜色</span>
+  type<span class="token operator">?</span><span class="token operator">:</span> <span class="token string">"default"</span> <span class="token operator">|</span> <span class="token string">"error"</span> <span class="token operator">|</span> <span class="token string">"warning"</span> <span class="token operator">|</span> <span class="token string">"success"</span> <span class="token operator">|</span> <span class="token string">"info"</span><span class="token punctuation">;</span>
+  <span class="token comment">// 圆圈的大小</span>
+  size<span class="token operator">?</span><span class="token operator">:</span> number<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token function">withDefaults</span><span class="token punctuation">(</span>defineProps<span class="token operator">&lt;</span>Props<span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token literal-property property">type</span><span class="token operator">:</span> <span class="token string">"default"</span><span class="token punctuation">,</span>
+  <span class="token literal-property property">size</span><span class="token operator">:</span> <span class="token number">10</span><span class="token punctuation">,</span>
+<span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>script<span class="token operator">&gt;</span>
+
+<span class="token operator">&lt;</span>template<span class="token operator">&gt;</span>
+  <span class="token operator">&lt;</span>span <span class="token keyword">class</span><span class="token operator">=</span><span class="token string">"circle"</span> <span class="token operator">:</span><span class="token keyword">class</span><span class="token operator">=</span><span class="token string">"[type]"</span> <span class="token operator">:</span>style<span class="token operator">=</span><span class="token string">"{ width: `${size}px`, height: `${size}px` }"</span> <span class="token operator">/</span><span class="token operator">&gt;</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>template<span class="token operator">&gt;</span>
+
+<span class="token operator">&lt;</span>style scoped<span class="token operator">&gt;</span>
+<span class="token punctuation">.</span>circle <span class="token punctuation">{<!-- --></span>
+  <span class="token literal-property property">display</span><span class="token operator">:</span> inline<span class="token operator">-</span>block<span class="token punctuation">;</span>
+  margin<span class="token operator">-</span>right<span class="token operator">:</span> 8px<span class="token punctuation">;</span>
+  border<span class="token operator">-</span>radius<span class="token operator">:</span> <span class="token number">50</span><span class="token operator">%</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token punctuation">.</span>default <span class="token punctuation">{<!-- --></span>
+  background<span class="token operator">-</span>color<span class="token operator">:</span> #<span class="token number">363636</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token punctuation">.</span>error <span class="token punctuation">{<!-- --></span>
+  background<span class="token operator">-</span>color<span class="token operator">:</span> #d03050<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token punctuation">.</span>warning <span class="token punctuation">{<!-- --></span>
+  background<span class="token operator">-</span>color<span class="token operator">:</span> #f0a020<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token punctuation">.</span>success <span class="token punctuation">{<!-- --></span>
+  background<span class="token operator">-</span>color<span class="token operator">:</span> #18a058<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token punctuation">.</span>info <span class="token punctuation">{<!-- --></span>
+  background<span class="token operator">-</span>color<span class="token operator">:</span> #2080f0<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+<span class="token operator">&lt;</span><span class="token operator">/</span>style<span class="token operator">&gt;</span>
+</code></pre> 
+<p>目前工程中的其它部分文件可以直接改个文件后缀名，将js改成ts即可。这个可以参考目录结构中的名字。另外在<code>vite.config.ts</code>中把入口文件名改掉：</p> 
+<pre><code class="prism language-js"><span class="token literal-property property">entry</span><span class="token operator">:</span> <span class="token string">'./src/index.ts'</span><span class="token punctuation">,</span>
+</code></pre> 
+<h3><a id="_734"></a>生成类型文件</h3> 
+<p>虽然把文件改写成了ts的形式，但是提供给用户的依然是js文件，文件本身是不带类型的。因为我们的工程也要适配那些不使用ts的开发者。我们以单独类型文件的形式提供。所以构建流程和入口文件不变，但是多了一步生成类型文件的步骤。</p> 
+<p>继续安装生成类型文件的依赖，使用vue提供的vue-tsc。</p> 
+<pre><code class="prism language-sh"><span class="token function">pnpm</span> <span class="token function">add</span> <span class="token parameter variable">-D</span> vue-tsc
+</code></pre> 
+<p>然后修改package.json，加入生成类型文件的相关脚本，构建的时候也一起生成类型。</p> 
+<pre><code class="prism language-json"><span class="token string-property property">"scripts"</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+  <span class="token string-property property">"build"</span><span class="token operator">:</span> <span class="token string">"vite build &amp;&amp; pnpm build:dts"</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"build:dts"</span><span class="token operator">:</span> <span class="token string">"vue-tsc --declaration --emitDeclarationOnly"</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>然后尝试生成类型：</p> 
+<pre><code class="prism language-sh"><span class="token function">pnpm</span> build:dts
+</code></pre> 
+<p>然后会发现，在dts文件夹（上面配置的目录）中生成了一些类型文件。其中的dts/src/index.d.ts是对应的类型入口文件。</p> 
+<h3><a id="packagejson_756"></a>package.json最后配置</h3> 
+<p>package.json中有专门提供ts类型文件的位置，配置为类型入口文件：</p> 
+<pre><code class="prism language-json"><span class="token string-property property">"types"</span><span class="token operator">:</span> <span class="token string">"dts/src/index.d.ts"</span><span class="token punctuation">,</span>
+<span class="token string-property property">"files"</span><span class="token operator">:</span> <span class="token punctuation">[</span> <span class="token string">"dist"</span><span class="token punctuation">,</span> <span class="token string">"dts/src"</span> <span class="token punctuation">]</span>
+</code></pre> 
+<p>现在的发布包中不仅要包含构建后的代码，还要包含类型文件。上面脚本配置构建时，也同时生成了类型文件。因此我们把版本号增加一下，直接进行构建，发布版本即可。</p> 
+<p>提供一下package.json最后的配置。</p> 
+<pre><code class="prism language-json"><span class="token punctuation">{<!-- --></span>
+  <span class="token string-property property">"name"</span><span class="token operator">:</span> <span class="token string">"sec-test"</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"version"</span><span class="token operator">:</span> <span class="token string">"1.0.0"</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"description"</span><span class="token operator">:</span> <span class="token string">""</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"module"</span><span class="token operator">:</span> <span class="token string">"dist/index.mjs"</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"types"</span><span class="token operator">:</span> <span class="token string">"dts/src/index.d.ts"</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"scripts"</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string-property property">"build"</span><span class="token operator">:</span> <span class="token string">"vite build &amp;&amp; pnpm build:dts"</span><span class="token punctuation">,</span>
+    <span class="token string-property property">"build:dts"</span><span class="token operator">:</span> <span class="token string">"vue-tsc --declaration --emitDeclarationOnly"</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"keywords"</span><span class="token operator">:</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"author"</span><span class="token operator">:</span> <span class="token string">""</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"license"</span><span class="token operator">:</span> <span class="token string">"ISC"</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"peerDependencies"</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string-property property">"naive-ui"</span><span class="token operator">:</span> <span class="token string">"^2.35.0"</span><span class="token punctuation">,</span>
+    <span class="token string-property property">"vue"</span><span class="token operator">:</span> <span class="token string">"^3.3.4"</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"devDependencies"</span><span class="token operator">:</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token string-property property">"@vitejs/plugin-vue"</span><span class="token operator">:</span> <span class="token string">"^4.4.0"</span><span class="token punctuation">,</span>
+    <span class="token string-property property">"@vue/tsconfig"</span><span class="token operator">:</span> <span class="token string">"^0.4.0"</span><span class="token punctuation">,</span>
+    <span class="token string-property property">"typescript"</span><span class="token operator">:</span> <span class="token string">"^5.2.2"</span><span class="token punctuation">,</span>
+    <span class="token string-property property">"vite"</span><span class="token operator">:</span> <span class="token string">"^4.5.0"</span><span class="token punctuation">,</span>
+    <span class="token string-property property">"vue-tsc"</span><span class="token operator">:</span> <span class="token string">"^1.8.22"</span>
+  <span class="token punctuation">}</span><span class="token punctuation">,</span>
+  <span class="token string-property property">"files"</span><span class="token operator">:</span> <span class="token punctuation">[</span> <span class="token string">"dist"</span><span class="token punctuation">,</span> <span class="token string">"dts/src"</span> <span class="token punctuation">]</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2><a id="_795"></a>总结</h2> 
+<p>上面提到的，仅仅是在封装vue组件库时一些基础的工程化方法。了解这些就可以开发基础的二次封装组件库了。</p> 
+<p>但实际上不管是组件库还是前端工程化都是一个比较复杂的主题。对于组件库封装，要考虑如何设计组件，还有交互样式、抛出的API、版本兼容、换肤、换不同国家和地区的差异等等。对于工程化，要考虑依赖关系、工程组织、体积优化、按需引入、TreeShaking等等。真正成熟的组件库要复杂的多。</p> 
+<h2><a id="_800"></a>参考</h2> 
+<ul><li>Element Plus 基于Vue3，面向设计师和开发者的组件库<br> <a href="https://element-plus.org/zh-CN/" rel="nofollow">https://element-plus.org/zh-CN/</a></li><li>Ant Design Vue<br> <a href="https://www.antdv.com/components/overview-cn" rel="nofollow">https://www.antdv.com/components/overview-cn</a></li><li>Naive UI 一个 Vue 3 组件库<br> <a href="https://www.naiveui.com/zh-CN/os-theme" rel="nofollow">https://www.naiveui.com/zh-CN/os-theme</a></li><li>Vuetify 一个功能强大的 Vue 组件框架<br> <a href="https://vuetifyjs.com/zh-Hans/" rel="nofollow">https://vuetifyjs.com/zh-Hans/</a></li><li>Varlet 基于 Vue3 开发的 Material 风格移动端组件库<br> <a href="https://varlet.gitee.io/varlet-ui/#/zh-CN/index" rel="nofollow">https://varlet.gitee.io/varlet-ui/#/zh-CN/index</a></li><li>探索Vue 3世界中的12个流行组件库<br> <a href="https://juejin.cn/post/7250091744526647352" rel="nofollow">https://juejin.cn/post/7250091744526647352</a></li><li>pnpm 文档<br> <a href="https://www.pnpm.cn/cli/add" rel="nofollow">https://www.pnpm.cn/cli/add</a></li><li>VueUse Collection of Vue Composition Utilities 文档<br> <a href="https://vueuse.org/" rel="nofollow">https://vueuse.org/</a></li><li>Vue文档 透传 Attributes<br> <a href="https://cn.vuejs.org/guide/components/attrs.html" rel="nofollow">https://cn.vuejs.org/guide/components/attrs.html</a></li><li>Vite文档 构建生产版本 库模式<br> <a href="https://cn.vitejs.dev/guide/build.html#library-mode" rel="nofollow">https://cn.vitejs.dev/guide/build.html#library-mode</a></li><li>Vite文档 构建选项 build-lib<br> <a href="https://cn.vitejs.dev/config/build-options.html#build-lib" rel="nofollow">https://cn.vitejs.dev/config/build-options.html#build-lib</a></li><li>前端工程化学习笔记<br> <a href="https://static.kancloud.cn/cyyspring/webpack/3064323" rel="nofollow">https://static.kancloud.cn/cyyspring/webpack/3064323</a></li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/162bd45dc222942e0b161ff1104176ab/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">STM32Cubemx：利用定时器实现定时功能</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/fee2d5297196aa7d2ef88461dcefc2a1/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【面试HOT200】二叉树——广度优先搜索篇</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

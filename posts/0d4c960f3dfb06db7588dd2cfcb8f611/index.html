@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Greenplum广播与重分布原理 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Greenplum广播与重分布原理" />
+<meta property="og:description" content="Greenplum 的执行计划和 PostgreSQL 基本一致，但是在表关联的时候还是会有区别，因为 greenplum 中数据不同于 pg，greenplum 是将数据分布在多个节点上。所以当两表关联时关联列又不是表的分布键时就会出现表的广播和重分布。本文将详细介绍广播和重分布的区别及场景。
+在此之前，我们需要先了解下在 greenplum 中表之间分布式关联有哪些类型？
+表的分布式关联主要分为两大类：
+1、单库关联，即表的关联键和分布键一致，所以只需要在单个库中得到结果后再关联即可，因此也不会涉及到广播和重分布；
+2、跨库关联，即表的关联键和分布键不一致，因此数据需要重新分布来达到单库关联的效果，这也是本文主要讲解的地方。
+对于跨库关联又分为两种情况：
+2.1、一张表的关联键是分布列，另一张表不是；
+2.2、两张表的关联键均不是分布列。
+详细情况如下图所示 (a、b 两表中 c1 列是分布列)：
+下面结合实例来讲解广播和重分布的原理及场景。
+构建环境：
+postgres=# CREATE table a(c1 int,c2 int)distributed by(c1); CREATE TABLE postgres=# CREATE table b(c1 int,c2 int)distributed by(c1); CREATE TABLE 现在主要来看看跨库关联的两种情况：
+— 情况一：a.c1=b.c2
+即 a 表关联键是分布列，b 表不是。这种情况可以通过两种方法来实现表的关联：
+1、重分布：将 b 表按照 c2 字段将数据重新分布到每个节点上，然后再和 a 表关联。这种情况下重分布的数据量就是 b 表的数据量 N；
+2、广播：将 a 表上的数据进行广播，即每个节点都放一份全量数据，然后再和 b 表关联。这种情况下数据量大小就是 a 表数据量 M * 节点数 L。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/0d4c960f3dfb06db7588dd2cfcb8f611/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-09-09T15:55:04+08:00" />
+<meta property="article:modified_time" content="2022-09-09T15:55:04+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Greenplum广播与重分布原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>Greenplum 的执行计划和 PostgreSQL 基本一致，但是在表关联的时候还是会有区别，因为 greenplum 中数据不同于 pg，greenplum 是将数据分布在多个节点上。所以当两表关联时关联列又不是表的分布键时就会出现表的广播和重分布。本文将详细介绍广播和重分布的区别及场景。</p> 
+<p>在此之前，我们需要先了解下在 greenplum 中表之间分布式关联有哪些类型？<br> 表的分布式关联主要分为两大类：<br> 1、单库关联，即表的关联键和分布键一致，所以只需要在单个库中得到结果后再关联即可，因此也不会涉及到广播和重分布；<br> 2、跨库关联，即表的关联键和分布键不一致，因此数据需要重新分布来达到单库关联的效果，这也是本文主要讲解的地方。</p> 
+<p>对于跨库关联又分为两种情况：<br> 2.1、一张表的关联键是分布列，另一张表不是；<br> 2.2、两张表的关联键均不是分布列。<br> 详细情况如下图所示 (a、b 两表中 c1 列是分布列)：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/ab/46/zxdsK7Oe_o.png"></p> 
+<p>下面结合实例来讲解广播和重分布的原理及场景。<br> 构建环境：</p> 
+<pre><code>postgres=# CREATE table a(c1 int,c2 int)distributed by(c1);
+CREATE TABLE
+postgres=# CREATE table b(c1 int,c2 int)distributed by(c1);
+CREATE TABLE</code></pre> 
+<p>现在主要来看看跨库关联的两种情况：</p> 
+<p>— 情况一：a.c1=b.c2</p> 
+<p>即 a 表关联键是分布列，b 表不是。这种情况可以通过两种方法来实现表的关联：<br> 1、重分布：将 b 表按照 c2 字段将数据重新分布到每个节点上，然后再和 a 表关联。这种情况下重分布的数据量就是 b 表的数据量 N；<br> 2、广播：将 a 表上的数据进行广播，即每个节点都放一份全量数据，然后再和 b 表关联。这种情况下数据量大小就是 a 表数据量 M * 节点数 L。</p> 
+<p>综上，我们可以得出结论：<br> N &gt; M <em>L：选择广播；<br> N &lt; =M </em>L：选择重分布。</p> 
+<p>下面用实例来验证下：<br><strong>—M = 20000，N = 15000，L=2：</strong></p> 
+<pre><code>postgres=# insert into a select generate_series(1,20000),generate_series(1,20000);
+INSERT 0 20000
+postgres=# insert into b select generate_series(1,15000),generate_series(1,15000);
+INSERT 0 15000</code></pre> 
+<p><strong>— 执行计划：重分布</strong></p> 
+<pre><code>postgres=# EXPLAIN select * from a,b where a.c1=b.c2;
+QUERY PLAN
+---------------------------------------------------------------------------------------------------------
+Gather Motion 2:1 (slice2; segments: 2) (cost=655.50..1117.00 rows=15000 width=16)
+-&gt; Hash Join (cost=655.50..1117.00 rows=7500 width=16)
+Hash Cond: a.c1 = b.c2
+-&gt; Seq Scan on a (cost=0.00..224.00 rows=10000 width=8)
+-&gt; Hash (cost=468.00..468.00 rows=7500 width=8)
+-&gt; Redistribute Motion 2:2 (slice1; segments: 2) (cost=0.00..468.00 rows=7500 width=8)
+Hash Key: b.c2
+-&gt; Seq Scan on b (cost=0.00..168.00 rows=7500 width=8)
+Optimizer status: legacy query optimizer
+(9 rows)</code></pre> 
+<p><strong>—M = 1000，N = 15000，L=2：</strong></p> 
+<pre><code>postgres=# TRUNCATE a
+TRUNCATE TABLE
+postgres=# insert into a select generate_series(1,1000),generate_series(1,1000);
+INSERT 0 1000</code></pre> 
+<p><strong>— 执行计划：广播</strong></p> 
+<pre><code>postgres=# EXPLAIN select * from a,b where a.c1=b.c2;
+QUERY PLAN
+-----------------------------------------------------------------------------------------------------
+Gather Motion 2:1 (slice2; segments: 2) (cost=67.00..287.50 rows=1000 width=16)
+-&gt; Hash Join (cost=67.00..287.50 rows=500 width=16)
+Hash Cond: b.c2 = a.c1
+-&gt; Seq Scan on b (cost=0.00..168.00 rows=7500 width=8)
+-&gt; Hash (cost=42.00..42.00 rows=1000 width=8)
+-&gt; Broadcast Motion 2:2 (slice1; segments: 2) (cost=0.00..42.00 rows=1000 width=8)
+-&gt; Seq Scan on a (cost=0.00..12.00 rows=500 width=8)
+Optimizer status: legacy query optimizer
+(8 rows)</code></pre> 
+<p>— 情况二：a.c2=b.c2</p> 
+<p>即两表的关联键都不是分布键，这种情况也分两种方法：<br> 1、重分布：将表 a 和表 b 均按照 c2 列，将数据重分布到每个节点上，所以代价就是表 a 数据量 M + 表 b 数据量 N；<br> 2、广播：将数据量较少的表数据进行广播，因此代价就是 min (M,N) <em>节点数 L。<br> 综上，我们又可以得出此情况下的结论：<br> M + N &gt; min(M,N) </em>L：广播；<br> M + N &lt;= min (M,N) * L：重分布。</p> 
+<p><strong>—M = 15000，N = 15000，L=2：</strong></p> 
+<pre><code>postgres=# insert into b select generate_series(1,15000),generate_series(1,15000);
+INSERT 0 15000
+postgres=# insert into a select generate_series(1,15000),generate_series(1,15000);
+INSERT 0 15000</code></pre> 
+<p><strong>— 执行计划：重分布</strong></p> 
+<pre><code>postgres=# EXPLAIN select * from a,b where a.c2 = b.c2;
+QUERY PLAN
+---------------------------------------------------------------------------------------------------------
+Gather Motion 2:1 (slice3; segments: 2) (cost=655.50..1348.50 rows=15000 width=16)
+-&gt; Hash Join (cost=655.50..1348.50 rows=7500 width=16)
+Hash Cond: a.c2 = b.c2
+-&gt; Redistribute Motion 2:2 (slice1; segments: 2) (cost=0.00..468.00 rows=7500 width=8)
+Hash Key: a.c2
+-&gt; Seq Scan on a (cost=0.00..168.00 rows=7500 width=8)
+-&gt; Hash (cost=468.00..468.00 rows=7500 width=8)
+-&gt; Redistribute Motion 2:2 (slice2; segments: 2) (cost=0.00..468.00 rows=7500 width=8)
+Hash Key: b.c2
+-&gt; Seq Scan on b (cost=0.00..168.00 rows=7500 width=8)
+Optimizer status: legacy query optimizer
+(11 rows)</code></pre> 
+<p><strong>—M = 1000，N = 15000，L=2：</strong></p> 
+<pre><code>postgres=# TRUNCATE a;
+TRUNCATE TABLE
+postgres=# insert into a select generate_series(1,1000),generate_series(1,1000);
+INSERT 0 1000
+postgres=# ANALYZE a;
+ANALYZE</code></pre> 
+<p><strong>— 执行计划：广播</strong></p> 
+<pre><code>postgres=# EXPLAIN select * from a,b where a.c2 = b.c2;
+QUERY PLAN
+-----------------------------------------------------------------------------------------------------
+Gather Motion 2:1 (slice2; segments: 2) (cost=67.00..287.50 rows=1000 width=16)
+-&gt; Hash Join (cost=67.00..287.50 rows=500 width=16)
+Hash Cond: b.c2 = a.c2
+-&gt; Seq Scan on b (cost=0.00..168.00 rows=7500 width=8)
+-&gt; Hash (cost=42.00..42.00 rows=1000 width=8)
+-&gt; Broadcast Motion 2:2 (slice1; segments: 2) (cost=0.00..42.00 rows=1000 width=8)
+-&gt; Seq Scan on a (cost=0.00..12.00 rows=500 width=8)
+Optimizer status: legacy query optimizer
+(8 rows)</code></pre> 
+<h4>总结：</h4> 
+<p>当表的分布式关联涉及到关联键不是分布列的时候，就会出现表的广播和重分布：</p> 
+<p>1、部分表的关联键不是分布列：N &gt; M * L 则使用广播，反之使用重分布；</p> 
+<p>2、所有表的关联键都不是分布列：M + N &gt; min (M,N) * L 则使用广播，反之使用重分布。 </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/5e9e083bc9de29a2b17bdcf28589dd91/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Cesium材质节点编辑器V0.1</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/556acaae47759c37c39461edab37cdde/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">C#学习记录——Visual Studio为项目添加DLL文件引用</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

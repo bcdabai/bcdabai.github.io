@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>一次Rust重写基础软件的实践（一） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="一次Rust重写基础软件的实践（一）" />
+<meta property="og:description" content="前言
+受到2022年“谷歌使用Rust重写Android系统且所有Rust代码的内存安全漏洞为零” [1] 的启发，最近笔者怀着浓厚的兴趣也顺应Rust 的潮流，尝试着将一款C语言开发的基础软件转化为 Rust 语言。本文的主要目的是通过记录此次转化过程中遇到的比较常见且有意思的问题以及解决此问题的方法与大家一起做相关的技术交流和讨论。
+问题描述
+在项目转化过程中我遇到了一个与 CAS (Compare and Swap) [2] 操作实现相关的问题，在计算机科学中CAS 是多线程/协程中用于实现同步的原子指令。该软件针对不同的芯片平台，通过在C语言中根据芯片平台的类别进行宏定义并嵌入相应的汇编代码来实现CAS操作。我知道不同芯片平台对应的 CAS 操作的汇编代码是不一样的 [3]，例如：
+x86-64 (Intel/AMD) 需要类似如下汇编代码块：
+lock cmpxchgq [destination], rdx ARM 需要类似如下汇编代码块：
+ldrex r1, [destination] cmp r1, r2 strexeq r1, r2, [destination] PowerPC 需要类似如下汇编代码块：
+lwarx r0, 0, destination cmpw r0, r1 bne retry ; branch if not equal stwcx. r2, 0, destination bne retry ; branch if store failed 然而如下面的代码片段所示，即使该软件使用相同的Intel x86芯片平台，但是在不同的操作系统平台上其实现的汇编指令也有可能是不一样的。
+C头文件中 cas_operation.h 的部分代码如下：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/79eff35d977253ea830a94a6d59dfd48/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-18T23:16:00+08:00" />
+<meta property="article:modified_time" content="2024-01-18T23:16:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">一次Rust重写基础软件的实践（一）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <p><strong>前言</strong></p> 
+ <p>受到2022年“谷歌使用Rust重写Android系统且所有Rust代码的内存安全漏洞为零” [1] 的启发，最近笔者怀着浓厚的兴趣也顺应Rust 的潮流，尝试着将一款C语言开发的基础软件转化为 Rust 语言。本文的主要目的是通过记录此次转化过程中遇到的比较常见且有意思的问题以及解决此问题的方法与大家一起做相关的技术交流和讨论。</p> 
+ <p><strong>问题描述</strong></p> 
+ <p>在项目转化过程中我遇到了一个与 CAS (Compare and Swap) [2] 操作实现相关的问题，在计算机科学中CAS 是多线程/协程中用于实现同步的原子指令。该软件针对不同的芯片平台，通过在C语言中根据芯片平台的类别进行宏定义并嵌入相应的汇编代码来实现CAS操作。我知道不同芯片平台对应的 CAS 操作的汇编代码是不一样的 [3]，例如：</p> 
+ <p><strong>x86-64 (Intel/AMD)</strong> 需要类似如下汇编代码块：</p> 
+ <pre class="has"><code class="language-go">lock cmpxchgq [destination], rdx</code></pre> 
+ <p><strong>ARM</strong> 需要类似如下汇编代码块：</p> 
+ <pre class="has"><code class="language-go">ldrex r1, [destination]
+    cmp r1, r2
+    strexeq r1, r2, [destination]</code></pre> 
+ <p><strong>PowerPC</strong> 需要类似如下汇编代码块：</p> 
+ <pre class="has"><code class="language-go">lwarx r0, 0, destination
+    cmpw r0, r1
+    bne retry ; branch if not equal
+    stwcx. r2, 0, destination
+    bne retry ; branch if store failed</code></pre> 
+ <p>然而如下面的代码片段所示，即使该软件使用相同的Intel x86芯片平台，但是在不同的操作系统平台上其实现的汇编指令也有可能是不一样的。</p> 
+ <ul><li><p>C头文件中 cas_operation.h 的部分代码如下：</p></li></ul> 
+ <pre class="has"><code class="language-go">#if defined(__i386) || defined(__x86_64__) || defined(__sparcv9) || defined(__sparcv8plus)
+typedef unsigned int slock_t;
+#else
+typedef unsigned char slock_t;
+#endif
+extern slock_t my_atomic_cas(volatile slock_t *lock, slock_t with, slock_t cmp);
+#define TAS(a) (my_atomic_cas((a), 1, 0) != 0)
+#endif</code></pre> 
+ <ul><li><p>对应实现的x86汇编文件 cas_operation.s 的部分代码如下：</p></li></ul> 
+ <pre class="has"><code class="language-go">my_atomic_cas:
+#if defined(__amd64)
+ movl       %edx, %eax
+ lock
+ cmpxchgl   %esi, (%rdi)
+#else
+ movl    4(%esp), %edx
+ movl    8(%esp), %ecx
+ movl    12(%esp), %eax
+ lock
+ cmpxchgl %ecx, (%edx)
+#endif
+ Ret</code></pre> 
+ <p>众所周知虽然Rust也有宏定义的包 Macros，但是目前也与C语言的有不小的差别。因此，在做转化的过程中如何做到芯片平台和操作系统级别的代码兼容则是我遇到的最大挑战。</p> 
+ <p><strong>解决方案</strong></p> 
+ <p>想到两个解决方案：</p> 
+ <ol><li><p>使用asm! 宏去处理不同芯片平台的汇编代码</p></li><li><p>使用 Rust代码对特定的操作进行针对性的实现</p></li></ol> 
+ <p>第一种方案比较简单，只需要在代码中使用std::arch::asm 包，然后使用 asm! 宏（类似 println! 宏）去包裹不同平台的汇编代码即可，这也是最直接最容易想到的解决方案，而且无需考虑具体的汇编操作实现的指令和代码。但是这方法杂糅了很多的不同平台的汇编代码，同时需要Rust做很多额外的平台相关的逻辑控制，对这些控制逻辑部分代码的维护也是一个持久且复杂的工作。比如对新的平台指令 RSIC-V 的支持也要纳入其中。</p> 
+ <p>第二种方案则需要考虑具体的操作逻辑，然后通过Rust代码去实现与汇编指令相同的逻辑，虽然有较大的工作量，但是这种方案可以消除由于芯片和系统平台不同带来的各种汇编代码实现的差异。 关于第一种方案的实现读者可以参照文档 Inline assembly [4] 中去做。针对 CAS 操作的第二种方案的实现则是本文主要提出的一种解决方案，而本文以类似Rust u32类型的 CAS 操作为例子实现其代码，在 my_compare_and_swap.rs 中会有如下代码段实现：</p> 
+ <pre class="has"><code class="language-go">use std::sync::atomic::{AtomicU32, Ordering};
+
+pub type uint32 = libc::c_uint;
+pub struct my_atomic_uint32 {
+ pub value: uint32,
+}
+
+impl my_atomic_uint32 {
+    #[inline]
+    pub fn compare_and_swap(&amp;self, expected: uint32, newval: uint32) -&gt; bool {
+        let atomic_ptr = self as *const my_atomic_uint32 as *const AtomicU32;
+        let atomic = unsafe { &amp;*(atomic_ptr) };
+        atomic.compare_and_swap(expected, newval, Ordering::SeqCst) == expected
+    }
+}
+
+pub fn my_compare_and_swap_u32_impl(
+    mut ptr: *mut pg_atomic_uint32,
+    mut expected: *mut uint32,
+    mut newval: uint32,
+) -&gt; bool {
+ let atomic = &amp;*ptr;
+ atomic.compare_and_swap(*expected, newval)
+}</code></pre> 
+ <p>下面我来解释一下上面的代码。由于是从 C 转到 Rust，因此我使用了 Rust 的 libc 包来自定义 uint32类型。然后通过自定义struct my_atomic_uint32 来对uint32进行CAS原子操作的包裹，同时对于此 struct实现其 inline 的compare_and_swap 操作函数。在该函数的实现中最关键的是将my_atomic_uint32的实体转化为一个AtomicU32的常量（注意需要在 Rust 代码文件开头使用 std::sync::atomic::{AtomicU32, Ordering} [5]），然后通过调用 AtomicU32 的compare_and_swap 来最终实现 uint32 的 CAS 操作。另外对于Ordering::SeqCst内存顺序 [6] 的选择也是比较考究的一个话题，这里我使用 SeqCst实际上是一个在保证正确的情况下不太考虑效率优化问题的选项。代码的最后my_compare_and_swap_u32_impl 则是对外使用的 u32 的 CAS 操作（事实上该软件主要也是需要实现 uint32 的 CAS 操作）。</p> 
+ <p><strong>结论</strong></p> 
+ <p>在本例中由于刚好有对应AtomicU32的CAS 实现，而且软件中整个原子同步的代码部分都是使用uint32进行的比较交换操作，因此我选择第二种方案则是最佳选择。由此可知上述的两种解决方案其实是各有利弊的，我必须结合实际的应用场景才能去做决定。那么这里有一个问题，如果需要对许多数据类型(比如uint32, int32, uint64, int64, float, float32, float64……)进行比较交换操作，又该做何种选择呢？这也许是仁者见仁智者见智的。</p> 
+ <p><strong>关于作者</strong></p> 
+ <p>张怀龙曾就职于阿尔卡特朗讯，百度，IBM等企业从事云计算研发相关的工作。目前就职于 Intel 中国，担任云原生开发工程师并致力于云原生、服务网格等技术领域研究实践，也是Istio 的maintainer的开发者。曾多次在 KubeCon、ServiceMeshCon、IstioCon、GOTC 和 InfoQ/QCon 等大会上发表演讲。</p> 
+ <p><strong>参考文档：</strong></p> 
+ <ul><li><p>[1] https://security.googleblog.com/2022/12/memory-safe-languages-in-android-13.html</p></li><li><p>[2] https://en.wikipedia.org/wiki/Compare-and-swap</p></li><li><p>[3] https://marabos.nl/atomics/hardware.html</p></li><li><p>[4] https://doc.rust-lang.org/reference/inline-assembly.html</p></li><li><p>[5] https://doc.rust-lang.org/std/sync/atomic</p></li><li><p>[6] https://marabos.nl/atomics/memory-ordering.html</p></li></ul> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/e990461ec92e3c3478dab1b6a44b130d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【Copula】最可能场景详解</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/bc8401cca98bf2780416625b51561d04/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">花了一周时间，终于把python爬虫入门必学知识整理出来了</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

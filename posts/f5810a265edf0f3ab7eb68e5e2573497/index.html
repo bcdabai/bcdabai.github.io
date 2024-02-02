@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>揭秘 docker 容器内 DNS 解析原理 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="揭秘 docker 容器内 DNS 解析原理" />
+<meta property="og:description" content="背景 这几天在使用 docker 中，碰到了在容器中 DNS 解析的一些问题。故花些时间弄清了原理，写此文章分享。
+1. docker run 命令启动的容器 以启动一个 busybox 容器为例：
+root@ubuntu20:~# docker run -itd --name u1 busybox 63b59ca8aeac18a09b63aaf4a14dc80895d6de293017d01786cac98cccda62ae root@ubuntu20:~# docker exec -it u1 sh / # / # ping www.baidu.com PING www.baidu.com (14.119.104.189): 56 data bytes 64 bytes from 14.119.104.189: seq=0 ttl=127 time=34.976 ms 64 bytes from 14.119.104.189: seq=1 ttl=127 time=35.369 ms ^C --- www.baidu.com ping statistics --- 2 packets transmitted, 2 packets received, 0% packet loss round-trip min/avg/max = 34." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/f5810a265edf0f3ab7eb68e5e2573497/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-04T14:48:59+08:00" />
+<meta property="article:modified_time" content="2024-01-04T14:48:59+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">揭秘 docker 容器内 DNS 解析原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="_0"></a>背景</h3> 
+<p>这几天在使用 docker 中，碰到了在容器中 DNS 解析的一些问题。故花些时间弄清了原理，写此文章分享。</p> 
+<h3><a id="1_docker_run__3"></a>1. docker run 命令启动的容器</h3> 
+<p>以启动一个 busybox 容器为例：</p> 
+<pre><code class="prism language-bash">root@ubuntu20:~<span class="token comment"># docker run -itd --name u1 busybox</span>
+63b59ca8aeac18a09b63aaf4a14dc80895d6de293017d01786cac98cccda62ae
+root@ubuntu20:~<span class="token comment"># docker exec -it u1 sh</span>
+/ <span class="token comment"># </span>
+/ <span class="token comment"># ping www.baidu.com</span>
+PING www.baidu.com <span class="token punctuation">(</span><span class="token number">14.119</span>.104.189<span class="token punctuation">)</span>: <span class="token number">56</span> data bytes
+<span class="token number">64</span> bytes from <span class="token number">14.119</span>.104.189: <span class="token assign-left variable">seq</span><span class="token operator">=</span><span class="token number">0</span> <span class="token assign-left variable">ttl</span><span class="token operator">=</span><span class="token number">127</span> <span class="token assign-left variable">time</span><span class="token operator">=</span><span class="token number">34.976</span> ms
+<span class="token number">64</span> bytes from <span class="token number">14.119</span>.104.189: <span class="token assign-left variable">seq</span><span class="token operator">=</span><span class="token number">1</span> <span class="token assign-left variable">ttl</span><span class="token operator">=</span><span class="token number">127</span> <span class="token assign-left variable">time</span><span class="token operator">=</span><span class="token number">35.369</span> ms
+^C
+--- www.baidu.com <span class="token function">ping</span> statistics ---
+<span class="token number">2</span> packets transmitted, <span class="token number">2</span> packets received, <span class="token number">0</span>% packet loss
+round-trip min/avg/max <span class="token operator">=</span> <span class="token number">34.976</span>/35.172/35.369 ms
+</code></pre> 
+<p>在容器里可以 ping 通外部的域名。</p> 
+<h4><a id="_20"></a>过程</h4> 
+<p>查看容器中的 /etc/resolv.conf 文件内容:</p> 
+<pre><code class="prism language-bash">/ <span class="token comment"># cat /etc/resolv.conf </span>
+<span class="token comment"># This file is managed by man:systemd-resolved(8). Do not edit.</span>
+<span class="token comment">#</span>
+<span class="token comment"># This is a dynamic resolv.conf file for connecting local clients directly to</span>
+<span class="token comment"># all known uplink DNS servers. This file lists all configured search domains.</span>
+<span class="token comment">#</span>
+<span class="token comment"># Third party programs must not access this file directly, but only through the</span>
+<span class="token comment"># symlink at /etc/resolv.conf. To manage man:resolv.conf(5) in a different way,</span>
+<span class="token comment"># replace this symlink by a static file or a different symlink.</span>
+<span class="token comment">#</span>
+<span class="token comment"># See man:systemd-resolved.service(8) for details about the supported modes of</span>
+<span class="token comment"># operation for /etc/resolv.conf.</span>
+
+nameserver <span class="token number">192.168</span>.30.2
+search localdomain
+</code></pre> 
+<p>使用的 DNS 服务器 ip 是 192.168.30.2。</p> 
+<p>这正是宿主机【我使用的是 Ubuntu 20.04 虚拟机】使用的 DNS 服务器ip地址。在宿主机上使用 systemd-resolve --status 命令可以看到：</p> 
+<pre><code>root@ubuntu20:~# systemd-resolve --status
+....
+
+Link 2 (ens33)
+      Current Scopes: DNS         
+DefaultRoute setting: yes         
+       LLMNR setting: yes         
+MulticastDNS setting: no          
+  DNSOverTLS setting: no          
+      DNSSEC setting: no          
+    DNSSEC supported: no          
+  Current DNS Server: 192.168.30.2
+         DNS Servers: 192.168.30.2
+          DNS Domain: localdomain 
+          
+...
+</code></pre> 
+<h4><a id="_60"></a>结论</h4> 
+<p>以这种方式启动的容器，容器内部的 /etc/resolv.conf 文件中配置的 ip 是宿主机使用的 DNS 服务器ip。</p> 
+<p><a href="https://medium.com/@huynhquangthao/how-does-the-docker-dns-work-ab69bde4c82a" rel="nofollow">参考文章：How does the Docker DNS work？</a></p> 
+<h3><a id="2_docker_compose__64"></a>2. docker compose 启动的容器</h3> 
+<p>在使用 docker compose 时，我们知道，一个容器可以使用另一个容器的服务名来获取它的ip地址。</p> 
+<p>看个例子，docker-compose.yml 文件内容如下：</p> 
+<pre><code class="prism language-yml"><span class="token key atrule">version</span><span class="token punctuation">:</span> <span class="token string">'2'</span>
+
+<span class="token key atrule">services</span><span class="token punctuation">:</span>
+  <span class="token key atrule">redis</span><span class="token punctuation">:</span>
+    <span class="token key atrule">image</span><span class="token punctuation">:</span> redis<span class="token punctuation">:</span><span class="token number">3.2</span>
+
+  <span class="token key atrule">busybox</span><span class="token punctuation">:</span>
+    <span class="token key atrule">image</span><span class="token punctuation">:</span> busybox
+    <span class="token key atrule">stdin_open</span><span class="token punctuation">:</span> <span class="token boolean important">true</span>
+    <span class="token key atrule">tty</span><span class="token punctuation">:</span> <span class="token boolean important">true</span>
+</code></pre> 
+<p>它定义了两个服务 redis 和 busybox。</p> 
+<p>进入 busybox 容器内，可以使用 “redis”来获取 redis 容器的 ip 地址：</p> 
+<pre><code class="prism language-bash">root@ubuntu20:~/test<span class="token comment"># docker-compose up -d</span>
+Creating network <span class="token string">"test_default"</span> with the default driver
+Creating test_redis_1   <span class="token punctuation">..</span>. <span class="token keyword">done</span>
+Creating test_busybox_1 <span class="token punctuation">..</span>. <span class="token keyword">done</span>
+root@ubuntu20:~/test<span class="token comment"># docker-compose ps</span>
+
+     Name                   Command               State    Ports  
+------------------------------------------------------------------
+test_busybox_1   <span class="token function">sh</span>                               Up              
+test_redis_1     docker-entrypoint.sh redis <span class="token punctuation">..</span>.   Up      <span class="token number">6379</span>/tcp
+
+root@ubuntu20:~/test<span class="token comment"># docker exec -it test_busybox_1 sh</span>
+/ <span class="token comment"># </span>
+/ <span class="token comment"># ping redis -c 1</span>
+PING redis <span class="token punctuation">(</span><span class="token number">192.168</span>.112.2<span class="token punctuation">)</span>: <span class="token number">56</span> data bytes
+<span class="token number">64</span> bytes from <span class="token number">192.168</span>.112.2: <span class="token assign-left variable">seq</span><span class="token operator">=</span><span class="token number">0</span> <span class="token assign-left variable">ttl</span><span class="token operator">=</span><span class="token number">64</span> <span class="token assign-left variable">time</span><span class="token operator">=</span><span class="token number">1.103</span> ms
+
+--- redis <span class="token function">ping</span> statistics ---
+<span class="token number">1</span> packets transmitted, <span class="token number">1</span> packets received, <span class="token number">0</span>% packet loss
+round-trip min/avg/max <span class="token operator">=</span> <span class="token number">1.103</span>/1.103/1.103 ms
+</code></pre> 
+<p>反之亦然。这是怎么做到的呢？</p> 
+<h4><a id="_106"></a>过程</h4> 
+<p>先看看容器中的 /etc/resolv.conf 文件：</p> 
+<pre><code>/ # cat /etc/resolv.conf 
+search localdomain
+nameserver 127.0.0.11
+options edns0 trust-ad ndots:0
+</code></pre> 
+<p>它使用的 DNS 服务器 ip 地址居然是个环回地址 127.0.0.11 ！那是怎么做到可以解析域名的呢？</p> 
+<p>在容器内的环回口抓下包看下：</p> 
+<pre><code class="prism language-bash">root@ubuntu20:~/test<span class="token comment"># docker inspect test_busybox_1 | grep Pid</span>
+            <span class="token string">"Pid"</span><span class="token builtin class-name">:</span> <span class="token number">211432</span>,
+            <span class="token string">"PidMode"</span><span class="token builtin class-name">:</span> <span class="token string">""</span>,
+            <span class="token string">"PidsLimit"</span><span class="token builtin class-name">:</span> null,
+root@ubuntu20:~/test<span class="token comment"># nsenter -t 211432 -n tcpdump -i lo -nn</span>
+tcpdump: verbose output suppressed, use <span class="token parameter variable">-v</span> or <span class="token parameter variable">-vv</span> <span class="token keyword">for</span> full protocol decode
+listening on lo, link-type EN10MB <span class="token punctuation">(</span>Ethernet<span class="token punctuation">)</span>, capture size <span class="token number">262144</span> bytes
+<span class="token number">10</span>:11:39.223669 IP <span class="token number">127.0</span>.0.1.58808 <span class="token operator">&gt;</span> <span class="token number">127.0</span>.0.11.59712: UDP, length <span class="token number">34</span>
+<span class="token number">10</span>:11:39.223707 IP <span class="token number">127.0</span>.0.1.58808 <span class="token operator">&gt;</span> <span class="token number">127.0</span>.0.11.59712: UDP, length <span class="token number">34</span>
+<span class="token number">10</span>:11:39.224305 IP <span class="token number">127.0</span>.0.11.53 <span class="token operator">&gt;</span> <span class="token number">127.0</span>.0.1.58808: <span class="token number">6751</span> <span class="token number">0</span>/0/0 <span class="token punctuation">(</span><span class="token number">23</span><span class="token punctuation">)</span>
+<span class="token number">10</span>:11:39.224682 IP <span class="token number">127.0</span>.0.11.53 <span class="token operator">&gt;</span> <span class="token number">127.0</span>.0.1.58808: <span class="token number">18524</span> <span class="token number">1</span>/0/0 A <span class="token number">192.168</span>.112.2 <span class="token punctuation">(</span><span class="token number">44</span><span class="token punctuation">)</span>
+</code></pre> 
+<p>这里有个小技巧：因为 busybox 容器中并没有 tcpdump 程序，所以使用 <code>nsenter</code> 进入了容器的网络命名空间，执行抓包程序。</p> 
+<p>通过抓包可以看到：DNS 请求被发给了 127.0.0.11.59712 ？说明有某个服务监听这个 ip地址+端口。<br> 使用 ss 命令查看下：</p> 
+<pre><code class="prism language-bash">root@ubuntu20:~/test<span class="token comment"># nsenter -t 211432 -n ss -unlp</span>
+State              Recv-Q             Send-Q                          Local Address:Port                            Peer Address:Port             Process             
+UNCONN             <span class="token number">0</span>                  <span class="token number">0</span>                                  <span class="token number">127.0</span>.0.11:59712                                <span class="token number">0.0</span>.0.0:*                 users:<span class="token variable"><span class="token punctuation">((</span>"dockerd"<span class="token punctuation">,</span>pid<span class="token operator">=</span><span class="token number">1078</span><span class="token punctuation">,</span>fd<span class="token operator">=</span><span class="token number">78</span><span class="token punctuation">))</span></span>
+</code></pre> 
+<p>发现监听这个 ip 地址加端口的居然是 dockerd 程序！原来 DNS 请求是发送给了 dockerd 程序处理了！</p> 
+<p>但是 DNS 请求目的端口不是 53 吗？怎么变成了这个 59712，这是怎么回事？看下 iptables nat 表：</p> 
+<pre><code class="prism language-bash">root@ubuntu20:~/test<span class="token comment"># nsenter -t 211432 -n iptables -t nat -S</span>
+<span class="token parameter variable">-P</span> PREROUTING ACCEPT
+<span class="token parameter variable">-P</span> INPUT ACCEPT
+<span class="token parameter variable">-P</span> OUTPUT ACCEPT
+<span class="token parameter variable">-P</span> POSTROUTING ACCEPT
+<span class="token parameter variable">-N</span> DOCKER_OUTPUT
+<span class="token parameter variable">-N</span> DOCKER_POSTROUTING
+<span class="token parameter variable">-A</span> OUTPUT <span class="token parameter variable">-d</span> <span class="token number">127.0</span>.0.11/32 <span class="token parameter variable">-j</span> DOCKER_OUTPUT
+<span class="token parameter variable">-A</span> POSTROUTING <span class="token parameter variable">-d</span> <span class="token number">127.0</span>.0.11/32 <span class="token parameter variable">-j</span> DOCKER_POSTROUTING
+<span class="token parameter variable">-A</span> DOCKER_OUTPUT <span class="token parameter variable">-d</span> <span class="token number">127.0</span>.0.11/32 <span class="token parameter variable">-p</span> tcp <span class="token parameter variable">-m</span> tcp <span class="token parameter variable">--dport</span> <span class="token number">53</span> <span class="token parameter variable">-j</span> DNAT --to-destination <span class="token number">127.0</span>.0.11:43107
+<span class="token parameter variable">-A</span> DOCKER_OUTPUT <span class="token parameter variable">-d</span> <span class="token number">127.0</span>.0.11/32 <span class="token parameter variable">-p</span> udp <span class="token parameter variable">-m</span> udp <span class="token parameter variable">--dport</span> <span class="token number">53</span> <span class="token parameter variable">-j</span> DNAT --to-destination <span class="token number">127.0</span>.0.11:59712
+<span class="token parameter variable">-A</span> DOCKER_POSTROUTING <span class="token parameter variable">-s</span> <span class="token number">127.0</span>.0.11/32 <span class="token parameter variable">-p</span> tcp <span class="token parameter variable">-m</span> tcp <span class="token parameter variable">--sport</span> <span class="token number">43107</span> <span class="token parameter variable">-j</span> SNAT --to-source :53
+<span class="token parameter variable">-A</span> DOCKER_POSTROUTING <span class="token parameter variable">-s</span> <span class="token number">127.0</span>.0.11/32 <span class="token parameter variable">-p</span> udp <span class="token parameter variable">-m</span> udp <span class="token parameter variable">--sport</span> <span class="token number">59712</span> <span class="token parameter variable">-j</span> SNAT --to-source :53
+</code></pre> 
+<p>原来有一条 DNAT 规则，将目的 ip 为127.0.0.11，端口为 53 的 udp 数据包，目的端口修改为 59712。一切真相大白！</p> 
+<h4><a id="_160"></a>结论</h4> 
+<p>以 docker compose 启动的容器，使用的 DNS 服务器是 dockerd 程序内部的 DNS 服务器。</p> 
+<p>它是通过以下三步来实现的：</p> 
+<ol><li>dockerd 在容器的网络命名空间中创建一个监听 127.0.0.11 的 udp socket</li><li>设置容器内 /etc/resolv.conf 文件ip 为 127.0.0.11</li><li>容器内添加 iptable DNAT 规则</li></ol>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f6aab7ac48e9d8899a489fcfb2cf825a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">微信小程序多选标签的实现（单选或者多选）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/84066ab4f1be5cbfea870589004e1dd1/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">深信服技术认证“SCSA-S”划重点：XSS漏洞</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

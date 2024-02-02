@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MYSQL索引失效的本质探究以及优化思想（上） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="MYSQL索引失效的本质探究以及优化思想（上）" />
+<meta property="og:description" content=" ==&gt; 学习汇总（持续更新）
+==&gt; 从零搭建后端基础设施系列（一）-- 背景介绍
+摘要：为什么要写这篇文章？因为从网上搜索&#34;索引失效的原因&#34;时，要么是一些片面的总结性用语，例如&#34;如果条件中有or，即使其中有条件带索引也不会使用&#34;，要么就是对着一些例子搭配explain进行笼统的解释。导致我经常看过就忘，究其根本原因就是没理解透彻，所以我经过从官方文档、博客和书籍等，来探究其内部索引使用的原理。鉴于内容较多，分为上下两篇进行分析，上篇主要了解索引原理以及查询优化器的概念，下篇根据上篇学到的知识并结合查询优化器，对于各种索引失效场景进行分析以及SQL调优思想总结。另外，会有一篇专门分析查询优化器的文章。
+一、索引是个什么东西？
+其实我觉得字典、图书馆的类比已经挺形象的了。就拿字典来说，如果你想查&#34;hello&#34;这个单词，是不是第一反应是先去目录那找到&#34;H&#34;开头的单词，接着在&#34;H&#34;下面继续跳到第二个字母是&#34;E&#34;的单词，依次类推，跳几次就能很快定位到这个单词了。但是跟这个单词相关联的仅仅是一个页码N，所以我们接着跳到第N页，又发现这一页有很多单词，这时候我们只能依次遍历这一页，才能找到&#34;hello&#34;这个单词的详细释义。如下图所示
+如果没有索引，我们如何找这个单词？很容易想象，在一本厚厚的字典里，一页一页的遍历查找，虽然有序的话，还是可以跳页，但是需要过滤的信息量太大。回到数据库中，其实思想也是一样的，相较于全表扫描，那通过索引定位是不是要快很多？所以数据库中才会造出那些个索引出来。 二、MYSQL中的B&#43;树索引类型分类和原理分析
+mysql中用的最多的就是B&#43;树索引，那这些索引如何分类呢？大家肯定已经知道非常多的索引类型名词，眼花缭乱，群魔乱舞。其实吧，mysql中的索引其实就分为2大类分别是聚集索引和辅助索引，其它都是按照功能分类造的名词，不需要强行去背它，只要理解了这两类索引的区别即可。最后还有稍微特殊一点的联合索引会单独说一下。
+MYSQL中的B&#43;树是什么样的
+先看一个非常简单的图
+从图中可以得出以下几个结论
+a.只有叶子节点称为数据节点，并且它存储了完整的数据
+b.目录节点只存放能够找到下层目录节点和数据节点的信息
+c.不管是目录节点还是数据节点，同一层次的节点用双链表相互连接
+d.不管是目录节点还是数据节点，内部都用单链表连接
+以上4个结论还比较表面，继续看一张比较详细的图
+从图中可以得出以下几个结论（假设图中数据节点的记录分别是id和name两个字段）
+a.所有的节点都是一个数据页
+b.目录节点存放的记录信息只有key和对应的数据页
+c.遍历数据节点能够得到按索引字段有序的记录
+d.数据页内并不是直接依次遍历得到记录，而是通过页目录进行二分查找
+mysql中的B&#43;树就长这样了，这也为什么说索引即数据，指的就是索引（聚集索引和辅助索引结构都长这样，只是节点中的记录不一样。）中的每一个节点都是数据页。还有一点需要注意，mysql搜索的时候是按页搜索，定位到页之后才会将页中的数据加载到内存进行查找。因为页中的记录是通过二分查找&#43;记录组内遍历，速度非常快，耗时忽略不计。
+聚集索引
+那什么是聚集索引？聚集索引的数据节点存放的是完整的记录。假设一个表有id、name和age字段，为了方便画图，name假设只有单个字母a~z。如下图所示
+从图中又可以得到几个结论
+a.聚集索引的数据节点按照主键id从左到右依次递增。
+b.聚集索引的数据节点存放了完整的记录。
+c.聚集索引的数据节点除了主键id是有序的，其它字段都是无序的。
+辅助索引
+那什么是辅助索引？可以想象一下，如果name这一列没有建立索引，根据name查找的时候，是不是得去遍历聚集索引下面的所有数据节点中的记录一一比较呢？那能有什么更快速的方法吗？答案就是为name建立一个索引，通过name定位到主键id，然后回到聚集索引中进行查找，这样速度就非常快。那可能有人会想问，为什么不直接为name建立一个聚集索引，这样就能直接在数据节点找到完整的记录信息了。是可以这么做，但是会增加空间消耗，重复存储冗余数据了。所以起名为辅助索引顾名思义，这个索引只起到一个辅助作用，真正查找数据还得回到聚集索引中找。如下图所示，为name建立一个辅助索引。
+从图中又可以得到几个结论
+a.数据节点中，从左到右，按照name从小到大排序。
+b.数据节点中，只有name和主键id两列数据。
+c.主键id在不同name中是乱序的。
+例如查找name=’a‘的时候，会找到三条数据，对应的主键id是1、22、30。然后回到聚集索引中，根据主键一个个查找，一共要进行三次回表操作。
+联合索引
+联合索引也是辅助索引的一种，接下来以name和age建立一个联合索引。
+从图中又可以得到几个结论
+a.联合索引中，数据节点从左到右依次按照第一个字段从小到大排序。
+b.联合索引中，数据节点中，第一个字段值相同，第二个字段按照从小到大排序。
+c.联合索引中，能够单独使用第一个字段作为索引查询，但是不能单独使用第二个字段作为索引查询。
+Q&amp;A
+什么是页目录？
+先看一下&lt;MYSQL技内幕：InnoDB存储引擎&gt;这本书中的介绍
+用大白话解释就是，一个数据页内会有很多记录，并且都是用单链表来连接，假设有1000条记录，如果没有页目录，最坏情况下，需要遍历1000次到最后一条记录。所以就想到了一种用少量空间换时间的办法，将1000条记录分成100组，每组记录数10条，然后用一个数组，将每一组的第一个地址偏移量存到数组中，当进行查找的时候，使用二分查找，定位到最后一组记录，再进行遍历，这样只需要遍历27次就能找到数据，时间上是不是大大减少了呢？用图来表示就像这样
+例如现在要查找id=11，步骤是通过页目录二分查找，定位到0x20(9 &lt; 11 &lt; 13)，然后从id=9依次遍历三次得到id=11这个结果。
+再举个不是数字的例子
+可以看到，页目录中存的是地址偏移，二分查找的时候，通过地址偏移拿到实际数据进行比较。
+B&#43;树的查找过程？
+当初作为小白的我，天真的以为是将整颗B&#43;树加载到内存中进行查找，现在才明白，其实是先在磁盘中查找到相应的页，然后才将这些页加载到内存中进行查找。可以细品mysql书籍里面经常说到多少多少次磁盘I/O查找，这不就是明着说B&#43;树的查找过程是先在磁盘查找的吗？
+三、什么是查询优化器？
+那什么是查询优化器？那我们得先了解MYSQL的查询流程，从客户端提交到服务端执行都经历什么？
+可以看到，提交引擎查询之前，会有一个查询优化的过程，在这一步，mysql真的是做了很多工作，可谓是绞尽脑汁帮用户&#34;愚蠢的行为&#34;买单。我们都知道explain这个关键字，可以帮助我们知道某条SQL语句的执行计划。而这个执行计划就是查询优化器经过优化后，最终选择的它认为的最优的执行计划。因为查询优化器内容实在太多，如果不细讲，会影响下篇分析索引失效的本质，所以在本篇最后，先将执行执行计划的各个参数含义列一遍，然后会专门写一篇查询优化器的原理分析。
+官方文档里面的简单解释
+四、总结
+索引就像是一本字典的目录，能快速帮你定位到需要查找的数据，付出的代价就是字典的前面会多出几页甚至几十页的目录出来。为什么需要索引？为了快速定位数据呗。MYSQL B&#43;树中的索引有哪些？聚集索引和辅助索引。B&#43;树索引由目录节点和数据节点构成，这两种节点都称为数据页，因为它们使用的结构是一样的，只是存放的数据不同。数据页是由页目录和记录构成的，数据页中会有成百上千条记录，为了快速定位查找，牺牲了一些空间，造出了页目录，其实就是一个数组，然后将记录分成N组，将每组的偏移量存入数组，就能通过二分查找&#43;记录组内遍历进行快速定位了。MYSQL查找的时候，会先从磁盘定位到需要用到的页，然后才加载到内存进行查找。查询优化器其实就是一个爱管闲事的玩意，不管你怎么造，它都会尽可能的帮你纠正，少走弯路。所以当你使用explain的时候，会发现很多奇奇怪怪的现象，和自己想的完全不一样。这时候就只有深入去探究它到底是如何进行优化的，才能掌握explain真正的威力。这里推荐一下官方文档、掘金小册中的从根儿上理解 MySQL和MYSQL技内幕：InnoDB存储引擎。我之前是先看的InnoDB存储引擎，但是比较难看懂，因为很多官话，然后遇到从根儿上理解 MySQL，作者用通俗易懂的语言，将书上和官方文档上的一些内容讲解出来，确实是不错。但是最全的还得是官方文档，这个是最难看懂的，但却是最权威的，所以我会将一些疑惑点，或者书上，其它作者没有讲清楚的点，自己去官方文档上找出来研究。这样下来，吸收日月精华，还有谁能阻挡？哈哈。再说一些额外的话，对于那些书籍、博客等讲解的知识，自己但凡有一点疑惑，都要自己去权威的官方文档中验证，当然了，如果你能看懂源码，这才是最权威的，但是太难了，只能退而求其次去官方文档中找答案了。 " />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/007ecbc7bad3082c7cf0e432bc0a175f/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-07-03T19:18:39+08:00" />
+<meta property="article:modified_time" content="2020-07-03T19:18:39+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MYSQL索引失效的本质探究以及优化思想（上）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>==&gt; <b><a href="https://xiejun.blog.csdn.net/article/details/103036852" rel="nofollow">学习汇总（持续更新）</a></b><br> ==&gt; <b><a href="https://xiejun.blog.csdn.net/article/details/96602739" rel="nofollow">从零搭建后端基础设施系列（一）-- 背景介绍</a></b></p> 
+<hr> 
+<p><font size="4"><b>摘要：</b></font><font size="2">为什么要写这篇文章？因为从网上搜索<font color="red"><b>"索引失效的原因"</b></font>时，要么是一些片面的总结性用语，例如<font color="red"><b>"如果条件中有or，即使其中有条件带索引也不会使用"</b></font>，要么就是对着一些例子搭配<font color="red"><b>explain</b></font>进行笼统的解释。导致我经常看过就忘，究其根本原因就是没理解透彻，所以我经过从官方文档、博客和书籍等，来探究其内部索引使用的原理。鉴于内容较多，分为上下两篇进行分析，<font color="red"><b>上篇主要了解索引原理以及查询优化器的概念，下篇根据上篇学到的知识并结合查询优化器，对于各种索引失效场景进行分析以及SQL调优思想总结</b></font>。另外，会有一篇专门分析查询优化器的文章。</font></p> 
+<hr> 
+<p><font size="4"><b>一、索引是个什么东西？</b></font></p> 
+<ul><li><font size="2">其实我觉得<font color="red"><b>字典、图书馆</b></font>的类比已经挺形象的了。就拿字典来说，如果你想查"hello"这个单词，是不是第一反应是先去目录那找到"H"开头的单词，接着在"H"下面继续跳到第二个字母是"E"的单词，依次类推，跳几次就能很快定位到这个单词了。但是跟这个单词相关联的仅仅是一个页码N，所以我们接着跳到第N页，又发现这一页有很多单词，这时候我们只能依次遍历这一页，才能找到"hello"这个单词的详细释义。如下图所示<br> <img src="https://images2.imgbox.com/0d/ac/jP4YKQ5o_o.png" alt="在这里插入图片描述" width="350" height="250"><br> 如果没有索引，我们如何找这个单词？很容易想象，在一本厚厚的字典里，<font color="RED"><b>一页一页的遍历查找，虽然有序的话，还是可以跳页，但是需要过滤的信息量太大。</b></font></font></li><li><font size="2">回到数据库中，其实思想也是一样的，<font color="RED"><b>相较于全表扫描，那通过索引定位是不是要快很多？</b></font>所以数据库中才会造出那些个索引出来。</font></li></ul> 
+<p><font size="4"><b>二、MYSQL中的B+树索引类型分类和原理分析</b></font><br> <font size="2">mysql中用的最多的就是B+树索引，那这些索引如何分类呢？大家肯定已经知道非常多的索引类型名词，眼花缭乱，群魔乱舞。其实吧，mysql中的索引其实就分为2大类分别是<font color="RED"><b>聚集索引</b></font>和<font color="RED"><b>辅助索引</b></font>，其它都是按照功能分类造的名词，不需要强行去背它，只要理解了这两类索引的区别即可。最后还有稍微特殊一点的<font color="RED"><b>联合索引</b></font>会单独说一下。</font></p> 
+<ul><li> <p><font size="3"><b>MYSQL中的B+树是什么样的</b></font><br> <font size="2">先看一个非常简单的图<br> <img src="https://images2.imgbox.com/0e/09/BAh8aOrO_o.png" alt="在这里插入图片描述"><br> 从图中可以得出以下几个结论<br> <font color="RED"><b>a.只有叶子节点称为数据节点，并且它存储了完整的数据<br> b.目录节点只存放能够找到下层目录节点和数据节点的信息<br> c.不管是目录节点还是数据节点，同一层次的节点用双链表相互连接<br> d.不管是目录节点还是数据节点，内部都用单链表连接</b></font><br> 以上4个结论还比较表面，继续看一张比较详细的图<br> <img src="https://images2.imgbox.com/28/11/6xDgwAHQ_o.png" alt="在这里插入图片描述"><br> 从图中可以得出以下几个结论（假设图中数据节点的记录分别是id和name两个字段）<br> <font color="RED"><b>a.所有的节点都是一个数据页<br> b.目录节点存放的记录信息只有<code>key</code>和<code>对应的数据页</code><br> c.遍历数据节点能够得到按索引字段有序的记录<br> d.数据页内并不是直接依次遍历得到记录，而是通过页目录进行二分查找</b></font><br> mysql中的B+树就长这样了，这也为什么说索引即数据，指的就是索引（<font color="RED"><b>聚集索引和辅助索引结构都长这样，只是节点中的记录不一样</b></font>。）中的每一个节点都是<font color="RED"><b>数据页</b></font>。还有一点需要注意，mysql搜索的时候是按页搜索，定位到页之后才会将页中的数据加载到内存进行查找。因为页中的记录是通过<font color="RED"><b>二分查找+记录组内遍历</b></font>，速度非常快，耗时忽略不计。</font></p> </li><li> <p><font size="3"><b>聚集索引</b></font><br> <font size="2">那什么是聚集索引？聚集索引的数据节点存放的是完整的记录。假设一个表有<code>id</code>、<code>name</code>和<code>age</code>字段，为了方便画图，<code>name</code>假设只有单个字母<code>a~z</code>。如下图所示<br> <img src="https://images2.imgbox.com/69/c7/jjtD2aB1_o.png" alt="在这里插入图片描述"></font></p> <p><font size="2">从图中又可以得到几个结论<br> <font color="RED"><b>a.聚集索引的数据节点按照主键<code>id</code>从左到右依次递增。<br> b.聚集索引的数据节点存放了完整的记录。<br> c.聚集索引的数据节点除了主键<code>id</code>是有序的，其它字段都是无序的。</b></font></font></p> </li><li> <p><font size="3"><b>辅助索引</b></font><br> <font size="2">那什么是辅助索引？可以想象一下，如果<code>name</code>这一列没有建立索引，根据<code>name</code>查找的时候，是不是得去遍历聚集索引下面的所有数据节点中的记录一一比较呢？那能有什么更快速的方法吗？答案就是为<code>name</code>建立一个索引，通过<code>name</code>定位到主键<code>id</code>，然后回到聚集索引中进行查找，这样速度就非常快。那可能有人会想问，为什么不直接为<code>name</code>建立一个聚集索引，这样就能直接在数据节点找到完整的记录信息了。是可以这么做，但是会增加空间消耗，重复存储冗余数据了。所以起名为辅助索引顾名思义，这个索引只起到一个辅助作用，真正查找数据还得回到聚集索引中找。如下图所示，为<code>name</code>建立一个辅助索引。<br> <img src="https://images2.imgbox.com/61/8c/qSK49yio_o.png" alt="在这里插入图片描述"><br> 从图中又可以得到几个结论<br> <font color="RED"><b>a.数据节点中，从左到右，按照<code>name</code>从小到大排序。<br> b.数据节点中，只有<code>name</code>和主键<code>id</code>两列数据。<br> c.主键<code>id</code>在不同<code>name</code>中是乱序的。</b></font><br> 例如查找<code>name=’a‘</code>的时候，会找到三条数据，对应的主键<code>id</code>是1、22、30。然后回到聚集索引中，根据主键一个个查找，一共要进行三次回表操作。<br> <img src="https://images2.imgbox.com/3b/7b/JcBN728C_o.png" alt="在这里插入图片描述" width="300" height="200"></font></p> </li><li> <p><font size="3"><b>联合索引</b></font><br> <font size="2">联合索引也是辅助索引的一种，接下来以<code>name</code>和<code>age</code>建立一个联合索引。<br> <img src="https://images2.imgbox.com/6b/d6/UA25DFl9_o.png" alt="在这里插入图片描述"><br> 从图中又可以得到几个结论<br> <font color="RED"><b>a.联合索引中，数据节点从左到右依次按照第一个字段从小到大排序。<br> b.联合索引中，数据节点中，第一个字段值相同，第二个字段按照从小到大排序。<br> c.联合索引中，能够单独使用第一个字段作为索引查询，但是不能单独使用第二个字段作为索引查询。</b></font></font></p> </li><li> <p><font size="3"><b>Q&amp;A</b></font></p> 
+  <ul><li> <p><font size="2"><b>什么是页目录？</b></font><br> <font size="2">先看一下<b>&lt;MYSQL技内幕：InnoDB存储引擎&gt;</b>这本书中的介绍</font></p> 
+    <blockquote> 
+     <p><img src="https://images2.imgbox.com/69/01/7ijoJbRB_o.png" alt="在这里插入图片描述"></p> 
+    </blockquote> <p><font size="2">用大白话解释就是，一个数据页内会有很多记录，并且都是用单链表来连接，假设有1000条记录，如果没有页目录，最坏情况下，需要遍历1000次到最后一条记录。所以就想到了一种用少量空间换时间的办法，将1000条记录分成100组，每组记录数10条，然后用一个数组，将每一组的第一个地址偏移量存到数组中，当进行查找的时候，使用二分查找，定位到最后一组记录，再进行遍历，这样只需要遍历27次就能找到数据，时间上是不是大大减少了呢？用图来表示就像这样<br> <img src="https://images2.imgbox.com/54/1c/6NVDYIcP_o.png" alt="在这里插入图片描述"><br> 例如现在要查找<code>id=11</code>，步骤是通过页目录二分查找，定位到<font color="RED"><b>0x20(9 &lt; 11 &lt; 13)</b></font>，然后从<code>id=9</code>依次遍历三次得到<code>id=11</code>这个结果。<br> 再举个不是数字的例子<br> <img src="https://images2.imgbox.com/ca/92/sWxIxR7t_o.png" alt="在这里插入图片描述"><br> 可以看到，页目录中存的是地址偏移，二分查找的时候，通过地址偏移拿到实际数据进行比较。</font></p> </li><li> <p><font size="2"><b>B+树的查找过程？</b></font><br> <font size="2">当初作为小白的我，天真的以为是将整颗B+树加载到内存中进行查找，现在才明白，<font color="RED"><b>其实是先在磁盘中查找到相应的页，然后才将这些页加载到内存中进行查找</b></font>。可以细品mysql书籍里面经常说到多少多少次磁盘I/O查找，这不就是明着说B+树的查找过程是先在磁盘查找的吗？</font></p> </li></ul> </li></ul> 
+<p><font size="4"><b>三、什么是查询优化器？</b></font><br> <font size="2">那什么是查询优化器？那我们得先了解MYSQL的查询流程，从客户端提交到服务端执行都经历什么？<br> <img src="https://images2.imgbox.com/b0/ed/KE70Zez8_o.png" alt="在这里插入图片描述"><br> 可以看到，提交引擎查询之前，会有一个查询优化的过程，在这一步，mysql真的是做了很多工作，可谓是绞尽脑汁帮用户"愚蠢的行为"买单。我们都知道<font color="RED"><b>explain</b></font>这个关键字，可以帮助我们知道某条SQL语句的执行计划。而这个执行计划就是查询优化器经过优化后，最终选择的它认为的最优的执行计划。因为查询优化器内容实在太多，如果不细讲，会影响下篇分析索引失效的本质，所以在本篇最后，先将执行执行计划的各个参数含义列一遍，然后会专门写一篇查询优化器的原理分析。<br> <img src="https://images2.imgbox.com/d2/88/VcIvvDVp_o.png" alt="在这里插入图片描述"><br> <a href="https://dev.mysql.com/doc/refman/8.0/en/explain-output.html" rel="nofollow">官方文档</a>里面的简单解释<br> <img src="https://images2.imgbox.com/96/66/NSuwOFsq_o.png" alt="在这里插入图片描述"></font></p> 
+<p><font size="4"><b>四、总结</b></font></p> 
+<ul><li><font size="2">索引就像是一本字典的<font color="RED"><b>目录</b></font>，能快速帮你定位到需要查找的数据，付出的代价就是字典的前面会多出几页甚至几十页的目录出来。</font></li><li><font size="2">为什么需要索引？为了快速定位数据呗。</font></li><li><font size="2">MYSQL B+树中的索引有哪些？<font color="RED"><b>聚集索引</b></font>和<font color="RED"><b>辅助索引</b></font>。</font></li><li><font size="2">B+树索引由<font color="RED"><b>目录节点</b></font>和<font color="RED"><b>数据节点</b></font>构成，这两种节点都称为<font color="RED"><b>数据页</b></font>，因为它们使用的结构是一样的，只是存放的数据不同。<font color="RED"></font></font></li><li><font size="2">数据页是由<font color="RED"><b>页目录</b></font>和<font color="RED"><b>记录</b></font>构成的，数据页中会有成百上千条记录，为了快速定位查找，牺牲了一些空间，造出了页目录，其实就是一个<font color="RED"><b>数组</b></font>，然后将记录分成N组，将每组的偏移量存入数组，就能通过<font color="RED"><b>二分查找+记录组内遍历</b></font>进行快速定位了。</font></li><li><font size="2">MYSQL查找的时候，会先从<font color="RED"><b>磁盘</b></font>定位到需要用到的页，然后才加载到<font color="RED"><b>内存</b></font>进行查找。</font></li><li><font size="2">查询优化器其实就是一个爱管闲事的玩意，不管你怎么造，它都会尽可能的帮你纠正，少走弯路。所以当你使用<font color="RED"><b>explain</b></font>的时候，会发现很多奇奇怪怪的现象，和自己想的完全不一样。这时候就只有深入去探究它到底是如何进行优化的，才能掌握<font color="RED"><b>explain</b></font>真正的威力。</font></li><li><font size="2">这里推荐一下<font color="RED"><b>官方文档</b></font>、掘金小册中的<font color="RED"><b>从根儿上理解 MySQL</b></font>和<font color="RED"><b>MYSQL技内幕：InnoDB存储引擎</b></font>。我之前是先看的InnoDB存储引擎，但是比较难看懂，因为很多官话，然后遇到从根儿上理解 MySQL，作者用通俗易懂的语言，将书上和官方文档上的一些内容讲解出来，确实是不错。但是最全的还得是官方文档，这个是最难看懂的，但却是最权威的，所以我会将一些疑惑点，或者书上，其它作者没有讲清楚的点，自己去官方文档上找出来研究。这样下来，吸收日月精华，还有谁能阻挡？哈哈。再说一些额外的话，对于那些书籍、博客等讲解的知识，自己但凡有一点疑惑，都要自己去权威的官方文档中验证，当然了，如果你能看懂源码，这才是最权威的，但是太难了，只能退而求其次去官方文档中找答案了。</font></li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ad05a1753a50ba6af42304e37ba78edc/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Java  Web项目解决 sql 注入问题（过滤器进行过滤解决）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/01804af064ffbbf529e8c31b2d301788/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Kubernetes存储之Configmap</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

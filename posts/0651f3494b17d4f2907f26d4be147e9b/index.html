@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>产业SOTA的实时实例分割算法SOLOv2，更快更强！ - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="产业SOTA的实时实例分割算法SOLOv2，更快更强！" />
+<meta property="og:description" content="https://github.com/PaddlePaddle/PaddleDetection/tree/release/0.5/configs/solov2
+这个算法，使用的是PaddleDetection研发团队深度优化过的实时实例分割算法SOLOv2。经过一系列的优化后，SOLOv2-Enhance（PaddleDetection提供的SOLOv2的增强模型，如图五角星所示）的性能表现如下图所示：
+Tesla V100-SXM2 的单GPU环境中预测速度达到38.6FPS，提升了31.2%；COCO val2017数据集上mask AP达到38.8%，提升2.4个百分点；单机8卡训练速度是SOLOv2官方PyTorch版本的2.4倍；在精度和预测速度性价比方面达到业界SOTA级别。 PaddleDetection提供的SOLOv2为何有如此优势呢？下面从实例分割算法、SOLO算法演进历程及PaddleDetection对于SOLOv2深度优化等几方面为大家逐层剖析背后的设计和实现思想。
+实例分割算法
+实例分割一般分为自上而下和自下而上两种方法。
+自上而下的实例分割方法 简单的说，这种方法就是先检测后分割。这类方法的代表选手是Mask R-CNN。它的优点是定位精度高，但也有一定的局限，比如：预测时延高，达不到实时，实例分割结果在物体检测框的束缚下等。
+业界很多大神都在持续尝试基于Mask R-CNN算法进行改进，希望解决上述局限问题，GCNet、PANet、HTC、DetectoRS等网络就是在Mask R-CNN算法上优化、演进而来的。但是预测速度慢的问题仍得不到解决。
+第一类可以被称为实时的实例分割的模型是YOLACT和YOLACT&#43;&#43;，它们基于RetainNet，将实例分割分为两个并行的子任务，采用单阶段的网络结构，使网络计算量尽量小，后者训练54个epoch左右，最终在COCO test-dev数据集上的mask AP达到34.6%，在Titan Xp的GPU环境中达到27.3~33.5FPS。
+而CenterMask算法则基于Anchor Free模型FCOS更进一步提升了实例分割的精度和速度，改进了backbone，提出VoVNetV2，同时基于Mask R-CNN的mask分支，引入Spatial Attention-Guided Mask（空间注意力模块），实时的CenterMask-Lite模型在COCO Test-dev数据集上的mask AP达到36.3%，在Titan Xp的GPU环境中达到35.7FPS，成为新的SOTA模型。
+自下而上的实例分割方法 这类方法比较好理解，先进行像素级别的语义分割，再通过聚类、度量学习等手段区分不同的实例。PolarMask、SOLO系列算法就是其中的代表。
+PolarMask基于FCOS的思想，将回归到检测框四边的距离问题转换为回归基于中心点不同角度的36根射线的距离问题，通过联通整个区域获得分割结果。这种方法创新性很高，但问题也很明显，如：通过角点确定分割区域的方法不够准确，mask AP较低，预测速度也很慢。
+而SOLO系列算法经过不断的优化，在精度和预测速度的性价比方面超均越了YOLACT&#43;&#43;和CenterMask算法，下面我们就着重介绍一下SOLO系列算法的发展历程及PaddleDetection针对SOLOv2算法进行的优化。
+SOLO算法发展历程
+SOLO（Segmenting Objects by Locations）算法的核心思想是将分割问题转化为位置分类问题，从而做到不需要anchor（锚框）及bounding box，而是根据实例的位置和大小，对每个实例的像素点赋予一个类别从而达到对实例对象进行分割的效果。
+具体而言，就是如果物体的中心落在了某个网格内，该网格就负责预测该物体的语义类别，并给每个像素点赋一个位置类别。
+SOLOv1 在SOLOv1中有两个分支：类别分支和mask分支。类别分支预测语义类别；mask分支则分割物体实例。同时，使用FPN来支持多尺度预测，FPN的每一个特征图后都接上述两个并行的分支。
+（来自论文《SOLO: Segmenting Objects by Locations》）
+其中，类别分支负责预测物体的语义类别，共产出S×S×C大小的预测结果。Mask分支中每个有类别输出的网格（正样本）都会输出对应类别的mask，这里一个通道负责预测一个网格的mask，因此输出维度是H×W×S2。同时基于SOLOv1，作者又提出了Decoupled-SOLO改进算法，将S2个分类器解耦为两组分类器，每组S个，分别对应S个水平位置类别和S个垂直位置类别，优化之后的输出空间就从H×W×S2降低到了H×W×2S，从而降低了网络计算量，如下图(b)所示，最后将两个通道的特征图做element-wise乘，进行特征的融合。
+（来自论文《SOLOv2: Dynamic and Fast Instance Segmentation》）
+SOLOv2 SOLOv2继承了SOLOv1中的一些设定，将原来的mask分支解耦为mask核分支和mask特征分支，分别预测卷积核和卷积特征，如上图(c)中的Dynamic head所示。
+输入为H×W×E的特征，F、E是输入特征的通道数，输出为卷积核S×S×D，其中S是划分的网格数目。
+Mask核分支位于预测head内，平行的有语义类别分支。预测 head的输入是FPN输出的特征图。Head内的2个分支都有4个卷积层来提取特征，和1个最终的卷积层做预测。Head 的权重在不同的特征图层级上共享。同时作者在kernel分支上增加了空间性，做法是在第一个卷积内加入了CoordConv，即输入后面跟着两个额外的通道，操作如下图所示。
+（来自论文《An Intriguing Failing of Convolutional Neural Networks and the CoordConv Solution》）" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/0651f3494b17d4f2907f26d4be147e9b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-12-07T12:56:53+08:00" />
+<meta property="article:modified_time" content="2020-12-07T12:56:53+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">产业SOTA的实时实例分割算法SOLOv2，更快更强！</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p> </p> 
+<p><a href="https://github.com/PaddlePaddle/PaddleDetection/tree/release/0.5/configs/solov2"><strong>https://github.com/PaddlePaddle/PaddleDetection/tree/release/0.5/configs/solov2</strong></a></p> 
+<p> </p> 
+<p>这个算法，使用的是<strong>PaddleDetection研发团队深度优化过的实时实例分割算法SOLOv2</strong>。经过一系列的优化后，SOLOv2-Enhance（PaddleDetection提供的SOLOv2的增强模型，如图五角星所示）的性能表现如下图所示：</p> 
+<p> </p> 
+<p><img alt="" src="https://images2.imgbox.com/16/a3/Ze23BRDX_o.png" width="1080"></p> 
+<p> </p> 
+<p> </p> 
+<ul><li>Tesla V100-SXM2 的单GPU环境中<strong>预测速度达到38.6FPS</strong>，提升了31.2%；</li><li>COCO val2017数据集上<strong>mask AP达到38.8%</strong>，提升2.4个百分点；</li><li>单机8卡训练速度是SOLOv2官方PyTorch版本的<strong>2.4倍</strong>；</li><li>在<strong>精度和预测速度性价比方面达到业界SOTA级别</strong>。</li></ul> 
+<p> </p> 
+<p>PaddleDetection提供的SOLOv2为何有如此优势呢？下面从实例分割算法、SOLO算法演进历程及PaddleDetection对于SOLOv2深度优化等几方面为大家逐层剖析背后的设计和实现思想。</p> 
+<p> </p> 
+<h3> </h3> 
+<p><strong>实例分割算法</strong></p> 
+<p> </p> 
+<p>实例分割一般分为自上而下和自下而上两种方法。</p> 
+<p> </p> 
+<ul><li><strong>自上而下的实例分割方法</strong></li></ul> 
+<p> </p> 
+<p>简单的说，这种方法就是先检测后分割。这类方法的代表选手是Mask R-CNN。它的优点是定位精度高，但也有一定的局限，比如：预测时延高，达不到实时，实例分割结果在物体检测框的束缚下等。</p> 
+<p> </p> 
+<p>业界很多大神都在持续尝试基于Mask R-CNN算法进行改进，希望解决上述局限问题，GCNet、PANet、HTC、DetectoRS等网络就是在Mask R-CNN算法上优化、演进而来的。但是预测速度慢的问题仍得不到解决。</p> 
+<p> </p> 
+<p>第一类可以被称为实时的实例分割的模型是YOLACT和YOLACT++，它们基于RetainNet，将实例分割分为两个并行的子任务，采用单阶段的网络结构，使网络计算量尽量小，后者训练54个epoch左右，最终在COCO test-dev数据集上的mask AP达到34.6%，在Titan Xp的GPU环境中达到27.3~33.5FPS。</p> 
+<p> </p> 
+<p>而CenterMask算法则基于Anchor Free模型FCOS更进一步提升了实例分割的精度和速度，改进了backbone，提出VoVNetV2，同时基于Mask R-CNN的mask分支，引入Spatial Attention-Guided Mask（空间注意力模块），实时的CenterMask-Lite模型在COCO Test-dev数据集上的mask AP达到36.3%，在Titan Xp的GPU环境中达到35.7FPS，成为新的SOTA模型。</p> 
+<p> </p> 
+<ul><li><strong>自下而上的实例分割方法</strong></li></ul> 
+<p> </p> 
+<p>这类方法比较好理解，先进行像素级别的语义分割，再通过聚类、度量学习等手段区分不同的实例。PolarMask、SOLO系列算法就是其中的代表。</p> 
+<p> </p> 
+<p>PolarMask基于FCOS的思想，将回归到检测框四边的距离问题转换为回归基于中心点不同角度的36根射线的距离问题，通过联通整个区域获得分割结果。这种方法创新性很高，但问题也很明显，如：通过角点确定分割区域的方法不够准确，mask AP较低，预测速度也很慢。</p> 
+<p> </p> 
+<p>而SOLO系列算法经过不断的优化，在精度和预测速度的性价比方面超均越了YOLACT++和CenterMask算法，下面我们就着重介绍一下SOLO系列算法的发展历程及PaddleDetection针对SOLOv2算法进行的优化。</p> 
+<p> </p> 
+<h3> </h3> 
+<p><strong>SOLO算法发展历程</strong></p> 
+<p> </p> 
+<p>SOLO（Segmenting Objects by Locations）算法的核心思想是将分割问题转化为位置分类问题，从而做到不需要anchor（锚框）及bounding box，而是根据实例的位置和大小，对每个实例的像素点赋予一个类别从而达到对实例对象进行分割的效果。</p> 
+<p> </p> 
+<p>具体而言，就是如果物体的中心落在了某个网格内，该网格就负责预测该物体的语义类别，并给每个像素点赋一个位置类别。</p> 
+<p> </p> 
+<ul><li><strong>SOLOv1</strong></li></ul> 
+<p> </p> 
+<p>在SOLOv1中有两个分支：类别分支和mask分支。类别分支预测语义类别；mask分支则分割物体实例。同时，使用FPN来支持多尺度预测，FPN的每一个特征图后都接上述两个并行的分支。</p> 
+<p> </p> 
+<p><img alt="" src="https://images2.imgbox.com/a4/3e/9YiTHw7J_o.png" width="1080"></p> 
+<p> </p> 
+<p>（来自论文《SOLO: Segmenting Objects by Locations》）</p> 
+<p> </p> 
+<p>其中，类别分支负责预测物体的语义类别，共产出S×S×C大小的预测结果。Mask分支中每个有类别输出的网格（正样本）都会输出对应类别的mask，这里一个通道负责预测一个网格的mask，因此输出维度是H×W×S2。同时基于SOLOv1，作者又提出了Decoupled-SOLO改进算法，将S2个分类器解耦为两组分类器，每组S个，分别对应S个水平位置类别和S个垂直位置类别，优化之后的输出空间就从H×W×S2降低到了H×W×2S，从而降低了网络计算量，如下图(b)所示，最后将两个通道的特征图做element-wise乘，进行特征的融合。</p> 
+<p> </p> 
+<p><img alt="" src="https://images2.imgbox.com/c2/3c/fTrWrC66_o.png" width="1080"></p> 
+<p> </p> 
+<p>（来自论文《SOLOv2: Dynamic and Fast Instance Segmentation》）</p> 
+<p> </p> 
+<ul><li><strong>SOLOv2</strong></li></ul> 
+<p> </p> 
+<p>SOLOv2继承了SOLOv1中的一些设定，将原来的mask分支解耦为mask核分支和mask特征分支，分别预测卷积核和卷积特征，如上图(c)中的Dynamic head所示。</p> 
+<p> </p> 
+<p>输入为H×W×E的特征，F、E是输入特征的通道数，输出为卷积核S×S×D，其中S是划分的网格数目。</p> 
+<p> </p> 
+<p>Mask核分支位于预测head内，平行的有语义类别分支。预测 head的输入是FPN输出的特征图。Head内的2个分支都有4个卷积层来提取特征，和1个最终的卷积层做预测。Head 的权重在不同的特征图层级上共享。同时作者在kernel分支上增加了空间性，做法是在第一个卷积内加入了CoordConv，即输入后面跟着两个额外的通道，操作如下图所示。</p> 
+<p> </p> 
+<p><img alt="" src="https://images2.imgbox.com/e0/37/OV5zuttv_o.png" width="640"></p> 
+<p> </p> 
+<p>（来自论文《An Intriguing Failing of Convolutional Neural Networks and the CoordConv Solution》）</p> 
+<p> </p> 
+<p>我们知道深度学习里的卷积运算是具有平移不变性的，这样可以在图像的不同位置共享统一的卷积核参数，但是这样卷积学习过程中是不能感知当前特征在图像中的坐标的。CoordConv就是通过在卷积的输入特征图中新增对应的通道来表征特征图像素点的坐标，让卷积学习过程中能够一定程度感知坐标来提升检测精度。</p> 
+<p> </p> 
+<p>同时SOLOv2也使用了Matrix NMS，通过矩阵运算所有的操作都可以单阶段地实现，不需要递归，比传统的NMS快9倍。</p> 
+<p> </p> 
+<p>经过以上的迭代，SOLOv2成为当前产业最实用的实例分割算法。而飞桨PaddleDetection不仅复现了该模型，还对其进行了一系列的深度优化，使其精度和速度相较原网络有了进一步的提升。</p> 
+<p> </p> 
+<h3> </h3> 
+<p><strong>PaddleDetection中的SOLOv2</strong></p> 
+<p> </p> 
+<h3> </h3> 
+<p>经过PaddleDetection深度优化后的SOLOv2在具有如下五大亮点：</p> 
+<p> </p> 
+<ul><li>更优的骨干网络：ResNet50vd-DCN+蒸馏</li><li>更稳定的训练方式：EMA、Sync-BN</li><li>更多的数据增强方法</li><li>更快的训练方式</li><li>多种部署方式</li></ul> 
+<p> </p> 
+<p><strong>更优的骨干网络: ResNet50vd-DCN+蒸馏</strong></p> 
+<p> </p> 
+<p>针对SOLOv2，飞桨使用更加优异的ResNet50vd-DCN作为模型的骨干网络，它相比于原始的ResNet，可以提高1%-2%的检测精度，且推理速度基本保持不变。</p> 
+<p> </p> 
+<p>而DCN（Deformable Convolution）可变形卷积的特点在于：其卷积核在每一个元素上额外增加了一个可学习的偏移参数。这样的卷积核在学习过程中可以调整卷积的感受野，从而能够更好的提取图像特征，以达到提升目标检测精度的目的，是一种引入极少计算量并提升模型精度的最佳策略。</p> 
+<p> </p> 
+<p>进一步的，PaddleDetection采用飞桨自研的<strong>SSLD知识蒸馏</strong>方法优化过的ResNet50vd，在ImageNet上的Top-1分类精度从79.1%优化到82.4%。感兴趣的同学可以到PaddleClas中了解SSLD知识蒸馏方案详情。</p> 
+<p> </p> 
+<p>PaddleClas链接：</p> 
+<p><a href="https://github.com/PaddlePaddle/paddleclas"><strong>https://github.com/PaddlePaddle/paddleclas</strong></a></p> 
+<p> </p> 
+<p>SOLOv2模型在使用了ResNet50vd的SSLD知识蒸馏之后更优的预训练权重进行训练后，COCO minival数据集的精度提升了1.4%（36.4%-&gt;37.8%）。在V100上的预测速度上，从29.4FPS提升至38.6FPS。</p> 
+<p> </p> 
+<p><strong>更稳定的训练方式：EMA、Sync-BN</strong></p> 
+<p> </p> 
+<p>飞桨团队采用了EMA（Exponential Moving Average）滑动平均方案，将参数过去一段时间的均值作为新的参数，让参数学习过程中变得更加平缓，有效避免异常值对参数更新的影响，提升模型训练的收敛效果。实验发现，使用EMA后网络收敛速度明显加快。</p> 
+<p> </p> 
+<p>一般情况下，Batch Norm实现只会计算单卡上的均值和方差，相当于‘减小了’批大小。SOLOv2实际训练比较耗费显存，单卡的batch size较小，为2。针对这种情况，我们引入了同步的Batch Norm，即：Sync-BN，它可以统计全局的均值和方差，获得更稳定的统计值，相当于‘增大了‘批大小。</p> 
+<p> </p> 
+<p>综上，通过训练过程中的指数滑动平均、Sync-BN的Trick，SOLOv2模型又提升了0.6%（37.8%-&gt;38.4%）。</p> 
+<p> </p> 
+<p><strong>更多的数据增强方法</strong></p> 
+<p> </p> 
+<p>在SOLOv2中除了采用空间变换（随机尺度变换、随机裁剪图片、随机翻转等）、颜色扭曲（透明度、亮度、饱和度等）、信息删除(增加随机噪声、随机遮挡等)等常用数据增强方法之外，还使用了一种新颖的信息删除方法：Grid-Mask方法。</p> 
+<p> </p> 
+<p><img alt="" src="https://images2.imgbox.com/d1/e5/sQH9VFaF_o.png" width="758"></p> 
+<p> </p> 
+<p> </p> 
+<p>Grid-Mask方法属于信息删除的方法。其实现方式是随机在图像上丢弃一块区域，作用相当于是在网络上增加一个正则项，避免网络过拟合，相比较改变网络结构来说，这种方法只需要在数据输入的时候进行增广，简单便捷。</p> 
+<p> </p> 
+<p>经过数据增强之后，SOLOv2模型在保持原有速度的情况下，精度又提升了0.4%（38.4%-&gt;38.8%）。</p> 
+<p> </p> 
+<p><strong>更快的训练方式</strong></p> 
+<p> </p> 
+<p>而实际的训练过程往往是艰辛和漫长的，往往一次训练实验要耗费十几甚至几十个小时，PaddleDetection在网络训练层面，针对损失函数(loss)计算进行了针对性的工程优化，从而加快了训练速度。</p> 
+<p> </p> 
+<ul><li>预取Target: 在计算loss时，输入ground truth需要经过一定的映射转换，将此流程放到数据预处理中进行，因数据预处理和模型计算是异步进行，起到了预取的作用。</li></ul> 
+<p> </p> 
+<ul><li>减少数据拷贝并GPU计算: 在官方PyTorch实现中，损失函数计算通过Numpy计算，在PaddleDetection中，由于飞桨框架提供了丰富算子，损失计算采用框架算子组合计算，不仅减少了数据的拷贝时间，还可以使用GPU计算加速。</li></ul> 
+<p> </p> 
+<ul><li>Batch计算: 在官方PyTorch实现版本中，Loss计算时，循环计算每张图的损失，在PaddleDetection中，采用batch计算（比如batch size=2，那么同时对2张图运算），加快了整体的训练速度。</li></ul> 
+<p> </p> 
+<p>采用飞桨分布式训练能力，在8卡Tesla V100-SXM2上，COCO数据集上训练一个SOLOv2-R50-1x的模型，训练12个epoch，只需要10小时就能完成。</p> 
+<p> </p> 
+<p><strong>多种部署方式</strong></p> 
+<p> </p> 
+<p>除了科研、学习使用外，PaddleDetection还充分考虑了产业用户的需求，使SOLOv2支持多种环境、多种语言的预测方法，包括：</p> 
+<p> </p> 
+<ul><li><strong>服务器端Python部署和C++部署</strong>：多用于工业、互联网等拥有服务器、工控机的环境；</li><li><strong>Paddle-Serving服务部署</strong>：多用于希望进行云端部署的场景；</li><li><strong>Paddle-Lite轻量化部署</strong>：多用户在边缘、轻量化设备、国产芯片等进行部署的场景；</li><li><strong>Windows系统部署</strong>：充分考虑工业场景多为windows系统的现状。</li></ul> 
+<p> </p> 
+<h3> </h3> 
+<p><strong>优化前后的SOLOv2性能对比</strong></p> 
+<p> </p> 
+<p>经过网络优化后，SOLOv2算法在COCO minival数据集上的mask AP达到38.8%，在单张Tesla V100上单卡预测速度达到38.6FPS。<strong>相比于原论文，精度提升2.4%，预测速度提升31.2%</strong>。</p> 
+<p> </p> 
+<p>除此之外，PaddleDetection还集成了基于MobileNetv3的轻量化模型，在最小输入尺寸448像素时，可以在V100上达到<strong>50FPS</strong>，COCO val2017数据集上mask AP达到30.0%，预测速度进一步提升。实验具体数据指标如下表所示：</p> 
+<p> </p> 
+<p><img alt="" src="https://images2.imgbox.com/0a/0e/uoVCCYkY_o.png" width="1080"></p> 
+<p> </p> 
+<p>注：表中带有**符号的模型代表PaddleDetection提供的开源模型。</p> 
+<p> </p> 
+<h3> </h3> 
+<p><strong>产业实践</strong></p> 
+<p> </p> 
+<p>如开篇所说，实例分割算法在产业中有非常广泛的应用场景，如：自动驾驶、机器人抓取控制、医疗影像分割、工业质检和遥感图像分析。下面我们就通过机器视觉导视和机械总院带钢表面缺陷检测两个案例，介绍下实例分割在产业中的应用。</p> 
+<p> </p> 
+<h3> </h3> 
+<p><strong>机器视觉导视</strong></p> 
+<p> </p> 
+<p>2D机械手抓取的思路往往是将算法提供的图像位置坐标信息转化为机械手的世界坐标，进而指导机械手实现抓取。实际的视觉导视里不仅需要了解目标的位置，还需要进一步了解目标的角度信息，因此实例分割逐渐被使用在了视觉导视中。</p> 
+<p> </p> 
+<p>下面是利用机械手吸盘抓取屏幕实现自动化装配的案例图像。我们可以看到，单纯使用目标检测虽然可以得到坐标信息，但对于倾斜的产品的定位却很难做到精确，而使用SOLOV2实例分割，是可以精确的得到目标的轮廓信息。</p> 
+<p><img alt="" src="https://images2.imgbox.com/ee/3f/TcQfKJoY_o.png" width="1080"></p> 
+<p> </p> 
+<p> </p> 
+<p>再通过将SOLOv2输出得到的结果进行转化，将Mat图像转换成散点图坐标，得到整个点的位置坐标，根据产品的质心和轮廓点判断出经过计算传输给机械手较好的抓取坐标，进而实现精准抓取。</p> 
+<p> </p> 
+<p><img alt="" src="https://images2.imgbox.com/d0/62/5dDaA8jb_o.png" width="1080"></p> 
+<p> </p> 
+<h3> </h3> 
+<p><strong>工业质检</strong></p> 
+<p> </p> 
+<p> 在工业质检中，要求标准精细化与出货灵活化，因此需要对缺陷的精细量化，让厂家更好的控制产品的良品率。比如在A产品上，5mm的缺陷是NG产品；但是在B产品上，即使是10mm也属于OK产品。在工厂中产品有着严格的等级标准，质检人员通常使用菲林比对卡来看缺陷的大小。因此如果深度学习想要进一步的利用在缺陷检测中，不仅仅要实现对于缺陷的定性分析，也需要定量计算缺陷的大小。通过实例分割，可以实现对于缺陷的像素级别分割，通过单像素精度的换算可以算得缺陷的实际物理尺寸，进而配合质量标准进行产品管控。</p> 
+<p><img alt="" src="https://images2.imgbox.com/b7/ad/893sCPQN_o.png" width="1080"></p> 
+<p> </p> 
+<p>实例分割算法就很好的实现对缺陷的位置及大小精确的捕捉量化，并且可以对缺陷类型进行分类。<strong>机械总院</strong>在带钢表面缺陷检测系统中采用PaddleDetection中提供的SOLOv2算法实现对于缺陷的识别和大小的计数，达到了良好的效果，在被生产监测系统集成后，直接推动产线质检效率、精度大幅度提升。</p> 
+<p><img alt="" src="https://images2.imgbox.com/96/49/ytLtBiNg_o.png" width="1080"></p> 
+<p> </p> 
+<h3> </h3> 
+<p> </p> 
+<p>写到这里，你还不心动嘛！赶紧前往飞桨PaddleDetection项目地址，学习、试用吧！！！记得顺手帮我们点亮Star哦~</p> 
+<p> </p> 
+<p>GitHub 链接: </p> 
+<p><a href="https://github.com/PaddlePaddle/PaddleDetection"><strong>https://github.com/PaddlePaddle/PaddleDetection</strong></a></p> 
+<p> </p> 
+<p>Gitee 链接: </p> 
+<p><a href="https://gitee.com/paddlepaddle/PaddleDetection" rel="nofollow"><strong>https://gitee.com/paddlepaddle/PaddleDetection</strong></a></p> 
+<p> </p> 
+<p>更多飞桨的相关内容，请参阅以下内容。</p> 
+<p> </p> 
+<p>官网地址：<a href="https://www.paddlepaddle.org.cn" rel="nofollow">https://www.paddlepaddle.org.cn</a></p> 
+<p> </p> 
+<p>飞桨开源框架项目地址：</p> 
+<p>GitHub: <a href="https://github.com/PaddlePaddle/Paddle">https://github.com/PaddlePaddle/Paddle</a></p> 
+<p>Gitee: <a href="https://gitee.com/paddlepaddle/Paddle" rel="nofollow">https://gitee.com/paddlepaddle/Paddle</a></p> 
+<p> </p> 
+<p><em>接下来，给大家介绍一下租用GPU做实验的方法，我们是在智星云租用的GPU，使用体验很好。具体大家可以参考：智星云官网：</em><em> </em><a href="http://www.ai-galaxy.cn/" rel="nofollow"><em>http://www.ai-galaxy.cn/</em></a><em>，淘宝店：</em><a href="https://shop36573300.taobao.com/" rel="nofollow"><em>https://shop36573300.taobao.com/</em></a><em>公众号</em><em>: </em><em>智星</em><em>AI</em></p> 
+<p><img alt="" src="https://images2.imgbox.com/f2/c9/FYX0YdgW_o.png" width="367"></p> 
+<p> </p> 
+<p>​</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/3fb9804bb014aa50f39713941d2e1d3b/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">### 基本数据类型转换（Conversion）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/32076caf0ff0249ef876012ca41e2058/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">sudo: add-apt-repository：找不到命令 解决方式</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

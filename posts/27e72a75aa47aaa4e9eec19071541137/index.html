@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【ceph】CEPH源码解析：读写流程 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【ceph】CEPH源码解析：读写流程" />
+<meta property="og:description" content="相同过程 Ceph的读/写操作采用Primary-Replica模型，客户端只向Object所对应OSD set的Primary OSD发起读/写请求，这保证了数据的强一致性。当Primary OSD收到Object的写请求时，它负责把数据发送给其他副本，只有这个数据被保存在所有的OSD上时，Primary OSD才应答Object的写请求，这保证了副本的一致性。
+写入数据
+这里以Object写入为例，假定一个PG被映射到3个OSD上。Object写入流程如图所示。
+当某个客户端需要向Ceph集群写入一个File时，首先需要在本地完成前面所述的寻址流程，将File变为一个Object，然后找出存储该Object的一组共3个OSD，这3个OSD具有各自不同的序号，序号最靠前的那个OSD就是这一组中的Primary OSD，而后两个则依次Secondary OSD和Tertiary OSD。
+找出3个OSD后，客户端将直接和Primary OSD进行通信，发起写入操作(步骤1)。 Primary OSD收到请求后，分别向Secondary OSD和Tertiary OSD发起写人操作(步骤2和步骤3)。当Secondary OSD和Tertiary OSD各自完成写入操作后，将分别向Primary OSD发送确认信息(步骤4和步骤5)。当Primary OSD确认其他两个OSD的写入完成后，则自己也完成数据写入，并向客户端确认Object写入操作完成(步骤6)。
+之所以采用这样的写入流程，本质上是为了保证写入过程中的可靠性，尽可能避免出现数据丢失的情况。同时，由于客户端只需要向Primary OSD发送数据，因此在互联网使用场景下的外网带宽和整体访问延迟又得到了一定程度的优化。
+当然，这种可靠性机制必然导致较长的延迟，特别是，如果等到所有的OSD都将数据写入磁盘后再向客户端发送确认信号，则整体延迟可能难以忍受。因此， Ceph可以分两次向客户端进行确认。当各个OSD都将数据写入内存缓冲区后，就先向客户端发送一次确认，此时客户端即可以向下执行。待各个OSD都将数据写入磁盘后，会向客户端发送一个最终确认信号，此时客户端可以根据需要删除本地数据。
+分析上述流程可以看出，在正常情况下，客户端可以独立完成OSD寻址操作，而不必依赖于其他系统模块。因此，大量的客户端可以同时和大量的OSD进行并行操作。同时，如果一个File被切分成多个Object，这多个Object也可被并行发送至多个OSD上。
+从OSD的角度来看，由于同一个OSD在不同的PG中的角色不同，因此，其工作压力也可以被尽可能均匀地分担，从而避免单个OSD变成性能瓶颈。
+读取数据
+如果需要读取数据，客户端只需完成同样的寻址过程，并直接和Primary OSD联系。在目前的Ceph设计中，被读取的数据默认由Primary OSD提供，但也可以设置允许从其他OSD中获取，以分散读取压力从而提高性能。
+原文链接：https://blog.csdn.net/lhc121386/article/details/113488420
+文件读写流程 libcephfs.cc 调用 Client.cc中的client 。client::_write
+cephfs：用户态客户端write 摘自：https://zhuanlan.zhihu.com/p/109573019
+还是通过cp命令来研究write。
+cp 2M_test /mnt/ceph-fuse/test 从fuse到cephfs客户端的函数流程如下
+client::_write就是核心函数，可以简单分为两个重要部分：get_caps和file_write部分。代码如下。
+int Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf, const struct iovec *iov, int iovcnt) { // offset = 0, size = 128K, buf是要写的内容，iov = NULL，iovcnt = 0 Inode *in = f-&gt;inode." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/27e72a75aa47aaa4e9eec19071541137/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-07-22T19:14:00+08:00" />
+<meta property="article:modified_time" content="2022-07-22T19:14:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【ceph】CEPH源码解析：读写流程</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="cnblogs_post_body" class="blogpost-body blogpost-body-html" style="font-size: 16px;"> 
+ <h2>相同过程</h2> 
+ <p>Ceph的读/写操作采用Primary-Replica模型，客户端只向Object所对应OSD set的Primary OSD发起读/写请求，这保证了数据的强一致性。当Primary OSD收到Object的写请求时，它负责把数据发送给其他副本，只有这个数据被保存在所有的OSD上时，Primary OSD才应答Object的写请求，这保证了副本的一致性。</p> 
+ <p>写入数据<br> 这里以Object写入为例，假定一个PG被映射到3个OSD上。Object写入流程如图所示。</p> 
+ <p><img alt="在这里插入图片描述" src="https://images2.imgbox.com/de/8e/hKloyUJk_o.jpg" style="outline: none;"></p> 
+ <p> <br> 当某个客户端需要向Ceph集群写入一个File时，首先需要在本地完成前面所述的寻址流程，将File变为一个Object，然后找出存储该Object的一组共3个OSD，这3个OSD具有各自不同的序号，序号最靠前的那个OSD就是这一组中的Primary OSD，而后两个则依次Secondary OSD和Tertiary OSD。<br> 找出3个OSD后，客户端将直接和Primary OSD进行通信，发起写入操作(步骤1)。 Primary OSD收到请求后，分别向Secondary OSD和Tertiary OSD发起写人操作(步骤2和步骤3)。当Secondary OSD和Tertiary OSD各自完成写入操作后，将分别向Primary OSD发送确认信息(步骤4和步骤5)。当Primary OSD确认其他两个OSD的写入完成后，则自己也完成数据写入，并向客户端确认Object写入操作完成(步骤6)。<br> 之所以采用这样的写入流程，本质上是为了保证写入过程中的可靠性，尽可能避免出现数据丢失的情况。同时，由于客户端只需要向Primary OSD发送数据，因此在互联网使用场景下的外网带宽和整体访问延迟又得到了一定程度的优化。<br> 当然，这种可靠性机制必然导致较长的延迟，特别是，如果等到所有的OSD都将数据写入磁盘后再向客户端发送确认信号，则整体延迟可能难以忍受。因此， Ceph可以分两次向客户端进行确认。当各个OSD都将数据写入内存缓冲区后，就先向客户端发送一次确认，此时客户端即可以向下执行。待各个OSD都将数据写入磁盘后，会向客户端发送一个最终确认信号，此时客户端可以根据需要删除本地数据。<br> 分析上述流程可以看出，在正常情况下，客户端可以独立完成OSD寻址操作，而不必依赖于其他系统模块。因此，大量的客户端可以同时和大量的OSD进行并行操作。同时，如果一个File被切分成多个Object，这多个Object也可被并行发送至多个OSD上。<br> 从OSD的角度来看，由于同一个OSD在不同的PG中的角色不同，因此，其工作压力也可以被尽可能均匀地分担，从而避免单个OSD变成性能瓶颈。</p> 
+ <p>读取数据<br> 如果需要读取数据，客户端只需完成同样的寻址过程，并直接和Primary OSD联系。在目前的Ceph设计中，被读取的数据默认由Primary OSD提供，但也可以设置允许从其他OSD中获取，以分散读取压力从而提高性能。<br> 原文链接：https://blog.csdn.net/lhc121386/article/details/113488420</p> 
+ <h2>文件读写流程</h2> 
+ <p>libcephfs.cc  调用 Client.cc中的client 。client::_write</p> 
+ <h2>cephfs：用户态客户端write</h2> 
+ <p>摘自：<a href="https://zhuanlan.zhihu.com/p/109573019" rel="noopener" title="https://zhuanlan.zhihu.com/p/109573019">https://zhuanlan.zhihu.com/p/109573019</a></p> 
+ <p>还是通过cp命令来研究write。</p> 
+ <pre class="has"><code>cp 2M_test /mnt/ceph-fuse/test</code></pre> 
+ <p>从fuse到cephfs客户端的函数流程如下</p> 
+ <p class="img-center"><img alt="" src="https://images2.imgbox.com/11/79/gMCJYk28_o.png" style="outline: none;"></p> 
+ <p>client::_write就是核心函数，可以简单分为两个重要部分：get_caps和file_write部分。代码如下。</p> 
+ <pre class="has"><code>int Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf, const struct iovec *iov, int iovcnt)
+{ // offset = 0, size = 128K, buf是要写的内容，iov = NULL，iovcnt = 0
+  Inode *in = f-&gt;inode.get();             // in-&gt;size = 0
+  uint64_t endoff = offset + size;        // endoff = 128K
+  utime_t start = ceph_clock_now();
+  // copy into fresh buffer (since our write may be resub, async)
+  bufferlist bl;
+  if (buf) { if (size &gt; 0) bl.append(buf, size);
+  } else if (iov){ ... }
+  uint64_t totalwritten;
+  int have;
+  int r = get_caps(in, CEPH_CAP_FILE_WR|CEPH_CAP_AUTH_SHARED, CEPH_CAP_FILE_BUFFER, &amp;have, endoff);
+  if (r &lt; 0)
+    return r;
+  ...
+}</code></pre> 
+ <h3>get_caps</h3> 
+ <p>get_caps的入参need是"AsFw", want是"Fb"。need表示需要的cap，而want表示想要的cap，在get_caps中跟revoke有关。</p> 
+ <p>need和want最关键的区别是：如果mds赋予客户端的caps中不包含need，那就无法往下写。Fw就是写的能力，而As，是因为需要获取本地缓存的Inode的mode值，需要判断(S_ISUID|S_ISGID)；want在caps中可有可无，不耽误写，只与写的方式有关。</p> 
+ <pre class="has"><code class="language-cpp">int Client::get_caps(Inode *in, int need, int want, int *phave, loff_t endoff)
+{ // need = "AsFw", want = "Fb", phave是要赋值的int值，endoff = 128K
+  int r = check_pool_perm(in, need);
+  ...
+}</code></pre> 
+ <p>首先判断是否有操作pool的权限。在Client类里面pool_perms成员是用来保存客户端对池的操作属性：即读或写。</p> 
+ <pre class="has"><code class="language-cpp">std::map&lt;std::pair&lt;int64_t,std::string&gt;, int&gt; pool_perms;</code></pre> 
+ <p>pool_perms里面的value就是属性集合，也就4种，根据字面意思，很好理解</p> 
+ <pre class="has"><code class="language-cpp">enum {
+  POOL_CHECKED = 1,
+  POOL_CHECKING = 2,
+  POOL_READ = 4,
+  POOL_WRITE = 8,
+};</code></pre> 
+ <p>Client::check_pool_perm代码如下</p> 
+ <pre class="has"><code class="language-cpp">int Client::check_pool_perm(Inode *in, int need)
+{
+  int64_t pool_id = in-&gt;layout.pool_id;                          // pool_id = 2
+  std::string pool_ns = in-&gt;layout.pool_ns;                      // pool_ns = ""
+  std::pair&lt;int64_t, std::string&gt; perm_key(pool_id, pool_ns);    // 
+  int have = 0;
+  while (true) {
+    auto it = pool_perms.find(perm_key);                 // 看pool_perms中是否有该pool的key
+    if (it == pool_perms.end())                          // 如果没有直接跳出
+      break;
+    if (it-&gt;second == POOL_CHECKING) {                   // 如果有，且正在checking中，等待check结束
+      // avoid concurrent checkings 
+      wait_on_list(waiting_for_pool_perm);                 
+    } else {                                             // 否则，就是已经check完了。
+      have = it-&gt;second;                                 // 获取目前该池的权限
+      assert(have &amp; POOL_CHECKED);
+      break;
+    }
+  }
+  if (!have) {
+    pool_perms[perm_key] = POOL_CHECKING;                 // 置上POOL_CHECKING标志
+    char oid_buf[32];
+    snprintf(oid_buf, sizeof(oid_buf), "%llx.00000000", (unsigned long long)in-&gt;ino);  //对象名存入oid_buf
+    object_t oid = oid_buf;
+    SnapContext nullsnapc;
+    C_SaferCond rd_cond;
+    ObjectOperation rd_op;
+    rd_op.stat(NULL, (ceph::real_time*)nullptr, NULL);
+    objecter-&gt;mutate(oid, OSDMap::file_to_object_locator(in-&gt;layout), rd_op,           // 发送CEPH_OSD_OP_STAT请求给osd
+		     nullsnapc, ceph::real_clock::now(), 0, &amp;rd_cond);
+    C_SaferCond wr_cond;
+    ObjectOperation wr_op;
+    wr_op.create(true);
+    objecter-&gt;mutate(oid, OSDMap::file_to_object_locator(in-&gt;layout), wr_op,           // 发送CEPH_OSD_OP_CREATE请求给osd
+		     nullsnapc, ceph::real_clock::now(), 0, &amp;wr_cond);
+    client_lock.Unlock();
+    int rd_ret = rd_cond.wait();              // 等待stat回复
+    int wr_ret = wr_cond.wait();              // 等待create回复
+    client_lock.Lock();
+    bool errored = false;
+    if (rd_ret == 0 || rd_ret == -ENOENT)
+      have |= POOL_READ;                      // 如果返回0或-ENOENT，则表示有READ权限
+    else if (rd_ret != -EPERM) {
+      errored = true;                         // stat出现错误
+    }
+    if (wr_ret == 0 || wr_ret == -EEXIST)
+      have |= POOL_WRITE;                     // 如果返回0或-EEXIST，则表示有write权限
+    else if (wr_ret != -EPERM) {
+      errored = true;                         // create出现错误
+    }
+    if (errored) {                                              
+      pool_perms.erase(perm_key);
+      signal_cond_list(waiting_for_pool_perm);  // 唤醒waiting_for_pool_perm
+      return -EIO;
+    }
+    pool_perms[perm_key] = have | POOL_CHECKED;  // 置上POOL_CHECKED标志                          
+    signal_cond_list(waiting_for_pool_perm);     // 唤醒waiting_for_pool_perm
+  }
+  if ((need &amp; CEPH_CAP_FILE_RD) &amp;&amp; !(have &amp; POOL_READ)) {    // 如果没有POOL_READ，则返回-EPERM                  
+    return -EPERM;
+  }
+  if ((need &amp; CEPH_CAP_FILE_WR) &amp;&amp; !(have &amp; POOL_WRITE)) {   // 如果没有POOL_WRITE，则返回-EPERM
+    return -EPERM;
+  }
+  return 0;
+}</code></pre> 
+ <p>检查完对pool的权限后，首先要判断客户端在Inode上拥有的caps是否有"Fw"，如果有"Fw",那就得校验要写的范围，如果超过了in-&gt;max_size，即endoff &gt; in-&gt;max_size，就说明此刻已经超过了mds分给客户端能写的范围，所以需要等待mds分配新的范围即in-&gt;max_size，并且要check_caps。</p> 
+ <p>如果have中也没有"As"，也需要等待caps，当然还有其他的情况。如果考虑太多，反而不太理解。简而言之，在get_caps中就两件事：</p> 
+ <p>1，如果已有的caps没有"AsFw"，则等待caps</p> 
+ <p>2，如果已有的caps有"AsFw"，则校验endoff。如果endoff &gt; in-&gt;max_size，就去check_caps，并等待；如果endoff &lt; in-&gt;max_size，只需要记录"AsFw"的引用。</p> 
+ <pre class="has"><code class="language-cpp">int Client::get_caps(Inode *in, int need, int want, int *phave, loff_t endoff)
+{ 
+  int r = check_pool_perm(in, need);
+  while (1) {
+    int file_wanted = in-&gt;caps_file_wanted();  // 此时open_by_mode中有{CEPH_FILE_MODE_WR=1}，所以file_wanted = "pAsxXsxFxwb"
+    if ((file_wanted &amp; need) != need) { ... }  // "pAsxXsxFxwb" &amp; "AsFw" == "AsFw"
+    int implemented;
+    int have = in-&gt;caps_issued(&amp;implemented);  // have = implemented = "pAsxLsXsxFsxwrcb"
+    bool waitfor_caps = false;
+    bool waitfor_commit = false;
+    if (have &amp; need &amp; CEPH_CAP_FILE_WR) {     // "pAsxLsXsxFsxwrcb" &amp; "AsFw" &amp; "Fw" = "Fw"
+      if (endoff &gt; 0 &amp;&amp; (endoff &gt;= (loff_t)in-&gt;max_size || endoff &gt; (loff_t)(in-&gt;size &lt;&lt; 1)) 
+          &amp;&amp; endoff &gt; (loff_t)in-&gt;wanted_max_size) {
+	    in-&gt;wanted_max_size = endoff;                 
+	    check_caps(in, 0); 
+      }
+      // 如果endoff &gt; in-&gt;max_size，就说明此刻已经超过了mds分给客户端能写的范围，所以需要等待
+      if (endoff &gt;= 0 &amp;&amp; endoff &gt; (loff_t)in-&gt;max_size) {
+	    waitfor_caps = true;
+      }
+      ...
+    }
+    if (!waitfor_caps &amp;&amp; !waitfor_commit) { // waitfor_caps = false, waitfor_commit = false
+      if ((have &amp; need) == need) {          // "pAsxLsXsxFsxwrcb" &amp; "AsFw" == "AsFw"
+	    int revoking = implemented &amp; ~have;   // revoking = 0
+	    if ((revoking &amp; want) == 0) {         // revoking = 0
+	      *phave = need | (have &amp; want);      // *phave = "AsFw" | ("pAsxLsXsxFsxwrcb" &amp; "Fb") = "AsFwb"
+	      in-&gt;get_cap_ref(need);              // cap_refs : {4=1, 4096=1}
+	      return 0;
+	    }
+      }
+    }
+    if (waitfor_caps)
+      wait_on_list(in-&gt;waitfor_caps);
+  }
+}</code></pre> 
+ <p>check_caps只在endoff &gt;= (loff_t)in-&gt;max_size时才执行，算是异常情况，这种情况调用check_caps，无非就是检查caps是否需要从mds那里更新。</p> 
+ <p>总结了下有三种情况需要更新caps：</p> 
+ <p>1，客户端想要的cap，mds没给；</p> 
+ <p>2，mds需要回收的cap，客户端没给；</p> 
+ <p>3，需要更新in-&gt;max_size。代码如下。</p> 
+ <pre class="has"><code class="language-cpp">void Client::check_caps(Inode *in, unsigned flags)
+{ // flags = 0
+  unsigned wanted = in-&gt;caps_wanted();       // wanted = "pAsxXsxFxwb"
+  unsigned used = get_caps_used(in);         
+  unsigned cap_used;
+  int implemented;
+  int issued = in-&gt;caps_issued(&amp;implemented);    // issued = "pAsxLsXsxFsxwrcb" = implemented
+  int revoking = implemented &amp; ~issued;          // revoking = 0
+  int retain = wanted | used | CEPH_CAP_PIN;     // retain = "pAsxXsxFxwb"
+  if (!unmounting) {
+    if (wanted)
+      retain |= CEPH_CAP_ANY;                    // retain = "pAsxLsxXsxFsxcrwbl"
+  }
+  for (auto &amp;it : in-&gt;caps) {
+    mds_rank_t mds = it.first;
+    Cap &amp;cap = it.second;
+    MetaSession *session = &amp;mds_sessions.at(mds);
+    cap_used = used;                                  
+    if (in-&gt;auth_cap &amp;&amp; &amp;cap != in-&gt;auth_cap)
+        cap_used &amp;= ~in-&gt;auth_cap-&gt;issued;
+    revoking = cap.implemented &amp; ~cap.issued;          // revoking = 0
+    // in-&gt;wanted_max_size = 0 &lt; in-&gt;max_size = 4M， 如果wanted_max_size超过了max_size，发送caps消息给mds，这里没超过
+    if (in-&gt;wanted_max_size &gt; in-&gt;max_size &amp;&amp; in-&gt;wanted_max_size &gt; in-&gt;requested_max_size 
+        &amp;&amp; &amp;cap == in-&gt;auth_cap)
+      goto ack;
+
+    /* approaching file_max? */
+    if ((cap.issued &amp; CEPH_CAP_FILE_WR) &amp;&amp; &amp;cap == in-&gt;auth_cap &amp;&amp; is_max_size_approaching(in)) {
+      goto ack;
+    }
+
+    /* completed revocation? */// 如果需要revoke caps，且revoking中的caps没有被用到，发送caps给mds
+    if (revoking &amp;&amp; (revoking &amp; cap_used) == 0) {
+      goto ack;
+    }
+    /* want more caps from mds? */// wanted = "pAsxXsxFxwb", cap.wanted = 0, cap.issued = "pAsxLsXsxFsxwrcb",这里为false
+    if (wanted &amp; ~(cap.wanted | cap.issued))
+      goto ack;
+      
+    if (wanted == cap.wanted &amp;&amp;         // mds knows what we want.这里wanted = "pAsxXsxFxwb"， cap.wanted = 0
+	    ((cap.issued &amp; ~retain) == 0) &amp;&amp;// and we don't have anything we wouldn't like
+	    !in-&gt;dirty_caps)                 // and we have no dirty caps
+        continue;
+
+    if (!(flags &amp; CHECK_CAPS_NODELAY)) {
+      cap_delay_requeue(in);
+      continue;
+    }
+    ...
+ ack:
+    ...
+    send_cap(in, session, &amp;cap, flags &amp; CHECK_CAPS_SYNCHRONOUS, cap_used, wanted,
+	     retain, flushing, flush_tid);
+}</code></pre> 
+ <p>需要更新in-&gt;max_size的情况就两种</p> 
+ <p><em>1，in-&gt;wanted_max_size &gt; in-&gt;max_size，即客户端的wanted_max_size大于max_size。in-&gt;wanted_max_size只会在endoff &gt;= in-&gt;max_size的情况下更新，这也可以看做是endoff &gt; in-&gt;max_size时，需要发送CEPH_CAP_OP_UPDATE消息给mds。</em></p> 
+ <p><em>2，is_max_size_approaching(in)为true时，发送CEPH_CAP_OP_UPDATE消息给mds。is_max_size_approaching代码如下：</em></p> 
+ <pre class="has"><code class="language-cpp">static bool is_max_size_approaching(Inode *in)
+{
+  /* mds will adjust max size according to the reported size */
+  if (in-&gt;flushing_caps &amp; CEPH_CAP_FILE_WR) // 之前已发送的CEPH_CAP_OP_UPDATE消息，mds还没回
+    return false;
+  if (in-&gt;size &gt;= in-&gt;max_size)             
+    return true;
+  /* half of previous max_size increment has been used */
+  if (in-&gt;max_size &gt; in-&gt;reported_size &amp;&amp;
+      (in-&gt;size &lt;&lt; 1) &gt;= in-&gt;max_size + in-&gt;reported_size)   //  这个不太好理解
+    return true;
+  return false;
+}</code></pre> 
+ <p><em>这里得单独看(in-&gt;size &lt;&lt;1) &gt;= in-&gt;max_size + in-&gt;reported_size，in-&gt;reported_size就是上一次发送CEPH_CAP_OP_UPDATE消息时，客户端已写的size。in-&gt;size就可以看做上次写的数据长度 Sn - 1 和这一次写的数据长度  和，最终推导上面的不等式为</em></p> 
+ <p><em>(in-&gt;size &lt;&lt;1) = 2 * (Sn -1  + Sn ) &gt;= in-&gt;max_size + Sn</em></p> 
+ <p><em>继续：2 * Sn &gt;= in-&gt;max_size - ，这样就很好理解了。即已写的空间超过上一次分配max_size后的剩余空间的一半。</em></p> 
+ <p>如果不需要发送caps，并且没有标记 CHECK_CAPS_NODELAY，则将caps放入delayed_list，等待5秒后，再拿出来执行check_caps。</p> 
+ <p>caps相关的解决完后，就开始写。写的过程中注意写的模式，如果flags中有O_DIRECT，即f-&gt;flags &amp; O_DIRECT为true，则不经过ObjectCache，直接调用filer模块去写；如果flags没有O_DIRECT，则要判断是同步，还是异步写，先写到ObjectCache层，如果是同步写，写到缓存后，flush下。</p> 
+ <pre class="has"><code class="language-cpp">int Client::_write(Fh *f, int64_t offset, uint64_t size, const char *buf, const struct iovec *iov, int iovcnt)
+{
+  ...
+ 
+  if (f-&gt;flags &amp; O_DIRECT)            // 如果flags中有O_DIRECT，则清除caps中的"Fb"
+    have &amp;= ~CEPH_CAP_FILE_BUFFER; 
+  if (cct-&gt;_conf-&gt;client_oc &amp;&amp; (have &amp; CEPH_CAP_FILE_BUFFER)) {
+    // do buffered write
+    if (!in-&gt;oset.dirty_or_tx)      
+      get_cap_ref(in, CEPH_CAP_FILE_CACHE | CEPH_CAP_FILE_BUFFER);
+    get_cap_ref(in, CEPH_CAP_FILE_BUFFER);
+    r = objectcacher-&gt;file_write(&amp;in-&gt;oset, &amp;in-&gt;layout, in-&gt;snaprealm-&gt;get_snap_context(), offset, size, bl, ceph::real_clock::now(),0);
+    put_cap_ref(in, CEPH_CAP_FILE_BUFFER);
+    // flush cached write if O_SYNC is set on file fh
+    // O_DSYNC == O_SYNC on linux &lt; 2.6.33
+    // O_SYNC = __O_SYNC | O_DSYNC on linux &gt;= 2.6.33
+    if ((f-&gt;flags &amp; O_SYNC) || (f-&gt;flags &amp; O_DSYNC)) {
+      _flush_range(in, offset, size);
+    }
+    } else {
+    if (f-&gt;flags &amp; O_DIRECT)
+      _flush_range(in, offset, size);
+    // simple, non-atomic sync write
+    C_SaferCond onfinish("Client::_write flock");
+    unsafe_sync_write++;
+    get_cap_ref(in, CEPH_CAP_FILE_BUFFER);  // released by onsafe callback
+
+    filer-&gt;write_trunc(in-&gt;ino, &amp;in-&gt;layout, in-&gt;snaprealm-&gt;get_snap_context(),
+		       offset, size, bl, ceph::real_clock::now(), 0,
+		       in-&gt;truncate_size, in-&gt;truncate_seq,
+		       &amp;onfinish);
+    client_lock.Unlock();
+    onfinish.wait();
+    client_lock.Lock();
+    _sync_write_commit(in);
+  }
+}</code></pre> 
+ <p>写到ObjectCache或者后端存储后，更新本地的in-&gt;size，并将"Fw"标脏。</p> 
+ <pre class="has"><code class="language-cpp">in-&gt;size = totalwritten + offset;
+in-&gt;mark_caps_dirty(CEPH_CAP_FILE_WR)</code></pre> 
+ <p>最后一步就是通过is_max_size_approaching函数判断是否需要更新max_size。</p> 
+ <p><strong>Client ------&gt;mds</strong></p> 
+ <p><strong>MDS更新max_size</strong></p> 
+ <p>假设需要更新caps，那就得发送MClientCaps给mds，发送MClientCaps内容如下</p> 
+ <pre class="has"><code class="language-cpp">class MClientCaps : public Message {
+ ...
+ public:
+
+// 成员变量
+  struct ceph_mds_caps_head head;                // head.op = CEPH_CAP_OP_UPDATE
+                                                 // head.ino : Inode号
+                                                 // head.caps = "pAsxLsXsxFsxcrwb"
+                                                 // head.wanted = wanted = "pAsxXsxFxwb"
+                                                 // head.dirty = dirty = "Fw"
+  uint64_t size;                                 // size = in-&gt;size = 2M
+  uint64_t  max_size;                            // max_size = in-&gt;wanted_max_size
+  uint64_t truncate_size;                        
+  uint64_t change_attr;                          // Inode中属性的改变次数
+  uint32_t truncate_seq;                         
+  utime_t mtime,atime, ctime, btime;
+  ...
+  /* advisory CLIENT_CAPS_* flags to send to mds */
+  unsigned flags;
+private:
+  file_layout_t layout; 
+ 
+}</code></pre> 
+ <p>这里面MClientCaps中max_size存在的作用是计算下一次mds分配给客户端的max_size大小。在Locker::_do_cap_update中的代码如下，</p> 
+ <pre class="has"><code class="language-cpp">if (m-&gt;get_max_size() &gt; new_max) {
+    change_max = true;
+    forced_change_max = true;
+    new_max = calc_new_max_size(latest, m-&gt;get_max_size());
+} else {
+    new_max = calc_new_max_size(latest, size);
+    if (new_max &gt; old_max)
+	change_max = true;
+    else
+	new_max = old_max;
+}</code></pre> 
+ <p>计算max_size的函数是Locker::calc_new_max_size，如果m-&gt;get_max_size()大于之前的max_size时，就以m-&gt;get_max_size()为入参；</p> 
+ <p>否则就以当前客户端已写的size为入参。</p> 
+ <pre class="has"><code class="language-cpp">uint64_t Locker::calc_new_max_size(inode_t *pi, uint64_t size)
+{
+  uint64_t new_max = (size + 1) &lt;&lt; 1;
+  uint64_t max_inc = g_conf-&gt;mds_client_writeable_range_max_inc_objs;   // max_inc = 1024
+  if (max_inc &gt; 0) {
+    max_inc *= pi-&gt;layout.object_size;                     // max_inc = 1024 * 4M = 4G
+    new_max = std::min(new_max, size + max_inc);                        
+  }
+  return ROUND_UP_TO(new_max, pi-&gt;get_layout_size_increment());         // 
+}</code></pre> 
+ <p>2 * (size + 1)&lt; size + 4G时，new_max就是2 * (size + 1)</p> 
+ <pre class="has"><code class="language-cpp">#define ROUND_UP_TO(n, d) ((n)%(d) ? ((n)+(d)-(n)%(d)) : (n))</code></pre> 
+ <p>最终max_size约等于2 * size对齐4M的值，简单来看就是客户端写了多少，MDS下次再分配2倍的空间给客户端。</p> 
+ <p>2 * (size + 1)&gt; size + 4G时，new_max就是size + 4G，最终max_size就是size + 4G，MDS每次多分配4G给客户端。</p> 
+ <h3>file_write</h3> 
+ <p>这个涉及到ObjectCache，待续...</p> 
+ <p>对应PPT：<a href="https://download.csdn.net/download/guzyguzyguzy/8853025?ops_request_misc=&amp;request_id=&amp;biz_id=103&amp;utm_term=Ceph%E8%AF%BB%E5%86%99%E6%B5%81%E7%A8%8B&amp;utm_medium=distribute.pc_search_result.none-task-download-2~download~sobaiduweb~default-1-8853025.pc_v2_rank_dl_default&amp;spm=1018.2226.3001.4451.2" title="ceph源码io读写流程分析串讲-CSDN下载" rel="noopener">ceph源码io读写流程分析串讲-CSDN下载</a></p> 
+ <p><strong>一、OSD模块简介</strong></p> 
+ <p><strong>1.1 消息封装</strong>：在OSD上发送和接收信息。</p> 
+ <p>cluster_messenger -与其它OSDs和monitors沟通<br> client_messenger －与客户端沟通</p> 
+ <p><strong>1.2 消息调度</strong>：</p> 
+ <p>Dispatcher类，主要负责消息分类</p> 
+ <p><strong>1.3 工作队列：</strong></p> 
+ <p>1.3.1 OpWQ: 处理ops(从客户端)和sub ops(从其他的OSD)。运行在op_tp线程池。</p> 
+ <p>1.3.2 PeeringWQ: 处理peering任务，运行在op_tp线程池。</p> 
+ <p>1.3.3 CommandWQ:处理cmd命令，运行在command_tp。</p> 
+ <p>1.3.4 RecoveryWQ: 数据修复，运行在recovery_tp。</p> 
+ <p>1.3.5 SnapTrimWQ: 快照相关，运行在disk_tp。</p> 
+ <p>1.3.6 ScrubWQ: scrub，运行在disk_tp。</p> 
+ <p>1.3.7 ScrubFinalizeWQ: scrub，运行在disk_tp。</p> 
+ <p>1.3.8 RepScrubWQ: scrub，运行在disk_tp。</p> 
+ <p>1.3.9 RemoveWQ: 删除旧的pg目录。运行在disk_tp。</p> 
+ <p><strong>1.4 线程池：</strong></p> 
+ <p>有4种OSD线程池:</p> 
+ <p>1.4.1 op_tp: 处理ops和sub ops</p> 
+ <p>1.4.2 recovery_tp:处理修复任务</p> 
+ <p>1.4.3 disk_tp: 处理磁盘密集型任务</p> 
+ <p>1.4.4 command_tp: 处理命令</p> 
+ <p><strong>1.5 主要对象：</strong></p> 
+ <p>ObjectStore *store;</p> 
+ <p>OSDSuperblock superblock; 主要是版本号等信息</p> 
+ <p>OSDMapRef  osdmap;</p> 
+ <p><strong>1.6 主要操作流程： </strong><a href="http://blog.sina.com.cn/s/blog_c2e1a9c7010151xb.html" rel="noopener" title="参考文章">参考文章</a></p> 
+ <p>1.6.1 客户端发起请求过程</p> 
+ <p>1.6.2 op_tp线程处理数据读取</p> 
+ <p>1.6.3 对象操作的处理过程</p> 
+ <p>1.6.4 修改操作的处理</p> 
+ <p>1.6.5 日志的写入</p> 
+ <p>1.6.6 写操作处理</p> 
+ <p>1.6.7 事务的sync过程</p> 
+ <p>1.6.8 日志恢复</p> 
+ <p><strong>1.7 整体处理过程图</strong></p> 
+ <p class="img-center"><img alt="" src="https://images2.imgbox.com/72/76/JYEyJU31_o.png" style="outline: none;"></p> 
+ <p>Ceph OSD 使用诸如Btrfs 和XFS 的日志文件系统。在将数据提交到备用存储之前，Ceph 首先将数据写入一个称为日志( journal) 的独立存储区域，日志是相同的机械磁盘(如OSD) 或不同的SSD 磁盘或分区上一小块<a href="https://www.zhihu.com/search?q=%E7%BC%93%E5%86%B2%E5%8C%BA&amp;search_source=Entity&amp;hybrid_search_source=Entity&amp;hybrid_search_extra=%7B%22sourceType%22%3A%22answer%22%2C%22sourceId%22%3A561372178%7D" rel="noopener" title="缓冲区">缓冲区</a>大小的分区，甚至也可以是文件系统上的一个文件。在这种机制中，Ceph 的所有写都是先到日志，然后再到备用存储，如下图所示。</p> 
+ <p class="img-center"><img alt="" src="https://images2.imgbox.com/37/80/pN9nlacR_o.png" style="outline: none;"></p> 
+ <p><br> 作者：启迪云<br> 链接：https://www.zhihu.com/question/21718731/answer/561372178</p> 
+ <p><strong>二、客户端写入数据大致流程及保存形式</strong></p> 
+ <p><strong>2.1 读写框架</strong></p> 
+ <p>              <img alt="image" height="250" src="https://images2.imgbox.com/ff/ca/gbTOsCTb_o.png" width="290" style="outline: none;">           </p> 
+ <p><img alt="image" height="291" src="https://images2.imgbox.com/a8/6e/A6oqb6Px_o.png" width="250" style="outline: none;">       <img alt="image" height="246" src="https://images2.imgbox.com/13/59/7HuNCIKr_o.png" width="250" style="outline: none;">             </p> 
+ <p><strong>2.2 客户端写入流程</strong></p> 
+ <p>在客户端使用 rbd 时一般有两种方法：</p> 
+ <ul><li>第一种 是 Kernel rbd。就是创建了rbd设备后，把rbd设备map到内核中，形成一个虚拟的块设备，这时这个块设备同其他通用块设备一样，一般的设备文件为/dev/rbd0，后续直接使用这个块设备文件就可以了，可以把 /dev/rbd0 格式化后 mount 到某个目录，也可以直接作为裸设备使用。这时对rbd设备的操作都通过kernel rbd操作方法进行的。 </li><li>第二种是 librbd 方式。就是创建了rbd设备后，这时可以使用librbd、librados库进行访问管理块设备。这种方式不会map到内核，直接调用librbd提供的接口，可以实现对rbd设备的访问和管理，但是不会在客户端产生块设备文件。</li></ul> 
+ <p class="img-center"><img alt="" height="266" src="https://images2.imgbox.com/b9/ca/drtYCEUx_o.png" width="250" style="outline: none;"></p> 
+ <p>应用写入rbd块设备的过程：</p> 
+ <ol><li>应用调用 librbd 接口或者对linux 内核虚拟块设备写入二进制块。下面以 librbd 为例。</li><li>librbd 对二进制块进行分块，默认块大小为 4M，每一块都有名字，成为一个对象</li><li>librbd 调用 librados 将对象写入 Ceph 集群</li><li>librados向 <strong>主OSD</strong> 写入分好块的二进制数据块 (先建立TCP/IP连接，然后发送消息给 OSD，OSD 接收后写入其磁盘)</li><li>主OSD 负责同时向一个或者多个次 OSD 写入副本。注意这里是写到日志(Journal)就返回，因此，使用SSD作为Journal的话，可以提高响应速度，做到服务器端对客户端的快速同步返回写结果(ack)。</li><li>当主次OSD都写入完成后，主OSD 向客户端返回写入成功。</li><li>当一段时间(也许得几秒钟)后Journal 中的数据向磁盘写入成功后，Ceph通过事件通知客户端数据写入磁盘成功(commit)，此时，客户端可以将写缓存中的数据彻底清除掉了。</li><li>默认地，Ceph 客户端会缓存写入的数据直到收到集群的commit通知。如果此阶段内(在写方法返回到收到commit通知之间)OSD 出故障导致数据写入文件系统失败，Ceph 将会允许客户端重做尚未提交的操作(replay)。因此，PG 有个状态叫 replay：“The placement group is waiting for clients to replay operations after an OSD crashed.”。</li></ol> 
+ <p>                                           <img alt="" src="https://images2.imgbox.com/4e/ea/7Lwq0SFw_o.png" style="outline: none;">            </p> 
+ <p>也就是，文件系统负责文件处理，librbd 负责块处理，librados 负责对象处理，OSD 负责将数据写入在Journal和磁盘中。</p> 
+ <p><strong>2.3 RBD保存形式</strong></p> 
+ <p>如下图所示，Ceph 系统中不同层次的组件/用户所看到的数据的形式是不一样的：</p> 
+ <p>                         <img alt="" src="https://images2.imgbox.com/83/92/tOXFigBe_o.png" style="outline: none;"></p> 
+ <ul><li>Ceph 客户端所见的是一个完整的连续的二进制数据块，其大小为创建 RBD image 是设置的大小或者 resize 的大小，客户端可以从头或者从某个位置开始写入二进制数据。</li><li>librados 负责在 RADOS 中创建对象(object)，其大小为 pool 的 order 决定，默认情况下 order = 22 此时 object 大小为 4MB；以及负责将客户端传入的二进制块条带化为若干个条带(stripe)。</li><li>librados 控制哪个条带由哪个 OSD 写入(条带 ---写入哪个----&gt; object ----位于哪个 ----&gt; OSD)</li><li>OSD 负责创建在文件系统中创建文件，并将 librados 传入的数据写入数据。</li></ul> 
+ <p>  Ceph client 向一个 RBD image 写入二进制数据(假设 pool 的拷贝份数为 3)：</p> 
+ <p>(1)Ceph client 调用 librados 创建一个 RBD image，这时候不会做存储空间分配，而是创建若干元数据对象来保存元数据信息。</p> 
+ <p>(2)Ceph client 调用 librados 开始写数据。librados 计算条带、object 等，然后开始写第一个 stripe 到特定的目标object。</p> 
+ <p>(3)librados 根据 CRUSH 算法，计算出 object 所对应的主 OSD ID，并将二进制数据发给它。</p> 
+ <p>(4)主OSD 负责调用文件系统接口将二进制数据写入磁盘上的文件(每个 object 对应一个 file，file 的内容是一个或者多个 stripe)。</p> 
+ <p>(5)主ODS 完成数据写入后，它使用 CRUSH 算啊计算出第二个OSD(secondary OSD)和第三个OSD(tertiary OSD)的位置，然后向这两个 OSD 拷贝对象。都完成后，它向 ceph client 反馈该 object 保存完毕。</p> 
+ <div style="text-align: center;"> 
+  <img alt="" height="243" src="https://images2.imgbox.com/97/a6/9ZxIhpbo_o.png" width="300" style="outline: none;"> 
+ </div> 
+ <p>(6)然后写第二个条带，直到全部写入完成。全部完成后，librados 还应该会做元数据更新，比如写入新的 size 等。</p> 
+ <p>完整的过程(<a href="https://www.google.com.hk/url?sa=i&amp;rct=j&amp;q=&amp;esrc=s&amp;source=images&amp;cd=&amp;cad=rja&amp;uact=8&amp;ved=0CAUQjhxqFQoTCOfz4ZCQmcgCFcMHLAodD3sDdw&amp;url=http%3A%2F%2Fwww.slideshare.net%2FLarryCover%2Fceph-open-source-storage-software-optimizations-on-intel-architecture-for-cloud-workloads&amp;psig=AFQjCNFqMBOmR1MCHDcx4E8NrIHRdDKN8Q&amp;ust=1443508949557117" rel="noopener" title="来源">来源</a>)：</p> 
+ <p>osd(<em>object</em> <em>store</em> <em>daemon</em> )  守护进程(<em>daemon</em>)是一类在后台运行的特殊进程 。</p> 
+ <div class="img-center" style="text-align: center;"> 
+  <figure class="image" style="display:block;text-align:center;"> 
+   <img alt="" height="571" src="https://images2.imgbox.com/91/08/7DJgQmWS_o.png" width="1019" style="outline: none;"> 
+   <figcaption>
+     图片 
+    <a href="https://insujang.github.io/2020-08-30/introduction-to-ceph/" rel="noopener" title="Introduction to Ceph | Better Tomorrow with Computer Science">Introduction to Ceph | Better Tomorrow with Computer Science</a> 
+   </figcaption> 
+  </figure> 
+ </div> 
+ <p> 该过程具有强一致性的特点：</p> 
+ <ul><li>Ceph 的读写操作采用 Primary-Replica 模型，Client 只向 Object 所对应 OSD set 的 Primary 发起读写请求，这保证了数据的强一致性。</li><li>由于每个 Object 都只有一个 Primary OSD，因此对 Object 的更新都是顺序的，不存在同步问题。</li><li>当 Primary 收到 Object 的写请求时，它负责把数据发送给其他 Replicas，只要这个数据被保存在所有的OSD上时，Primary 才应答Object的写请求，这保证了副本的一致性。这也带来一些副作用。相比那些只实现了最终一致性的存储系统比如 Swift，Ceph 只有三份拷贝都写入完成后才算写入完成，这在出现磁盘损坏时会出现写延迟增加。</li></ul> 
+ <p>    在 OSD 上，在收到数据存放指令后，它会产生2~3个磁盘seek操作：</p> 
+ <ul><li>把写操作记录到 OSD 的 Journal 文件上(Journal是为了保证写操作的原子性)。</li><li>把写操作更新到 Object 对应的文件上。</li><li>把写操作记录到 PG Log 文件上。</li></ul> 
+ <p><strong>三、客户端请求流程(转的<a href="https://my.oschina.net/u/2460844/blog/532755" rel="noopener" title="一只小江">一只小江</a>的博文，写的挺好的)</strong></p> 
+ <p>RADOS读对象流程</p> 
+ <p>                             <img alt="image" height="283" src="https://images2.imgbox.com/42/01/2zlDNVWs_o.png" width="400" style="outline: none;">              </p> 
+ <p> RADOS写对象操作流程</p> 
+ <p>                                   <img alt="image" height="276" src="https://images2.imgbox.com/22/f1/e7v4oFNI_o.png" width="350" style="outline: none;">          </p> 
+ <p>例子：</p> 
+ <blockquote> 
+  <p>#!/usr/bin/env python<br> import sys,rados,rbd<br> def connectceph():<br>       cluster = rados.Rados(conffile = '/root/xuyanjiangtest/ceph-0.94.3/src/ceph.conf')<br>       cluster.connect()<br>       ioctx = cluster.open_ioctx('mypool')<br>       rbd_inst = rbd.RBD()<br>       size = 4*1024**3 #4 GiB<br>       rbd_inst.create(ioctx,'myimage',size)<br>       image = rbd.Image(ioctx,'myimage')<br>       data = 'foo'* 200<br>       image.write(data,0)<br>       image.close()<br>       ioctx.close()<br>         cluster.shutdown()<br> if __name__ == "__main__":<br>         connectceph()</p> 
+ </blockquote> 
+ <p>1. 首先cluster = rados.Rados(conffile = 'ceph.conf')，用当前的这个ceph的配置文件去创建一个rados，这里主要是解析ceph.conf中中的集群配置参数。然后将这些参数的值保存在rados中。</p> 
+ <p>2. cluster.connect() ，这里将会创建一个radosclient的结构，这里会把这个结构主要包含了几个功能模块：</p> 
+ <p><strong>消息管理模块Messager，数据处理模块Objector，finisher线程模块。</strong></p> 
+ <p>3. ioctx = cluster.open_ioctx('mypool')，为一个名字叫做mypool的存储池创建一个ioctx ，ioctx中会指明radosclient与Objector模块，同时也会记录mypool的信息，包括pool的参数等。</p> 
+ <p>4. rbd_inst.create(ioctx,'myimage',size) ，创建一个名字为myimage的rbd设备，之后就是将数据写入这个设备。</p> 
+ <p>5. image = rbd.Image(ioctx,'myimage')，创建image结构，这里该结构将myimage与ioctx 联系起来，后面可以通过image结构直接找到ioctx。这里会将ioctx复制两份，分为为data_ioctx和md_ctx。见明知意，一个用来处理rbd的存储数据，一个用来处理rbd的管理数据。</p> 
+ <p>流程图：</p> 
+ <p>                      <img alt="143540_OSPk_2460844" src="https://images2.imgbox.com/c9/17/QjfK5y03_o.png" style="outline: none;">  </p> 
+ <p>1. image.write(data,0)，通过image开始了一个写请求的生命的开始。这里指明了request的两个基本要素 buffer=data 和 offset=0。由这里开始进入了ceph的世界，也是c++的世界。</p> 
+ <p>由image.write(data,0)  转化为librbd.cc 文件中的Image::write() 函数，来看看这个函数的主要实现</p> 
+ <pre class="has"><code class="language-cpp">ssize_t Image::write(uint64_t ofs, size_t len, bufferlist&amp; bl)
+{      
+  ImageCtx *ictx = (ImageCtx *)ctx;     
+  int r = librbd::write(ictx, ofs, len, bl.c_str(), 0);     
+  return r;      
+}</code></pre> 
+ <p>2. 该函数中直接进行分发给了librbd::wrte的函数了。跟随下来看看librbd::write中的实现。该函数的具体实现在internal.cc文件中。</p> 
+ <pre class="has"><code class="language-cpp">ssize_t write(ImageCtx *ictx, uint64_t off, size_t len, const char *buf, int op_flags)
+{     
+    Context *ctx = new C_SafeCond(&amp;mylock, &amp;cond, &amp;done, &amp;ret);   //---a     
+    AioCompletion *c = aio_create_completion_internal(ctx, rbd_ctx_cb);//---b     
+    r = aio_write(ictx, off, mylen, buf, c, op_flags);  //---c       
+    while (!done)            
+      cond.Wait(mylock);  // ---d
+}</code></pre> 
+ <p>---a.这句要为这个操作申请一个回调操作，所谓的回调就是一些收尾的工作，信号唤醒处理。</p> 
+ <p>---b。这句是要申请一个io完成时 要进行的操作，当io完成时，会调用rbd_ctx_cb函数，该函数会继续调用ctx-&gt;complete()。</p> 
+ <p>---c.该函数aio_write会继续处理这个请求。</p> 
+ <p>---d.当c句将这个io下发到osd的时候，osd还没请求处理完成，则等待在d上，直到底层处理完请求，回调b申请的 AioCompletion, 继续调用a中的ctx-&gt;complete()，唤醒这里的等待信号，然后程序继续向下执行。</p> 
+ <p>3.再来看看aio_write 拿到了 请求的offset和buffer会做点什么呢？</p> 
+ <pre class="has"><code class="language-cpp">int aio_write(ImageCtx *ictx, uint64_t off, size_t len, const char *buf,            AioCompletion *c, int op_flags)
+{       
+    //将请求按着object进行拆分       
+    vector&lt;ObjectExtent&gt; extents;       
+    if (len &gt; 0)        
+    {          
+      Striper::file_to_extents(ictx-&gt;cct, ictx-&gt;format_string, &amp;ictx-&gt;layout, off, 
+      clip_len,0, extents);   //---a       
+    } 
+    
+    //处理每一个object上的请求数据       
+    for (vector&lt;ObjectExtent&gt;::iterator p = extents.begin(); p != extents.end(); ++p)
+    {            
+      C_AioWrite *req_comp = new C_AioWrite(cct, c); //---b            
+      AioWrite *req = new AioWrite(ictx, p-&gt;oid.name, p-&gt;objectno, p- &gt;offset,bl,….., 
+      req_comp);     //---c                
+      r = req-&gt;send();    //---d       
+    }
+}</code></pre> 
+ <p>根据请求的大小需要将这个请求按着object进行划分，由函数file_to_extents进行处理，处理完成后按着object进行保存在extents中。file_to_extents()存在很多同名函数注意区分。这些函数的主要内容做了一件事儿，那就对原始请求的拆分。(file_to_extents :<a href="https://blog.csdn.net/don_chiang709/article/details/90607215" title="https://blog.csdn.net/don_chiang709/article/details/90607215" rel="noopener">https://blog.csdn.net/don_chiang709/article/details/90607215</a>)</p> 
+ <p>一个rbd设备是有很多的object组成，也就是将rbd设备进行切块，每一个块叫做object，每个object的大小默认为4M，也可以自己指定。file_to_extents函数将这个大的请求分别映射到object上去，拆成了很多小的请求如下图。最后映射的结果保存在ObjectExtent中。</p> 
+ <p>                              <img alt="" height="223" src="https://images2.imgbox.com/78/d6/FPVtr9Yl_o.png" width="350" style="outline: none;"></p> 
+ <p> 原本的offset是指在rbd内的偏移量(写入rbd的位置)，经过file_to_extents后，转化成了一个或者多个object的内部的偏移量offset0。这样转化后处理一批这个object内的请求。</p> 
+ <p>4. 再回到 aio_write函数中，需要将拆分后的每一个object请求进行处理。</p> 
+ <p>---b.为写请求申请一个回调处理函数。</p> 
+ <p>---c.根据object内部的请求，创建一个叫做AioWrite的结构。</p> 
+ <p>---d.将这个AioWrite的req进行下发send().</p> 
+ <p>5. 这里AioWrite 是继承自 AbstractWrite ，AbstractWrite 继承自AioRequest类，在AbstractWrite 类中定义了send的方法，看下send的具体内容.</p> 
+ <pre class="has"><code class="language-cpp">int AbstractWrite::send()  {      
+  if (send_pre())           //---a
+}
+
+#进入send_pre()函数中
+bool AbstractWrite::send_pre()
+{
+  m_state = LIBRBD_AIO_WRITE_PRE;   // ----a       
+  FunctionContext *ctx =    //----b            
+  new FunctionContext( boost::bind(&amp;AioRequest::complete, this, _1));       
+  m_ictx-&gt;object_map.aio_update(ctx); //-----c
+}</code></pre> 
+ <p>---a.修改m_state 状态为LIBRBD_AIO_WRITE_PRE。</p> 
+ <p>---b.申请一个回调函数，实际调用AioRequest::complete()</p> 
+ <p>---c.开始下发object_map.aio_update的请求，这是一个状态更新的函数，不是很重要的环节，这里不再多说，当更新的请求完成时会自动回调到b申请的回调函数。</p> 
+ <p>6. 进入到AioRequest::complete() 函数中。</p> 
+ <pre class="has"><code class="language-cpp">void AioRequest::complete(int r)
+{     
+ if (should_complete(r))   //---a
+}</code></pre> 
+ <p>---a.should_complete函数是一个纯虚函数，需要在继承类AbstractWrite中实现，来7. 看看AbstractWrite:: should_complete()</p> 
+ <pre class="has"><code class="language-cpp">AbstractWrite:: should_complete()
+
+bool AbstractWrite::should_complete(int r)
+{    
+  switch (m_state)     
+  {         
+   case LIBRBD_AIO_WRITE_PRE:  //----a        
+    {           
+      send_write(); //----b</code></pre> 
+ <p>----a.在send_pre中已经设置m_state的状态为LIBRBD_AIO_WRITE_PRE，所以会走这个分支。</p> 
+ <p>----b. send_write()函数中，会继续进行处理，</p> 
+ <p>7.1.下面来看这个send_write函数</p> 
+ <pre class="has"><code class="language-cpp">void AbstractWrite::send_write()
+{      
+  m_state = LIBRBD_AIO_WRITE_FLAT;   //----a       
+  add_write_ops(&amp;m_write);    // ----b       
+  int r = m_ictx-&gt;data_ctx.aio_operate(m_oid, rados_completion, &amp;m_write);
+}</code></pre> 
+ <p>---a.重新设置m_state的状态为 LIBRBD_AIO_WRITE_FLAT。</p> 
+ <p>---b.填充m_write，将请求转化为m_write。</p> 
+ <p>---c.下发m_write  ，使用data_ctx.aio_operate 函数处理。继续调用io_ctx_impl-&gt;aio_operate()函数，继续调用objecter-&gt;mutate().</p> 
+ <p>8. objecter-&gt;mutate()</p> 
+ <pre class="has"><code class="language-cpp">ceph_tid_t mutate(……..)  
+{     
+  Op *o = prepare_mutate_op(oid, oloc, op, snapc, mtime, flags, 
+onack, oncommit, objver);//----d     
+ return op_submit(o);
+}</code></pre> 
+ <p>---d.将请求转化为Op请求，继续使用op_submit下发这个请求。在op_submit中继续调用_op_submit_with_budget处理请求。继续调用_op_submit处理。</p> 
+ <p>8.1 _op_submit 的处理过程。这里值得细看</p> 
+ <pre class="has"><code class="language-cpp">ceph_tid_t Objecter::_op_submit(Op *op, RWLock::Context&amp; lc)
+{
+    check_for_latest_map = _calc_target(&amp;op-&gt;target, &amp;op-&gt;last_force_resend)； //---a     
+    int r = _get_session(op-&gt;target.osd, &amp;s, lc);  //---b    
+    _session_op_assign(s, op); //----c     _send_op(op, m); //----d
+}</code></pre> 
+ <p>----a. _calc_target，通过计算当前object的保存的osd，然后将主osd保存在target中，rbd写数据都是先发送到主osd，主osd再将数据发送到其他的副本osd上。这里对于怎么来选取osd集合与主osd的关系就不再多说，在《ceph的数据存储之路(3)》中已经讲述这个过程的原理了，代码部分不难理解。</p> 
+ <p>----b. _get_session，该函数是用来与主osd建立通信的，建立通信后，可以通过该通道发送给主osd。再来看看这个函数是怎么处理的</p> 
+ <p>9. _get_session</p> 
+ <pre class="has"><code class="language-cpp">int Objecter::_get_session(int osd, OSDSession **session, RWLock::Context&amp; lc)
+{     
+  map&lt;int,OSDSession*&gt;::iterator p = osd_sessions.find(osd);   //----a  
+  
+ if (p != osd_sessions.end()) {
+    auto s = p-&gt;second;
+    s-&gt;get();
+    *session = s;
+    return 0;
+  }   
+  OSDSession *s = new OSDSession(cct, osd); //----b     
+  osd_sessions[osd] = s;//--c     
+  s-&gt;con = messenger-&gt;get_connection(osdmap-&gt;get_inst(osd));//-d
+……
+}</code></pre> 
+ <p>----a.首先在osd_sessions中查找是否已经存在一个连接可以直接使用，第一次通信是没有的。</p> 
+ <p>----b.重新申请一个OSDSession，并且使用osd等信息进行初始化。</p> 
+ <p>---c. 将新申请的OSDSession添加到osd_sessions中保存，以备下次使用。</p> 
+ <p>----d.调用messager的get_connection方法。在该方法中继续想办法与目标osd建立连接。</p> 
+ <p>10. messager 是由子类simpleMessager实现的，下面来看下SimpleMessager中get_connection的实现方法</p> 
+ <pre class="has"><code class="language-cpp">ConnectionRef SimpleMessenger::get_connection(const entity_inst_t&amp; dest)
+{     
+  Pipe *pipe = _lookup_pipe(dest.addr);     //-----a     
+  if (pipe)  {     
+  } else {       
+   pipe = connect_rank(dest.addr, dest.name.type(), NULL, NULL); //----b     
+  }
+}</code></pre> 
+ <p>----a.首先要查找这个pipe，第一次通信，自然这个pipe是不存在的。</p> 
+ <p>----b. connect_rank 会根据这个目标osd的addr进行创建。看下connect_rank做了什么。</p> 
+ <p>11. SimpleMessenger::connect_rank</p> 
+ <pre class="has"><code class="language-cpp">Pipe *SimpleMessenger::connect_rank(const entity_addr_t&amp; addr,  int type, PipeConnection *con,    Message *first)
+{      
+    Pipe *pipe = new Pipe(this, Pipe::STATE_CONNECTING, static_cast&lt;PipeConnection*&gt;(con));      //----a     
+   pipe-&gt;set_peer_type(type); //----b     
+   pipe-&gt;set_peer_addr(addr); //----c     
+   pipe-&gt;policy = get_policy(type); //----d     
+   pipe-&gt;start_writer();  //----e     
+   return pipe; //----f
+}</code></pre> 
+ <p>----a.首先需要创建这个pipe，并且pipe同pipecon进行关联。</p> 
+ <p>----b,----c,-----d。都是进行一些参数的设置。</p> 
+ <p>----e.开始启动pipe的写线程，这里pipe的写线程的处理函数pipe-&gt;writer(),该函数中会尝试连接osd。并且建立socket连接通道。</p> 
+ <p>目前的资源统计一下，写请求可以根据目标主osd，去查找或者建立一个OSDSession，这个OSDSession中会有一个管理数据通道的Pipe结构，然后这个结构中存在一个发送消息的处理线程writer，这个线程会保持与目标osd的socket通信。</p> 
+ <p>12. 建立并且获取到了这些资源，这时再回到_op_submit 函数中</p> 
+ <pre class="has"><code class="language-cpp">ceph_tid_t Objecter::_op_submit(Op *op, RWLock::Context&amp; lc)
+{
+    check_for_latest_map = _calc_target(&amp;op-&gt;target, &amp;op-&gt;last_force_resend)； //---a     
+    int r = _get_session(op-&gt;target.osd, &amp;s, lc);  //---b     
+    _session_op_assign(s, op); //----c     
+    MOSDOp *m = _prepare_osd_op(op); //-----d     
+    _send_op(op, m); //----e
+}</code></pre> 
+ <p>---c，将当前的op请求与这个session进行绑定，在后面发送请求的时候能知道使用哪一个session进行发送。</p> 
+ <p>--d，将op转化为MOSDop，后面会以MOSDOp为对象进行处理的。</p> 
+ <p>---e，_send_op 会根据之前建立的通信通道，将这个MOSDOp发送出去。_send_op 中调用op-&gt;session-&gt;con-&gt;send_message(m)，这个方法会调用SimpleMessager-&gt; send_message(m), 再调用_send_message(),再调用submit_message().在submit_message会找到之前的pipe，然后调用pipe-&gt;send方法，最后通过pipe-&gt;writer的线程发送到目标osd。</p> 
+ <p>自此，客户就等待osd处理完成返回结果了。</p> 
+ <p class="img-center"><img alt="" src="https://images2.imgbox.com/7d/2e/YEKKcSKZ_o.png" style="outline: none;"></p> 
+ <p>1.看左上角的rados结构，首先创建io环境，创建rados信息，将配置文件中的数据结构化到rados中。</p> 
+ <p>2.根据rados创建一个radosclient的客户端结构，该结构包括了三个重要的模块，finiser 回调处理线程、Messager消息处理结构、Objector数据处理结构。</p> 
+ <p>最后的数据都是要封装成消息 通过Messager发送给目标的osd。</p> 
+ <p>3.根据pool的信息与radosclient进行创建一个ioctx，这里面包好了pool相关的信息，然后获得这些信息后在数据处理时会用到。</p> 
+ <p>4.紧接着会复制这个ioctx到imagectx中，变成data_ioctx与md_ioctx数据处理通道，最后将imagectx封装到image结构当中。之后所有的写操作都会通过这个image进行。顺着image的结构可以找到前面创建并且可以使用的数据结构。</p> 
+ <p>5.通过最右上角的image进行读写操作，当读写操作的对象为image时，这个image会开始处理请求，然后这个请求经过处理拆分成object对象的请求。拆分后会交给objector进行处理查找目标osd，当然这里使用的就是crush算法，找到目标osd的集合与主osd。</p> 
+ <p>6.将请求op封装成MOSDOp消息，然后交给SimpleMessager处理，SimpleMessager会尝试在已有的osd_session中查找，如果没有找到对应的session，则会重新创建一个OSDSession，并且为这个OSDSession创建一个数据通道pipe，把数据通道保存在SimpleMessager中，可以下次使用。</p> 
+ <p>7.pipe 会与目标osd建立Socket通信通道，pipe会有专门的写线程writer来负责socket通信。在线程writer中会先连接目标ip，建立通信。消息从SimpleMessager收到后会保存到pipe的outq队列中，writer线程另外的一个用途就是监视这个outq队列，当队列中存在消息等待发送时，会就将消息写入socket，发送给目标OSD。</p> 
+ <p>8. 等待OSD将数据消息处理完成之后，就是进行回调，反馈执行结果，然后一步步的将结果告知调用者。</p> 
+ <p><strong>四、Ceph读流程</strong></p> 
+ <p>OSD端读消息分发流程</p> 
+ <p>                                    <img alt="image" height="316" src="https://images2.imgbox.com/a5/91/WBkljpxQ_o.png" width="350" style="outline: none;">               </p> 
+ <p>OSD端读操作处理流程</p> 
+ <p>                                             <img alt="image" height="328" src="https://images2.imgbox.com/7d/80/HxdYS7uV_o.png" width="350" style="outline: none;"></p> 
+ <p>总体流程图：</p> 
+ <p class="img-center"><img alt="4ac886ce405a7e638b2979b693802a8e" src="https://images2.imgbox.com/0b/eb/DVCZufsp_o.png" style="outline: none;"></p> 
+ <pre class="has"><code class="language-cpp">int read(inodeno_t ino,
+             file_layout_t *layout,
+             snapid_t snap,
+             uint64_t offset,
+             uint64_t len,
+             bufferlist *bl,   // ptr to data
+             int flags,
+             Context *onfinish,
+             int op_flags = 0)    --------------------------------Filer.h</code></pre> 
+ <p>Striper::file_to_extents(cct, ino, layout, offset, len, truncate_size, extents);//将要读取数据的长度和偏移转化为要访问的对象,extents沿用了brtfs文件系统的概念<br> objecter-&gt;sg_read_trunc(extents, snap, bl, flags, truncate_size, truncate_seq, onfinish, op_flags);//向osd发起请求</p> 
+ <p>对于读操作而言：</p> 
+ <p>1.客户端直接计算出存储数据所属于的主osd，直接给主osd上发送消息。</p> 
+ <p>2.主osd收到消息后，可以调用Filestore直接读取处在底层文件系统中的主pg里面的内容然后返回给客户端。具体调用函数在ReplicatedPG::do_osd_ops中实现。</p> 
+ <p>CEPH_OSD_OP_MAPEXT||CEPH_OSD_OP_SPARSE_READ</p> 
+ <p>r = osd-&gt;store-&gt;fiemap(coll, soid, op.extent.offset, op.extent.length, bl);</p> 
+ <p>CEPH_OSD_OP_READ</p> 
+ <p>r = pgbackend-&gt;objects_read_sync(soid, miter-&gt;first, miter-&gt;second, &amp;tmpbl);</p> 
+ <p><strong>五、Ceph写流程</strong></p> 
+ <p>OSD端写操作处理流程</p> 
+ <p>                                   <img alt="image" src="https://images2.imgbox.com/54/bc/1bAyXh36_o.png" style="outline: none;"></p> 
+ <p>而对于写操作而言，由于要保证数据写入的同步性就会复杂很多：</p> 
+ <p>1.首先客户端会将数据发送给主osd，</p> 
+ <p>2.主osd同样要先进行写操作预处理，完成后它要发送写消息给其他的从osd，让他们对副本pg进行更改，</p> 
+ <p>3.从osd通过FileJournal完成写操作到Journal中后发送消息告诉主osd说完成，进入5</p> 
+ <p>4.当主osd收到所有的从osd完成写操作的消息后，会通过FileJournal完成自身的写操作到Journal中。完成后会通知客户端，已经完成了写操作。</p> 
+ <p>5.主osd，从osd的线程开始工作调用Filestore将Journal中的数据写入到底层文件系统中。</p> 
+ <p>写的逻辑流程图如图：</p> 
+ <p>从图中我们可以看到写操作分为以下几步：<br> 1.OSD::op_tp线程从OSD::op_wq中拿出来操作如本文开始的图上描述，具体代码流是</p> 
+ <p>    ReplicatePG::apply_repop中创建回调类C_OSD_OpCommit和C_OSD_OpApplied</p> 
+ <p>    FileStore::queue_transactions中创建了回调类C_JournaledAhead</p> 
+ <p>2.FileJournal::write_thread线程从FileJournal::writeq中拿出来操作，主要就是写数据到具体的journal中，具体代码流：</p> 
+ <p>3.Journal::Finisher.finisher_thread线程从Journal::Finisher.finish_queue中拿出来操作，通过调用C_JournalAhead留下的回调函数FileStore:_journaled_ahead，该线程开始工作两件事：首先入底层FileStore::op_wq通知开始写，再入FileStore::ondisk_finisher.finisher_queue通知可以返回。具体代码流：</p> 
+ <p>4.FileStore::ondisk_finisher.finisher_thread线程从FileStore::ondisk_finisher.finisher_queue中拿出来操作，通过调用C_OSD_OpCommit留下来的回调函数ReplicatePG::op_commit，通知客户端写操作成功</p> 
+ <p>5.FileStore::op_tp线程池从FileStore::op_wq中拿出操作(此处的OP_WQ继承了父类ThreadPool::WorkQueue重写了_process和_process_finish等函数，所以不同于OSD::op_wq，它有自己的工作流程)，首先调用FileStore::_do_op,完成后调用FileStore::_finish_op。</p> 
+ <p>6. FileStore::op_finisher.finisher_thread线程从FileStore::op_finisher.finisher_queue中拿出来操作，通过调用C_OSD_OpApplied留下来的回调函数ReplicatePG::op_applied,通知数据可读。</p> 
+ <p>具体OSD方面的源码逐句解析可以参考<a href="https://my.oschina.net/u/2460844/blog/534390?fromerr=PnkKCbYU" rel="noopener" title="一只小江的博文">一只小江的博文</a></p> 
+ <p>PPT下载地址：<a href="https://download.csdn.net/download/guzyguzyguzy/8853025?ops_request_misc=&amp;request_id=&amp;biz_id=103&amp;utm_term=Ceph%E8%AF%BB%E5%86%99%E6%B5%81%E7%A8%8B&amp;utm_medium=distribute.pc_search_result.none-task-download-2~download~sobaiduweb~default-1-8853025.pc_v2_rank_dl_default&amp;spm=1018.2226.3001.4451.2" title="https://download.csdn.net/download/guzyguzyguzy/8853025?ops_request_misc=&amp;request_id=&amp;biz_id=103&amp;utm_term=Ceph%E8%AF%BB%E5%86%99%E6%B5%81%E7%A8%8B&amp;utm_medium=distribute.pc_search_result.none-task-download-2~download~sobaiduweb~default-1-8853025.pc_v2_rank_dl_default&amp;spm=1018.2226.3001.4451.2" rel="noopener">https://download.csdn.net/download/guzyguzyguzy/8853025?ops_request_misc=&amp;request_id=&amp;biz_id=103&amp;utm_term=Ceph%E8%AF%BB%E5%86%99%E6%B5%81%E7%A8%8B&amp;utm_medium=distribute.pc_search_result.none-task-download-2~download~sobaiduweb~default-1-8853025.pc_v2_rank_dl_default&amp;spm=1018.2226.3001.4451.2</a> </p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/88a603bba9e4f0a9baced1c5338f4542/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【ceph】Rados的客户端RadosClient|MonClient|Osdc</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/cea0221403a232d76fb72171ba623812/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【cmake】CMakeList添加库|添加头文件|添加路径|add_executable、add_library、target_link_libraries|添加编译选项|宏开关...</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

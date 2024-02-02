@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>G1调优实践日记--被误解的MetaspaceSize - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="G1调优实践日记--被误解的MetaspaceSize" />
+<meta property="og:description" content="Metaspace Metaspace 大家应该很熟悉了，所有线程共享的一块内存区域，主要存放已被虚拟机加载的类定义，方法定义，常量等一些元数据信息，运行时常量池（Runtime Constant Pool）也是方法区的一部分，Class 文件中的常量池表（Constant Pool Table，里面各种字面量和符号引用），被类加载后就放入方法区的运行时常量池 。运行时常量池并不只有编译时才往里放东西，运行时也可以放新的常量，比如 String.intern()。有一个别名叫“非堆”。
+jdk1.8以后直接用本地内存实现方法区，并改名叫 Metaspace。正因为用本地内存（native memory），所以它的最大内存可以达到机器内存的极限，但关于它的调优参数一直有个误解。
+MetaspaceSize -XX:MetaspaceSize 并不代表初始的 Metaspace 大小，在 oracle doc 中，有明确的解释
+Class metadata is deallocated when the corresponding Java class is unloaded. Java classes are unloaded as a result of garbage collection, and garbage collections may be induced to unload classes and deallocate class metadata. When the space committed for class metadata reaches a certain level (a high-water mark), a garbage collection is induced." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/bd7612f8852b6c4d75985380376d6484/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-08-27T18:01:23+08:00" />
+<meta property="article:modified_time" content="2021-08-27T18:01:23+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">G1调优实践日记--被误解的MetaspaceSize</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h4><a id="Metaspace_0"></a>Metaspace</h4> 
+<p>Metaspace 大家应该很熟悉了，所有线程共享的一块内存区域，主要存放已被虚拟机加载的类定义，方法定义，常量等一些元数据信息，运行时常量池（Runtime Constant Pool）也是方法区的一部分，Class 文件中的常量池表（Constant Pool Table，里面各种字面量和符号引用），被类加载后就放入方法区的运行时常量池 。运行时常量池并不只有编译时才往里放东西，运行时也可以放新的常量，比如 String.intern()。有一个别名叫“非堆”。</p> 
+<p>jdk1.8以后直接用本地内存实现方法区，并改名叫 Metaspace。正因为用本地内存（native memory），所以它的最大内存可以达到机器内存的极限，但关于它的调优参数一直有个误解。</p> 
+<h4><a id="MetaspaceSize_5"></a>MetaspaceSize</h4> 
+<p><code>-XX:MetaspaceSize</code> 并不代表初始的 Metaspace 大小，在 oracle doc 中，有明确的<a href="https://docs.oracle.com/javase/9/gctuning/other-considerations.htm#JSGCT-GUID-B29C9153-3530-4C15-9154-E74F44E3DAD9" rel="nofollow">解释</a></p> 
+<pre><code>Class metadata is deallocated when the corresponding Java class is unloaded. 
+Java classes are unloaded as a result of garbage collection, and garbage collections may be induced to unload classes and deallocate class metadata. 
+When the space committed for class metadata reaches a certain level (a high-water mark), a garbage collection is induced. 
+After the garbage collection, the high-water mark may be raised or lowered depending on the amount of space freed from class metadata. 
+The high-water mark would be raised so as not to induce another garbage collection too soon. 
+The high-water mark is initially set to the value of the command-line option -XX:MetaspaceSize.
+It is raised or lowered based on the options -XX:MaxMetaspaceFreeRatio and -XX:MinMetaspaceFreeRatio. 
+If the committed space available for class metadata as a percentage of the total committed space for class metadata is greater than -XX:MaxMetaspaceFreeRatio, then the high-water mark will be lowered. 
+If it's less than -XX:MinMetaspaceFreeRatio, then the high-water mark will be raised.
+</code></pre> 
+<p>大致意思就是当 MetaspaceSize 接近一个指定水位（high-water mark）的时候，会引发垃圾回收，这个初始化的水位值就是 <code>-XX:MetaspaceSize</code> 。</p> 
+<p>另一方面，水位值会上下浮动，上浮主要是为了避免过早引发一次垃圾回收，而上下浮动主要由 两个参数控制</p> 
+<ul><li>-XX:MaxMetaspaceFreeRatio：已提交的 Metaspace 空间中剩余可用的占全部提交空间的比例 大于 MaxMetaspaceFreeRatio ，说明 Metaspace 空间仍有富余，会降低水位。</li><li>-XX:MinMetaspaceFreeRatio：反之，如果比例小于 MinMetaspaceFreeRatio ，说明 Metaspace 空间比较紧张，会升高水位。</li></ul> 
+<p>这说明如果你只指定 <code>-XX:MetaspaceSize</code>，然后再做 Metaspace oom实验，并不代表 gc 会在你指定的值发生，因为这个值会上下浮动。</p> 
+<p>最后再提下 <code>-XX:MaxMetaspaceSize</code> 就是字面意思，会给 MetaspaceSize 设一个上限，默认空间是无限的（default unlimited）。</p> 
+<h4><a id="XXMetaspaceSize__32"></a><code>-XX:MetaspaceSize</code> 验证实验</h4> 
+<p>前面说了，要做 Metaspace oom 实验还需要考虑 <code>MaxMetaspaceFreeRatio</code> 和 <code>MinMetaspaceFreeRatio</code> 的设置，这次我的 gc 参数设为如下,都设为 0 是避免水位上下浮动：</p> 
+<p><code>-XX:+UseG1GC -XX:+PrintGCDetails -XX:+PrintGCDateStamps -XX:MetaspaceSize=8m -XX:MaxMetaspaceFreeRatio=0 -XX:MinMetaspaceFreeRatio=0</code></p> 
+<p>然后自定义一个大对象 <code>OomObject</code> ：</p> 
+<pre><code>public class OomObject {
+
+    String[] strings;
+
+    public OomObject() {
+        this(1);
+    }
+
+    /**
+     * size,unit mb
+     */
+    public OomObject(int size) {
+        if (size &lt;= 0) {
+            size = 1;
+        }
+        strings = new String[size];
+        for (int i = 0; i &lt; size; i++) {
+            strings[i] = new String(createObject());
+        }
+    }
+
+    /**
+     * create 1mb object
+     *
+     * @return
+     */
+    private byte[] createObject() {
+        return new byte[1024 * 300];
+    }
+}
+</code></pre> 
+<p>然后单元测试 会无限循环创建 <code>OomObject</code> 的子类(通过cglib，并且关闭缓存)，这样会慢慢填充 MetaspaceSize，并且实时打印 MetaspaceSize log。</p> 
+<pre><code>    @Test
+    public void testMetaSpaceOom() throws InterruptedException {
+//        ArrayList&lt;Object&gt; objects = new ArrayList&lt;Object&gt;();
+        List&lt;MemoryPoolMXBean&gt; memoryPoolMXBeans = ManagementFactory.getMemoryPoolMXBeans();
+
+        while (true) {
+            Enhancer enhancer = new Enhancer();
+            enhancer.setSuperclass(OomObject.class);
+            enhancer.setUseCache(false);
+            enhancer.setCallback(new MethodInterceptor() {
+                @Override
+                public Object intercept(Object obj, Method method, Object[] args, MethodProxy proxy)
+                        throws Throwable {
+                    return proxy.invokeSuper(obj, args);
+                }
+            });
+            enhancer.create();
+            Thread.sleep(200);
+            for (MemoryPoolMXBean poolMXBean : memoryPoolMXBeans) {
+                if (MemoryType.NON_HEAP.equals(poolMXBean.getType())) {
+                    MemoryUsage usage = poolMXBean.getUsage();
+                    if (poolMXBean.getName().contains("Metaspace")) {
+                        System.out.println(poolMXBean.getName() + ":" + usage.getCommitted());
+                    }
+                }
+            }
+        }
+    }
+</code></pre> 
+<p>最后我们可以看到成果，在 MetaspaceSize 达到 8m 的时候，会触发 <code>Metadata GC Threshold</code> gc，验证了 <code>-XX:MetaspaceSize</code> 的作用。</p> 
+<pre><code>···
+Metaspace:8388608
+Metaspace:8388608
+2021-08-26T15:59:08.109+0800: [GC pause (Metadata GC Threshold) (young) (initial-mark), 0.0046983 secs]
+   [Parallel Time: 3.6 ms, GC Workers: 8]
+      [GC Worker Start (ms): Min: 36019.2, Avg: 36019.4, Max: 36020.0, Diff: 0.8]
+      [Ext Root Scanning (ms): Min: 0.0, Avg: 0.5, Max: 0.8, Diff: 0.8, Sum: 4.0]
+ ···
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/50cae5c77d167b6c6e47c5889274e88a/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">一文解析TOP命令</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ddb29bf25fb9bdb5865929ecf9397508/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【Python】十分钟学会用Flask编写web后台</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

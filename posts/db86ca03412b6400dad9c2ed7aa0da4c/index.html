@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【cpp-taskflow】源码分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【cpp-taskflow】源码分析" />
+<meta property="og:description" content="一、简介 cpp-taskflow 源码：https://github.com/cpp-taskflow/cpp-taskflow
+（后面简称taskflow）
+taskflow一个写的比较好的基于task有向无环图（DAG）的并行调度的框架，之所以说写的比较好，个人觉得有几点原因：
+1.是一个兼具学术研究和工业使用的项目，并非一个玩具
+2.现代C&#43;&#43;开发，风格简洁
+（源码要求编译器支持C&#43;&#43;17，也比较容易改成C&#43;&#43;11）
+3.文档全面
+4.注释丰富
+因此，学习和研究了taskflow的代码，并写此文作为学习笔记。
+通读代码之后，个人的感觉是开发一个通用的DAG调度框架重要在三个方面：
+1.拓扑结构的存储和表达
+taskflow存储和表达拓扑结构的方式还是比较简单的，用Node类表示DAG中的每个结点，Graph类存储所有的Node对象，Topology类表示一个拓扑结构，后面再详细说。
+2.拓扑结构的调度执行
+taskflow的调度逻辑中为提高性能做了较多优化：通过WorkStealingQueue提高线程使用率，通过Notifier类（from Eigen库）减少生产者-消费者模式中加锁的频率等。
+3.辅助工具或功能
+taskflow提供方法可以比较简单的监视每个线程的活动、分析用户程序的性能。
+二、基本数据类型 1.类Node 类Node最重要的是保存了当前节点的执行函数，所有前继节点的指针、后续节点的指针，子图（如果有的话），每个前继节点完成后需要修改的计数器（当所有的前继节点都完成时，当前节点就可以执行了）。
+class Node { //static节点的执行函数是返回值和参数都是void的函数 using StaticWork = std::function&lt;void()&gt;; //dynamic节点的执行函数是返回值为void、参数为Subflow的函数， //在代码中通过模板元编程判断参数是否是Subflow来区分静态节点还是动态节点 using DynamicWork = std::function&lt;void(Subflow&amp;)&gt;; //节点的status constexpr static int SPAWNED = 0x1; constexpr static int SUBTASK = 0x2; public: Node() = default; //可以通过构造函数传入节点的执行函数，可以不传入（default构造函数），后续再set template &lt;typename C&gt; Node(C&amp;&amp;); //传入当前节点的一个后续节点 void precede(Node&amp;); private: std::string _name; //用了C&#43;&#43;17的std::variant函数，可以认为就是union类型，未设置、static work、dynamic work std::variant&lt;std::monostate, StaticWork, DynamicWork&gt; _work; //所有的后续节点 tf::PassiveVector&lt;Node*&gt; _successors; //所有的前继节点 tf::PassiveVector&lt;Node*&gt; _dependents; //子图，正如github上的文档所说，每个节点可以在执行期动态的创建子图 //这里用了C&#43;&#43;17的std::optional函数，多了”未设置“状态，好处是如果未设置不会调用Graph的构造函数 std::optional&lt;Graph&gt; _subgraph; //若有值，表示此节点实际一个Taskflow，通过组合成为了一个Node Taskflow* _module {nullptr}; //以下两个是弱引用 Topology* _topology {nullptr}; Taskflow* _module {nullptr}; int _status {0}; //前继节点的个数，在调度执行过程会多线程修改，所以是std::atomic类型。 std::atomic&lt;int&gt; _num_dependents {0}; }; 重点说下precede函数的实现" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/db86ca03412b6400dad9c2ed7aa0da4c/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-02-07T01:07:08+08:00" />
+<meta property="article:modified_time" content="2020-02-07T01:07:08+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【cpp-taskflow】源码分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>一、简介</h2> 
+<p>cpp-taskflow 源码：https://github.com/cpp-taskflow/cpp-taskflow<br> （后面简称taskflow）</p> 
+<p>taskflow一个写的比较好的基于task有向无环图（DAG）的并行调度的框架，之所以说写的比较好，个人觉得有几点原因：</p> 
+<blockquote> 
+ <p>1.是一个兼具学术研究和工业使用的项目，并非一个玩具<br> 2.现代C++开发，风格简洁<br> （源码要求编译器支持C++17，也比较容易改成C++11）<br> 3.文档全面<br> 4.注释丰富</p> 
+</blockquote> 
+<p>因此，学习和研究了taskflow的代码，并写此文作为学习笔记。</p> 
+<p>通读代码之后，个人的感觉是开发一个通用的DAG调度框架重要在三个方面：</p> 
+<blockquote> 
+ <p>1.拓扑结构的存储和表达<br> taskflow存储和表达拓扑结构的方式还是比较简单的，用Node类表示DAG中的每个结点，Graph类存储所有的Node对象，Topology类表示一个拓扑结构，后面再详细说。<br> 2.拓扑结构的调度执行<br> taskflow的调度逻辑中为提高性能做了较多优化：通过WorkStealingQueue提高线程使用率，通过Notifier类（from Eigen库）减少生产者-消费者模式中加锁的频率等。<br> 3.辅助工具或功能<br> taskflow提供方法可以比较简单的监视每个线程的活动、分析用户程序的性能。</p> 
+</blockquote> 
+<h2><a id="_23"></a>二、基本数据类型</h2> 
+<h3><a id="1Node_25"></a>1.类Node</h3> 
+<p>类Node最重要的是保存了当前节点的执行函数，所有前继节点的指针、后续节点的指针，子图（如果有的话），每个前继节点完成后需要修改的计数器（当所有的前继节点都完成时，当前节点就可以执行了）。</p> 
+<pre><code>class Node {
+  //static节点的执行函数是返回值和参数都是void的函数
+  using StaticWork  = std::function&lt;void()&gt;;
+  //dynamic节点的执行函数是返回值为void、参数为Subflow的函数，
+  //在代码中通过模板元编程判断参数是否是Subflow来区分静态节点还是动态节点
+  using DynamicWork = std::function&lt;void(Subflow&amp;)&gt;;
+
+  //节点的status
+  constexpr static int SPAWNED = 0x1;
+  constexpr static int SUBTASK = 0x2;
+
+  public:
+
+    Node() = default;
+
+   //可以通过构造函数传入节点的执行函数，可以不传入（default构造函数），后续再set
+    template &lt;typename C&gt;
+    Node(C&amp;&amp;);
+
+    //传入当前节点的一个后续节点
+    void precede(Node&amp;);
+
+  private:
+    
+    std::string _name;
+    //用了C++17的std::variant函数，可以认为就是union类型，未设置、static work、dynamic work
+    std::variant&lt;std::monostate, StaticWork, DynamicWork&gt; _work;
+
+    //所有的后续节点
+    tf::PassiveVector&lt;Node*&gt; _successors;
+    //所有的前继节点
+    tf::PassiveVector&lt;Node*&gt; _dependents;
+   
+    //子图，正如github上的文档所说，每个节点可以在执行期动态的创建子图
+    //这里用了C++17的std::optional函数，多了”未设置“状态，好处是如果未设置不会调用Graph的构造函数
+    std::optional&lt;Graph&gt; _subgraph;
+
+    //若有值，表示此节点实际一个Taskflow，通过组合成为了一个Node
+    Taskflow* _module {nullptr};
+
+    //以下两个是弱引用
+    Topology* _topology {nullptr};
+    Taskflow* _module {nullptr};
+
+    int _status {0};
+    //前继节点的个数，在调度执行过程会多线程修改，所以是std::atomic类型。
+    std::atomic&lt;int&gt; _num_dependents {0};
+};
+</code></pre> 
+<p>重点说下precede函数的实现</p> 
+<pre><code>inline void Node::precede(Node&amp; v) {
+  //1.将v添加到当前节点的后续节点vector中
+  _successors.push_back(&amp;v);
+  //2.将当前节点添加到v的前继节点vector中
+  v._dependents.push_back(this);
+  //3.将v的前继节点的计数+1，调度执行时每个前继节点完成时-1，等于0时即可执行当前节点
+  v._num_dependents.fetch_add(1, std::memory_order_relaxed);
+}
+</code></pre> 
+<h3><a id="2Task_91"></a>2.类Task</h3> 
+<p>类Task很简单，就是Node指针的包装，弱引用一个Node对象指针，并不管理其内存。提供了一些public函数的实现也是直接调用类Node对应的函数。根据注释，用类Task而不是直接使用Node指针的目的，是为了防止使用方直接操作内部存储数据。</p> 
+<pre><code>class Task {
+  public:
+    template &lt;typename C&gt;
+    Task&amp; work(C&amp;&amp; callable);
+    
+    template &lt;typename... Ts&gt;
+    Task&amp; precede(Ts&amp;&amp;... tasks);
+    Task&amp; precede(std::vector&lt;Task&gt;&amp; tasks);
+    Task&amp; precede(std::initializer_list&lt;Task&gt; tasks);
+    
+    template &lt;typename... Ts&gt;
+    Task&amp; succeed(Ts&amp;&amp;... tasks);
+    Task&amp; succeed(std::vector&lt;Task&gt;&amp; tasks);
+    Task&amp; succeed(std::initializer_list&lt;Task&gt; tasks);
+    
+    template &lt;typename... Ts&gt;
+    Task&amp; gather(Ts&amp;&amp;... tasks);
+    Task&amp; gather(std::vector&lt;Task&gt;&amp; tasks);
+    Task&amp; gather(std::initializer_list&lt;Task&gt; tasks);
+
+  private:
+    //弱引用，不负责管理其内存
+    Node* _node {nullptr};
+};
+</code></pre> 
+<h3><a id="3Graph_119"></a>3.类Graph</h3> 
+<p>类Graph负责管理Node对象内存。</p> 
+<pre><code>class Graph {
+  public:
+    void clear();
+
+    bool empty() const;
+
+    size_t size() const;
+    
+    template &lt;typename C&gt;
+    Node&amp; emplace_back(C&amp;&amp;); 
+
+    Node&amp; emplace_back();
+
+    std::vector&lt;std::unique_ptr&lt;Node&gt;&gt;&amp; nodes();
+
+    const std::vector&lt;std::unique_ptr&lt;Node&gt;&gt;&amp; nodes() const;
+
+  private:
+    //强引用，负责Node对象内存的管理
+    std::vector&lt;std::unique_ptr&lt;Node&gt;&gt; _nodes;
+};
+</code></pre> 
+<p>重点看下emplace_back函数的实现：</p> 
+<pre><code>template &lt;typename C&gt;
+Node&amp; Graph::emplace_back(C&amp;&amp; c) {
+  //1.创建一个新的Node节点
+  //2.传入c作为新节点的执行函数
+  //3.将新节点指针插入到vector中
+  //4.返回新节点的引用
+  _nodes.push_back(std::make_unique&lt;Node&gt;(std::forward&lt;C&gt;(c)));
+  return *(_nodes.back());
+}
+
+inline Node&amp; Graph::emplace_back() {
+  //同上，但没有传执行函数，后续再set
+  _nodes.push_back(std::make_unique&lt;Node&gt;());
+  return *(_nodes.back());
+}
+</code></pre> 
+<h3><a id="4_Topology_163"></a>4. 类Topology</h3> 
+<pre><code>class Topology {
+  public:
+    //Taskflow是弱引用，P是判断函数、传给_pred，C是回调函数、传给_call
+    template &lt;typename P, typename C&gt;
+    Topology(Taskflow&amp;, P&amp;&amp;, C&amp;&amp;);
+    
+  private:
+
+    Taskflow&amp; _taskflow;
+    //Executor的各种run函数返回的就是这个promise对应的future
+    //可以异步的等待taskflow执行完毕
+    std::promise&lt;void&gt; _promise;
+
+    //DAG的所有入口节点指针（即graph中所有前继节点为0的节点）
+    PassiveVector&lt;Node*&gt; _sources;
+     //DAG的所有出口节点的个数（出口只需要知道个数就行了）
+    int _cached_num_sinks {0};
+    //DAG的出口节点的完成计数器（当所有的出口都执行完毕，整个DAG就执行完毕了），多线程写，因此为 std::atomic类型
+    std::atomic&lt;int&gt; _num_sinks {0};
+    
+    //判断函数，当DAG执行完毕后执行这个函数，若返回false，则再执行一遍
+    std::function&lt;bool()&gt; _pred;
+    //回调函数，taskflow执行完成后执行此回调函数
+    std::function&lt;void()&gt; _call;
+
+    void _bind(Graph&amp; g);
+    void _recover_num_sinks();
+};
+</code></pre> 
+<p>重点看下_bind函数：</p> 
+<pre><code>inline void Topology::_bind(Graph&amp; g) {
+  
+  _num_sinks = 0;
+  _sources.clear();
+  
+  //遍历graph中的每个node，找到所有的入口节点，计算所有的出口节点个数
+  for(auto&amp; node : g.nodes()) {
+    
+    node-&gt;_topology = this;
+
+    if(node-&gt;num_dependents() == 0) {
+      _sources.push_back(node.get());
+    }
+
+    if(node-&gt;num_successors() == 0) {
+      _num_sinks++;
+    }
+  }
+  _cached_num_sinks = _num_sinks;
+
+}
+</code></pre> 
+<h2><a id="_220"></a>三、流数据类型</h2> 
+<h3><a id="1FlowBuilder_221"></a>1.类FlowBuilder</h3> 
+<p>FlowBuilder是Taskflow的父类，因此先看下FlowBuilder。</p> 
+<pre><code>class FlowBuilder {
+    FlowBuilder(Graph&amp; graph);
+    
+    //插入一个执行函数，实现中将在graph中创建一个新节点，参数callable作为新节点的执行函数
+    template &lt;typename C&gt;
+    Task emplace(C&amp;&amp; callable);
+    //同上，区别是插入多个执行函数
+    template &lt;typename... C, std::enable_if_t&lt;(sizeof...(C)&gt;1), void&gt;* = nullptr&gt;
+    auto emplace(C&amp;&amp;... callables);
+    
+    //对一个容器，从迭代器[beg,end)进行分片，并行度为p（如果为0则设为CPU核数）分片，分片中对每个成员执行callable操作。创建一个占位的开始节点和结束节点（都没有实际的执行函数），返回的就是pair&lt;开始节点，结束节点&gt;
+    template &lt;typename I, typename C&gt;
+    std::pair&lt;Task, Task&gt; parallel_for(I beg, I end, C&amp;&amp; callable, size_t partitions = 0);
+    //同上，多了一个step参数
+    template &lt;typename I, typename C, std::enable_if_t&lt;std::is_arithmetic_v&lt;I&gt;, void&gt;* = nullptr &gt;
+    std::pair&lt;Task, Task&gt; parallel_for(I beg, I end, I step, C&amp;&amp; callable, size_t partitions = 0);
+    
+
+    //并行执行reduce操作（bop），先分片，每个分片并行执行bop，在对每个分片的结果执行bop。例如求容器中的min或max，可以用这种方法提高效率。
+    template &lt;typename I, typename T, typename B&gt;
+    std::pair&lt;Task, Task&gt; reduce(I beg, I end, T&amp; result, B&amp;&amp; bop);
+    template &lt;typename I, typename T&gt;
+    std::pair&lt;Task, Task&gt; reduce_min(I beg, I end, T&amp; result);
+    template &lt;typename I, typename T&gt;
+    std::pair&lt;Task, Task&gt; reduce_max(I beg, I end, T&amp; result);
+    
+   //基本同上，区别在于执行bop之前先对容器中的每个元素执行uop操作。
+    template &lt;typename I, typename T, typename B, typename U&gt;
+    std::pair&lt;Task, Task&gt; transform_reduce(I beg, I end, T&amp; result, B&amp;&amp; bop, U&amp;&amp; uop);
+    template &lt;typename I, typename T, typename B, typename P, typename U&gt;
+    std::pair&lt;Task, Task&gt; transform_reduce(I beg, I end, T&amp; result, B&amp;&amp; bop1, P&amp;&amp; bop2, U&amp;&amp; uop);
+    
+    //创建一个空的task，无执行体
+    Task placeholder();
+   
+   //A是B的前继节点
+    void precede(Task A, Task B);
+
+    //vector中的第i个task是第i+1个task的前继节点，即后续会串行执行
+    void linearize(std::vector&lt;Task&gt;&amp; tasks);
+    void linearize(std::initializer_list&lt;Task&gt; tasks);
+
+   //A是所有others的前继节点
+    void broadcast(Task A, std::vector&lt;Task&gt;&amp; others);
+    void broadcast(Task A, std::initializer_list&lt;Task&gt; others);
+
+    // A是所有others的后续节点
+    void gather(std::vector&lt;Task&gt;&amp; others, Task A);
+    void gather(std::initializer_list&lt;Task&gt; others, Task A);
+    
+  private:
+    Graph&amp; _graph;
+};
+</code></pre> 
+<h3><a id="2Taskflow_278"></a>2.类Taskflow</h3> 
+<p>类Taskflow继承自类FlowBuilder，大部分功能FlowBuilder都已经实现了，看下不一样的：</p> 
+<pre><code>class Taskflow : public FlowBuilder {
+public:
+    //Taskflow之间是可以组合的，一个Taskflow作为其他的Taskflow的其中一个节点
+    tf::Task composed_of(Taskflow&amp; taskflow);
+
+  private:
+ 
+    std::string _name;
+    
+    //Taskflow保存Graph，而FlowBuilder只是弱引用Graph
+    Graph _graph;
+
+    std::mutex _mtx;
+
+   //这里很有意思，Graph只有一个而Topology是一个列表，也就是说一个taskflow可以执行多个拓扑结构，而节点却是可以复用的
+    std::list&lt;Topology&gt; _topologies;
+};
+</code></pre> 
+<h2><a id="_299"></a>四、执行</h2> 
+<p>类Executor是负责执行taskflow的类。</p> 
+<pre><code>class Executor {
+  //每个工作线程处理一个Worker
+  struct Worker {
+    std::mt19937 rdgen { std::random_device{}() };
+    //这个queue需要理解：说明每个工作线程有自己单独的queue
+    WorkStealingQueue&lt;Node*&gt; queue;
+    std::optional&lt;Node*&gt; cache;
+  };
+    //作为thread local data在每个工作线程中都有一个副本
+  struct PerThread {
+    Executor* pool {nullptr}; 
+    int worker_id  {-1};  //这个id作为索引来访问对应的Worker
+  };
+
+  public:
+    explicit Executor(unsigned n = std::thread::hardware_concurrency());
+
+    ~Executor();
+
+    std::future&lt;void&gt; run(Taskflow&amp; taskflow);
+    template&lt;typename C&gt;
+    std::future&lt;void&gt; run(Taskflow&amp; taskflow, C&amp;&amp; callable);
+    std::future&lt;void&gt; run_n(Taskflow&amp; taskflow, size_t N);
+    template&lt;typename C&gt;
+    std::future&lt;void&gt; run_n(Taskflow&amp; taskflow, size_t N, C&amp;&amp; callable);
+    template&lt;typename P&gt;
+    std::future&lt;void&gt; run_until(Taskflow&amp; taskflow, P&amp;&amp; pred);
+    //上面几个run函数最终都是调用此函数，下文重点看下此函数
+    template&lt;typename P, typename C&gt;
+    std::future&lt;void&gt; run_until(Taskflow&amp; taskflow, P&amp;&amp; pred, C&amp;&amp; callable);
+
+    void wait_for_all();
+
+    size_t num_workers() const;
+  
+    template&lt;typename Observer, typename... Args&gt;
+    Observer* make_observer(Args&amp;&amp;... args);
+    void remove_observer();
+
+  private:
+    
+    std::condition_variable _topology_cv;
+    std::mutex _topology_mutex;
+    std::mutex _queue_mutex;
+
+    unsigned _num_topologies {0};
+    
+    // scheduler field
+    std::vector&lt;Worker&gt; _workers;//每个工作现场固定访问其中一个
+    std::vector&lt;Notifier::Waiter&gt; _waiters;
+    std::vector&lt;std::thread&gt; _threads;//N个工作线程
+
+    //这个queue需要理解：这是调用线程（不是工作线程）的queue。也就是说有N+1个queue
+    WorkStealingQueue&lt;Node*&gt; _queue;
+
+    std::atomic&lt;size_t&gt; _num_actives {0};
+    std::atomic&lt;size_t&gt; _num_thieves {0};
+    std::atomic&lt;bool&gt;   _done        {0};
+
+    Notifier _notifier;
+    
+    std::unique_ptr&lt;ExecutorObserverInterface&gt; _observer;
+};
+</code></pre> 
+<p>Executor在构造函数中做了这几件事：<br> 1.创建了N个工作线程，N为并发度、默认为CPU核数<br> 2.工作线程中初始化tls数据PerThread<br> 3.然后就是一个死循环：</p> 
+<pre><code>std::optional&lt;Node*&gt; t;
+while(1) {
+        
+        // i是工作线程的索引；执行task
+        _exploit_task(i, t);
+
+        // 等待可用的task
+        if(_wait_for_task(i, t) == false) {
+          break;
+        }
+      }
+</code></pre> 
+<p>注意上面先执行_exploit_task，再执行_wait_for_task，而通常确实相反的操作。这里这么做的原因是，执行到_wait_for_task说明当前工作线程自己的queue已经全部执行完、为空了。</p> 
+<p>_wait_for_task中用了一个Eigen中Notifier类，相对于通常实现生产者-消费者模式直接使用信号量性能更好，理解上可以当做信号量理解。</p> 
+<p>_wait_for_task原理：<br> 1.生成[0，N)之间的随机数作为索引，尝试从对应的工作线程的queue中偷一个task（如果随机到本线程id，则到调用线程queue中偷）。偷到了则进行下一步，偷不到则继续随机，直到随机了Y（Y=100）次还是没偷到，也进行下一步。<br> 2.偷到了则返回，没偷到则继续下一步<br> 3.再次尝试从调用线程queue中偷任务，偷到了则返回<br> 4.阻塞等待</p> 
+<p>可以看到，在阻塞等待前通过work stealing提高线程使用率。</p> 
+<p>_exploit_task原理：<br> 1.对于取到的任务（实际是Node*），进行执行：<br> A 对于static节点，执行该组合节点<br> B 对于dynamic节点，执行节点的node-&gt;_work，并根据_subgraph创建子图的拓扑结构，开始调度这个子图拓扑结构<br> 2. 对于当前节点的所有后继节点的_num_dependents - 1，如果减到0，则加入调度队列<br> 3. 如果当前节点是一个最终节点，那么对拓扑结构的_num_sinks - 1，如果减到0，则到tear_down逻辑<br> 4. 执行拓扑结构的_pred函数（如果有的话），如果返回false，则再执行一遍打当前拓扑结构，否则：<br> A 调用回调函数_call<br> B 设置_promise<br> C 执行拓扑结构队列中的下一个拓扑结构，全部都执行完成后设置</p> 
+<h2><a id="_408"></a>五、一些有趣的代码</h2> 
+<p>cpp-taskflow中有一些很有趣的代码：<br> 1.Work Stealing Queue<br> 2.来源于Eigen中的Notifier类</p> 
+<p>这块再单独写文档。</p> 
+<p>以上。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/fd1da4529c4eceff5e9c60c1338e7593/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">js实现下载excel</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/8b813b0f76a87200d138dee9f570d755/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【前端】【vue.js】【参考项目】vue-konva-project</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

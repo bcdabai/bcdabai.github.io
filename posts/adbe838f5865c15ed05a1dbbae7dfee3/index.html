@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Linux高性能服务器编程笔记（三） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Linux高性能服务器编程笔记（三）" />
+<meta property="og:description" content="第三章 TCP协议详解 参考引用：
+关于三次握手和四次挥手，面试官想听到怎样的回答？ - 车小胖的回答 - 知乎
+https://www.zhihu.com/question/271701044/answer/398114686
+关于三次握手和四次挥手，面试官想听到怎样的回答？ - 小林coding的回答 - 知乎
+https://www.zhihu.com/question/271701044/answer/1279809269
+终于到重点中的重点的TCP协议了T_T！
+3.1 TCP服务的特点 面向连接、字节流和可靠传输。
+对应的UDP的特点是，不面向连接，数据报和不可靠传输。
+不面向连接：发送不需要通信双方建立连接。
+数据报：数据的发送和接受有边界限制，体现在通信双方需要执行相同次数的读写操作。
+不可靠传输：在UDP协议的层次上不具备传输失败后重传的能力，也不拥有接受数据后应答的能力。
+3.2 TCP头部结构（整个结构都需要记忆，有被问过） 3.2.1 TCP固定头部结构 16位端口号：进行TCP通信时，客户端通常使用系统自动选择的临时端口号，而服务器则选择知名服务端口号。（知名端口号都定义在/etc/services中）
+32位序号：A与B进行TCP通信，A发送给B的第一个TCP报文段中，序列值为系统初始化为某个随机值ISN。后续的序号值被设置成ISN加上该报文段所携带数据的第一个字节在整个字节流的偏移，如发送1025-2048字节，那么序列号为ISN&#43;1025。
+PS:ISN的作用？
+ISN作为发送方的字节数据编号的原点，让对方生成一个合法的接受窗口；
+ISN是动态随机的，目的有两个：
+增加安全性，为了避免被第三方猜到，从而被第三方伪造的RST报文Reset;使得每个tcp session的字节序列号没有重叠，如果出现**tcp五元组（源IP，源端口，目的IP，目的端口和传输层协议）**冲突这种极少概率情况的发生，也能分清不同session的数据。 32位确认号：用作对另一方发送来的TCP报文段的响应。值为收到的报文段的序号值加一，对于上面的例子，B收到ISN&#43;1025序号的TCP数据包后，应该回复ISN&#43;1025&#43;1的确认号并带上ACK标志的报文段。
+6位标志位（每个标志位的作用都需要记忆）：
+URG：表示紧急指针是否有效；
+ACK：表示确认号是否有效；
+PSH：提示接收端应用程序应该立即从TCP接受缓冲区读走数据（若不将数据读走，将一直停留在TCP接受缓冲区）
+RST：表示要求对方重新建立连接，携带RST标志的TCP报文段为复位报文段；
+SYN：请求建立一个连接，携带SYN标志的TCP报文段为同步报文段；
+FIN：表示通知对方本端要关闭拦截了，携带FIN标志的TCP报文段为结束报文段。（书上提到四次挥手中的第一次挥手主动关闭方需要发送一个FIN，但实际上会发送FIN&#43;ACK，因为RFC793规定，除了第一次握手报文SYN除外，其他报文必须将ACK设为1）
+16位窗口的大小：TCP流量控制的一个手段，指接受通告窗口。
+16位校验和：由发送端填充。校验不仅包括TCP头部，还包括数据部分。也是TCP可靠传输的一个保障（TCP的可靠传输包括接受应答，定时重传，数据校验等等）
+3.2.2 TCP头部选项（即头部的最后一个选项字段option） 需要注意的是
+kind=3：窗口扩大因子选项，能让TCP模块允许的接受通告窗口远超65535，为了提高TCP通信的吞吐量。
+kind=4：选择性确认SACK选项。一般情况，TCP通信时，如果某个报文段丢失，TCP模块会重传最后被确认的TCP报文段后续的所有报文段，一些已经正确传输的报文段也可能被重传。SACK技术使TCP模块只重新发送丢失的TCP报文段，不用发送所有未被确认的报文段。
+kind=5：SACK实际工作的选项。因为一个块的信息占用8个字节，所以TCP头部选项中实际最多可以包含4个这样的不连续数据块。（头部选项最长为40字节）
+3.3 TCP连接的建立和关闭 3.3.1 三次握手和四次挥手 A向B进行TCP连接（三次握手的过程）：
+第一次握手：A发送的TCP报文段包含SYN标志及一个ISN值，因此它是一个同步报文段。
+第二次握手：B发送的TCP报文段包含SYN标志，表示同意与A建立连接；同时发送自己的ISN值作为序号，并对第一个同步报文段进行确认，确认号在A的ISN值基础上加一，加上ACK标志表示确认，发送给A。
+第三次握手：A对B发送的SYN-ACK报文段进行确认，即在B的ISN值基础上加一，加上ACK标志表示确认，发送给B。
+PS：经典问题，为什么要三次握手？
+可以转化成为啥不能两次或者四次？
+主要原因：TCP两次握手无法阻止历史连接。
+如果只有两次握手，被动发起方没有中间状态给主动发起方来阻止历史连接，导致被动发起方可能建立一个历史连接，造成资源浪费。
+例子：
+我们假设A向B建立TCP连接。两次握手下，B收到SYN报文后，就进入了established状态，意味着可以给A发数据，但A还没进入。假设这次是由于A的历史连接而建立连接，那么B所发送的数据中包含的确认号不正确，因此A将回复RST报文来断开连接。这样B就浪费了一次建立连接和一次发送数据的资源了。
+当三次握手的情况下，B如果收到了历史连接，它会根据收到的序列号回复对应的确认号给A，此时仍然处于SYN_RCVD状态。A收到回复后，发现对方的确认号不正确，于是发起了RST报文中止连接。一段时间后，B收到了新的同步报文段，于是回复给A新的确认号，此时A确认无误后就进入established状态，同时给B回复对应的确认报文，最后B也进入了established状态。
+当四次握手的情况下，其实就是将B第二次握手的SYN，ACK分开发送，即回复一个确认报文和发送一个同步报文。这个动作可以合并成一个动作，也就是三次握手的情况。
+A向B断开连接（四次挥手）
+第一次挥手：A向B发送FIN结束报文段。
+第二次挥手：B向A发送ACK确认报文段。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/adbe838f5865c15ed05a1dbbae7dfee3/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-01-03T20:13:04+08:00" />
+<meta property="article:modified_time" content="2022-01-03T20:13:04+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Linux高性能服务器编程笔记（三）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_TCP_0"></a>第三章 TCP协议详解</h2> 
+<p>参考引用：<br> 关于三次握手和四次挥手，面试官想听到怎样的回答？ - 车小胖的回答 - 知乎<br> https://www.zhihu.com/question/271701044/answer/398114686<br> 关于三次握手和四次挥手，面试官想听到怎样的回答？ - 小林coding的回答 - 知乎<br> https://www.zhihu.com/question/271701044/answer/1279809269</p> 
+<p>终于到重点中的重点的TCP协议了T_T！<br> <img src="https://images2.imgbox.com/60/9f/DyetxvqR_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="31_TCP_9"></a>3.1 TCP服务的特点</h2> 
+<p>面向连接、字节流和可靠传输。<br> 对应的UDP的特点是，不面向连接，数据报和不可靠传输。<br> 不面向连接：发送不需要通信双方建立连接。<br> 数据报：数据的发送和接受有边界限制，体现在通信双方需要<strong>执行相同次数的读写操作</strong>。<br> 不可靠传输：在UDP协议的层次上不具备传输失败后重传的能力，也不拥有接受数据后应答的能力。<br> <img src="https://images2.imgbox.com/e9/8d/T5Z4ux3c_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="32_TCP_16"></a>3.2 TCP头部结构（整个结构都需要记忆，有被问过）</h3> 
+<h4><a id="321_TCP_17"></a>3.2.1 TCP固定头部结构</h4> 
+<p><img src="https://images2.imgbox.com/ad/17/N3VPxbqY_o.png" alt="在这里插入图片描述"><br> 16位端口号：进行TCP通信时，客户端通常使用系统自动选择的临时端口号，而服务器则选择知名服务端口号。（知名端口号都定义在/etc/services中）<br> 32位序号：A与B进行TCP通信，A发送给B的第一个TCP报文段中，序列值为系统初始化为某个随机值<strong>ISN</strong>。后续的序号值被设置成ISN加上该报文段所携带数据的第一个字节在整个字节流的偏移，如发送1025-2048字节，那么序列号为ISN+1025。</p> 
+<p><strong>PS:ISN的作用？</strong><br> ISN作为发送方的字节数据编号的原点，让对方生成一个合法的接受窗口；<br> ISN是动态随机的，目的有两个：</p> 
+<ol><li>增加安全性，为了避免被第三方猜到，从而被第三方伪造的RST报文Reset;</li><li>使得每个tcp session的字节序列号没有重叠，如果出现**tcp五元组（源IP，源端口，目的IP，目的端口和传输层协议）**冲突这种极少概率情况的发生，也能分清不同session的数据。</li></ol> 
+<p>32位确认号：用作对另一方发送来的TCP报文段的响应。值为收到的报文段的序号值加一，对于上面的例子，B收到ISN+1025序号的TCP数据包后，应该回复ISN+1025+1的确认号并带上ACK标志的报文段。<br> 6位标志位（<strong>每个标志位的作用都需要记忆</strong>）：</p> 
+<p>URG：表示紧急指针是否有效；<br> ACK：表示确认号是否有效；<br> PSH：提示接收端应用程序应该立即从TCP接受缓冲区读走数据（若不将数据读走，将一直停留在TCP接受缓冲区）<br> RST：表示要求对方重新建立连接，携带RST标志的TCP报文段为复位报文段；<br> SYN：请求建立一个连接，携带SYN标志的TCP报文段为同步报文段；<br> FIN：表示通知对方本端要关闭拦截了，携带FIN标志的TCP报文段为结束报文段。（<strong>书上提到四次挥手中的第一次挥手主动关闭方需要发送一个FIN，但实际上会发送FIN+ACK，因为RFC793规定，除了第一次握手报文SYN除外，其他报文必须将ACK设为1</strong>）</p> 
+<p>16位窗口的大小：TCP流量控制的一个手段，指接受通告窗口。<br> 16位校验和：由发送端填充。校验不仅包括TCP头部，还包括数据部分。也是TCP可靠传输的一个保障（TCP的可靠传输包括接受应答，定时重传，数据校验等等）</p> 
+<h2><a id="322_TCPoptionhttpsimgblogcsdnimgcn87b326696e034f9793660d2d587cdc09png_41"></a>3.2.2 TCP头部选项（即头部的最后一个选项字段option）<img src="https://images2.imgbox.com/24/21/cvrLJfV4_o.png" alt="在这里插入图片描述"></h2> 
+<p>需要注意的是<br> kind=3：窗口扩大因子选项，能让TCP模块允许的接受通告窗口远超65535，为了提高TCP通信的吞吐量。<br> kind=4：选择性确认SACK选项。一般情况，TCP通信时，如果某个报文段丢失，TCP模块会重传最后被确认的TCP报文段后续的所有报文段，一些已经正确传输的报文段也可能被重传。<strong>SACK技术使TCP模块只重新发送丢失的TCP报文段，不用发送所有未被确认的报文段。</strong><br> kind=5：SACK实际工作的选项。因为一个块的信息占用8个字节，所以TCP头部选项中实际最多可以包含4个这样的不连续数据块。（头部选项最长为40字节）</p> 
+<h3><a id="33_TCP_47"></a>3.3 TCP连接的建立和关闭</h3> 
+<h4><a id="331__48"></a>3.3.1 三次握手和四次挥手</h4> 
+<p><img src="https://images2.imgbox.com/0a/c5/RtMTS3WX_o.png" alt="在这里插入图片描述"><br> A向B进行TCP连接（三次握手的过程）：<br> 第一次握手：A发送的TCP报文段包含SYN标志及一个ISN值，因此它是一个同步报文段。<br> 第二次握手：B发送的TCP报文段包含SYN标志，表示同意与A建立连接；同时发送自己的ISN值作为序号，并对第一个同步报文段进行确认，确认号在A的ISN值基础上加一，加上ACK标志表示确认，发送给A。<br> 第三次握手：A对B发送的SYN-ACK报文段进行确认，即在B的ISN值基础上加一，加上ACK标志表示确认，发送给B。</p> 
+<p><strong>PS：经典问题，为什么要三次握手？</strong><br> 可以转化成为啥不能两次或者四次？<br> <strong>主要原因：TCP两次握手无法阻止历史连接。</strong><br> 如果只有两次握手，被动发起方没有中间状态给主动发起方来阻止历史连接，导致被动发起方可能建立一个<strong>历史连接</strong>，造成资源浪费。<br> 例子：<br> 我们假设A向B建立TCP连接。两次握手下，B收到SYN报文后，就进入了<strong>established</strong>状态，意味着可以给A发数据，但A还没进入。假设这次是由于A的历史连接而建立连接，那么B所发送的数据中包含的确认号不正确，因此A将回复RST报文来断开连接。这样B就浪费了一次建立连接和一次发送数据的资源了。<br> 当三次握手的情况下，B如果收到了历史连接，它会根据收到的序列号回复对应的确认号给A，此时仍然处于<strong>SYN_RCVD</strong>状态。A收到回复后，发现对方的确认号不正确，于是发起了RST报文中止连接。一段时间后，B收到了新的同步报文段，于是回复给A新的确认号，此时A确认无误后就进入established状态，同时给B回复对应的确认报文，最后B也进入了established状态。<br> 当四次握手的情况下，其实就是将B第二次握手的SYN，ACK分开发送，即回复一个确认报文和发送一个同步报文。这个动作可以合并成一个动作，也就是三次握手的情况。<br> <img src="https://images2.imgbox.com/20/08/Aj6DB3aS_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/6b/7f/CYypPM36_o.png" alt="在这里插入图片描述"><br> A向B断开连接（四次挥手）<br> 第一次挥手：A向B发送FIN结束报文段。<br> 第二次挥手：B向A发送ACK确认报文段。<br> 第三次挥手：A向B发送FIN结束报文段，该报文段包括了对第一次挥手的确认序号及自己的序号。（实际上，仅用于确认目的的第二次挥手可以省略，因为第三次挥手也携带了该确认信息，这取决于TCP的延迟确认特性）<br> 第四次挥手：B向A发送ACK确认报文段。</p> 
+<h4><a id="332__71"></a>3.3.2 半关闭状态</h4> 
+<p>需要注意的是，发送FIN结束报文段后，告诉对方自己已经完成了数据的发送，但仍然可以接受对方的数据。具体表现为，A向B发送FIN，B回复ACK后，B继续向A write()数据，A仍然可以通过read()读取数据，并发送数据的确认报文。<br> （<strong>也就是在FIN_WAIT_2阶段仍然可以接受数据</strong>）<br> <img src="https://images2.imgbox.com/3b/31/0JNM8ayI_o.png" alt="在这里插入图片描述"></p> 
+<h2><a id="333__75"></a>3.3.3 连接超时</h2> 
+<p>当服务器对于客户端发送的同步报文没有应答，客户端将先进行重连，如果仍然无效就通知应用程序连接超时。</p> 
+<h3><a id="34_TCP11_78"></a>3.4 TCP状态转移（这11个状态很重要）</h3> 
+<p><img src="https://images2.imgbox.com/26/cd/sG5UHV7B_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/f9/99/jQBPxOZQ_o.png" alt="在这里插入图片描述"><br> 粗虚线表示服务器端连接的状态转移，粗实线表示客户端连接的状态转移。<br> 需要注意的点：<br> 假设A向B建立TCP连接，A向B关闭TCP连接。</p> 
+<ol><li>A通过connect和B建立连接，A发送SYN同步报文段后，进入SYN_SENT状态；当连接成功后，connect调用成功返回，连接进入established状态。若失败，要判断是端口无法被连接还是没收到回复，当无法被连接，B将发送一个RST复位报文段，调用失败；若没收到回复，则调用失败。</li><li>如果三次握手顺利的话，A将会先进入established状态，B随后进入。</li><li>A向B发送FIN结束报文段后，将使A连接进入<strong>FIN_WAIT_1</strong>状态，B通过返回确认报文段使B进入<strong>CLOSE_WAIT</strong>状态。</li><li>A收到B的确认报文段后，进入<strong>FIN_WAIT_2</strong>状态。</li><li>B给A发送FIN结束报文，自己进入<strong>LAST_ACK</strong>状态，等到A对报文进行最后一次确认。</li><li>A收到B的FIN结束报文段后，进入<strong>TIME_WAIT</strong>状态，并给B发送确认报文。</li></ol> 
+<p><strong>PS：经典问题</strong><br> 一. TIME_WAIT状态的作用是啥？<br> 1.可靠地终止TCP连接。<br> 2.保证让迟来的TCP报文段有足够的的时间被识别并丢弃。<br> （白话版，<strong>1.让主动关闭方可以保证第四次挥手的ACK确认报文能顺利到达被动关闭方，2.让这次TCP连接所产生但没被接受的所有数据报都有足够的时候消失</strong>）</p> 
+<p>二.为啥TIME_WAIT的等待时间是2MSL？<br> MSL 是 Maximum Segment Lifetime，报文最大生存时间，它是任何报文在网络上存在的最长时间，超过这个时间报文将被丢弃。<strong>经过2MSL时间，足以让两个方向上的数据包都被丢弃，使得原来连接的数据包在网络中都自然消失，再出现的数据包一定都是新建立连接所产生的</strong>。2MSL 的时间是从客户端接收到 FIN 后发送 ACK 开始计时的。<br> 作用还是<strong>让这次TCP连接所产生但没被接受的所有数据报都有足够的时间自然消失。</strong></p> 
+<p>三.如果服务器主动关闭连接后异常终止，导致一直处于TIME_WAIT怎么办？</p> 
+<ol><li>使用setsocket，通过设置SO_REUSEADDR来强制使用被处于TIME_WAIT状态的连接占用的socket地址。</li><li>修改内核参数tcp_tw_recycle快速回收被关闭的socket，使得TCP连接不进入TIME_WAIT状态</li><li>使用setsocket，通过设置SO_LINGER，l_onoff不为0，l_linger等于0。此时close立即返回，同时给对方发送一个RST报文段。</li></ol> 
+<h2><a id="35_RST_106"></a>3.5 复位报文段RST</h2> 
+<p>产生复位报文段的三种情况：</p> 
+<ol><li><strong>访问不存在的端口</strong>，收到复位报文段的一端应该关闭连接或重新连接，而不能回应这个复位报文段。</li><li><strong>异常终止连接</strong>：给对方发送一个复位报文段，发送端所有排队等待发送的数据都将被丢弃。</li><li><strong>处理半打开连接</strong>：往处于半打开状态的连接写入数据，对方将回应一个复位报文段。</li></ol> 
+<h2><a id="36_TCP_112"></a>3.6 TCP交互数据流</h2> 
+<p>根据报文段所携带的应用程序数据长度划分，有交互数据和成块数据。使用交互数据的应用程序对实时性要求高，如telnet、ssh等。<br> <img src="https://images2.imgbox.com/df/84/SuOeMSmx_o.png" alt="在这里插入图片描述"><br> 对于书上的例子，客户端针对服务器返回的数据所发送的确认报文段6,9,11都不带任何应用程序数据（长度为0）；而服务器每次发送的确认报文2,5,8,10都包含着它要发送的数据（长度大于0）。<strong>这种处理方式叫做延迟确认，即不马上确认上次收到的数据，而是等到一段时间后查看本端是否有数据发送，如果有，就将数据和确认信息一起发送。（在TCP连接和建立和断开过程中，也可能发生延迟确认）</strong></p> 
+<p>PS：什么是Nagle算法<br> 1、通信双方在任意时刻都最多只能发送一个未被确认的TCP报文段<br> 2、发送方在等待确认的同时收集本端需要发送的微量数据（小于MSS，最大报文段长度）。有ACK回来后，以一个TCP报文段将它们全部发出。<br> 目的：尽量发送大块的数据（长度达到MSS的）</p> 
+<h3><a id="39_TCP_122"></a>3.9 TCP超时重传</h3> 
+<p>TCP模块为每个TCP报文段都维护一个重传定时器，在报文段第一次被发送时启动。如果超时时间内没收到对方的应答，TCP模块将重传发送缓冲区的TCP报文段并重置定时器。当超过失败重传次数后，底层的IP和ARP开始接管（寻找目的IP）。<br> TCP每次重传超时时间都增加一倍，与TCP超时重连的策略相似。</p> 
+<h3><a id="310__126"></a>3.10 拥塞控制</h3> 
+<h4><a id="3101__127"></a>3.10.1 拥塞控制概述</h4> 
+<p>拥塞控制包括四部分，<strong>慢启动，拥塞避免，快速重传和快速恢复。</strong><br> 拥塞控制主要控制发送端向网络一次连续写入的数据量，称为SWND（Send Window，发送窗口）。接收方控制的变量称为接受通告窗口（RWND），发送端引入一个称为拥塞窗口（CWND）的变。因此实际的SWND是RWND和CWND中的较小值。<br> <img src="https://images2.imgbox.com/cd/f1/WTRDaIvl_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="3102__131"></a>3.10.2 慢启动和拥塞避免</h3> 
+<p>TCP连接建立后，CWND将初始值设置为2-4个SMSS（Sender Maximum Segment Size，发送者最大段大小，一般等于MSS）。此后发送端每收到接收端的一个确认，其CWND就不断增加根据公式不断增加：<strong>CWND += min（N，SMSS）</strong>，N为此次确认中包含的之前没被确认的字节数。</p> 
+<p>但如果一直按照这样增加，慢启动必然使得CWND很快膨胀（<strong>一开始指数增长</strong>）。因此还有一个变量来控制：慢启动门限（slow start threshold size, ssthresh），使得变成<strong>线性增长</strong>。当CWND的大小超过该值，TCP拥塞控制将进入拥塞避免阶段。增长的情况如下图：<br> <img src="https://images2.imgbox.com/b9/0c/n7xiz2cv_o.png" alt="在这里插入图片描述"><br> 发送端判断拥塞发生的依据有如下两个：</p> 
+<ol><li>传输超时，或说TCP重传定时器溢出</li><li>接收到重复的确认报文段（<strong>说明刚发出的报文段对方没收到</strong>）</li></ol> 
+<p>对于第一种情况，仍然使用慢启动和拥塞避免，也就是保持线性增长；对于第二种情况则使用快速重传和快速回复。<strong>如果第二种情况发生在重传定时器溢出之后，也被拥塞控制当做第一种情况</strong>。<br> 如果发送端检测到拥塞发生是由于传输超时，即第一种情况，那么将执行重传并进行如下调整：<strong>ssthresh = max(FlightSize/2, 2*SMSS) CWMD&lt;=SMSS</strong>。FlightSize是已经发送但未收到确认的字节数，这样调整后CWND将小于SMSS，故再次进入慢启动阶段。</p> 
+<h4><a id="3103__143"></a>3.10.3 快速重传和快速恢复</h4> 
+<p>判断拥塞发生的条件：<strong>发送端连续收到3个重复的ACK确认报文段</strong>（说明刚才发送的报文段对方没收到）。然后就启动快速重传和快速回复，快速重传和快速恢复完成后，将恢复到拥塞避免阶段。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/cd269aceecfd2a0300526ec2db6d8955/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Linux高性能服务器编程笔记（二）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/e8ee49c93008a85463b5de2d1be7b727/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">基于微信小程序的投票系统——计算机毕业设计</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

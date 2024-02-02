@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>芯片验证之后仿真 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="芯片验证之后仿真" />
+<meta property="og:description" content="一、什么是后仿真
+通常设计写完RTL后验证人员进行的仿真我们叫做前仿，前仿完成后，后端同事通常会提供两版网表：
+1、综合后的网表&#43;PreSTA产生的SDF文件（无net延时，cell延时不准确，时钟树不准确）。
+2、布局布线后网表&#43;PostSTA产生的SDF文件（包含布局布线过程中器件延时和线延时的timing信息）。
+通常验证在拿到综合后的网表后会进行一次仿真，这一步通常只做纯网表仿真，由于此时SDF文件信息不准确，一般不会进行SDF仿真。在验证进行纯网表仿真的同时，后端会进行布局布线，并将布局布线过程中器件延时和线延时的timing信息提取出来，生成SDF文件，然后后端将PR后网表和SDF文件给到验证，此时一般会再基于新版本网表进行纯网表仿真（如果期间网表无变化也可省去）和加入SDF的网表仿真。我们通常将纯网表仿真和加入SDF时序信息的网表仿真统称为后仿真。
+二、后仿真的意义
+后端一般会进行静态时序分析（STA），静态时序分析根据一定的模型从网表中创建无向图，计算路径延迟的总和，如果所有的路径都满足时序约束和规范，那么认为电路设计满足时序约束规范。静态时序分析的方法不依赖于激励，且可以穷尽所有路径，运行速度很快，占用内存很少。对于同步设计电路，可以借助于静态时序分析工具完成时序验证的任务，但是不能对异步电路进行时序分析。所以如果设计中存在异步电路，就要借助于后仿真。
+后仿真主要意义在于：
+1、确认异步路径、multi cycle path、false path。
+2、功能仿真不包含的信息，如DFT插入的扫描链，或者基于工艺单元的功耗评估以及时序信息等。
+3、检查时序约束（SDC）的正确性，防止约束错误。
+4、检查网表的完备性，防止综合、布局布线过程中的意外错误。
+5、为后续流程如功耗分析、IR drop分析提供波形（后仿波形分析更准确）。
+6、完整的系统初始化上电处理流程和复位流程，尤其是面对系统中存在不定态的情况。
+由于后仿真较为耗时，一般不会将所有的前仿case都进行后仿，通常的做法是挑出一部分进行后仿即可，而case的挑选可以基于以上几点，将有风险的case挑选出来进行仿真。
+三、后仿真如何进行
+后仿真主要分为两部分，纯网表仿真和加SDF延时文件的网表仿真。
+纯网表仿真主要是为了检查前仿RTL和综合后的网表行为的一致性，因为纯网表仿真虽然也耗时间，但是相对于SDF仿真，仿真时间还是可控的。如果一开始直接进行SDF仿真，当环境问题较多时，单个case要跑多次才会收敛，对于单次仿真时间动辄好几天的SDF仿真来说，无疑效率极其低下。所以一般会先进行纯网表仿真，排除一些简单的问题，然后再进行SDF仿真，这样可以加速仿真收敛时间。
+四、纯网表仿真
+纯网表仿真如何进行呢？
+1、需要将RTL的code路径改为后端提供的网表路径。
+2、纯网表仿真时需要添加以下参数：
+&#43;nospecify：Supress module path delays and timing checks in specify blocks. So post simulation with SDF must remove this option.
+notimingcheck：时序检查开关，比如setup/hold/width检查等等，如使用了该option，则仿真时不检查时序，行为类似于RTL仿真。在PR未结束，sdf反标文件还没准备好时，可用该选项忽略延时，可用于功能性的粗略检查。
+&#43;delay_model_zero：将标准单元中定义的延时替换为0。
+3、环境调整
+环境调整又可以分为几种类型：
+a、无复位端寄存器
+网表内部难免有些寄存器是没有复位端的，而这些寄存器的Q端在系统复位完后还是处于X态，一旦时钟跑起来，这些X态就有可能传播出去，对仿真产生影响。因此，在项目实践中，可以让后端提供一个 no reset reg list, 他们可以用脚本非常方便的提取出来。有了这样一个list后，我们在后仿中可以利用&#43;vcs&#43;initreg&#43;config&#43;config_file，对这些没有复位端的寄存器进行初始化，config_file的写法比较简单，网上有很多教程，也可以参考VCS手册。
+b、顶层端口信号
+顶层的端口信号不能是不定态，要根据芯片实际情况，force为特定值，否则仿真时X态会传播，有可能导致仿真失败。
+c、memory
+一般可以将memory初始化为随机值（data&#43;ecc都要初始化成随机值），防止读memory时读出X态，导致仿真失败。如果系统能保证在读memory操作前有相应地址的写操作，也可以不初始化。
+d、case中的信号调整
+因为网表中某些信号的层次相对前仿会有所调整，所以后仿时环境中引用的DUT内部信号需要根据后仿网表层次进行调整，一般选择用POSTSIM宏做隔离，否则编译会报错。
+在后仿网表中很多地方如果路径太长，一般会加入buffer和成对的inverter，如果case中某些信号是处于成对的inverter之间，则此信号的值和前仿的值刚好相反，相应的，对此信号做的一些判断和逻辑也要相应调整。
+五、SDF仿真
+加SDF文件的网表仿真需要进行SDF反标，SDF文件中通常有min，typical，max三组时序值，再仿真器读入SDF的时候，要指定使用哪一组。通常我们只使用min和max两种极端情况进行仿真。常用的SDF反标方式如下：
+module sdf_annotate; initial begin `ifdef MAX_DELAY $sdf_annotate(&#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/2aa3dfc803a8c14b917ec5afe15e4d04/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-04-17T11:24:23+08:00" />
+<meta property="article:modified_time" content="2023-04-17T11:24:23+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">芯片验证之后仿真</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p><span style="color:#fe2c24;"><strong>一、什么是后仿真</strong></span></p> 
+<p>通常设计写完RTL后验证人员进行的仿真我们叫做前仿，前仿完成后，后端同事通常会提供两版网表：</p> 
+<p>1、综合后的网表+PreSTA产生的SDF文件（无net延时，cell延时不准确，时钟树不准确）。</p> 
+<p>2、布局布线后网表+PostSTA产生的SDF文件（包含布局布线过程中器件延时和线延时的timing信息）。</p> 
+<p>通常验证在拿到综合后的网表后会进行一次仿真，这一步通常只做<span style="color:#0d0016;"><span style="background-color:#a2e043;">纯网表仿真</span></span>，由于此时SDF文件信息不准确，一般不会进行SDF仿真。在验证进行纯网表仿真的同时，后端会进行布局布线，并将布局布线过程中器件延时和线延时的timing信息提取出来，生成SDF文件，然后后端将PR后网表和SDF文件给到验证，<span style="background-color:#a2e043;">此时一般会再基于新版本网表进行纯网表仿真（如果期间网表无变化也可省去）和加入SDF的网表仿真</span>。我们通常将纯网表仿真和加入SDF时序信息的网表仿真统称为后仿真。</p> 
+<p><span style="color:#fe2c24;"><strong>二、后仿真的意义</strong></span></p> 
+<p>后端一般会进行静态时序分析（STA），静态时序分析根据一定的模型从网表中创建无向图，计算路径延迟的总和，如果所有的路径都满足时序约束和规范，那么认为电路设计满足时序约束规范。静态时序分析的方法不依赖于激励，且可以穷尽所有路径，运行速度很快，占用内存很少。<span style="background-color:#a2e043;">对于同步设计电路，可以借助于静态时序分析工具完成时序验证的任务，但是不能对异步电路进行时序分析。所以如果设计中存在异步电路，就要借助于后仿真。</span></p> 
+<p>后仿真主要意义在于：</p> 
+<p>1、确认异步路径、multi cycle path、false path。</p> 
+<p>2、功能仿真不包含的信息，如DFT插入的扫描链，或者基于工艺单元的功耗评估以及时序信息等。</p> 
+<p>3、检查时序约束（SDC）的正确性，防止约束错误。</p> 
+<p>4、检查网表的完备性，防止综合、布局布线过程中的意外错误。</p> 
+<p>5、为后续流程如功耗分析、IR drop分析提供波形（后仿波形分析更准确）。</p> 
+<p>6、完整的系统初始化上电处理流程和复位流程，尤其是面对系统中存在不定态的情况。</p> 
+<p>由于后仿真较为耗时，一般不会将所有的前仿case都进行后仿，通常的做法是挑出一部分进行后仿即可，而case的挑选可以基于以上几点，将有风险的case挑选出来进行仿真。</p> 
+<p><strong><span style="color:#fe2c24;">三、后仿真如何进行</span></strong></p> 
+<p>后仿真主要分为两部分，纯网表仿真和加SDF延时文件的网表仿真。</p> 
+<p>纯网表仿真主要是为了检查前仿RTL和综合后的网表行为的一致性，因为纯网表仿真虽然也耗时间，但是相对于SDF仿真，仿真时间还是可控的。如果一开始直接进行SDF仿真，当环境问题较多时，单个case要跑多次才会收敛，对于单次仿真时间动辄好几天的SDF仿真来说，无疑效率极其低下。所以一般会先进行纯网表仿真，排除一些简单的问题，然后再进行SDF仿真，这样可以加速仿真收敛时间。</p> 
+<p><span style="color:#fe2c24;"><strong>四、纯网表仿真</strong></span></p> 
+<p>纯网表仿真如何进行呢？</p> 
+<p>1、需要将RTL的code路径改为后端提供的网表路径。</p> 
+<p>2、纯网表仿真时需要添加以下参数：</p> 
+<p><span style="background-color:#a2e043;">+nospecify</span>：Supress module path delays and timing checks in specify blocks. So post simulation with SDF must remove this option.</p> 
+<p><span style="background-color:#a2e043;">notimingcheck</span>：时序检查开关，比如setup/hold/width检查等等，如使用了该option，则仿真时不检查时序，行为类似于RTL仿真。在PR未结束，sdf反标文件还没准备好时，可用该选项忽略延时，可用于功能性的粗略检查。</p> 
+<p><span style="background-color:#a2e043;">+delay_model_zero</span>：将标准单元中定义的延时替换为0。</p> 
+<p>3、环境调整</p> 
+<p>环境调整又可以分为几种类型：</p> 
+<p>a、无复位端寄存器</p> 
+<p>网表内部难免有些寄存器是没有复位端的，而这些寄存器的Q端在系统复位完后还是处于X态，一旦时钟跑起来，这些X态就有可能传播出去，对仿真产生影响。因此，在项目实践中，可以让后端提供一个 no reset reg list, 他们可以用脚本非常方便的提取出来。有了这样一个list后，我们在后仿中可以利用+vcs+initreg+config+config_file，对这些没有复位端的寄存器进行初始化，config_file的写法比较简单，网上有很多教程，也可以参考VCS手册。</p> 
+<p>b、顶层端口信号</p> 
+<p>顶层的端口信号不能是不定态，要根据芯片实际情况，force为特定值，否则仿真时X态会传播，有可能导致仿真失败。</p> 
+<p>c、memory</p> 
+<p>一般可以将memory初始化为随机值（data+ecc都要初始化成随机值），防止读memory时读出X态，导致仿真失败。如果系统能保证在读memory操作前有相应地址的写操作，也可以不初始化。</p> 
+<p>d、case中的信号调整</p> 
+<p>因为网表中某些信号的层次相对前仿会有所调整，所以后仿时环境中引用的DUT内部信号需要根据后仿网表层次进行调整，一般选择用POSTSIM宏做隔离，否则编译会报错。</p> 
+<p>在后仿网表中很多地方如果路径太长，一般会加入buffer和成对的inverter，如果case中某些信号是处于成对的inverter之间，则此信号的值和前仿的值刚好相反，相应的，对此信号做的一些判断和逻辑也要相应调整。</p> 
+<p>  </p> 
+<p><span style="color:#fe2c24;"><strong>五、SDF仿真</strong></span></p> 
+<p><span style="background-color:#a2e043;">加SDF文件的网表仿真</span>需要进行SDF反标，SDF文件中通常有min，typical，max三组时序值，再仿真器读入SDF的时候，要指定使用哪一组。通常我们只使用min和max两种极端情况进行仿真。常用的SDF反标方式如下：</p> 
+<pre><code class="language-cpp">module sdf_annotate;
+
+    initial begin
+        `ifdef MAX_DELAY
+            $sdf_annotate("rtl.sdf.gz",tb_top.dut,,"sdf.log","MAXIMUM");
+        `else
+            $sdf_annotate("rtl.sdf.gz",tb_top.dut,,"sdf.log","MINIMUM");
+        `endif
+    end
+endmodule</code></pre> 
+<p>在进行SDF网表仿真时，不能在有nospecify和notimingcheck等参数，除此之外还要额外增加以下编译参数：</p> 
+<p><span style="background-color:#a2e043;">+neg_tchk</span>：Enable negative timing checks. If you omit this option, <a href="https://so.csdn.net/so/search?q=VCS&amp;spm=1001.2101.3001.7020" title="VCS">VCS</a> changes all negative limits to 0. Negative timing checks are either $setuphold timing check with negative setup or hold limits, or $recrem timing checks with negative recovery or removal tlimits。标准单元库文件一般有两种，例如分别为smic13_neg和smic13,前者支持neg_tchk负延迟检查,后者不支持。因为hold time check的值是负的, 所以要进行negative timingcheck ,否则默认将会使负值的holdtime check改为0，对hold time负值的检查,在vcs时加上+neg_tchk这个option。</p> 
+<p><span style="background-color:#a2e043;">-negdelay</span>：Enable the use of negative values in IOPATH and INTERCONNECT entries in SDF files，SDF仿真要加入此参数，因为很多工艺库的holdtime为负值。</p> 
+<p><span style="background-color:#a2e043;">-sdfretain</span>:：Enable timing annotation as specified by a RETAIN retry on IOPATH delays。</p> 
+<p style="margin-left:0;"><span style="background-color:#a2e043;">+transport_path_delays</span>：一般和+pulse_r/&lt;滤除百分比R&gt;及+pulse_e/&lt;滤除百分比E&gt;一起使用，可在仿真阶段实现传输延迟的模拟，并且配置不同的滤除百分比。如果标准门单元buf指定的延迟是5ns，实际仿真时信号的脉冲宽度是W，则当W&lt;5ns*R时，脉冲会被过滤掉，当5ns*R&lt;W&lt;5ns*E时，此时buf输出X态，当W&gt;=5ns*E时，信号可以正常输出。当不指定+pulse_r和+pulse_e或者这两个参数值相等时，则小于5ns的信号会被过滤，大于等于5ns的信号才可以通过buf。</p> 
+<p><span style="background-color:#a2e043;">+maxdelays</span>：选择SDF文件中的max延迟信息，一般和+allmtm参数一起使用。</p> 
+<p><span style="background-color:#a2e043;">+mindelay</span>：选择SDF文件中的min延迟信息，一般和+allmtm参数一起使用。</p> 
+<p>下图是相对于纯网表仿真，SDF仿真额外增加的参数：</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/2c/d2/GXrgXmOj_o.png"></p> 
+<p>可以看出除了上述参数外，还加了一个<span style="background-color:#a2e043;">+fsdb+skip_cell_instance</span>=2，加此选项的目的是为了cell只dump端口信号，不dump cell单元内部信号，这样可以加快后仿真的速度，如果需要看cell内部波形，可以将参数值改为0即可。</p> 
+<p><span style="background-color:#a2e043;">+optconfigfile</span>+.../Async.cfg是为了处理同步器第一拍进亚稳态的情况。由于是异步采样，同步器第一拍采样很可能会发生在setup hold窗口内，此时第一个触发器会产生X态，向后蔓延会导致X态传播，进而导致仿真失败，针对这类情况可以加notiming不检查此类场景的时序。具体做法就是加上述编译语句，并在Async.cfg文件中增加如下语句：</p> 
+<p>instance {tb.dut.u_xxx.u_xx.cell_name} {no Timing};</p> 
+<p>除了上述参数的变化，相对于纯网表仿真，SDF仿真时对于环境的改动也稍有不同，主要体现在时序上，当进行子系统级的后仿时，接口信号的驱动要设置input delay，即输入信号相对时钟信号的延时，具体的delay值要和后端同事讨论。其实不仅是子系统的后仿，只要是DUT顶层的输入信号都要和后端对齐input delay的值。例如为了加速仿真，用AXI VIP代替CPU进行仿真，此时AXI VIP的输入信号也要设置input delay，一般是在interface中通过设置setup hold参数来实现。</p> 
+<p>参考：</p> 
+<p><a href="https://blog.csdn.net/qq_16423857/article/details/123804699" title="ASIC验证，关于后仿那些事_验证后仿_那么菜的博客-CSDN博客">ASIC验证，关于后仿那些事_验证后仿_那么菜的博客-CSDN博客</a></p> 
+<p><a href="https://blog.csdn.net/messi_cyc/article/details/127509496?spm=1001.2101.3001.6650.14&amp;utm_medium=distribute.pc_relevant.none-task-blog-2~default~ESLANDING~default-14-127509496-blog-123804699.235%5Ev27%5Epc_relevant_landingrelevant&amp;depth_1-utm_source=distribute.pc_relevant.none-task-blog-2~default~ESLANDING~default-14-127509496-blog-123804699.235%5Ev27%5Epc_relevant_landingrelevant&amp;utm_relevant_index=21" title="关于后仿我知道得不多_messi_cyc的博客-CSDN博客">关于后仿我知道得不多_messi_cyc的博客-CSDN博客</a></p> 
+<p><a href="https://blog.csdn.net/qq_41360172/article/details/127640701?utm_medium=distribute.pc_relevant.none-task-blog-2~default~baidujs_baidulandingword~default-0-127640701-blog-123804699.235%5Ev27%5Epc_relevant_landingrelevant&amp;spm=1001.2101.3001.4242.1&amp;utm_relevant_index=2" title="【验证技能】数字IC后仿真总结_飓风_数字IC验证的博客-CSDN博客">【验证技能】数字IC后仿真总结_飓风_数字IC验证的博客-CSDN博客</a></p> 
+<p><a href="https://blog.csdn.net/Pieces_thinking/article/details/110703120" title="RTL中的惯性延迟和传输延迟_rtl网卡 ping 延时_碎碎思的博客-CSDN博客">RTL中的惯性延迟和传输延迟_rtl网卡 ping 延时_碎碎思的博客-CSDN博客</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ce212fbc10cca713c85a892378abf411/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">解决input输入框按下enter键会刷新页面得问题</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/77eb1e860ccf7de6220bab9671bfb41d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">网络基础架构</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

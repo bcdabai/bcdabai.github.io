@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>并发读写数据一致性保证（一）Java并发容器 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="并发读写数据一致性保证（一）Java并发容器" />
+<meta property="og:description" content="业务开发过程，其实就是用户业务数据的处理过程，因而开发的核心任务就是维护数据一致不出错。现实场景中，多个用户会并发读写同一份数据（如秒杀），不加控制会翻车、加了控制则降低并发度，影响性能和用户体验。
+如何优雅的进行并发数据控制呢？本质上需要解决两个问题：
+读-写冲突写-写冲突 （想自学习编程的小伙伴请搜索圈T社区，更多行业相关资讯更有行业相关免费视频教程。完全免费哦!）
+让我们看下Java经典的并发容器CopyOnWriteList以及ConcurrentHashMap是如何协调这两个问题的
+CopyOnWriteList 读写策略 CopyOnWrite顾名思义即写时复制策略
+针对写处理，首先加ReentrantLock锁，然后复制出一份数据副本，对副本进行更改之后，再将数据引用替换为副本数据，完成后释放锁
+针对读处理，依赖volatile提供的语义保证，每次读都能读到最新的数组引用
+读-写冲突 显然，CopyOnWriteList采用读写分离的思想解决并发读写的冲突
+当读操作与写操作同时发生时：
+如果写操作未完成引用替换，这时读操作处理的是原数组而写操作处理的数组副本，互不干扰如果写操作已完成引用替换，这时读操作与写操作处理的都是同一个数组引用 可见在读写分离的设计下，并发读写过程中，读不一定能实时看到最新的数据，也就是所谓的弱一致性。
+也正是由于牺牲了强一致性，可以让读操作无锁化，支撑高并发读
+写-写冲突 当多个写操作的同时发生时，先拿到锁的先执行，其他线程只能阻塞等到锁的释放
+简单粗暴又行之有效，但并发性能相对较差
+ConcurrentHashMap（JDK7） 读写策略 主要采用分段锁的思想，降低同时操作一份数据的概率
+针对读操作：
+先在数组中定位Segment并利用UNSAFE.getObjectVolatile原子读语义获取Segment接着在数组中定位HashEntry并利用UNSAFE.getObjectVolatile原子读语义获取HashEntry然后依赖final不变的next指针遍历链表找到对应的volatile值 针对写操作：
+先在数组中定位Segment并利用UNSAFE.getObjectVolatile原子读语义获取Segment然后尝试加锁ReentrantLock接着在数组中定位HashEntry并利用UNSAFE.getObjectVolatile原子读语义获取HashEntry链表头节点遍历链表，若找到已存在的key，则利用UNSAFE.putOrderedObject原子写新值，若找不到，则创建一个新的节点，插入到链表头，同时利用UNSAFE.putOrderedObject原子更新链表头完成操作后释放锁 读-写冲突 若并发读写的数据不位于同一个Segment，操作是相互独立的
+若位于同一个Segment，ConcurrentHashMap利用了很多Java特性来解决读写冲突，使得很多读操作都无锁化
+当读操作与写操作同时发生时：
+若PUT的KEY已存在，直接更新原有的value，此时读操作在volatile的保证下可以读到最新值，无需加锁若PUT的key不存在增加一个节点，或删除一个节点时，会改变原有的链表结构，注意到HashEntry的每个next指针都是final的，因此得复制链表，在更新HashEntry数组元素（即链表头节点）的时候又是通过UNSAFE提供的语义保证来完成更新的，若新链表更新前发生读操作，此时还是获取原有的链表，无需加锁，但是数据不是最新的 可见，支持无锁并发读操作还是弱一致的
+写-写冲突 若并发写操作的数据不位于同一个Segment，操作是相互独立的
+若位于同一个Segment，多个线程还是由于加ReentrantLock锁导致阻塞等待
+ConcurrentHashMap（JDK8） 读写策略 与JDK7相比，少了Segment分段锁这一层，直接操作Node数组（链表头数组），后面称为桶
+针对读操作，通过UNSAFE.getObjectVolatile原子读语义获取最新的value
+针对写操作，由于采用懒惰加载的方式，刚初始化时只确定桶的数量，并没有初始默认值。当需要put值的时候先定位下标，然后该下标下桶的值是否为null，如果是，则通过
+UNSAFE.comepareAndSwapObject(CAS)赋值，如果不为null,则加Synchronized锁，找到对应的链表/红黑树的节点value进行更改，后释放锁
+读-写冲突 若并发读写的数据不位于同一个桶，则相互独立互不干扰
+若位于同一个桶，与JDK7的版本相比，简单了许多，但还是基于Java的特性使得许多读操作无锁化
+当读操作与写操作同时发生时：
+若PUT的key已经存在，则直接更新值，此时读操作在volatile的保证下可以获取最新值若PUT的key不存在，会新建一个节点 或 删除一个节点的时候，会改变对原有的结构，这时next指针是volatile的，直接插入到链表尾（超过一定长度变成红黑树）等对结构的修改，此时读操作也是可以获取到最新的next 因此只要写操作happens-before读操作，volatile语义就可以保证读的数据是最新的，可以说JDK8版本的ConcurrentHashMap是强一致的（此处只关注基本读写（GET/PUT），可能会有弱一致的场景遗漏，例如扩容操作，不过应该是全局加锁的，如有错误烦请指出，共同学习）
+写-写冲突 若并发读写的数据不位于同一个桶，则相互独立互不干扰
+若位于同一个桶，注意到写操作在不同的场景下采取不同的策略，CAS或Synchronized
+当多个写操作同时发生时，若桶为null，则CAS应对并发写，当第一个写操作赋值成功后，后面的写线程CAS失败，转为竞争Synchronized锁,阻塞等待
+小结 为什么这么设计（个人观点） 对数据进行存储必然涉及数据结构的设计，任何对数据的操作都得基于数据结构
+常规思路是对整个数据结构加锁，但是锁的存在会大大影响性能，所以接下来的任务，就是找到哪些可以无锁化的操作
+操作主要分为两大类，读和写。
+先看写，因为涉及到原有数据的改动，不加控制肯定会翻车，怎么控制呢？
+写操作也分两种，一种会改变结构，一种不会
+对于会改变结构的写，不管底层是数组还是链表，由于改动得基于原有的结构，必然得加锁串行化保证原子操作，优化的点就是锁层面的优化了，例如最开始HashTable等synchronized锁到
+ConcurrentHashMap1.7版本的ReentrantLock锁，再到1.8版本的Synchronized改良锁 。或者数据分散化，concurrnethashmap等基于hash的数据结构比CopyOnWriteList的数据结构就多了桶分散的优势
+对于不会改变结构的写，或者改动的频率不大（桶扩容频率低），由于锁的开销实在是太大了，CAS是个不错的思路。为什么CopyOnWriteList不用CAS来控制并发写，我个人觉得主要原因还是因为结构变化频繁，可以看下ActomicReferenceArray等基于CAS的数组容器，都是创建后就不允许结构发生变化的。
+确保数据不会改错之后，读相对就好办了
+主要考虑是不是要实时读最新的数据（等待写操作完成），也就是强一致还是弱一致的问题
+强一致的话，读就得等写完成，读写竞争同一把锁，这就相互影响了读写的效率。
+大多数场景下，读的数据一致性要求没有写的要求高，可以读错，但是坚决不可以写错。要是在读的这一刻，数据还没改完，读到旧数据也没关系，只要最后写完对读可见即可
+还好JMM（Java内存模型）有个volatile可见性的语义，可以保证不加锁的情况下，读也能看到写更改的数据。此外还有UNSAFE包的各种内存直接操作，也可相对高性能的完成可见性语义" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/c9d4240ea532d8074d5000bb5bb297cd/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2019-09-09T10:11:47+08:00" />
+<meta property="article:modified_time" content="2019-09-09T10:11:47+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">并发读写数据一致性保证（一）Java并发容器</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <blockquote> 
+ <p>业务开发过程，其实就是用户业务数据的处理过程，因而开发的核心任务就是维护数据一致不出错。现实场景中，多个用户会并发读写同一份数据（如秒杀），不加控制会翻车、加了控制则降低并发度，影响性能和用户体验。<br> <br> 如何优雅的进行并发数据控制呢？本质上需要解决两个问题：</p> 
+ <ul><li>读-写冲突</li><li>写-写冲突</li></ul> 
+</blockquote> 
+<p><strong>（想自学习编程的小伙伴请搜索<a href="http://www.aiquanti.com" rel="nofollow">圈T社区</a>，更多行业相关资讯更有行业相关免费视频教程。完全免费哦!）</strong></p> 
+<p>让我们看下Java经典的并发容器CopyOnWriteList以及ConcurrentHashMap是如何协调这两个问题的</p> 
+<h3><a id="CopyOnWriteList_11"></a>CopyOnWriteList</h3> 
+<p><img src="https://images2.imgbox.com/20/fa/u7Xunbf0_o.png" alt="在这里插入图片描述"></p> 
+<h5><a id="_13"></a>读写策略</h5> 
+<p>CopyOnWrite顾名思义即写时复制策略</p> 
+<p>针对写处理，首先加ReentrantLock锁，然后复制出一份数据副本，对副本进行更改之后，再将数据引用替换为副本数据，完成后释放锁</p> 
+<p>针对读处理，依赖volatile提供的语义保证，每次读都能读到最新的数组引用</p> 
+<h5><a id="_19"></a>读-写冲突</h5> 
+<p>显然，CopyOnWriteList采用读写分离的思想解决并发读写的冲突</p> 
+<p>当读操作与写操作同时发生时：</p> 
+<ul><li>如果写操作未完成引用替换，这时读操作处理的是原数组而写操作处理的数组副本，互不干扰</li><li>如果写操作已完成引用替换，这时读操作与写操作处理的都是同一个数组引用</li></ul> 
+<p>可见在读写分离的设计下，并发读写过程中，读不一定能实时看到最新的数据，也就是所谓的弱一致性。</p> 
+<p>也正是由于牺牲了强一致性，可以让读操作无锁化，支撑高并发读</p> 
+<h5><a id="_30"></a>写-写冲突</h5> 
+<p>当多个写操作的同时发生时，先拿到锁的先执行，其他线程只能阻塞等到锁的释放</p> 
+<p>简单粗暴又行之有效，但并发性能相对较差</p> 
+<h3><a id="ConcurrentHashMapJDK7_34"></a>ConcurrentHashMap（JDK7）</h3> 
+<h5><a id="_36"></a>读写策略</h5> 
+<p>主要采用分段锁的思想，降低同时操作一份数据的概率</p> 
+<p>针对读操作：</p> 
+<ul><li>先在数组中定位Segment并利用UNSAFE.getObjectVolatile原子读语义获取Segment</li><li>接着在数组中定位HashEntry并利用UNSAFE.getObjectVolatile原子读语义获取HashEntry</li><li>然后依赖final不变的next指针遍历链表</li><li>找到对应的volatile值</li></ul> 
+<p>针对写操作：</p> 
+<ul><li>先在数组中定位Segment并利用UNSAFE.getObjectVolatile原子读语义获取Segment</li><li>然后尝试加锁ReentrantLock</li><li>接着在数组中定位HashEntry并利用UNSAFE.getObjectVolatile原子读语义获取HashEntry链表头节点</li><li>遍历链表，若找到已存在的key，则利用UNSAFE.putOrderedObject原子写新值，若找不到，则创建一个新的节点，插入到链表头，同时利用UNSAFE.putOrderedObject原子更新链表头</li><li>完成操作后释放锁</li></ul> 
+<h5><a id="_54"></a>读-写冲突</h5> 
+<p>若并发读写的数据不位于同一个Segment，操作是相互独立的</p> 
+<p>若位于同一个Segment，ConcurrentHashMap利用了很多Java特性来解决读写冲突，使得很多读操作都无锁化</p> 
+<p>当读操作与写操作同时发生时：</p> 
+<ul><li>若PUT的KEY已存在，直接更新原有的value，此时读操作在volatile的保证下可以读到最新值，无需加锁</li><li>若PUT的key不存在增加一个节点，或删除一个节点时，会改变原有的链表结构，注意到HashEntry的每个next指针都是final的，因此得复制链表，在更新HashEntry数组元素（即链表头节点）的时候又是通过UNSAFE提供的语义保证来完成更新的，若新链表更新前发生读操作，此时还是获取原有的链表，无需加锁，但是数据不是最新的</li></ul> 
+<p>可见，支持无锁并发读操作还是弱一致的</p> 
+<h5><a id="_65"></a>写-写冲突</h5> 
+<p>若并发写操作的数据不位于同一个Segment，操作是相互独立的</p> 
+<p>若位于同一个Segment，多个线程还是由于加ReentrantLock锁导致阻塞等待</p> 
+<h3><a id="ConcurrentHashMapJDK8_69"></a>ConcurrentHashMap（JDK8）</h3> 
+<p><img src="https://images2.imgbox.com/ff/57/uF5EaKOy_o.png" alt="在这里插入图片描述"></p> 
+<h5><a id="_71"></a>读写策略</h5> 
+<p>与JDK7相比，少了Segment分段锁这一层，直接操作Node数组（链表头数组），后面称为桶</p> 
+<p>针对读操作，通过UNSAFE.getObjectVolatile原子读语义获取最新的value</p> 
+<p>针对写操作，由于采用懒惰加载的方式，刚初始化时只确定桶的数量，并没有初始默认值。当需要put值的时候先定位下标，然后该下标下桶的值是否为null，如果是，则通过</p> 
+<p>UNSAFE.comepareAndSwapObject(CAS)赋值，如果不为null,则加Synchronized锁，找到对应的链表/红黑树的节点value进行更改，后释放锁</p> 
+<h5><a id="_80"></a>读-写冲突</h5> 
+<p>若并发读写的数据不位于同一个桶，则相互独立互不干扰</p> 
+<p>若位于同一个桶，与JDK7的版本相比，简单了许多，但还是基于Java的特性使得许多读操作无锁化</p> 
+<p>当读操作与写操作同时发生时：</p> 
+<ul><li>若PUT的key已经存在，则直接更新值，此时读操作在volatile的保证下可以获取最新值</li><li>若PUT的key不存在，会新建一个节点 或 删除一个节点的时候，会改变对原有的结构，这时next指针是volatile的，直接插入到链表尾（超过一定长度变成红黑树）等对结构的修改，此时读操作也是可以获取到最新的next</li></ul> 
+<p>因此只要写操作happens-before读操作，volatile语义就可以保证读的数据是最新的，可以说JDK8版本的ConcurrentHashMap是强一致的（此处只关注基本读写（GET/PUT），可能会有弱一致的场景遗漏，例如扩容操作，不过应该是全局加锁的，如有错误烦请指出，共同学习）</p> 
+<h5><a id="_91"></a>写-写冲突</h5> 
+<p>若并发读写的数据不位于同一个桶，则相互独立互不干扰</p> 
+<p>若位于同一个桶，注意到写操作在不同的场景下采取不同的策略，CAS或Synchronized</p> 
+<p>当多个写操作同时发生时，若桶为null，则CAS应对并发写，当第一个写操作赋值成功后，后面的写线程CAS失败，转为竞争Synchronized锁,阻塞等待</p> 
+<h3><a id="_97"></a>小结</h3> 
+<h5><a id="_98"></a>为什么这么设计（个人观点）</h5> 
+<p>对数据进行存储必然涉及数据结构的设计，任何对数据的操作都得基于数据结构</p> 
+<p>常规思路是对整个数据结构加锁，但是锁的存在会大大影响性能，所以接下来的任务，就是找到哪些可以无锁化的操作</p> 
+<p>操作主要分为两大类，读和写。</p> 
+<p>先看写，因为涉及到原有数据的改动，不加控制肯定会翻车，怎么控制呢？</p> 
+<p>写操作也分两种，一种会改变结构，一种不会</p> 
+<p>对于会改变结构的写，不管底层是数组还是链表，由于改动得基于原有的结构，必然得加锁串行化保证原子操作，优化的点就是锁层面的优化了，例如最开始HashTable等synchronized锁到<br> ConcurrentHashMap1.7版本的ReentrantLock锁，再到1.8版本的Synchronized改良锁 。或者数据分散化，concurrnethashmap等基于hash的数据结构比CopyOnWriteList的数据结构就多了桶分散的优势</p> 
+<p>对于不会改变结构的写，或者改动的频率不大（桶扩容频率低），由于锁的开销实在是太大了，CAS是个不错的思路。为什么CopyOnWriteList不用CAS来控制并发写，我个人觉得主要原因还是因为结构变化频繁，可以看下ActomicReferenceArray等基于CAS的数组容器，都是创建后就不允许结构发生变化的。</p> 
+<p>确保数据不会改错之后，读相对就好办了</p> 
+<p>主要考虑是不是要实时读最新的数据（等待写操作完成），也就是强一致还是弱一致的问题<br> 强一致的话，读就得等写完成，读写竞争同一把锁，这就相互影响了读写的效率。</p> 
+<p>大多数场景下，读的数据一致性要求没有写的要求高，可以读错，但是坚决不可以写错。要是在读的这一刻，数据还没改完，读到旧数据也没关系，只要最后写完对读可见即可</p> 
+<p>还好JMM（Java内存模型）有个volatile可见性的语义，可以保证不加锁的情况下，读也能看到写更改的数据。此外还有UNSAFE包的各种内存直接操作，也可相对高性能的完成可见性语义</p> 
+<p>对读操作而言，最好的数据，就是不变的数据，不用担心被修改引发的各种问题。唯一的不变是变化，一些数据还是有变化的可能，如果要支持这种不变性，或者说尽量减少变化的频率，变化的部分就得在别的地方处理，也就是所谓的读写分离</p> 
+<blockquote> 
+ <p>以上纯个人理解，受限于水平，想法不一定正确，欢迎讨论指点</p> 
+</blockquote>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/2e6c79929015a032aa93eb84a22a489f/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">C#编译过程</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/1186291e3d7da4f76433ff0289fb0448/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Spring注入Bean细节--解决Bean名称重复问题</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

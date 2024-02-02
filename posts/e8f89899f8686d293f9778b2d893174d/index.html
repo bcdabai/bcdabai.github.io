@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>使用OpenSSL自建一个HTTPS服务 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="使用OpenSSL自建一个HTTPS服务" />
+<meta property="og:description" content="1. 理论知识 1.1 什么是https 传统的 HTTP 协议以明文方式进行通信，不提供任何方式的数据加密，很容易被中间攻击者破解通信内容或者伪装成服务器与客户端通信，在安全性上存在很大问题。
+HTTPS 协议是由 HTTP 加上 TLS/SSL 协议构建的可进行加密传输、身份认证的网络协议，主要通过数字证书、加密算法、非对称密钥等技术完成互联网数据传输加密，实现互联网传输安全保护。
+关于非对称加密以及公钥私钥相关知识不在赘述，可自行了解。
+PS: TLS 是传输层加密协议，前身是由网景公司1995年发布的 SSL 协议，不过在很多场合还是用 SSL 指代 TLS/SSL。
+1.2 https的通信过程 下图来源：菜鸟教程
+1、客户端发起 HTTPS 请求
+用户访问 https 网址，连接到服务器的 443 端口，请求信息中包含了客户端支持的对称加密算法列表。
+2、服务端的配置
+支持 HTTPS 协议的服务器必须要有包含自己认证信息和公钥的数字证书以及自己的私钥。
+3、下发证书
+服务器下发自己的数字证书，这一步其实还包括从客户端支持的对称加密算法列表中选出来用于双向通信的算法，因为非对称加密是一个很耗费资源的过程，所以一般只用来协商之后用于通信的对称加密算法。
+当然这一步只是明文协商了对称加密算法的名字，后面会用非对称加密来传输用于对称加密算法的秘钥，由于非对称加密的有效性，这个秘钥是不会被破解的，后续的对称加密传输也就不会被破解。
+4、客户端验证证书有效性
+客户端验证证书的有效性，如果证书没有问题，那么就生成一个随机值（对称加密秘钥），然后用证书中的公钥对该随机值进行加密。
+5、传送用于对称通信的秘钥
+用公钥加密的随机值被发送到服务端。
+6、服务端解密秘钥
+服务端用自己的私钥解密后，得到了客户端传过来的随机值（对称加密秘钥）。
+7、双向对称加密通信
+接下来就使用之前协商好的对称加密算法以及加密传输的秘钥进行通信即可。
+1.3 SSL证书的签发流程 上面的 https 通信过程中，最关键的一步就是客户端如何验证服务端下发证书的有效性，因为下发证书是一个明文传输的过程，证书可能在传输过程中被拦截，被调包，被篡改，那么客户端怎么确定自己收到的就是自己想访问的网站的证书呢？
+由于客户端是发起通信的一方，双方没有协商好的加密算法，服务端也不可能持有客户端的公钥信息，所以证书不能被加密发送，那么要解决这个问题就必须引入第三方可信机构（CA），客户端信任它，它就可以对服务器证书做出认证，具体来说就是使用自己的私钥对服务器证书进行签名，签名后的信息包含在证书内，这样客户端只需要持有各个 CA 的公钥，便可以对签名信息进行解密来验证证书的有效性。
+上图就是 SSL 证书的签发流程：
+浏览器需要记住各大CA。浏览器是怎么样记住CA的呢？在浏览器开发的时候，各个CA就把自己的根证书交给了浏览器，那么 CA 根证书中最重要的信息就是该 CA 机构的公钥了，此外还有 CA 机构的标识信息以便匹配服务器证书中声明对它签名的机构。
+各大网站，如支付宝，将自己的证书交给CA。CA此时需要做的事情是，通过各种法定机构，验证网站的身份。如果CA确定该网站是真的，那么就需要用自己的私钥给网站的证书签名。网站交给 CA 的证书中除了包含自己的 URL 等标识信息外，还必须有网站自己的公钥信息，因为签完名之后证书就不能动了，而后面客户端需要服务器的公钥来加密信息。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/e8f89899f8686d293f9778b2d893174d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-12-13T11:16:09+08:00" />
+<meta property="article:modified_time" content="2020-12-13T11:16:09+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">使用OpenSSL自建一个HTTPS服务</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-github-gist">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="1__1"></a>1. 理论知识</h2> 
+<h3><a id="11_https_3"></a>1.1 什么是https</h3> 
+<blockquote> 
+ <p>传统的 HTTP 协议以明文方式进行通信，不提供任何方式的数据加密，很容易被中间攻击者破解通信内容或者伪装成服务器与客户端通信，在安全性上存在很大问题。</p> 
+ <p>HTTPS 协议是由 HTTP 加上 TLS/SSL 协议构建的可进行加密传输、身份认证的网络协议，主要通过数字证书、加密算法、非对称密钥等技术完成互联网数据传输加密，实现互联网传输安全保护。</p> 
+ <p>关于非对称加密以及公钥私钥相关知识不在赘述，可自行了解。</p> 
+ <p>PS: TLS 是传输层加密协议，前身是由网景公司1995年发布的 SSL 协议，不过在很多场合还是用 SSL 指代 TLS/SSL。</p> 
+</blockquote> 
+<h3><a id="12_https_13"></a>1.2 https的通信过程</h3> 
+<p>下图来源：<a href="https://www.runoob.com/w3cnote/http-vs-https.html" rel="nofollow">菜鸟教程</a></p> 
+<p><img src="https://images2.imgbox.com/46/4d/syJY0nUa_o.png" alt="rekhX6.png"></p> 
+<p><strong>1、客户端发起 HTTPS 请求</strong></p> 
+<p>用户访问 https 网址，连接到服务器的 443 端口，请求信息中包含了客户端支持的对称加密算法列表。</p> 
+<p><strong>2、服务端的配置</strong></p> 
+<p>支持 HTTPS 协议的服务器必须要有包含自己认证信息和公钥的数字证书以及自己的私钥。</p> 
+<p><strong>3、下发证书</strong></p> 
+<p>服务器下发自己的数字证书，这一步其实还包括从客户端支持的对称加密算法列表中选出来用于双向通信的算法，因为非对称加密是一个很耗费资源的过程，所以一般只用来协商之后用于通信的对称加密算法。</p> 
+<p>当然这一步只是明文协商了对称加密算法的名字，后面会用非对称加密来传输用于对称加密算法的秘钥，由于非对称加密的有效性，这个秘钥是不会被破解的，后续的对称加密传输也就不会被破解。</p> 
+<p><strong>4、客户端验证证书有效性</strong></p> 
+<p>客户端验证证书的有效性，如果证书没有问题，那么就生成一个随机值（对称加密秘钥），然后用证书中的公钥对该随机值进行加密。</p> 
+<p><strong>5、传送用于对称通信的秘钥</strong></p> 
+<p>用公钥加密的随机值被发送到服务端。</p> 
+<p><strong>6、服务端解密秘钥</strong></p> 
+<p>服务端用自己的私钥解密后，得到了客户端传过来的随机值（对称加密秘钥）。</p> 
+<p><strong>7、双向对称加密通信</strong></p> 
+<p>接下来就使用之前协商好的对称加密算法以及加密传输的秘钥进行通信即可。</p> 
+<h3><a id="13_SSL_49"></a>1.3 SSL证书的签发流程</h3> 
+<p>上面的 https 通信过程中，最关键的一步就是客户端如何验证服务端下发证书的有效性，因为下发证书是一个明文传输的过程，证书可能在传输过程中被拦截，被调包，被篡改，那么客户端怎么确定自己收到的就是自己想访问的网站的证书呢？</p> 
+<p>由于客户端是发起通信的一方，双方没有协商好的加密算法，服务端也不可能持有客户端的公钥信息，所以证书不能被加密发送，那么要解决这个问题就必须引入第三方可信机构（CA），客户端信任它，它就可以对服务器证书做出认证，具体来说就是使用自己的私钥对服务器证书进行签名，签名后的信息包含在证书内，这样客户端只需要持有各个 CA 的公钥，便可以对签名信息进行解密来验证证书的有效性。</p> 
+<p><img src="https://images2.imgbox.com/1f/84/Xb4LhXRj_o.png" alt="rek5nK.png"></p> 
+<p>上图就是 SSL 证书的签发流程：</p> 
+<ol><li> <p>浏览器需要记住各大CA。浏览器是怎么样记住CA的呢？在浏览器开发的时候，各个CA就把自己的根证书交给了浏览器，那么 CA 根证书中最重要的信息就是该 CA 机构的公钥了，此外还有 CA 机构的标识信息以便匹配服务器证书中声明对它签名的机构。</p> </li><li> <p>各大网站，如支付宝，将自己的证书交给CA。CA此时需要做的事情是，通过各种法定机构，验证网站的身份。如果CA确定该网站是真的，那么就需要用自己的私钥给网站的证书签名。网站交给 CA 的证书中除了包含自己的 URL 等标识信息外，还必须有网站自己的公钥信息，因为签完名之后证书就不能动了，而后面客户端需要服务器的公钥来加密信息。</p> </li><li> <p>此处就回到了之前的 https 通信过程，浏览器拿到证书后首先根据该证书的信息，如哪个 CA 对它进行了签名，结合浏览器已有的 CA 的根证书列表，对该证书进行验证，具体来说就是用对应 CA 的公钥对证书中的签名信息进行解密，再与证书信息进行比对，如果验证通过，那么就可以确定这个证书的有效性。</p> </li></ol> 
+<h2><a id="2_https_65"></a>2. 搭建https服务</h2> 
+<blockquote> 
+ <p>本机环境：Ubuntu 20.04，openssl 1.1.1h</p> 
+</blockquote> 
+<p>明白了 https 工作过程后，我们便可以利用开源的安全传输层密码库 openssl 来自建一个实验性的 https 服务。</p> 
+<p>想一想我们需要什么？</p> 
+<ul><li>一个提供 https 服务的服务器需要有经过 CA 认证的数字证书和自己的公钥私钥（公钥放在证书里）</li><li>CA 认证是需要收费的，所以我们需要自建一个 CA 机构</li><li>自建的 CA 机构需要有标识自己身份的根证书（包含公钥），以及用来对服务器证书进行签名的私钥</li><li>一个 https 站点，收到客户端访问时下发自己的数字证书</li><li>客户端需要持有 CA 的根证书，所以我们需要手动导入自建 CA 的证书</li></ul> 
+<h3><a id="21_CA_79"></a>2.1 自建CA</h3> 
+<p>首先创建一个 myCA 目录来存放自建 CA 的相关信息：</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 创建用户目录下的 https 目录作为实验目录，在其中创建 myCA 目录存放 CA 相关信息</span>
+<span class="token comment"># myCA/signedcerts：存放经 CA 认证的证书副本</span>
+<span class="token comment"># myCA/private：存放 CA 私钥</span>
+<span class="token function">cd</span> <span class="token operator">&amp;&amp;</span> <span class="token function">mkdir</span> -p https/myCA/signedcerts <span class="token operator">&amp;&amp;</span> <span class="token function">mkdir</span> https/myCA/private <span class="token operator">&amp;&amp;</span> <span class="token function">cd</span> https/myCA
+
+<span class="token comment"># 创建证书库，这两个文件存放了 CA 每一次颁发证书的记录</span>
+<span class="token keyword">echo</span> <span class="token string">'01'</span> <span class="token operator">&gt;</span> serial <span class="token operator">&amp;&amp;</span> <span class="token function">touch</span> index.txt
+</code></pre> 
+<p>使用任何你熟悉的编辑器在 myCA 目录下新建一个 caconfig.cnf 文件来配置 CA 信息，其中需要注意的部分有：</p> 
+<ul><li> <p>username：修改为自己的用户名</p> </li><li> <p>default_md：默认对证书签名时的摘要算法，不要使用 sha2 以下的算法，否则服务器会启动失败（老版本可能没这个限制）</p> </li></ul> 
+<pre><code class="prism language-bash"><span class="token comment"># My sample caconfig.cnf file.</span>
+<span class="token comment">#</span>
+<span class="token comment"># Default configuration to use when one is not provided on the command line.</span>
+<span class="token comment">#</span>
+<span class="token punctuation">[</span> ca <span class="token punctuation">]</span>
+default_ca      <span class="token operator">=</span> local_ca
+<span class="token comment">#</span>
+<span class="token comment">#</span>
+<span class="token comment"># Default location of directories and files needed to generate certificates.</span>
+<span class="token comment">#</span>
+<span class="token punctuation">[</span> local_ca <span class="token punctuation">]</span>
+<span class="token function">dir</span>             <span class="token operator">=</span> /home/<span class="token punctuation">{<!-- --></span>username<span class="token punctuation">}</span>/https/myCA    <span class="token comment"># CA 目录</span>
+certificate     <span class="token operator">=</span> <span class="token variable">$dir</span>/cacert.pem
+database        <span class="token operator">=</span> <span class="token variable">$dir</span>/index.txt
+new_certs_dir   <span class="token operator">=</span> <span class="token variable">$dir</span>/signedcerts
+private_key     <span class="token operator">=</span> <span class="token variable">$dir</span>/private/cakey.pem
+serial          <span class="token operator">=</span> <span class="token variable">$dir</span>/serial
+<span class="token comment">#      </span>
+<span class="token comment">#</span>
+<span class="token comment"># Default expiration and encryption policies for certificates.</span>
+<span class="token comment"># 认证其他服务器证书设置</span>
+default_crl_days        <span class="token operator">=</span> 365                  <span class="token comment"># 默认吊销证书列表更新时间</span>
+default_days            <span class="token operator">=</span> 1825                 <span class="token comment"># 默认证书有效期</span>
+default_md              <span class="token operator">=</span> sha256               <span class="token comment"># 默认对证书签名时的摘要算法</span>
+<span class="token comment">#      </span>
+policy          <span class="token operator">=</span> local_ca_policy
+x509_extensions <span class="token operator">=</span> local_ca_extensions
+<span class="token comment">#      </span>
+<span class="token comment">#</span>
+<span class="token comment"># Default policy to use when generating server certificates.  The following</span>
+<span class="token comment"># fields must be defined in the server certificate.</span>
+<span class="token comment">#</span>
+<span class="token punctuation">[</span> local_ca_policy <span class="token punctuation">]</span>
+commonName              <span class="token operator">=</span> supplied
+stateOrProvinceName     <span class="token operator">=</span> supplied
+countryName             <span class="token operator">=</span> supplied
+emailAddress            <span class="token operator">=</span> supplied
+organizationName        <span class="token operator">=</span> supplied
+organizationalUnitName  <span class="token operator">=</span> supplied
+<span class="token comment">#      </span>
+<span class="token comment">#</span>
+<span class="token comment"># x509 extensions to use when generating server certificates.</span>
+<span class="token comment">#</span>
+<span class="token punctuation">[</span> local_ca_extensions <span class="token punctuation">]</span>
+basicConstraints        <span class="token operator">=</span> CA:false
+<span class="token comment">#      </span>
+<span class="token comment">#</span>
+<span class="token comment"># The default root certificate generation policy.</span>
+<span class="token comment"># 生成 CA 根证书设置</span>
+<span class="token punctuation">[</span> req <span class="token punctuation">]</span>
+default_bits    <span class="token operator">=</span> 2048                                          <span class="token comment"># 默认生成证书请求时的秘钥长度</span>
+default_keyfile <span class="token operator">=</span> /home/<span class="token punctuation">{<!-- --></span>username<span class="token punctuation">}</span>/https/myCA/private/cakey.pem <span class="token comment"># 默认私钥存放位置</span>
+default_md      <span class="token operator">=</span> sha256                                        <span class="token comment"># 默认证书签名时使用的摘要算法</span>
+<span class="token comment">#     </span>
+prompt                  <span class="token operator">=</span> no
+distinguished_name      <span class="token operator">=</span> root_ca_distinguished_name
+x509_extensions         <span class="token operator">=</span> root_ca_extensions
+<span class="token comment">#</span>
+<span class="token comment">#</span>
+<span class="token comment"># Root Certificate Authority distinguished name.  Change these fields to match</span>
+<span class="token comment"># your local environment!</span>
+<span class="token comment">#</span>
+<span class="token punctuation">[</span> root_ca_distinguished_name <span class="token punctuation">]</span>
+commonName              <span class="token operator">=</span> myCA              <span class="token comment"># CA 机构名</span>
+stateOrProvinceName     <span class="token operator">=</span> JS                <span class="token comment"># 所在省份</span>
+countryName             <span class="token operator">=</span> CN                <span class="token comment"># 所在国家（仅限两字符）</span>
+emailAddress            <span class="token operator">=</span> example@qq.com    <span class="token comment"># 邮箱</span>
+organizationName        <span class="token operator">=</span> USTC              <span class="token comment"># 组织名</span>
+organizationalUnitName  <span class="token operator">=</span> SE                <span class="token comment"># 单位名</span>
+<span class="token comment">#      </span>
+<span class="token punctuation">[</span> root_ca_extensions <span class="token punctuation">]</span>
+basicConstraints        <span class="token operator">=</span> CA:true
+</code></pre> 
+<p>然后生成自签名的 CA 根证书和秘钥，CA 的根证书是自签名的，也就是用自己的私钥对自己的证书签名，因为它是可信机构，不需要别人认证：</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 设置 openssl 环境变量，以 CA 身份运行接下来的 openssl 命令</span>
+<span class="token function">export</span> OPENSSL_CONF<span class="token operator">=</span>~/https/myCA/caconfig.cnf
+
+<span class="token comment"># 生成 rsa 秘钥对和 pem 格式的 CA 自签名根证书，有效期 1825天</span>
+<span class="token comment"># 需要输入密码，每次对服务器证书进行签名都需要这个密码，最少4位</span>
+openssl req -x509 -newkey rsa:2048 -out cacert.pem -outform PEM -days 1825
+</code></pre> 
+<p>以上步骤生成了自建 CA 机构的根证书和私钥文件：</p> 
+<ul><li>myCA/cacert.pem: CA 根证书</li><li>myCA/private/cakey.pem: CA 私钥</li></ul> 
+<h3><a id="22_CA_190"></a>2.2 创建服务器证书并用CA签名</h3> 
+<p>首先创建一个服务器目录来存放服务器相关信息：</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 在 myCA 同级目录下创建 server 目录存放服务器相关信息</span>
+<span class="token function">cd</span> <span class="token punctuation">..</span> <span class="token operator">&amp;&amp;</span> <span class="token function">mkdir</span> server <span class="token operator">&amp;&amp;</span> <span class="token function">cd</span> server
+</code></pre> 
+<p>使用任何你熟悉的编辑器在 server 目录下新建一个 server.cnf 文件来配置服务器信息：</p> 
+<pre><code class="prism language-bash"><span class="token comment">#</span>
+<span class="token comment"># server.cnf</span>
+<span class="token comment">#</span>
+
+<span class="token punctuation">[</span> req <span class="token punctuation">]</span>
+prompt                  <span class="token operator">=</span> no
+distinguished_name      <span class="token operator">=</span> server_distinguished_name
+
+<span class="token punctuation">[</span> server_distinguished_name <span class="token punctuation">]</span>
+commonName              <span class="token operator">=</span> localhost         <span class="token comment"># 服务器域名，由于在本地测试，设为 localhost 即可</span>
+stateOrProvinceName     <span class="token operator">=</span> JS                <span class="token comment"># 服务器所在省份</span>
+countryName             <span class="token operator">=</span> CN                <span class="token comment"># 服务器所在国家（仅限2字符）</span>
+emailAddress            <span class="token operator">=</span> example@qq.com    <span class="token comment"># 邮箱</span>
+organizationName        <span class="token operator">=</span> USTC              <span class="token comment"># 组织名</span>
+organizationalUnitName  <span class="token operator">=</span> SE                <span class="token comment"># 单位名</span>
+
+</code></pre> 
+<p>生成秘钥对和未经签名的服务器证书文件：</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 设置 openssl 环境变量，以服务器身份运行接下来的 openssl 命令</span>
+<span class="token function">export</span> OPENSSL_CONF<span class="token operator">=</span>~/https/server/server.cnf
+
+<span class="token comment"># 生成临时服务器秘钥和未经签名的证书文件</span>
+openssl req -newkey rsa:2048 -keyout tempkey.pem -keyform PEM -out tempreq.pem -outform PEM
+
+<span class="token comment"># 将临时私钥转换为未加密状态，也可以直接改名，这样就是加密状态，要输入密码才能启动服务器</span>
+openssl rsa <span class="token operator">&lt;</span> tempkey.pem <span class="token operator">&gt;</span> server_key.pem
+</code></pre> 
+<p>然后使用自建 CA 对服务器证书进行签名：</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 设置 openssl 环境变量，以 CA 身份运行接下来的 openssl 命令</span>
+<span class="token function">export</span> OPENSSL_CONF<span class="token operator">=</span>~/https/myCA/caconfig.cnf
+<span class="token comment"># 对服务器证书进行签名</span>
+openssl ca -in tempreq.pem -out server_crt.pem
+</code></pre> 
+<p>删除临时证书和私钥文件：</p> 
+<pre><code class="prism language-bash"><span class="token function">rm</span> tempkey.pem <span class="token operator">&amp;&amp;</span> <span class="token function">rm</span> tempreq.pem
+</code></pre> 
+<p>现在，自签名的服务器证书和私钥文件便产生了：</p> 
+<ul><li>server/server_crt.pem: 服务器证书</li><li>server/server_key.pem: 服务器私钥</li></ul> 
+<h3><a id="23_https_253"></a>2.3 使用https访问服务器</h3> 
+<p>以 apache 为例来配置 https 服务，首先安装 apache：</p> 
+<pre><code class="prism language-bash"><span class="token function">sudo</span> apt <span class="token function">install</span> apache2
+</code></pre> 
+<p>apache 默认是 http 访问的，我们需要配置它的 https 服务并启用，首先 cd 到 apache 的可用站点目录：</p> 
+<pre><code class="prism language-bash"><span class="token function">cd</span> /etc/apache2/sites-available/
+</code></pre> 
+<p>其中有一个默认的 ssl 站点 default-ssl.conf，我们不用新建站点，修改它里面的 ssl 配置并启用即可，修改这个文件需要 sudo 权限，打开后找到其中的证书和私钥设置，修改为自己的服务器证书和私钥文件位置：</p> 
+<pre><code class="prism language-bash">SSLCertificateFile  /home/<span class="token punctuation">{<!-- --></span>username<span class="token punctuation">}</span>/https/server/server_crt.pem
+SSLCertificateKeyFile /home/<span class="token punctuation">{<!-- --></span>username<span class="token punctuation">}</span>/https/server/server_key.pem
+</code></pre> 
+<p>然后重启 apache 服务器：</p> 
+<pre><code class="prism language-bash"><span class="token comment"># 启用默认 ssl 站点和 ssl 模块</span>
+a2ensite default-ssl.conf
+a2enmod ssl
+<span class="token comment"># 重启 apache 服务</span>
+systemctl restart apache2
+</code></pre> 
+<p>到这一步我们的 https 服务就搭建完成了，接下来在浏览器中手动导入自建 CA 的根证书，以 Chrome 为例，进入设置 -&gt; 隐私设置和安全性 -&gt; 安全 -&gt; 管理证书 -&gt; 授权机构，点击导入，选择 myCA 目录下的证书文件 cacert.pem，确定导入，然后就可以在列表中找到我们的 CA 根证书，看看证书信息：</p> 
+<p><img src="https://images2.imgbox.com/67/39/fMShUjkK_o.png" alt="rtq3Zt.png"></p> 
+<p>打开浏览器访问：https://localhost：</p> 
+<p><img src="https://images2.imgbox.com/aa/76/nedMe4uV_o.png" alt="rt7OQs.png"></p> 
+<p>https 访问成功，查看一下服务器下发的证书信息：</p> 
+<p><img src="https://images2.imgbox.com/7d/ba/iHfO8EKI_o.png" alt="rtHRtU.png"></p> 
+<p>手动搭建 https 服务完成。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/11ad5f0944d35c5ceb3c6c1ca83d9435/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">rgmii信号是否可以直接在mac和mac互联_电脑显示器无信号输入怎么解决</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/6334ae15ddf731eb4a3233b2ee494c68/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">python爬虫数据提取脚本</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

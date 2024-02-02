@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>接口怎么分批量同步数据_SaasS系统接口同步三方平台的优化方案 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="接口怎么分批量同步数据_SaasS系统接口同步三方平台的优化方案" />
+<meta property="og:description" content="本文主角是一个SaaS模式的“后台发货系统”，对接美团等O2O平台的订单。
+目的是将各销售渠道的订单统一管理，完成发货。
+既然统一发货，就少不了做统一的库存同步到销售渠道的机制。这样才能确保各平台数据互通，良性运营。
+本次案例就来自库存价格同步机制这块的优化。
+01. 产品模型整个业务模型大概是这样的：
+该图表自下往上，分别是：
+1)最下是“商户WMS”：作为真实的门店和门店商品库存、价格的来源。(因为是O2O，所以库存就来自实体门店)。
+2)图中间是SaaS系统的“商户商品后台”：生成平台&#43;线上门店&#43;商品维度的数据清单，以衔接下端WMS和上端平台后台的数据。
+3)最上面是O2O平台的后台：各渠道后台通过统一接口，统一在发货系统中对接，节约成本，数据互通。
+需注意的是：由于是O2O，同一商品，在不同平台的不同门店，价格可能不同。所以若有n个实体店，m个商品的话，那么在每个平台，商户最多就要维护n*m条数据。
+若w个销售渠道(平台)，那么最多就要维护n*m*w条数据。这个客观现实就为本次事件埋下伏笔。
+02. 核心功能：同步库存、价格给第三方平台
+功能基于模型，所以正向功能就是：库存价格变化，则同步到对应的各个平台。
+触发条件除了WMS增量自动同步之外，还需要手动触发同步的机制。
+比如，美团打折活动结束，就要触发同步WMS的价格进行恢复。若此时不具有触发增量的条件，就需要手动触发。
+于是增加了批量、单个的功能。
+至此，触发同步的条件就确定了：单个同步、批量同步、增量自动同步。
+功能流程如下图：
+03. 技术实现机制
+总体机制：不同平台的商品，从WMS搜集待同步的数据，然后集中后发车完成同步。
+第一期的方案是采用“同步池”，汇集所有的同步请求。即：将来自于WMS的定时增量推送、页面批量操作、单个操作的同步请求数据，集中在同步池中。
+再按照各自的去向，寻找对应的平台接口，此时需服从各平台的限流规则。
+限流规则：就是平台限制接口被请求的次数。比如美团限制每天只支持10万次的同步请求。
+整理后的技术实现流程图：
+04. 出现的问题
+主要有三个问题表现：同步池中的数据量会很大；经常量丢数据导致同步失败；用户等待时间过长。
+1)数量大的原因：
+基数大 由于各个平台和门店按照每个商户有200个连锁店，每个商户有2000个商品，那么就又有20万条基础数据。
+若同时使用3个平台，最大就有60万基础数据。
+触发次数多 假设不同平台和门店在正常销售，那么WMS的库存就会不停变化，于是就会不停地增量推送数据，请求同步到平台。
+同时，商户又在单个或批量进行同步。商户为确保万无一失还会选择重复操作同步。
+2)丢数据的原因：
+三方平台限流，提交过多的数据就被限制不执行。若平台不反馈失败数据，那么失败后我们也不知道遗漏了哪些。 数据量过大，占用线程挤满，资源不够。 3)执行时间太久的原因：
+目前平台的限流大致都是100条/秒，一个门店按照2000条商品，最快10秒完成，正常情况下20w商品数据需要近一小时。
+总结以上，根源是数据量过大的问题。监控到2天有300w&#43;的同步任务产生。
+这就导致请求失败过多，用户继续重新同步，恶性循环，导致同步任务可能会很长一段时间无法降低，任务积压。不丢都难。
+05. 优化方案
+1)降低批量操作的频次
+将同步库存和同步价格按钮分开 最初，同步库存和价格的按钮是在一起的，即。
+这就导致每点击一下，就要同时同步库存和价格到三方平台的后台。
+而事实上，价格的变更很少见，而库存的同步相对比较频繁(任何一个平台的任何一个门店产生订单，都会引发异动)。
+如果不拆开，那么每次的请求都双份的(注：平台接口是支持拆开的)。
+限制频繁操作同步按钮 同步库存货价格的按钮点击之后，若上个任务没执行完，则按钮不允许再次操作。
+表面上看，若不做限制，貌似让用户随时用着爽，但实际上根本爽不起来。
+2)对同步池中的数据进行过滤
+只取时间戳最新的执行 根据唯一键，对重复提交进来的数据进行去重。
+比如手动点击同步，系统又自动增量同步，那么这两次请求只取最后这次的。
+对比上次同步成功的数值，和本次提交的同步数值 如果数值没变化，那么同步过去也是无意义的，可以直接跳过这条任务。
+比如上次已经同步过，且成功了，那么这次就算手动触发了同步，一旦对比到当前的价格和上次同步的价格是相同的，那就没必要再次同步了。
+3)增加补推机制
+在同步给平台失败的场景比较多。
+若是数据本身不具备同步的条件，例如缺少默写必须信息。或者不满足平台的约束条件，比如平台无此数据。那么只能返回原因，告诉用户处理后再试。
+若是上述两种条件都满足，但是平台因为限流，导致部分数据遗留下来的话，理论上持续补推的话，总会完结的。
+但是，考虑到后面还有很多数据在等待，所以这里不能一直补推。
+最终的方案就是间隔1s重新插入补推2次。
+补推还不成功的，就停止补推，并汇报原因，便用户自己再手动同步。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/dd2132063336ee41fcda3c1a8106537e/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-12-08T19:30:46+08:00" />
+<meta property="article:modified_time" content="2020-12-08T19:30:46+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">接口怎么分批量同步数据_SaasS系统接口同步三方平台的优化方案</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div style="font-size:16px;"> 
+ <p>本文主角是一个SaaS模式的“后台发货系统”，对接美团等O2O平台的订单。</p> 
+ <p>目的是将各销售渠道的<strong>订单统一管理，完成发货</strong>。</p> 
+ <p>既然统一发货，就少不了做统一的<strong>库存同步到销售渠道</strong>的机制。这样才能确保各平台数据互通，良性运营。</p> 
+ <p>本次案例就来自库存价格同步机制这块的优化。</p> 
+ <p><strong>01. 产品模型</strong>整个业务模型大概是这样的：</p> 
+ <div class="pgc-img"> 
+  <img src="https://images2.imgbox.com/d6/5d/Gy9S2QXU_o.png" alt="376def07b195849541aaa51c7f6e6c8f.png"> 
+ </div> 
+ <p>该图表自下往上，分别是：</p> 
+ <p><strong>1)最下是“商户WMS”：</strong>作为真实的门店和门店商品库存、价格的来源。(因为是O2O，所以库存就来自实体门店)。</p> 
+ <p><strong>2)图中间是SaaS系统的“商户商品后台”：</strong>生成平台+线上门店+商品维度的数据清单，以衔接下端WMS和上端平台后台的数据。</p> 
+ <p><strong>3)最上面是O2O平台的后台：</strong>各渠道后台通过统一接口，统一在发货系统中对接，节约成本，数据互通。</p> 
+ <p><strong>需注意的是</strong>：由于是O2O，同一商品，在不同平台的不同门店，价格可能不同。所以若有n个实体店，m个商品的话，那么在每个平台，商户最多就要维护n*m条数据。</p> 
+ <p>若w个销售渠道(平台)，那么最多就要维护n*m*w条数据。这个客观现实就为本次事件埋下伏笔。</p> 
+ <p><strong>02. 核心功能：同步库存、价格给第三方平台</strong></p> 
+ <p>功能基于模型，所以正向功能就是：库存价格变化，则同步到对应的各个平台。</p> 
+ <p>触发条件除了WMS增量自动同步之外，还需要手动触发同步的机制。</p> 
+ <p>比如，美团打折活动结束，就要触发同步WMS的价格进行恢复。若此时不具有触发增量的条件，就需要手动触发。</p> 
+ <p>于是增加了批量、单个的功能。</p> 
+ <p>至此，触发同步的条件就确定了：单个同步、批量同步、增量自动同步。</p> 
+ <p>功能流程如下图：</p> 
+ <div class="pgc-img"> 
+  <img src="https://images2.imgbox.com/3d/3b/bshHOjA0_o.png" alt="a83ac5bcd5dcfbfca80aae26190d80f0.png"> 
+ </div> 
+ <p><strong>03. 技术实现机制</strong></p> 
+ <p>总体机制：不同平台的商品，从WMS搜集待同步的数据，然后集中后发车完成同步。</p> 
+ <p>第一期的方案是采用“同步池”，汇集所有的同步请求。即：将来自于WMS的定时增量推送、页面批量操作、单个操作的同步请求数据，集中在同步池中。</p> 
+ <p>再按照各自的去向，寻找对应的平台接口，此时需服从各平台的限流规则。</p> 
+ <blockquote> 
+  <p>限流规则：就是平台限制接口被请求的次数。比如美团限制每天只支持10万次的同步请求。</p> 
+ </blockquote> 
+ <p>整理后的技术实现流程图：</p> 
+ <div class="pgc-img"> 
+  <img src="https://images2.imgbox.com/d9/42/pctds9BI_o.png" alt="130c9a6d7a8adb1562e56bb4b865e728.png"> 
+ </div> 
+ <p><strong>04. 出现的问题</strong></p> 
+ <p>主要有三个问题表现：同步池中的数据量会很大；经常量丢数据导致同步失败；用户等待时间过长。</p> 
+ <p><strong>1)数量大的原因：</strong></p> 
+ <ul><li>基数大</li></ul> 
+ <p>由于各个平台和门店按照每个商户有200个连锁店，每个商户有2000个商品，那么就又有20万条基础数据。</p> 
+ <p>若同时使用3个平台，最大就有60万基础数据。</p> 
+ <ul><li>触发次数多</li></ul> 
+ <p>假设不同平台和门店在正常销售，那么WMS的库存就会不停变化，于是就会不停地增量推送数据，请求同步到平台。</p> 
+ <p>同时，商户又在单个或批量进行同步。商户为确保万无一失还会选择重复操作同步。</p> 
+ <p><strong>2)丢数据的原因：</strong></p> 
+ <ul><li>三方平台限流，提交过多的数据就被限制不执行。若平台不反馈失败数据，那么失败后我们也不知道遗漏了哪些。</li></ul> 
+ <ul><li>数据量过大，占用线程挤满，资源不够。</li></ul> 
+ <p><strong>3)执行时间太久的原因：</strong></p> 
+ <p>目前平台的限流大致都是100条/秒，一个门店按照2000条商品，最快10秒完成，正常情况下20w商品数据需要近一小时。</p> 
+ <p>总结以上，根源是数据量过大的问题。监控到2天有300w+的同步任务产生。</p> 
+ <p>这就导致请求失败过多，用户继续重新同步，恶性循环，导致同步任务可能会很长一段时间无法降低，任务积压。不丢都难。</p> 
+ <p><strong>05. 优化方案</strong></p> 
+ <p><strong>1)降低批量操作的频次</strong></p> 
+ <ul><li><strong>将同步库存和同步价格按钮分开</strong></li></ul> 
+ <p>最初，同步库存和价格的按钮是在一起的，即。</p> 
+ <p>这就导致每点击一下，就要同时同步库存和价格到三方平台的后台。</p> 
+ <p>而事实上，价格的变更很少见，而库存的同步相对比较频繁(任何一个平台的任何一个门店产生订单，都会引发异动)。</p> 
+ <p>如果不拆开，那么每次的请求都双份的(注：平台接口是支持拆开的)。</p> 
+ <ul><li>限制频繁操作同步按钮</li></ul> 
+ <p>同步库存货价格的按钮点击之后，若上个任务没执行完，则按钮不允许再次操作。</p> 
+ <p>表面上看，若不做限制，貌似让用户随时用着爽，但实际上根本爽不起来。</p> 
+ <p><strong>2)对同步池中的数据进行过滤</strong></p> 
+ <ul><li>只取时间戳最新的执行</li></ul> 
+ <p>根据唯一键，对重复提交进来的数据进行去重。</p> 
+ <p>比如手动点击同步，系统又自动增量同步，那么这两次请求只取最后这次的。</p> 
+ <ul><li>对比上次同步成功的数值，和本次提交的同步数值</li></ul> 
+ <p>如果数值没变化，那么同步过去也是无意义的，可以直接跳过这条任务。</p> 
+ <p>比如上次已经同步过，且成功了，那么这次就算手动触发了同步，一旦对比到当前的价格和上次同步的价格是相同的，那就没必要再次同步了。</p> 
+ <p><strong>3)增加补推机制</strong><br>在同步给平台失败的场景比较多。</p> 
+ <p>若是数据本身不具备同步的条件，例如缺少默写必须信息。或者不满足平台的约束条件，比如平台无此数据。那么只能返回原因，告诉用户处理后再试。</p> 
+ <p>若是上述两种条件都满足，但是平台因为限流，导致部分数据遗留下来的话，理论上持续补推的话，总会完结的。</p> 
+ <p>但是，考虑到后面还有很多数据在等待，所以这里不能一直补推。</p> 
+ <p>最终的方案就是间隔1s重新插入补推2次。</p> 
+ <p>补推还不成功的，就停止补推，并汇报原因，便用户自己再手动同步。</p> 
+ <p><strong>4)将同步池去掉，改为缓存池</strong></p> 
+ <p>同步池其实是一张数据表。数据量攀升很快，需定期清理，也比较耗费时间。每次执行同步都调用池中数据，也耗性能。</p> 
+ <p>现在改为从缓存中直接执行，动态线程。好处就是提升处理速度。</p> 
+ <p><strong>5)增加同步状态的展示和同步日志</strong></p> 
+ <p>在页面对数据展示状态：正常、失败、异常<br>点击状态，展示同步日志。方便用户自行发现异常。</p> 
+ <p><strong>06. 总结</strong></p> 
+ <p><strong>1)本次优化针对的是第三方数据同步的问题</strong><br>问题的根源在于数据量大，且三方平台限流。解决方案要点：</p> 
+ <ul><li>第一：减少来源，重点是前端的操作入口分离，并限制操作频率。</li><li>第二：对待处理数据进行清洗，去重、对比、改变存储方式等。</li><li>第三：增加失败补偿机制和日志。</li></ul> 
+ <p><strong>2)解决思路模型</strong><br>开源节流的思路：敲定场景、控制入口，清洗数据，处理并发，并输出结果。</p> 
+ <p><strong>敲定场景</strong>：场景是无法无视的，场景确定，是做正确事的前提。当确定必须解决这个问题的时候，就可以静下心找方案。</p> 
+ <p><strong>控制入口</strong>：因为数据量大，所以先从来源上做增益。</p> 
+ <p><strong>清洗数据：</strong>同样是为了摆脱无效数据，尽可能降低冗余。</p> 
+ <p><strong>处理并发：</strong>通过对比、时间戳等，滤掉无效数据。</p> 
+ <p><strong>输出日志：</strong>让用户有迹可循，自行追溯。</p> 
+ <p><strong>3)这类问题初期很难预测</strong></p> 
+ <p>调研需求的时候，很难估计到数据的真实生态，以及第三方接口的各种限制。</p> 
+ <p>因此只能在生产中发现和敲定问题。</p> 
+ <p><strong>4)产品经理需了解技术机制</strong></p> 
+ <p>这类问题属于性能问题，本质属于开发主导的范畴，但产品经理需了解这些机制。才能初期有所防备，后期及时处理。</p> 
+ <p>作者：赵世哲 互联网+产品经理，案例拆解，知识画像。《后端产品经理宝典》作者。医药、PMP、跨境电商领域。</p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/26640149525ebe223480b8ba4ce5d979/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Centos7/8 Oracle11g R2 图形化部署</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/53908c1fcd2be94828bf26d0f61459be/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">MinGW在线安装包下载失败的解决办法</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

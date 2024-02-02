@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>3-OAuth2登录流程分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="3-OAuth2登录流程分析" />
+<meta property="og:description" content="在上一篇胖哥和大家共同体验了OAuth2登录流程，直观感受了OAuth2，本篇我们来共同分析一下OAuth2登录的流程，本次分析将严重依赖trace日志。
+流程分析 ①访问被拒绝 /foo/hello发起请求后会经过一系列过滤器链的过滤触发访问被拒绝，核心的日志如下：
+进入HTTP资源安全处理过滤器FilterSecurityInterceptor。发现本次/foo/hello请求是一个匿名请求。而实际上/foo/hello需要非匿名认证。访问决策投票器WebExpressionVoter做出了拒绝授权投票（Voted to deny authorization）。在基于肯定（AffirmativeBased）的访问策略下本次请求授权失败，抛出AccessDeniedException异常。异常响应过滤器ExceptionTranslationFilter对步骤⑤抛出的异常进行处理。 ②访问拒绝处理 ExceptionTranslationFilter接收到AccessDeniedException异常后会交给handleAccessDeniedException方法处理，该方法的逻辑如图所示:
+我们所涉及的逻辑只会有到步骤④，其逻辑为：
+上面的逻辑会跳转到登录入口（如果有两个provider的话）：
+③发起OAuth2登录请求 我们点击gitee选项会向我们的后端服务器发起/oauth2/authorization/gitee请求：
+GET /oauth2/authorization/gitee HTTP/1.1 Host: localhost:8082 对应的日志为：
+从日志上看请求被OAuth2AuthorizationRequestRedirectFilter拦截，重定向到了Gitee授权服务器登录页面。
+重定向的请求为：
+GET /oauth/authorize?response_type=code&amp;client_id=40f6a4018837&amp;scope=user_info&amp;state=j_y78k1M4A&amp;redirect_uri=http://localhost:8082/login/oauth2/code/gitee HTTP/1.1 Host: gitee.com 涉及的参数有：response_type、client_id、scope、state、redirect_uri，我们先不管这些参数是干嘛的，有个印象就好。
+另外这个请求端点正好是配置中的authorization-uri配置项：
+spring: security: oauth2: client: provider: gitee: authorization-uri: https://gitee.com/oauth/authorize OAuth2AuthorizationRequestRedirectFilter的作用就很清晰了：
+拦截/oauth2/authorization/{registrationId}，这里registrationId=gitee。组装registrationId对应provider的authorization-uri并发起重定向。 关于OAuth2AuthorizationRequestRedirectFilter的细节会在后面进行专门分析。
+④用户授权 跳转到Gitee登录页面之后，后面的流程可以从浏览器记录中分析出来。
+① 点击login页面的gitee按钮，客户端服务器302重定向到授权服务器发起授权请求。② 授权服务器同意授权后，又302 重定向到了配置中的redirect_uri并附带一个code和state参数。③ redirect_uri发起了请求。 安全起见，redirect_uri应当在授权服务器对应的客户端信息中注册，否则将被视为非法URI。
+redirect_uri请求我简化成HTTP脚本以方便加深印象：
+GET /login/oauth2/code/gitee?code=a6e4cac6a7e&amp;state=cR4FABTHbHj4ILZ HTTP/1.1 Host: localhost:8082 Referer: https://gitee.com/login 以下是授权服务器（gitee）302重定向/login/oauth2/code/gitee后的日志：
+大致步骤为：
+redirect_uri请求被过滤器OAuth2LoginAuthenticationFilter拦截处理。向gitee发出/oauth/token请求，该端点对应配置文件中的token-uri。/oauth/token请求的响应被封装为OAuth2AccessTokenResponse对象实例。向gitee发出/v5/user请求，该端点对应配置文件中的user-info-uri。/v5/user请求的响应被封装为Map&lt;String,Object&gt;。根据某些策略对Session会话进行了处理（先了解即可）将OAuth2AuthenticationToken存储到SecurityContextHolder中。最后重定向到/foo/hello。 须知 这个流程并不是标准的OAuth2流程，OAuth2中并不涉及用户登录认证，该登录认证是建立在信任Gitee用户的基础上做的认证，这一点要明白。
+关于授权码的详细规范请参阅4.1 Authorization Code Grant，如果遇到疑难杂症，请联系我。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/989dfb58c89f298f596649c7e5c99de1/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-03-16T21:45:12+08:00" />
+<meta property="article:modified_time" content="2022-03-16T21:45:12+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">3-OAuth2登录流程分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>在上一篇胖哥和大家共同体验了<strong>OAuth2</strong>登录流程，直观感受了<strong>OAuth2</strong>，本篇我们来共同分析一下<strong>OAuth2</strong>登录的流程，本次分析将严重依赖trace日志。</p> 
+<h4><a id="_2"></a>流程分析</h4> 
+<h5><a id="_4"></a>①访问被拒绝</h5> 
+<p><code>/foo/hello</code>发起请求后会经过一系列过滤器链的过滤触发访问被拒绝，核心的日志如下：<br> <img src="https://images2.imgbox.com/11/4f/oUtZlemN_o.png" alt="在这里插入图片描述"></p> 
+<ol><li>进入HTTP资源安全处理过滤器<code>FilterSecurityInterceptor</code>。</li><li>发现本次<code>/foo/hello</code>请求是一个匿名请求。</li><li>而实际上<code>/foo/hello</code>需要非匿名认证。</li><li>访问决策投票器<code>WebExpressionVoter</code>做出了拒绝授权投票（Voted to deny authorization）。</li><li>在基于肯定（AffirmativeBased）的访问策略下本次请求授权失败，抛出<code>AccessDeniedException</code>异常。</li><li>异常响应过滤器<code>ExceptionTranslationFilter</code>对步骤⑤抛出的异常进行处理。</li></ol> 
+<h5><a id="_15"></a>②访问拒绝处理</h5> 
+<p><code>ExceptionTranslationFilter</code>接收到<code>AccessDeniedException</code>异常后会交给<code>handleAccessDeniedException</code>方法处理，该方法的逻辑如图所示:<br> <img src="https://images2.imgbox.com/d5/bc/nwuvnVjF_o.png" alt="在这里插入图片描述"><br> 我们所涉及的逻辑只会有到步骤④，其逻辑为：<br> <img src="https://images2.imgbox.com/d6/09/wIGh5V5f_o.png" alt="在这里插入图片描述"><br> 上面的逻辑会跳转到登录入口（如果有两个provider的话）：<br> <img src="https://images2.imgbox.com/5a/9a/xW4LG0nk_o.png" alt="[外链图片转存失败,源站可能有防盗链机制,建议将图片保存下来直接上传(img-NmnERpOg-1647437855521)(.\img\1644545563269.png)]"></p> 
+<h5><a id="OAuth2_23"></a>③发起OAuth2登录请求</h5> 
+<p>我们点击<strong>gitee</strong>选项会向我们的后端服务器发起<code>/oauth2/authorization/gitee</code>请求：</p> 
+<pre><code class="prism language-http">GET /oauth2/authorization/gitee HTTP/1.1
+Host: localhost:8082
+</code></pre> 
+<p>对应的日志为：<br> <img src="https://images2.imgbox.com/4e/53/LzKeyWtX_o.png" alt="在这里插入图片描述"><br> 从日志上看请求被<code>OAuth2AuthorizationRequestRedirectFilter</code>拦截，重定向到了<strong>Gitee</strong>授权服务器登录页面。</p> 
+<p>重定向的请求为：</p> 
+<pre><code class="prism language-http">GET /oauth/authorize?response_type=code&amp;client_id=40f6a4018837&amp;scope=user_info&amp;state=j_y78k1M4A&amp;redirect_uri=http://localhost:8082/login/oauth2/code/gitee HTTP/1.1
+Host: gitee.com
+</code></pre> 
+<p>涉及的参数有：<code>response_type</code>、<code>client_id</code>、<code>scope</code>、<code>state</code>、<code>redirect_uri</code>，我们先不管这些参数是干嘛的，有个印象就好。</p> 
+<p>另外这个请求端点正好是配置中的<code>authorization-uri</code>配置项：</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">spring</span><span class="token punctuation">:</span>
+  <span class="token key atrule">security</span><span class="token punctuation">:</span>
+    <span class="token key atrule">oauth2</span><span class="token punctuation">:</span>
+      <span class="token key atrule">client</span><span class="token punctuation">:</span>
+        <span class="token key atrule">provider</span><span class="token punctuation">:</span>
+          <span class="token key atrule">gitee</span><span class="token punctuation">:</span>
+            <span class="token key atrule">authorization-uri</span><span class="token punctuation">:</span> https<span class="token punctuation">:</span>//gitee.com/oauth/authorize      
+</code></pre> 
+<p><code>OAuth2AuthorizationRequestRedirectFilter</code>的作用就很清晰了：</p> 
+<ul><li>拦截<code>/oauth2/authorization/{registrationId}</code>，这里<code>registrationId=gitee</code>。</li><li>组装<code>registrationId</code>对应<code>provider</code>的<code>authorization-uri</code>并发起重定向。</li></ul> 
+<blockquote> 
+ <p>关于<code>OAuth2AuthorizationRequestRedirectFilter</code>的细节会在后面进行专门分析。</p> 
+</blockquote> 
+<h5><a id="_64"></a>④用户授权</h5> 
+<p>跳转到<strong>Gitee</strong>登录页面之后，后面的流程可以从浏览器记录中分析出来。<br> <img src="https://images2.imgbox.com/1a/e0/Nty7kh9k_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>① 点击<strong>login</strong>页面的<strong>gitee</strong>按钮，客户端服务器<code>302</code>重定向到授权服务器发起授权请求。</li><li>② 授权服务器同意授权后，又<code>302</code> 重定向到了配置中的<code>redirect_uri</code>并附带一个<code>code</code>和<code>state</code>参数。</li><li>③ <code>redirect_uri</code>发起了请求。</li></ul> 
+<blockquote> 
+ <p>安全起见，<code>redirect_uri</code>应当在授权服务器对应的客户端信息中注册，否则将被视为非法<strong>URI</strong>。</p> 
+</blockquote> 
+<p><code>redirect_uri</code>请求我简化成<strong>HTTP</strong>脚本以方便加深印象：</p> 
+<pre><code class="prism language-http">GET /login/oauth2/code/gitee?code=a6e4cac6a7e&amp;state=cR4FABTHbHj4ILZ HTTP/1.1
+Host: localhost:8082
+Referer: https://gitee.com/login
+</code></pre> 
+<p>以下是授权服务器（gitee）<code>302</code>重定向<code>/login/oauth2/code/gitee</code>后的日志：<br> <img src="https://images2.imgbox.com/39/f0/AYigoi72_o.png" alt="在这里插入图片描述"><br> 大致步骤为：</p> 
+<ol><li><code>redirect_uri</code>请求被过滤器<code>OAuth2LoginAuthenticationFilter</code>拦截处理。</li><li>向gitee发出<code>/oauth/token</code>请求，该端点对应配置文件中的<code>token-uri</code>。</li><li><code>/oauth/token</code>请求的响应被封装为<code>OAuth2AccessTokenResponse</code>对象实例。</li><li>向gitee发出<code>/v5/user</code>请求，该端点对应配置文件中的<code>user-info-uri</code>。</li><li><code>/v5/user</code>请求的响应被封装为<code>Map&lt;String,Object&gt;</code>。</li><li>根据某些策略对Session会话进行了处理（先了解即可）</li><li>将<code>OAuth2AuthenticationToken</code>存储到<code>SecurityContextHolder</code>中。</li><li>最后重定向到<code>/foo/hello</code>。</li></ol> 
+<h4><a id="_95"></a>须知</h4> 
+<p>这个流程并不是标准的<strong>OAuth2</strong>流程，<strong>OAuth2</strong>中并不涉及用户登录认证，该登录认证是建立在信任<strong>Gitee</strong>用户的基础上做的认证，这一点要明白。</p> 
+<blockquote> 
+ <p>关于授权码的详细规范请参阅<a href="https://datatracker.ietf.org/doc/html/rfc6749#section-4.1" rel="nofollow">4.1 Authorization Code Grant</a>，如果遇到疑难杂症，请<a href="https://asset.felord.cn/blog/20210224102609.png" rel="nofollow">联系我</a>。</p> 
+</blockquote>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/fd6085b5be8803a14bc786e5c87915f8/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">redis中的AKF理论和CAP理论详解</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/59a625e1877085e028a394d445bd665a/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【mac电脑更新就这样了】Can‘t update: not a git repository. mac安装git 和 homebrew</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

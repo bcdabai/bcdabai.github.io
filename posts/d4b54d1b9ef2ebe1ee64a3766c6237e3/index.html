@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>第四篇：k8s之节点kubelet预留资源配置 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="第四篇：k8s之节点kubelet预留资源配置" />
+<meta property="og:description" content="第四篇：k8s之kubelet预留资源配置 1 前言2 预留资源Kube-reservedSystem-reservedEviction Thresholds实施节点可分配约束 3 Pod优先级4 生产应用配置文件重启kubelet服务查看节点资源 1 前言 最近k8s在使用过程中遇到这样一个问题
+由于Pod没有对内存及CPU进行限制，导致Pod在运行过程中所需的内存超过了节点本身的内存（OOM），从而导致节点崩溃，使得运行在该节点上的所有Pod都失败了
+为了解决这个问题以及提高节点的稳定性，综合k8s的一些特性，方案如下
+每个节点为系统守护进程预留计算资源(CPU、内存、磁盘空间)Pod驱逐：节点资源到达一定使用量，开始驱逐 pod每个Pod需指定所需资源 2 预留资源 Kubernetes 的节点可以按照 Capacity 调度。默认情况下 pod 能够使用节点全部可用容量。 这是个问题，因为节点自己通常运行了不少驱动 OS 和 Kubernetes 的系统守护进程。 除非为这些系统守护进程留出资源，否则它们将与 Pod 争夺资源并导致节点资源短缺问题。
+kubelet 公开了一个名为 ‘Node Allocatable’ 的特性，有助于为系统守护进程预留计算资源。 Kubernetes 推荐集群管理员按照每个节点上的工作负载密度配置 ‘Node Allocatable’。
+Kubernetes 节点上的 ‘Allocatable’ 被定义为 Pod 可用计算资源量。 调度器不会超额申请 ‘Allocatable’。 目前支持 ‘CPU’、‘memory’ 和 ‘ephemeral-storage’ 这几个参数。
+可分配的节点暴露为 API 中 v1.Node 对象的一部分，也是 CLI 中 kubectl describe node 的一部分。
+在 kubelet 中，可以为两类系统守护进程预留资源。
+Node Capacity：Node的所有硬件资源" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/d4b54d1b9ef2ebe1ee64a3766c6237e3/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-28T18:01:39+08:00" />
+<meta property="article:modified_time" content="2023-07-28T18:01:39+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">第四篇：k8s之节点kubelet预留资源配置</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>第四篇：k8s之kubelet预留资源配置</h4> 
+ <ul><li><a href="#1___2" rel="nofollow">1 前言</a></li><li><a href="#2__14" rel="nofollow">2 预留资源</a></li><li><ul><li><a href="#Kubereserved_46" rel="nofollow">Kube-reserved</a></li><li><a href="#Systemreserved_70" rel="nofollow">System-reserved</a></li><li><a href="#Eviction_Thresholds_93" rel="nofollow">Eviction Thresholds</a></li><li><a href="#_111" rel="nofollow">实施节点可分配约束</a></li></ul> 
+  </li><li><a href="#3_Pod_134" rel="nofollow">3 Pod优先级</a></li><li><a href="#4__171" rel="nofollow">4 生产应用</a></li><li><ul><li><a href="#_173" rel="nofollow">配置文件</a></li><li><a href="#kubelet_198" rel="nofollow">重启kubelet服务</a></li><li><a href="#_204" rel="nofollow">查看节点资源</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h2><a id="1___2"></a>1 前言</h2> 
+<p>最近k8s在使用过程中遇到这样一个问题</p> 
+<p><strong>由于Pod没有对内存及CPU进行限制，导致Pod在运行过程中所需的内存超过了节点本身的内存（OOM），从而导致节点崩溃，使得运行在该节点上的所有Pod都失败了</strong></p> 
+<p>为了解决这个问题以及提高节点的稳定性，综合k8s的一些特性，方案如下</p> 
+<ul><li>每个节点为系统守护进程预留计算资源(CPU、内存、磁盘空间)</li><li>Pod驱逐：节点资源到达一定使用量，开始驱逐 pod</li><li>每个Pod需指定所需资源</li></ul> 
+<h2><a id="2__14"></a>2 预留资源</h2> 
+<p>Kubernetes 的节点可以按照 <code>Capacity</code> 调度。默认情况下 pod 能够使用节点全部可用容量。 这是个问题，因为节点自己通常运行了不少驱动 OS 和 Kubernetes 的系统守护进程。 除非为这些系统守护进程留出资源，否则它们将与 Pod 争夺资源并导致节点资源短缺问题。</p> 
+<p><code>kubelet</code> 公开了一个名为 ‘Node Allocatable’ 的特性，有助于为系统守护进程预留计算资源。 Kubernetes 推荐集群管理员按照每个节点上的工作负载密度配置 ‘Node Allocatable’。</p> 
+<p><img src="https://images2.imgbox.com/ca/a7/wTUDGWjR_o.png" alt="在这里插入图片描述"></p> 
+<p>Kubernetes 节点上的 ‘Allocatable’ 被定义为 Pod 可用计算资源量。 调度器不会超额申请 ‘Allocatable’。 目前支持 ‘CPU’、‘memory’ 和 ‘ephemeral-storage’ 这几个参数。</p> 
+<p>可分配的节点暴露为 API 中 <code>v1.Node</code> 对象的一部分，也是 CLI 中 <code>kubectl describe node</code> 的一部分。</p> 
+<p>在 <code>kubelet</code> 中，可以为两类系统守护进程预留资源。</p> 
+<p><strong>Node Capacity：Node的所有硬件资源</strong></p> 
+<table><thead><tr><th>Node Capacity</th><th>说明</th></tr></thead><tbody><tr><td>kube-reserved</td><td>给kube组件预留的资源：kubelet,kube-proxy以及docker等</td></tr><tr><td>system-reserved</td><td>给system进程预留的资源</td></tr><tr><td>eviction-threshold</td><td>kubelet eviction的阈值设定</td></tr><tr><td>allocatable(available for pods)</td><td>Allocatable 被定义为 pod 可用计算资源量。调度器不会超额申请 Allocatable。<br>目前支持 CPU, memory 和 storage 这几个参数<br>（保证Node上所有Pods的request resource不超过Allocatable）</td></tr></tbody></table> 
+<p>allocatable的值即对应 describe node 时看到的allocatable容量，pod 调度的上限</p> 
+<p>计算公式：节点上可配置值 = 总量 - 预留值 - 驱逐阈值</p> 
+<pre><code class="prism language-bash">Allocatable <span class="token operator">=</span> Capacity - Reserved<span class="token punctuation">(</span>kube+system<span class="token punctuation">)</span> - Eviction Threshold
+</code></pre> 
+<h3><a id="Kubereserved_46"></a>Kube-reserved</h3> 
+<ul><li><strong>Kubelet 标志</strong> ：<code>--kube-reserved=[cpu=100m][,][memory=100Mi][,][ephemeral-storage=1Gi][,][pid=1000]</code></li><li><strong>Kubelet 标志</strong> ：<code>--kube-reserved-cgroup=</code></li></ul> 
+<p><code>kube-reserved</code> 用来给诸如 <code>kubelet</code>、容器运行时、节点问题监测器等 Kubernetes 系统守护进程记述其资源预留值。 该配置并非用来给以 Pod 形式运行的系统守护进程预留资源。<code>kube-reserved</code> 通常是节点上 <code>Pod 密度</code> 的函数。</p> 
+<p>除了 <code>cpu</code>、<code>内存</code> 和 <code>ephemeral-storage</code> 之外，<code>pid</code> 可用来指定为 Kubernetes 系统守护进程预留指定数量的进程 ID。</p> 
+<p><strong>设置方式</strong></p> 
+<ol><li> <p>systemctl status kubelet 查看 kubelet启动的配置文件路径：–kubeconfig=/etc/kubernetes/kubelet.conf --config=/var/lib/kubelet/config.yaml</p> </li><li> <p>编辑/var/lib/kubelet/config.yaml，添加如下内容</p> <pre><code class="prism language-yaml"><span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> kubelet.config.k8s.io/v1beta1
+<span class="token punctuation">...</span>
+<span class="token key atrule">kubeReserved</span><span class="token punctuation">:</span>  <span class="token comment"># 配置 kube 资源预留, 根据实际情况进行设置</span>
+  <span class="token key atrule">cpu</span><span class="token punctuation">:</span> 1000m
+  <span class="token key atrule">memory</span><span class="token punctuation">:</span> 5Gi
+  <span class="token key atrule">ephemeral-storage</span><span class="token punctuation">:</span> 5Gi
+</code></pre> </li></ol> 
+<h3><a id="Systemreserved_70"></a>System-reserved</h3> 
+<ul><li><strong>Kubelet 标志</strong> ：<code>--system-reserved=[cpu=100m][,][memory=100Mi][,][ephemeral-storage=1Gi][,][pid=1000]</code></li><li><strong>Kubelet 标志</strong> ：<code>--system-reserved-cgroup=</code></li></ul> 
+<p><code>system-reserved</code> 用于为诸如 <code>sshd</code>、<code>udev</code> 等系统守护进程记述其资源预留值。 <code>system-reserved</code> 也应该为 <code>kernel</code> 预留 <code>内存</code>，因为目前 <code>kernel</code> 使用的内存并不记在 Kubernetes 的 Pod 上。 同时还推荐为用户登录会话预留资源（systemd 体系中的 <code>user.slice</code>）。</p> 
+<p>除了 <code>cpu</code>、<code>内存</code> 和 <code>ephemeral-storage</code> 之外，<code>pid</code> 可用来指定为 Kubernetes 系统守护进程预留指定数量的进程 ID。</p> 
+<p><strong>设置方式</strong></p> 
+<p>编辑/var/lib/kubelet/config.yaml，添加如下内容</p> 
+<pre><code class="prism language-bash">apiVersion: kubelet.config.k8s.io/v1beta1
+<span class="token punctuation">..</span>.
+systemReserved:  <span class="token comment"># 配置系统资源预留</span>
+  cpu: 1000m
+  memory: 10Gi
+  ephemeral-storage: 10Gi
+
+</code></pre> 
+<h3><a id="Eviction_Thresholds_93"></a>Eviction Thresholds</h3> 
+<p><strong>Kubelet 标志</strong> ：<code>--eviction-hard=[memory.available&lt;500Mi]</code></p> 
+<p>节点级别的内存压力将导致系统内存不足，这将影响到整个节点及其上运行的所有 Pod。 节点可以暂时离线直到内存已经回收为止。为了防止系统内存不足（或减少系统内存不足的可能性）， kubelet 提供了资源不足管理。 驱逐操作只支持 <code>memory</code> 和 <code>ephemeral-storage</code>。 通过 <code>--eviction-hard</code> 标志预留一些内存后，当节点上的可用内存降至预留值以下时， <code>kubelet</code> 将尝试驱逐 Pod。 如果节点上不存在系统守护进程，Pod 将不能使用超过 <code>capacity-eviction-hard</code> 所指定的资源量。 因此，为驱逐而预留的资源对 Pod 是不可用的。</p> 
+<p><strong>设置方式</strong></p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> kubelet.config.k8s.io/v1beta1
+<span class="token punctuation">...</span>
+<span class="token key atrule">evictionHard</span><span class="token punctuation">:</span>
+  <span class="token key atrule">memory.available</span><span class="token punctuation">:</span> 1Gi
+  <span class="token key atrule">nodefs.available</span><span class="token punctuation">:</span> "10%""
+
+</code></pre> 
+<h3><a id="_111"></a>实施节点可分配约束</h3> 
+<p><strong>Kubelet 标志</strong> ：<code>--enforce-node-allocatable=pods[,][system-reserved][,][kube-reserved]</code></p> 
+<p>调度器将 ‘Allocatable’ 视为 Pod 可用的 <code>capacity</code>（资源容量）。</p> 
+<p><code>kubelet</code> 默认对 Pod 执行 ‘Allocatable’ 约束。 无论何时，如果所有 Pod 的总用量超过了 ‘Allocatable’，驱逐 Pod 的措施将被执行。 可通过设置 kubelet <code>--enforce-node-allocatable</code> 标志值为 <code>pods</code> 控制这个措施。</p> 
+<p>可选地，通过在同一标志中同时指定 <code>kube-reserved</code> 和 <code>system-reserved</code> 值， 可以使 <code>kubelet</code> 强制实施 <code>kube-reserved</code> 和 <code>system-reserved</code> 约束。 请注意，要想执行 <code>kube-reserved</code> 或者 <code>system-reserved</code> 约束， 需要对应设置 <code>--kube-reserved-cgroup</code> 或者 <code>--system-reserved-cgroup</code></p> 
+<p>默认情况下只对Pod进行约束，在对系统进程约束时需要注意一些系统核心进程被杀掉导致节点失效的问题。</p> 
+<p><strong>设置方式</strong></p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> kubelet.config.k8s.io/v1beta1
+<span class="token punctuation">...</span>
+<span class="token key atrule">systemReservedCgroup</span><span class="token punctuation">:</span> /system.slice
+<span class="token key atrule">enforceNodeAllocatable</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> pods
+  <span class="token punctuation">-</span> system<span class="token punctuation">-</span>reserved
+</code></pre> 
+<h2><a id="3_Pod_134"></a>3 Pod优先级</h2> 
+<p>系统守护进程一般会被按照类似 Guaranteed 的 Pod 一样对待。 系统守护进程可以在与其对应的控制组中出现突发资源用量，这一行为要作为 Kubernetes 部署的一部分进行管理。 例如，<code>kubelet</code> 应该有它自己的控制组并和容器运行时共享 <code>kube-reserved</code> 资源。 不过，如果执行了 <code>kube-reserved</code> 约束，则 kubelet 不可出现突发负载并用光节点的所有可用资源。</p> 
+<p>在执行 <code>system-reserved</code> 预留策略时请加倍小心，因为它可能导致节点上的关键系统服务出现 CPU 资源短缺、 因为内存不足而被终止或者无法在节点上创建进程。 建议只有当用户详尽地描述了他们的节点以得出精确的估计值， 并且对该组中进程因内存不足而被杀死时，有足够的信心将其恢复时， 才可以强制执行 <code>system-reserved</code> 策略。</p> 
+<ul><li>作为起步，可以先针对 <code>pods</code> 上执行 ‘Allocatable’ 约束。</li><li>一旦用于追踪系统守护进程的监控和告警的机制到位，可尝试基于用量估计的方式执行 <code>kube-reserved</code> 策略。</li><li>随着时间推进，在绝对必要的时候可以执行 <code>system-reserved</code> 策略。</li></ul> 
+<p>当资源不足时，配置了如上驱逐参数，pod之间的驱逐顺序是怎样的呢？以下描述设置不同优先级来确保集群中核心的组件不被驱逐还正常运行，OOM 的优先级如下,pod oom 值越低，也就越不容易被系统杀死。</p> 
+<p><em>BestEffort Pod &gt; Burstable Pod &gt; 其它进程（内核init进程等） &gt; Guaranteed Pod &gt; kubelet/docker 等 &gt; sshd 等进程</em></p> 
+<p>kubernetes 把 pod 分成了三个 QoS 等级，而其中和limits和requests参数有关：</p> 
+<ul><li>Guaranteed：oom优先级最低，可以考虑数据库应用或者一些重要的业务应用。除非 pods 使用超过了它们的 limits，或者节点的内存压力很大而且没有 QoS 更低的 pod，否则不会被杀死。</li><li>Burstable：这种类型的 pod 可以多于自己请求的资源（上限有 limit 指定，如果 limit 没有配置，则可以使用主机的任意可用资源），但是重要性认为比较低，可以是一般性的应用或者批处理任务。</li><li>Best Effort：oom优先级最高，集群不知道 pod 的资源请求情况，调度不考虑资源，可以运行到任意节点上（从资源角度来说），可以是一些临时性的不重要应用。pod 可以使用节点上任何可用资源，但在资源不足时也会被优先杀死。</li></ul> 
+<p>Pod 的 requests 和 limits 是如何对应到这三个 QoS 等级上的，可以用下面一张表格概括：</p> 
+<table><thead><tr><th>request是否配置</th><th>limits是否配置</th><th>两者的关系</th><th>Qos</th><th>说明</th></tr></thead><tbody><tr><td>是</td><td>是</td><td>requests=limits</td><td>Guaranteed</td><td>所有容器的cpu和memory都必须配置相同的requests和limits</td></tr><tr><td>是</td><td>是</td><td>request&lt;limit</td><td>Burstable</td><td>只要有容器配置了cpu或者memory的request和limits就行</td></tr><tr><td>是</td><td>否</td><td></td><td>Burstable</td><td>只要有容器配置了cpu或者memory的request就行</td></tr><tr><td>否</td><td>是</td><td></td><td>Guaranteed/<br>Burstable</td><td>如果配置了limits，k8s会自动把对应资源的request设置和limits一样。<br>如果所有容器所有资源都配置limits，那就是Guaranteed;如果只有部分配置了limits，<br>就是Burstable</td></tr><tr><td>否</td><td>否</td><td></td><td>Best Effort</td><td>所有的容器都没有配置资源requests或limits</td></tr></tbody></table> 
+<p>说明：</p> 
+<ul><li>request和limits相同，可以参考资源动态调整中的VPA设置合理值。</li><li>如果只配置了limits，没有配置request，k8s会把request值和limits值一样。</li><li>如果只配置了request，没有配置limits，该pod共享node上可用的资源，实际上很反对这样设置。</li></ul> 
+<h2><a id="4__171"></a>4 生产应用</h2> 
+<h3><a id="_173"></a>配置文件</h3> 
+<p>编辑/var/lib/kubelet/config.yaml</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> kubelet.config.k8s.io/v1beta1
+<span class="token punctuation">...</span>
+<span class="token comment"># 添加如下内容</span>
+<span class="token key atrule">systemReserved</span><span class="token punctuation">:</span>
+  <span class="token key atrule">memory</span><span class="token punctuation">:</span> 5Gi
+  <span class="token key atrule">cpu</span><span class="token punctuation">:</span> 1000m
+  <span class="token key atrule">ephemeral-storage</span><span class="token punctuation">:</span> 10Gi
+<span class="token key atrule">kubeReserved</span><span class="token punctuation">:</span>
+  <span class="token key atrule">memory</span><span class="token punctuation">:</span> 5Gi
+  <span class="token key atrule">cpu</span><span class="token punctuation">:</span> 1000m
+  <span class="token key atrule">ephemeral-storage</span><span class="token punctuation">:</span> 10Gi
+<span class="token key atrule">evictionHard</span><span class="token punctuation">:</span>
+  <span class="token key atrule">memory.available</span><span class="token punctuation">:</span> <span class="token string">"3%"</span>
+  <span class="token key atrule">nodefs.available</span><span class="token punctuation">:</span> <span class="token string">"10%"</span>
+<span class="token comment"># systemReservedCgroup: /system.slice</span>
+<span class="token key atrule">enforceNodeAllocatable</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> pods
+  <span class="token comment"># - system-reserved</span>
+</code></pre> 
+<h3><a id="kubelet_198"></a>重启kubelet服务</h3> 
+<pre><code class="prism language-yaml">systemctl restart kubelet
+</code></pre> 
+<h3><a id="_204"></a>查看节点资源</h3> 
+<p><img src="https://images2.imgbox.com/26/37/EYHw5Mqe_o.png" alt="在这里插入图片描述"></p> 
+<table><thead><tr><th>资源类型</th><th>SystemReserved</th><th>KubeReserved</th><th>EvictionHard</th><th>Allocatable</th><th>All</th></tr></thead><tbody><tr><td>CPU</td><td>1000m</td><td>1000m</td><td>0</td><td>8000m</td><td>1000m</td></tr><tr><td>Memory</td><td>5Gi</td><td>5Gi</td><td>1.88Gi （3%）</td><td>50.93Gi</td><td>62.81Gi</td></tr><tr><td>Ephemeral-storage</td><td>10Gi</td><td>10Gi</td><td>50Gi</td><td>429.7Gi</td><td>499.7Gi</td></tr></tbody></table> 
+<p>Allocatable = All - SystemReserved - KubeReserved - EvictionHard</p> 
+<p>说明配置成功。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/36d05adc04e9c1f1f037c38ff8138efd/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">机器学习中的数据预处理指南</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a951fd63cf40c54db444583f83a6b443/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【JVM】详细解析java创建对象的具体流程</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

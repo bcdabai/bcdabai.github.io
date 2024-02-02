@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>深度解析MethodHandle方法句柄之findspecial方法的原理 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="深度解析MethodHandle方法句柄之findspecial方法的原理" />
+<meta property="og:description" content="网上看过太多关于MethodHandle方法句柄的文章，但是基本上没有人能把其中的findspecial方法讲清楚，特别是findspecial的第四个参数specialCaller, 相信大家都不明白是干嘛用的，网上给出的水文是很多都是说： 执行到specialCaller的父类所对应的方法。我可以很负责的告知各位：这个结论绝对是错误的！
+包括网上很知名的书籍《深入理解java虚拟机》也并没有把这个问题讲清楚，这本书废话太多，对于关键问题讲不到重点，完全是浪费读者时间。
+首先我给出一个结论：findspecial的第四个参数specialCaller的作用：是为了限定方法查找的范围。
+public MethodHandle findSpecial(Class&lt;?&gt; refc, String name, MethodType type, Class&lt;?&gt; specialCaller) throws NoSuchMethodException, IllegalAccessException 后面会通过走读源码具体说明这一点。
+首先我们需要了解，MethodHandle方法句柄中lookup到底是起什么作用的，因为包括findstatic,findvirtual,findspecial这些都是从lookup中创建出来。
+官网的解释如下：
+A lookup object is a factory for creating method handles, when the creation requires access checking. Method handles do not perform access checks when they are called, but rather when they are created. Therefore, method handle access restrictions must be enforced when a method handle is created. The caller class against which those restrictions are enforced is known as the lookup class." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/a21d00be98ec70cfb73905db715fbaec/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-06-06T09:38:37+08:00" />
+<meta property="article:modified_time" content="2023-06-06T09:38:37+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">深度解析MethodHandle方法句柄之findspecial方法的原理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>网上看过太多关于MethodHandle方法句柄的文章，但是基本上没有人能把其中的findspecial方法讲清楚，特别是findspecial的第四个参数specialCaller, 相信大家都不明白是干嘛用的，网上给出的水文是很多都是说： 执行到specialCaller的父类所对应的方法。我可以很负责的告知各位：<strong>这个结论绝对是错误的！</strong></p> 
+<p>包括网上很知名的书籍《深入理解java虚拟机》也并没有把这个问题讲清楚，这本书废话太多，对于关键问题讲不到重点，完全是浪费读者时间。</p> 
+<p>首先我给出一个结论：<span style="color:#fe2c24;"><strong><span style="background-color:#ffd900;">findspecial的第四个参数specialCaller的作用：是为了限定方法查找的范围。</span></strong></span></p> 
+<p><img alt="" height="536" src="https://images2.imgbox.com/3d/11/UvDcOjes_o.png" width="1200"></p> 
+<p></p> 
+<pre><code>public MethodHandle findSpecial(Class&lt;?&gt; refc,
+ String name,
+ MethodType type,
+ Class&lt;?&gt; specialCaller)  throws NoSuchMethodException, IllegalAccessException</code></pre> 
+<p>后面会通过走读源码具体说明这一点。</p> 
+<p>首先我们需要了解，MethodHandle方法句柄中lookup到底是起什么作用的，因为包括findstatic,findvirtual,findspecial这些都是从lookup中创建出来。</p> 
+<p>官网的解释如下：</p> 
+<p><em>A lookup object is a factory for creating method handles, when the creation requires access checking. Method handles do not perform access checks when they are called, but rather when they are created. Therefore, method handle access restrictions must be enforced when a method handle is created. The caller class against which those restrictions are enforced is known as the <a href="https://docs.oracle.com/en/java/javase/19/docs/api/java.base/java/lang/invoke/MethodHandles.Lookup.html#lookupClass%28%29" rel="nofollow" title="lookup class">lookup class</a>.</em></p> 
+<p><em>A lookup class which needs to create method handles will call <a href="https://docs.oracle.com/en/java/javase/19/docs/api/java.base/java/lang/invoke/MethodHandles.html#lookup%28%29" rel="nofollow" title="MethodHandles.lookup">MethodHandles.lookup</a> to create a factory for itself. When the <code>Lookup</code> factory object is created, the identity of the lookup class is determined, and securely stored in the <code>Lookup</code> object. The lookup class (or its delegates) may then use factory methods on the <code>Lookup</code> object to create method handles for access-checked members. This includes all methods, constructors, and fields which are allowed to the lookup class, even private ones.</em></p> 
+<p>这里面说了很多，但是关键点只有三点：</p> 
+<p><strong>1. lookup是用来创建方法句柄的工厂对象</strong></p> 
+<p><strong>2. 方法句柄创建时就必须做权限检查，而不是运行时做权限检查</strong></p> 
+<p><strong>3. 受该权限约束的class对象就是lookup class, 而且一旦lookup工厂对象创建，就能确定具体的lookup class.</strong></p> 
+<p>第三点说的非常抽象，不太好理解。关于这一点可以通过断点调试搞明白：</p> 
+<p>通过网上著名的son/father/grandfather这段代码，做一个断点调试如下： </p> 
+<p><img alt="" height="982" src="https://images2.imgbox.com/a4/df/PzDOzbiV_o.png" width="1200"></p> 
+<p><img alt="" height="448" src="https://images2.imgbox.com/4b/4f/IaBOJ3DH_o.png" width="976"></p> 
+<p> 这里的方法调用是从Son的实例发起的，而根据上面断点调试结果，lookup class也正好是类Son,</p> 
+<p>那么可以看到：方法句柄所说的lookup对象，<strong>实际是指调用lookup方法所在的类</strong>，<strong>也就是：<span style="color:#fe2c24;">哪个类调用了lookup方法，那么生成的lookup对象就指向这个类</span></strong></p> 
+<p>你可以简单理解为：<span style="color:#fe2c24;"><strong>lookup就是当前方法调用所处的一个上下文环境，在这个上下文里面，你所有的权限都不能超过这个范围！</strong></span></p> 
+<p><span style="color:#fe2c24;"><strong>换句话说：findSpecial方法的权限也在这个范围里面，这就是为什么会出现私有权限越界的原因：no private access for invokespecial ，如下所示：</strong></span></p> 
+<p><img alt="" height="795" src="https://images2.imgbox.com/32/ab/s76INmsz_o.png" width="1200"></p> 
+<p> 那么回到开头：findspecial的第四个参数specialCaller到底是干嘛用的呢？</p> 
+<p>官网是这样解释的:</p> 
+<p><em>Produces an early-bound method handle for a virtual method. It will bypass checks for overriding methods on the receiver, <a href="https://docs.oracle.com/en/java/javase/19/docs/api/java.base/java/lang/invoke/MethodHandles.Lookup.html#equiv" rel="nofollow" title="as if called">as if called</a> from an <code>invokespecial</code> instruction from within the explicitly specified <code>specialCaller</code>. The type of the method handle will be that of the method, with a suitably restricted receiver type prepended. (The receiver type will be <code>specialCaller</code> or a subtype.) The method and all its argument types must be accessible to the lookup object.</em></p> 
+<p><em>Before method resolution, if the explicitly specified caller class is not identical with the lookup class, or if this lookup object does not have <a href="https://docs.oracle.com/en/java/javase/19/docs/api/java.base/java/lang/invoke/MethodHandles.Lookup.html#privacc" rel="nofollow" title="private access">private access</a> privileges, the access fails.</em></p> 
+<p><em>The returned method handle will have <a href="https://docs.oracle.com/en/java/javase/19/docs/api/java.base/java/lang/invoke/MethodHandle.html#asVarargsCollector%28java.lang.Class%29" rel="nofollow" title="variable arity">variable arity</a> if and only if the method's variable arity modifier bit (<code>0x0080</code>) is set.</em></p> 
+<p>说实话，这段话非常不好理解，基本上等同于狗屁不通，说了半天不知所云，果然是官网出品，必属废品！</p> 
+<p>只有倒数第二部分，稍微有点意思：</p> 
+<p><span style="color:#fe2c24;"><strong>"在方法解析之前，如果显式指定的调用者类与lookup不同，或者如果该Lookup不具有私有访问权限，则访问失败（即方法句柄创建失败）。"</strong></span></p> 
+<p><span style="color:#0d0016;">现在通过源码走读来揭开其中的秘密：</span></p> 
+<p><span style="color:#0d0016;">跟进findSpecial方法首先关注到</span>checkSpecialCaller方法：</p> 
+<p><img alt="" height="624" src="https://images2.imgbox.com/d7/4a/X04anFjK_o.png" width="1200"></p> 
+<p> 继续跟进checkSpecialCaller方法：</p> 
+<p><img alt="" height="657" src="https://images2.imgbox.com/9a/51/ipEW463j_o.png" width="1200"></p> 
+<p> 发现：如果specialCaller跟lookupClass对象不一致时，就会抛出：无私有权限异常</p> 
+<p>这确实印证了官网刚才的倒数第二段解释。</p> 
+<p>但是这还不够，难道specialCaller仅仅只是为了简单做这样一个校验的吗，那岂不是很多此一举，这跟findVirtual也没多大区别，还要自找麻烦传入第四个参数，有意义吗？！因为前面已经说过：</p> 
+<p><span style="color:#fe2c24;"><strong>findSpecial方法的权限本身被封存在lookup class对象的范围内，它的所有子对象和操作都不能超过这个范围，所以specialCaller这里显得很多余！所以，一定还有别的什么原因。</strong></span></p> 
+<p><span style="color:#0d0016;">回到findSpecial主代码，继续跟进:</span></p> 
+<p><img alt="" height="653" src="https://images2.imgbox.com/c5/d4/iiZ2ZSxQ_o.png" width="1200"></p> 
+<p> 注意有一个this.in方法(实际是Lookup.in)：重新生成了specialLookup</p> 
+<p>查看一下官网对这个Api的解释：</p> 
+<blockquote> 
+ <p>public <a href="https://docs.oracle.com/en/java/javase/19/docs/api/java.base/java/lang/invoke/MethodHandles.Lookup.html" rel="nofollow" title="MethodHandles.Lookup">MethodHandles.Lookup</a> in(<a href="https://docs.oracle.com/en/java/javase/19/docs/api/java.base/java/lang/Class.html" rel="nofollow" title="Class">Class</a>&lt;?&gt; requestedLookupClass)</p> 
+ <p>Creates a lookup on the specified new lookup class. The resulting object will report the specified class as its own <a href="https://docs.oracle.com/en/java/javase/19/docs/api/java.base/java/lang/invoke/MethodHandles.Lookup.html#lookupClass%28%29" rel="nofollow" title="lookupClass">lookupClass</a>.</p> 
+ <p>However, the resulting <code>Lookup</code> object is guaranteed to have no more access capabilities than the original. In particular, access capabilities can be lost as follows:</p> 
+</blockquote> 
+<p>重点在第二段：这个新生成的Lookup对象的权限不会超过原有对象的范围，而this.in方法是把specialCaller作为参数传进去，生成了一个新的Lookup对象，<span style="color:#fe2c24;"><strong><span style="background-color:#ffd900;">所以：这个新的Lookup对象的权限也不会超过specialCaller的范围，</span></strong></span>记住这个结论！</p> 
+<p><img alt="" height="922" src="https://images2.imgbox.com/c0/63/hcS7H4Zf_o.png" width="1200"></p> 
+<p> 然后继续跟进getDirectMethod方法：</p> 
+<p><img alt="" height="593" src="https://images2.imgbox.com/c1/0b/VtynBEOq_o.png" width="1200"></p> 
+<p></p> 
+<p><img alt="" height="422" src="https://images2.imgbox.com/00/11/wBkcPNNA_o.png" width="1200"> 跟进getDirectMethodCommon方法：</p> 
+<p>注意：这里的入参refc就是findSpecial的第一个参数refc</p> 
+<p> <img alt="" height="701" src="https://images2.imgbox.com/22/e6/D9yxzqD3_o.png" width="1200"></p> 
+<p> 重点看下面的while循环这段：</p> 
+<p><img alt="" height="682" src="https://images2.imgbox.com/e1/c9/QyXaSIa6_o.png" width="1200"></p> 
+<p></p> 
+<pre><code>Class&lt;?&gt; refcAsSuper = lookupClass();
+MemberName m2; 
+do {
+    refcAsSuper = refcAsSuper.getSuperclass();
+    m2 = new MemberName(refcAsSuper,
+                          method.getName(),
+                          method.getMethodType(),
+                          REF_invokeSpecial);
+   m2 = IMPL_NAMES.resolveOrNull(refKind, m2, lookupClassOrNull());
+     } while (m2 == null &amp;&amp;  // no method is found yet
+     refc != refcAsSuper); // search up to refc</code></pre> 
+<p>注意这里的<strong>refcAsSuper实际就是specalCaller</strong>，因为上面整个方法调用链条的发起人就是specialLookup，而且specialLookup是通过specalCaller创建的，所以这里的lookupClass上下文就是specialCaller，从而推断出refcAsSuper就是specialCaller对象。</p> 
+<p><span style="color:#fe2c24;"><strong><span style="background-color:#ffd900;">在这个while循环里，refcAsSuper不断的通过getSuperclass()方法向其父级搜寻指定的method方法,如果找到方法就跳出循环；否则就一直往上找，直到抵达refc类的层级.</span></strong></span></p> 
+<p><strong>为什么这么说呢，因为while条件是这么写的，仔细想想就能明白：</strong></p> 
+<pre><code>while (m2 == null &amp;&amp;  refc != refcAsSuper); </code></pre> 
+<p>所以，到现在为止，一切都很明朗了：findspecial并不是执行到specialCaller的父类为止所对应的方法！</p> 
+<p><strong><span style="color:#fe2c24;"><span style="background-color:#ffd900;">而是从specialCaller开始一直向其父类寻找指定方法，一旦找到就返回并执行该方法；如果找不到就一直往上找，最后终止于findspecial的第一个参数refc所对应的类。</span></span></strong></p> 
+<p><strong><span style="color:#fe2c24;"><span style="background-color:#ffd900;">这里其实隐含了一层意思：就是specialCaller一定是findspecial的第一个参数refc的子类！</span></span></strong></p> 
+<p><span style="color:#0d0016;">下面我们来验证上面的结论。</span></p> 
+<p><span style="color:#0d0016;">由于前面已经说过当specialCaller跟lookUP class对象不一致时，是无法通过权限检查的。</span></p> 
+<p><img alt="" height="623" src="https://images2.imgbox.com/e4/2e/SSMFCDJM_o.png" width="1200"></p> 
+<p>但是我们可以通过修改allowedModes的值，让它等于TRUSTED（也就是-1），绕过这个检查：</p> 
+<p><img alt="" height="631" src="https://images2.imgbox.com/b1/75/e25URqcY_o.png" width="1200"></p> 
+<p>加入下面两行代码：</p> 
+<pre><code class="language-java">Field lookupImpl = MethodHandles.Lookup.class.getDeclaredField("IMPL_LOOKUP"); 
+lookupImpl.setAccessible(true);</code></pre> 
+<p>然后通过lookupImpl.get(null)方法可以获取到一个allowedModes=-1 的lookup</p> 
+<p><img alt="" height="908" src="https://images2.imgbox.com/f6/c1/QSMyFWt3_o.png" width="1200"></p> 
+<p></p> 
+<p>这样就跳过了checkSpecial的权限检查。</p> 
+<p>下面来试验specialCaller的方法查找范围：</p> 
+<p><img alt="" height="695" src="https://images2.imgbox.com/73/58/iS7AywFy_o.png" width="1200"></p> 
+<p> <img alt="" height="931" src="https://images2.imgbox.com/b2/74/pMVTp9Kj_o.png" width="1200"></p> 
+<p> 当specialCaller指定为Son.class时，最后的确执行了它的父级Father的think方法。</p> 
+<p><span style="color:#fe2c24;"><strong>但是如果把父级Father的think方法注释掉，会发生什么呢！</strong></span></p> 
+<p><img alt="" height="812" src="https://images2.imgbox.com/2b/9d/Dy6d4XOP_o.png" width="1200"></p> 
+<p><strong> 看到了吗，因为specialCaller(Son.class)因为在它的父级Father找不到指定的thinking方法，所以会继续向上查找：从而找到Grandfather的thinking方法，并执行该方法。</strong></p> 
+<p>所以最后总结：<span style="color:#fe2c24;"><strong><span style="background-color:#ffd900;">findspecial的第四个参数specialCaller的作用：是为了限定方法查找的范围。</span></strong></span></p> 
+<p><strong><span style="color:#fe2c24;"><span style="background-color:#ffd900;">具体来说：findSpecial执行时：会从specialCaller开始一直向其父类寻找指定方法，一旦找到就立即返回并执行该方法；如果找不到就一直往上找，最后终止于findspecial的第一个参数refc所对应的类。如果最终找不到指定的方法，就会抛NoSuchMethodException异常</span></span></strong></p> 
+<p><strong><span style="color:#fe2c24;"><span style="background-color:#ffd900;">另外：specialCaller一定是findspecial的第一个参数refc的子类！</span></span></strong></p> 
+<p></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f27b3110f84d587331bb6496b9bf35d2/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Install Harbor 2.8 on Centos</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/d4fe57abab7ba604b698e4e1f09fe88e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">el-upload上传校验格式、大小的实现方式</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

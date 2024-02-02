@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>第90讲：MySQL数据库主从复制集群原理概念以及搭建流程 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="第90讲：MySQL数据库主从复制集群原理概念以及搭建流程" />
+<meta property="og:description" content="文章目录 1.MySQL主从复制集群的核心概念1.1.什么是主从复制集群1.2.主从复制集群中的专业术语1.3.主从复制集群工作原理1.4.主从复制中的小细节1.5.搭建主从复制集群的前提条件1.6.MySQL主从复制集群的架构信息 2.搭建MySQL多实例环境2.1.在mysql-1中搭建身为主库的MySQL实例2.2.在mysql-2中搭建MySQL多实例2.2.1.安装数据库软件2.2.1.搭建第一个3306从库的MySQL实例2.2.2.搭建第二个3307从库的MySQL实例 2.3.MySQL多个节点搭建完毕 3.配置MySQL主从复制集群3.1.在主库开启Binlog二进制日志3.2.在主库上创建主从复制的用户3.3.将主库数据备份并在从库中进行还原3.4.配置从库连接主库的复制信息3.5.启动主从复制线程 4.查看主从复制集群状态 1.MySQL主从复制集群的核心概念 1.1.什么是主从复制集群 主从复制是指将主数据库的 DDL 和 DML 操作通过二进制日志传到从库服务器中，然后在从库上对这些日志重新执行（也叫重做），从而使得从库和主库的数据保持同步。
+MySQL支持一台主库同时向多台从库进行复制， 从库同时也可以作为其他从服务器的主库，实现链状复制。
+MySQL 复制的优点主要包含以下三个方面：
+主库出现问题，可以快速切换到从库提供服务。实现读写分离，降低主库的访问压力。可以在从库中执行备份，以避免备份期间影响主库服务。 1.2.主从复制集群中的专业术语 在MySQL主从复制集群中，主要分为两大部分：文件、线程。
+文件：
+主库 Binlog：二进制日志。 从库 relay-log：中继日志，主库推送过来的Binlog日志都存放在中继日志中。master.info：从库复制主库的信息文件，记录着主库的地址、用户、Binlog等信息。relay-log.info：中继日志的信息文件，该文件记录了上次执行relay-log的位置等信息。 线程：
+主库 binlog_dump_thread：二进制日志投递线程，主要将二进制日志发送给从库的线程。 从库 IO_Thread：从库的IO线程，用于请求和接收主库的Binlog二进制日志。SQL_Thread：从库的SQL线程，用于将主库发来的二进制日志在数据库中进行数据复制。 1.3.主从复制集群工作原理 MySQL主从复制集群的工作原理主要围绕前面提到的文件和线程。
+MySQL主从复制集群的原理：
+1）首先从库执行change master to将连接主库的配置信息记录到master.info文件中，此时从库上会开启两个线程：I/O线程和SQL线程。
+2）从库上的I/O线程会从master.info文件中读取主库的连接信息。
+3）从库I/O线程获取到主库的信息后，会与主库进行身份认证，然后建立连接。
+4）当从库I/O线程成功连接到主库后，主库会立即给从库分配一个binlog_dump_thread线程，用于推送Binlog日志到从库。
+5）从库I/O线程会根据master.info中记录的Binlog信息（Binlog日志文件、标识位号）与主库的binlog_dump_thread线程请求最新的Binlog日志。
+6）这时主库的binlog_dump_thread线程就会去查询是否产生了新的Binlog日志，如果产生了新的Binlog日志，会截取最新的Binlog日志然后推送给从库的I/O线程。
+7）从库的I/O线程接收到主库推送的Binlog日志后，会现将其存放在内存的TCP/IP缓存中，然后告知主库的binlog_dump_thread线程，Binlog日志已收到。
+8）此时从库的I/O线程会去更新master.info文件中的Binlog位置点信息，记录最新的Binlog标识号。
+9）然后从库的I/O线程会将主库推送的Binlog日志写入到磁盘上的relay-log文件中。
+10）最后由从库的SQL线程读取relay-log.ifno文件，获取relay-log最新的位置点，然后根据的位置点去relay-log中执行最新的Binlog日志，执行完成后会再次更新relay-log.info文件中记录的relay-log位置点。
+这就是完整的主从复制工作原理。
+简单来说MySQL主从复制的原理就是，从库的I/O线程读取连接主库的配置信息，然后去连接主库开始主从同步，当I/O线程连接上主库后，主库会立即给I/O线程分配一个Dump线程，用于推送Binlog日志到从库，此时I/O线程会根据master.info文件中记录的Binlog信息，向主库的Dump线程请求最新的BInlog，Dump线程查询到有最新的Binlog产生，会将最新的Binlog截取，然后推送给从库的I/O线程，I/O线程收到Binlog日志后，将其存放在内存的TCP/IP缓存中，然后更新master.info文件中最新的Binlog信息，紧接着将Binlog日志写入到relay-log中，最后由从库的SQL线程从relay-log.info中读取relay-log的位置号，然后执行relay-log中最新的Binlog日志，执行完成后，再次更新relay-log.info中的relay-log位置号，以便于下次再relay-log中读取最新的Binlog日志。
+relay-log日志会通过MySQL中的其他线程定期清理。
+1.4.主从复制中的小细节 从上面说的主从复制原理来看，好像每次都是从库向主库去请求新数据，那么什么时候从库才应该向主库请求呢？请求的频率如何？
+其实是这样的：当主库上产生了新的事务，更新到Binlog日之后，会给binlog_dump_thread线程发送一个“信号”，binlog_dump_thread线程会与从库的I/O线程一直建立连接，binlog_dump_thread线程就会通知从库的I/O线程有新数据产生了，这时从库的I/O线程就带着master.info中记录的最新Binlog标识位号，向binlog_dump_thread线程请求最新的Binlog，然后完成数据同步。
+MySQL主从复制第一次复制时，是按照上面说到的10步完成的，第二次复制时，只需要等待主库的binlog_dump_thread线程向从库的I/O线程发送信号，然后I/O线程去请求最新的Binlog，最后由SQL线程复制数据即可。
+1.5.搭建主从复制集群的前提条件 搭建MySQL主从复制集群的前提条件如下：
+首先需要准备多个MySQL实例，最少两个MySQL实例，能够实现一主一从的架构，可以在多个服务器中分布部署独立的MySQL节点，也可以在一台服务器中部署多个MySQL实例。每个MySQL实例都需要由单独的sever_id。身为主库角色的MySQL实例需要开启二进制日志，从库在特定场景下需要开启。主库需要授权一个专门的用户作为主从复制的用户。如果主库是一个运行很多年的数据库，突然要升级为主从复制集群，最好先将主库的数据同步一份到从库中。开启专用的复制线程。 1.6.MySQL主从复制集群的架构信息 本次主从复制的架构是一主两从的结构。
+IP主机名端口角色server_id192.168.20.11mysql-13306主库1192.168.20.12mysql-23306从库2192.168.20.12mysql-23307从库3 2.搭建MySQL多实例环境 再搭建MySQL主从复制集群之前，首先搭建出多个MySQL实例，由于服务器有限，因此通过两台机器模拟出一主两从的环境。
+主从复制集群中有一个节点开启了gtid，所有的节点都需要开启gtid，否则主从将不能同步。
+2.1.在mysql-1中搭建身为主库的MySQL实例 mysql-1服务器中的3306端口的MySQL实例再前面已经搭建完成了，就是我们一直在使用的数据库实例，里面有数据，更加方便演示主从集群，下面只是提供一下搭建过程的步骤。
+注意每个MySQL节点的server_id都要设置成不同的，如果你的一主两从都是单独在不同服务器中部署的，那么直接参考本小结的数据库实例安装即可，不用再看多实例的步骤了。
+1.解压MySQL [root@mysql-1 ~]# tar xf mysql-5." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/3e2667b05c29b1a376fffcce9033acfe/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-18T10:41:58+08:00" />
+<meta property="article:modified_time" content="2024-01-18T10:41:58+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">第90讲：MySQL数据库主从复制集群原理概念以及搭建流程</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>文章目录</h4> 
+ <ul><li><ul><li><a href="#1MySQL_2" rel="nofollow">1.MySQL主从复制集群的核心概念</a></li><li><ul><li><a href="#11_4" rel="nofollow">1.1.什么是主从复制集群</a></li><li><a href="#12_16" rel="nofollow">1.2.主从复制集群中的专业术语</a></li><li><a href="#13_37" rel="nofollow">1.3.主从复制集群工作原理</a></li><li><a href="#14_71" rel="nofollow">1.4.主从复制中的小细节</a></li><li><a href="#15_79" rel="nofollow">1.5.搭建主从复制集群的前提条件</a></li><li><a href="#16MySQL_90" rel="nofollow">1.6.MySQL主从复制集群的架构信息</a></li></ul> 
+   </li><li><a href="#2MySQL_102" rel="nofollow">2.搭建MySQL多实例环境</a></li><li><ul><li><a href="#21mysql1MySQL_108" rel="nofollow">2.1.在mysql-1中搭建身为主库的MySQL实例</a></li><li><a href="#22mysql2MySQL_182" rel="nofollow">2.2.在mysql-2中搭建MySQL多实例</a></li><li><ul><li><a href="#221_186" rel="nofollow">2.2.1.安装数据库软件</a></li><li><a href="#2213306MySQL_204" rel="nofollow">2.2.1.搭建第一个3306从库的MySQL实例</a></li><li><a href="#2223307MySQL_262" rel="nofollow">2.2.2.搭建第二个3307从库的MySQL实例</a></li></ul> 
+    </li><li><a href="#23MySQL_322" rel="nofollow">2.3.MySQL多个节点搭建完毕</a></li></ul> 
+   </li><li><a href="#3MySQL_330" rel="nofollow">3.配置MySQL主从复制集群</a></li><li><ul><li><a href="#31Binlog_348" rel="nofollow">3.1.在主库开启Binlog二进制日志</a></li><li><a href="#32_369" rel="nofollow">3.2.在主库上创建主从复制的用户</a></li><li><a href="#33_375" rel="nofollow">3.3.将主库数据备份并在从库中进行还原</a></li><li><a href="#34_400" rel="nofollow">3.4.配置从库连接主库的复制信息</a></li><li><a href="#35_473" rel="nofollow">3.5.启动主从复制线程</a></li></ul> 
+   </li><li><a href="#4_487" rel="nofollow">4.查看主从复制集群状态</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h3><a id="1MySQL_2"></a>1.MySQL主从复制集群的核心概念</h3> 
+<h4><a id="11_4"></a>1.1.什么是主从复制集群</h4> 
+<p>主从复制是指将主数据库的 DDL 和 DML 操作通过二进制日志传到从库服务器中，然后在从库上对这些日志重新执行（也叫重做），从而使得从库和主库的数据保持同步。</p> 
+<p>MySQL支持一台主库同时向多台从库进行复制， 从库同时也可以作为其他从服务器的主库，实现链状复制。</p> 
+<p>MySQL 复制的优点主要包含以下三个方面：</p> 
+<ul><li>主库出现问题，可以快速切换到从库提供服务。</li><li>实现读写分离，降低主库的访问压力。</li><li>可以在从库中执行备份，以避免备份期间影响主库服务。</li></ul> 
+<h4><a id="12_16"></a>1.2.主从复制集群中的专业术语</h4> 
+<p>在MySQL主从复制集群中，主要分为两大部分：文件、线程。</p> 
+<p><strong>文件：</strong></p> 
+<ul><li>主库 
+  <ul><li>Binlog：二进制日志。</li></ul> </li><li>从库 
+  <ul><li>relay-log：中继日志，主库推送过来的Binlog日志都存放在中继日志中。</li><li>master.info：从库复制主库的信息文件，记录着主库的地址、用户、Binlog等信息。</li><li>relay-log.info：中继日志的信息文件，该文件记录了上次执行relay-log的位置等信息。</li></ul> </li></ul> 
+<p><strong>线程：</strong></p> 
+<ul><li>主库 
+  <ul><li>binlog_dump_thread：二进制日志投递线程，主要将二进制日志发送给从库的线程。</li></ul> </li><li>从库 
+  <ul><li>IO_Thread：从库的IO线程，用于请求和接收主库的Binlog二进制日志。</li><li>SQL_Thread：从库的SQL线程，用于将主库发来的二进制日志在数据库中进行数据复制。</li></ul> </li></ul> 
+<h4><a id="13_37"></a>1.3.主从复制集群工作原理</h4> 
+<p>MySQL主从复制集群的工作原理主要围绕前面提到的文件和线程。</p> 
+<blockquote> 
+ <p><strong>MySQL主从复制集群的原理：</strong></p> 
+ <p>1）首先从库执行<code>change master to</code>将连接主库的配置信息记录到master.info文件中，此时从库上会开启两个线程：I/O线程和SQL线程。</p> 
+ <p>2）从库上的I/O线程会从master.info文件中读取主库的连接信息。</p> 
+ <p>3）从库I/O线程获取到主库的信息后，会与主库进行身份认证，然后建立连接。</p> 
+ <p>4）当从库I/O线程成功连接到主库后，主库会立即给从库分配一个binlog_dump_thread线程，用于推送Binlog日志到从库。</p> 
+ <p>5）从库I/O线程会根据master.info中记录的Binlog信息（Binlog日志文件、标识位号）与主库的binlog_dump_thread线程请求最新的Binlog日志。</p> 
+ <p>6）这时主库的binlog_dump_thread线程就会去查询是否产生了新的Binlog日志，如果产生了新的Binlog日志，会截取最新的Binlog日志然后推送给从库的I/O线程。</p> 
+ <p>7）从库的I/O线程接收到主库推送的Binlog日志后，会现将其存放在内存的TCP/IP缓存中，然后告知主库的binlog_dump_thread线程，Binlog日志已收到。</p> 
+ <p>8）此时从库的I/O线程会去更新master.info文件中的Binlog位置点信息，记录最新的Binlog标识号。</p> 
+ <p>9）然后从库的I/O线程会将主库推送的Binlog日志写入到磁盘上的relay-log文件中。</p> 
+ <p>10）最后由从库的SQL线程读取relay-log.ifno文件，获取relay-log最新的位置点，然后根据的位置点去relay-log中执行最新的Binlog日志，执行完成后会再次更新relay-log.info文件中记录的relay-log位置点。</p> 
+ <p>这就是完整的主从复制工作原理。</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/4e/42/1NARzkMx_o.png" alt="image-20220705232103542"></p> 
+<p>简单来说MySQL主从复制的原理就是，从库的I/O线程读取连接主库的配置信息，然后去连接主库开始主从同步，当I/O线程连接上主库后，主库会立即给I/O线程分配一个Dump线程，用于推送Binlog日志到从库，此时I/O线程会根据master.info文件中记录的Binlog信息，向主库的Dump线程请求最新的BInlog，Dump线程查询到有最新的Binlog产生，会将最新的Binlog截取，然后推送给从库的I/O线程，I/O线程收到Binlog日志后，将其存放在内存的TCP/IP缓存中，然后更新master.info文件中最新的Binlog信息，紧接着将Binlog日志写入到relay-log中，最后由从库的SQL线程从relay-log.info中读取relay-log的位置号，然后执行relay-log中最新的Binlog日志，执行完成后，再次更新relay-log.info中的relay-log位置号，以便于下次再relay-log中读取最新的Binlog日志。</p> 
+<p>relay-log日志会通过MySQL中的其他线程定期清理。</p> 
+<h4><a id="14_71"></a>1.4.主从复制中的小细节</h4> 
+<p>从上面说的主从复制原理来看，好像每次都是从库向主库去请求新数据，那么什么时候从库才应该向主库请求呢？请求的频率如何？</p> 
+<blockquote> 
+ <p>其实是这样的：当主库上产生了新的事务，更新到Binlog日之后，会给binlog_dump_thread线程发送一个“信号”，binlog_dump_thread线程会与从库的I/O线程一直建立连接，binlog_dump_thread线程就会通知从库的I/O线程有新数据产生了，这时从库的I/O线程就带着master.info中记录的最新Binlog标识位号，向binlog_dump_thread线程请求最新的Binlog，然后完成数据同步。</p> 
+</blockquote> 
+<p>MySQL主从复制第一次复制时，是按照上面说到的10步完成的，第二次复制时，只需要等待主库的binlog_dump_thread线程向从库的I/O线程发送信号，然后I/O线程去请求最新的Binlog，最后由SQL线程复制数据即可。</p> 
+<h4><a id="15_79"></a>1.5.搭建主从复制集群的前提条件</h4> 
+<p>搭建MySQL主从复制集群的前提条件如下：</p> 
+<ul><li>首先需要准备多个MySQL实例，最少两个MySQL实例，能够实现一主一从的架构，可以在多个服务器中分布部署独立的MySQL节点，也可以在一台服务器中部署多个MySQL实例。</li><li>每个MySQL实例都需要由单独的sever_id。</li><li>身为主库角色的MySQL实例需要开启二进制日志，从库在特定场景下需要开启。</li><li>主库需要授权一个专门的用户作为主从复制的用户。</li><li>如果主库是一个运行很多年的数据库，突然要升级为主从复制集群，最好先将主库的数据同步一份到从库中。</li><li>开启专用的复制线程。</li></ul> 
+<h4><a id="16MySQL_90"></a>1.6.MySQL主从复制集群的架构信息</h4> 
+<p>本次主从复制的架构是一主两从的结构。</p> 
+<table><thead><tr><th>IP</th><th>主机名</th><th>端口</th><th>角色</th><th>server_id</th></tr></thead><tbody><tr><td>192.168.20.11</td><td>mysql-1</td><td>3306</td><td>主库</td><td>1</td></tr><tr><td>192.168.20.12</td><td>mysql-2</td><td>3306</td><td>从库</td><td>2</td></tr><tr><td>192.168.20.12</td><td>mysql-2</td><td>3307</td><td>从库</td><td>3</td></tr></tbody></table> 
+<h3><a id="2MySQL_102"></a>2.搭建MySQL多实例环境</h3> 
+<p>再搭建MySQL主从复制集群之前，首先搭建出多个MySQL实例，由于服务器有限，因此通过两台机器模拟出一主两从的环境。</p> 
+<p>主从复制集群中有一个节点开启了gtid，所有的节点都需要开启gtid，否则主从将不能同步。</p> 
+<h4><a id="21mysql1MySQL_108"></a>2.1.在mysql-1中搭建身为主库的MySQL实例</h4> 
+<p>mysql-1服务器中的3306端口的MySQL实例再前面已经搭建完成了，就是我们一直在使用的数据库实例，里面有数据，更加方便演示主从集群，下面只是提供一下搭建过程的步骤。</p> 
+<p>注意每个MySQL节点的server_id都要设置成不同的，如果你的一主两从都是单独在不同服务器中部署的，那么直接参考本小结的数据库实例安装即可，不用再看多实例的步骤了。</p> 
+<pre><code class="prism language-sh"><span class="token number">1</span>.解压MySQL
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># tar xf mysql-5.7.36-linux-glibc2.12-x86_64.tar.gz -C /usr/local/</span>
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># mv /usr/local/mysql-5.7.36-linux-glibc2.12-x86_64 /usr/local/mysql</span>
+
+<span class="token number">2</span>.设置MySQL的环境变量
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># vim /etc/profile</span>
+<span class="token builtin class-name">export</span> <span class="token assign-left variable">MYSQL_HOME</span><span class="token operator">=</span>/usr/local/mysql
+<span class="token builtin class-name">export</span> <span class="token assign-left variable"><span class="token environment constant">PATH</span></span><span class="token operator">=</span><span class="token variable">$MYSQL_HOME</span>/bin:<span class="token environment constant">$PATH</span>
+<span class="token builtin class-name">export</span> <span class="token assign-left variable">LD_LIBRARY_PATH</span><span class="token operator">=</span>:/usr/local/mysql/lib
+
+<span class="token number">3</span>.创建mysql用户
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># groupadd -r mysql</span>
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># useradd -M -r -s /sbin/nologin -g mysql mysql</span>
+
+<span class="token number">4</span>.准备数据目录
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># mkdir /data/mysql</span>
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># chown -R mysql. /data/mysql</span>
+
+<span class="token number">5</span>.初始化数据库
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># mysqld --initialize-insecure --user=mysql --basedir=/usr/local/mysql --datadir=/data/mysql</span>
+
+<span class="token number">6</span>.准备mysql配置文件
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># vim /etc/my.cnf</span>
+<span class="token punctuation">[</span>mysqld<span class="token punctuation">]</span>	
+<span class="token assign-left variable">user</span><span class="token operator">=</span>mysql								
+<span class="token assign-left variable">port</span><span class="token operator">=</span><span class="token number">3306</span>							    
+<span class="token assign-left variable">server_id</span><span class="token operator">=</span><span class="token number">1</span>							<span class="token comment">#每个MySQL数据库的server_id都设置成不同的</span>
+<span class="token assign-left variable">basedir</span><span class="token operator">=</span>/usr/local/mysql				
+<span class="token assign-left variable">datadir</span><span class="token operator">=</span>/data/mysql	
+<span class="token assign-left variable">log_bin</span><span class="token operator">=</span>mysql-bin
+gtid-mode<span class="token operator">=</span>on
+enforce-gtid-consistency<span class="token operator">=</span>true
+<span class="token assign-left variable">socket</span><span class="token operator">=</span>/tmp/mysql.sock
+<span class="token assign-left variable">log_error</span><span class="token operator">=</span>/data/mysql/mysql_err.log
+character-set-server<span class="token operator">=</span>utf8
+
+<span class="token punctuation">[</span>mysql<span class="token punctuation">]</span>
+<span class="token assign-left variable">socket</span><span class="token operator">=</span>/tmp/mysql.sock
+
+<span class="token number">7</span>.准备服务管理脚本
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># vim /etc/systemd/system/mysqld.service </span>
+<span class="token punctuation">[</span>Unit<span class="token punctuation">]</span>
+<span class="token assign-left variable">Description</span><span class="token operator">=</span>MySQL Server
+<span class="token assign-left variable">Documentation</span><span class="token operator">=</span>man:mysqld<span class="token punctuation">(</span><span class="token number">8</span><span class="token punctuation">)</span>
+<span class="token assign-left variable">Documentation</span><span class="token operator">=</span>http://dev.mysql.com/doc/refman/en/using-systemd.html
+<span class="token assign-left variable">After</span><span class="token operator">=</span>network.target
+<span class="token assign-left variable">After</span><span class="token operator">=</span>syslog.target
+<span class="token punctuation">[</span>Install<span class="token punctuation">]</span>
+<span class="token assign-left variable">WantedBy</span><span class="token operator">=</span>multi-user.target
+<span class="token punctuation">[</span>Service<span class="token punctuation">]</span>
+<span class="token assign-left variable">User</span><span class="token operator">=</span>mysql
+<span class="token assign-left variable">Group</span><span class="token operator">=</span>mysql
+<span class="token assign-left variable">ExecStart</span><span class="token operator">=</span>/usr/local/mysql/bin/mysqld --defaults-file<span class="token operator">=</span>/etc/my.cnf
+LimitNOFILE <span class="token operator">=</span> <span class="token number">5000</span>
+
+<span class="token number">8</span>.启动数据库
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># systemctl daemon-reload </span>
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># systemctl start mysqld</span>
+
+<span class="token number">9</span>.设置root密码
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># mysqladmin -u root -P 3306  password '123456'</span>
+
+<span class="token number">10</span>.登陆数据库
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># mysql -uroot -p123456</span>
+mysql<span class="token operator">&gt;</span>
+</code></pre> 
+<h4><a id="22mysql2MySQL_182"></a>2.2.在mysql-2中搭建MySQL多实例</h4> 
+<p>由于服务器数量有限，在mysql-2这台服务器中分别搭建两个从库。</p> 
+<h5><a id="221_186"></a>2.2.1.安装数据库软件</h5> 
+<pre><code class="prism language-sh"><span class="token number">1</span>.解压MySQL
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># tar xf mysql-5.7.36-linux-glibc2.12-x86_64.tar.gz -C /usr/local/</span>
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># mv /usr/local/mysql-5.7.36-linux-glibc2.12-x86_64 /usr/local/mysql</span>
+
+<span class="token number">2</span>.设置MySQL的环境变量
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># vim /etc/profile</span>
+<span class="token builtin class-name">export</span> <span class="token assign-left variable">MYSQL_HOME</span><span class="token operator">=</span>/usr/local/mysql
+<span class="token builtin class-name">export</span> <span class="token assign-left variable"><span class="token environment constant">PATH</span></span><span class="token operator">=</span><span class="token variable">$MYSQL_HOME</span>/bin:<span class="token environment constant">$PATH</span>
+<span class="token builtin class-name">export</span> <span class="token assign-left variable">LD_LIBRARY_PATH</span><span class="token operator">=</span>:/usr/local/mysql/lib
+
+<span class="token number">3</span>.创建mysql用户
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># groupadd -r mysql</span>
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># useradd -M -r -s /sbin/nologin -g mysql mysql</span>
+</code></pre> 
+<h5><a id="2213306MySQL_204"></a>2.2.1.搭建第一个3306从库的MySQL实例</h5> 
+<p>搭建第一个从库实例，端口号为3306，server_id为2，数据路径为/data/mysql3306。</p> 
+<pre><code class="prism language-sh"><span class="token number">1</span>.创建3306从库的数据目录
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># mkdir /data/mysql3306</span>
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># chown -R mysql.mysql /data/mysql3306/</span>
+
+<span class="token number">2</span>.准备3306从库的配置文件
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># vim /etc/my3306.cnf</span>
+<span class="token punctuation">[</span>mysqld<span class="token punctuation">]</span>	
+<span class="token assign-left variable">user</span><span class="token operator">=</span>mysql								
+<span class="token assign-left variable">port</span><span class="token operator">=</span><span class="token number">3306</span>							    
+<span class="token assign-left variable">server_id</span><span class="token operator">=</span><span class="token number">2</span>							<span class="token comment">#每个MySQL数据库的server_id都设置成不同的</span>
+<span class="token assign-left variable">basedir</span><span class="token operator">=</span>/usr/local/mysql				
+<span class="token assign-left variable">datadir</span><span class="token operator">=</span>/data/mysql3306	
+<span class="token assign-left variable">log_bin</span><span class="token operator">=</span>/data/mysql3306/mysql-bin
+gtid-mode<span class="token operator">=</span>on
+enforce-gtid-consistency<span class="token operator">=</span>true
+<span class="token assign-left variable">socket</span><span class="token operator">=</span>/data/mysql3306/mysql.sock
+<span class="token assign-left variable">log_error</span><span class="token operator">=</span>/data/mysql3306/mysql_err.log
+character-set-server<span class="token operator">=</span>utf8
+
+<span class="token punctuation">[</span>mysql<span class="token punctuation">]</span>
+<span class="token assign-left variable">socket</span><span class="token operator">=</span>/data/mysql3306/mysql.sock
+
+<span class="token number">3</span>.初始化3306从库
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># mysqld --initialize-insecure --user=mysql --basedir=/usr/local/mysql --datadir=/data/mysql3306</span>
+
+<span class="token number">4</span>.准备服务管理脚本
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># vim /etc/systemd/system/mysqld3306.service </span>
+<span class="token punctuation">[</span>Unit<span class="token punctuation">]</span>
+<span class="token assign-left variable">Description</span><span class="token operator">=</span>MySQL Server
+<span class="token assign-left variable">Documentation</span><span class="token operator">=</span>man:mysqld<span class="token punctuation">(</span><span class="token number">8</span><span class="token punctuation">)</span>
+<span class="token assign-left variable">Documentation</span><span class="token operator">=</span>http://dev.mysql.com/doc/refman/en/using-systemd.html
+<span class="token assign-left variable">After</span><span class="token operator">=</span>network.target
+<span class="token assign-left variable">After</span><span class="token operator">=</span>syslog.target
+<span class="token punctuation">[</span>Install<span class="token punctuation">]</span>
+<span class="token assign-left variable">WantedBy</span><span class="token operator">=</span>multi-user.target
+<span class="token punctuation">[</span>Service<span class="token punctuation">]</span>
+<span class="token assign-left variable">User</span><span class="token operator">=</span>mysql
+<span class="token assign-left variable">Group</span><span class="token operator">=</span>mysql
+<span class="token assign-left variable">ExecStart</span><span class="token operator">=</span>/usr/local/mysql/bin/mysqld --defaults-file<span class="token operator">=</span>/etc/my3306.cnf
+LimitNOFILE <span class="token operator">=</span> <span class="token number">5000</span>
+
+<span class="token number">5</span>.启动数据库
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># systemctl daemon-reload </span>
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># systemctl start mysqld3306</span>
+
+<span class="token number">6</span>.设置root密码
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># mysqladmin -u root -P 3306 -S /data/mysql3306/mysql.sock password '123456'</span>
+
+<span class="token number">7</span>.登陆数据库
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># mysql -uroot -p123456 -P3306 -S /data/mysql3306/mysql.sock</span>
+mysql<span class="token operator">&gt;</span>
+</code></pre> 
+<h5><a id="2223307MySQL_262"></a>2.2.2.搭建第二个3307从库的MySQL实例</h5> 
+<p>搭建第一个从库实例，端口号为3306，server_id为2，数据路径为/data/mysql3306。</p> 
+<pre><code class="prism language-sh"><span class="token number">1</span>.创建3307从库的数据目录
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># mkdir /data/mysql3307</span>
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># chown -R mysql.mysql /data/mysql3307/</span>
+
+<span class="token number">2</span>.准备3307从库的配置文件
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># vim /etc/my3307.cnf</span>
+<span class="token punctuation">[</span>mysqld<span class="token punctuation">]</span>	
+<span class="token assign-left variable">user</span><span class="token operator">=</span>mysql								
+<span class="token assign-left variable">port</span><span class="token operator">=</span><span class="token number">3307</span>							    
+<span class="token assign-left variable">server_id</span><span class="token operator">=</span><span class="token number">3</span>							<span class="token comment">#每个MySQL数据库的server_id都设置成不同的</span>
+<span class="token assign-left variable">basedir</span><span class="token operator">=</span>/usr/local/mysql				
+<span class="token assign-left variable">datadir</span><span class="token operator">=</span>/data/mysql3307	
+<span class="token assign-left variable">log_bin</span><span class="token operator">=</span>/data/mysql3307/mysql-bin
+gtid-mode<span class="token operator">=</span>on
+enforce-gtid-consistency<span class="token operator">=</span>true
+<span class="token assign-left variable">socket</span><span class="token operator">=</span>/data/mysql3307/mysql.sock
+<span class="token assign-left variable">log_error</span><span class="token operator">=</span>/data/mysql3307/mysql_err.log
+character-set-server<span class="token operator">=</span>utf8
+
+<span class="token punctuation">[</span>mysql<span class="token punctuation">]</span>
+<span class="token assign-left variable">socket</span><span class="token operator">=</span>/data/mysql3307/mysql.sock
+
+<span class="token number">3</span>.初始化3307从库
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># mysqld --initialize-insecure --user=mysql --basedir=/usr/local/mysql --datadir=/data/mysql3307</span>
+
+<span class="token number">4</span>.准备服务管理脚本
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># vim /etc/systemd/system/mysqld3307.service </span>
+<span class="token punctuation">[</span>Unit<span class="token punctuation">]</span>
+<span class="token assign-left variable">Description</span><span class="token operator">=</span>MySQL Server
+<span class="token assign-left variable">Documentation</span><span class="token operator">=</span>man:mysqld<span class="token punctuation">(</span><span class="token number">8</span><span class="token punctuation">)</span>
+<span class="token assign-left variable">Documentation</span><span class="token operator">=</span>http://dev.mysql.com/doc/refman/en/using-systemd.html
+<span class="token assign-left variable">After</span><span class="token operator">=</span>network.target
+<span class="token assign-left variable">After</span><span class="token operator">=</span>syslog.target
+<span class="token punctuation">[</span>Install<span class="token punctuation">]</span>
+<span class="token assign-left variable">WantedBy</span><span class="token operator">=</span>multi-user.target
+<span class="token punctuation">[</span>Service<span class="token punctuation">]</span>
+<span class="token assign-left variable">User</span><span class="token operator">=</span>mysql
+<span class="token assign-left variable">Group</span><span class="token operator">=</span>mysql
+<span class="token assign-left variable">ExecStart</span><span class="token operator">=</span>/usr/local/mysql/bin/mysqld --defaults-file<span class="token operator">=</span>/etc/my3307.cnf
+LimitNOFILE <span class="token operator">=</span> <span class="token number">5000</span>
+
+<span class="token number">5</span>.启动数据库
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># systemctl daemon-reload </span>
+<span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># systemctl start mysqld3307</span>
+
+<span class="token number">6</span>.设置root密码
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># mysqladmin -u root -P 3307 -S /data/mysql3307/mysql.sock password '123456'</span>
+
+<span class="token number">7</span>.登陆数据库
+<span class="token punctuation">[</span>root@mysql-2 ~<span class="token punctuation">]</span><span class="token comment"># mysql -uroot -p123456 -P3307 -S /data/mysql3307/mysql.sock</span>
+mysql<span class="token operator">&gt;</span>
+</code></pre> 
+<h4><a id="23MySQL_322"></a>2.3.MySQL多个节点搭建完毕</h4> 
+<p>MySQL多个节点已经搭建完毕了，下面来查询每个实例的server_id。</p> 
+<p><img src="https://images2.imgbox.com/54/c7/sG5UCcWX_o.png" alt="image-20220705001555462"></p> 
+<h3><a id="3MySQL_330"></a>3.配置MySQL主从复制集群</h3> 
+<p>MySQL数据库的多个实例节点已经搭建完成了，下面将这些搭建的数据库实例配置成主从复制集群（一主两从）。</p> 
+<table><thead><tr><th>IP</th><th>主机名</th><th>端口</th><th>角色</th></tr></thead><tbody><tr><td>192.168.20.11</td><td>mysql-1</td><td>3306</td><td>主库</td></tr><tr><td>192.168.20.12</td><td>mysql-2</td><td>3306</td><td>从库</td></tr><tr><td>192.168.20.12</td><td>mysql-2</td><td>3307</td><td>从库</td></tr></tbody></table> 
+<p>配置MySQL主从复制集群的大致步骤：</p> 
+<ul><li>主库开启Binlog日志，从库复制主库数据要通过Binlog进行复制。</li><li>主库创建专门用作主从复制的用户。</li><li>将主库数据进行备份，再从库中恢复。</li><li>配置从库连接主库的复制信息。</li><li>启动主从复制集群。</li></ul> 
+<h4><a id="31Binlog_348"></a>3.1.在主库开启Binlog二进制日志</h4> 
+<p>主库已经开启了Binlog二进制日志，我们来查一下。</p> 
+<pre><code class="prism language-sql">mysql<span class="token operator">&gt;</span> <span class="token keyword">show</span> variables <span class="token operator">like</span> <span class="token string">'%log_bin%'</span><span class="token punctuation">;</span>
+<span class="token operator">+</span><span class="token comment">---------------------------------+-----------------------------+</span>
+<span class="token operator">|</span> Variable_name                   <span class="token operator">|</span> <span class="token keyword">Value</span>                       <span class="token operator">|</span>
+<span class="token operator">+</span><span class="token comment">---------------------------------+-----------------------------+</span>
+<span class="token operator">|</span> log_bin                         <span class="token operator">|</span> <span class="token keyword">ON</span>                          <span class="token operator">|</span>
+<span class="token operator">|</span> log_bin_basename                <span class="token operator">|</span> <span class="token operator">/</span><span class="token keyword">data</span><span class="token operator">/</span>mysql<span class="token operator">/</span>mysql<span class="token operator">-</span>bin       <span class="token operator">|</span>
+<span class="token operator">|</span> log_bin_index                   <span class="token operator">|</span> <span class="token operator">/</span><span class="token keyword">data</span><span class="token operator">/</span>mysql<span class="token operator">/</span>mysql<span class="token operator">-</span>bin<span class="token punctuation">.</span><span class="token keyword">index</span> <span class="token operator">|</span>
+<span class="token operator">|</span> log_bin_trust_function_creators <span class="token operator">|</span> <span class="token keyword">OFF</span>                         <span class="token operator">|</span>
+<span class="token operator">|</span> log_bin_use_v1_row_events       <span class="token operator">|</span> <span class="token keyword">OFF</span>                         <span class="token operator">|</span>
+<span class="token operator">|</span> sql_log_bin                     <span class="token operator">|</span> <span class="token keyword">ON</span>                          <span class="token operator">|</span>
+<span class="token operator">+</span><span class="token comment">---------------------------------+-----------------------------+</span>
+<span class="token number">6</span> <span class="token keyword">rows</span> <span class="token operator">in</span> <span class="token keyword">set</span> <span class="token punctuation">(</span><span class="token number">0.01</span> sec<span class="token punctuation">)</span>
+</code></pre> 
+<p>从库复制主库数据，都是通过Binlog进行传输和恢复的。</p> 
+<h4><a id="32_369"></a>3.2.在主库上创建主从复制的用户</h4> 
+<pre><code class="prism language-sql">mysql<span class="token operator">&gt;</span> <span class="token keyword">grant</span> <span class="token keyword">replication</span> slave <span class="token keyword">on</span> <span class="token operator">*</span><span class="token punctuation">.</span><span class="token operator">*</span> <span class="token keyword">to</span> replicas<span class="token variable">@'192.168.20.%'</span> identified <span class="token keyword">by</span> <span class="token string">'123456'</span><span class="token punctuation">;</span>
+</code></pre> 
+<h4><a id="33_375"></a>3.3.将主库数据备份并在从库中进行还原</h4> 
+<p>如果是运行很久的主库，要升级为主从复制集群，那么建议将主库上的数据备份还原到从库上，避免从库一次性同步很多数据，浪费性能。</p> 
+<pre><code class="prism language-sh"><span class="token punctuation">[</span>root@mysql-1 ~<span class="token punctuation">]</span><span class="token comment"># mysqldump -uroot -p123456 -A --master-data=2 -R -E --triggers --single-transaction &gt; all_db.sql</span>
+</code></pre> 
+<p>在192.168.20.12的两个从库中还原主库的备份数据。</p> 
+<pre><code class="prism language-sql"><span class="token number">1.</span>将备份上传到从库的服务器上
+<span class="token punctuation">[</span>root<span class="token variable">@mysql</span><span class="token operator">-</span><span class="token number">1</span> <span class="token operator">~</span><span class="token punctuation">]</span><span class="token comment"># scp -rp all_db.sql root@192.168.20.12:/root</span>
+
+<span class="token number">2.3306</span>从库还原主库备份数据
+<span class="token punctuation">[</span>root<span class="token variable">@mysql</span><span class="token operator">-</span><span class="token number">2</span> <span class="token operator">~</span><span class="token punctuation">]</span><span class="token comment"># mysql -uroot -p123456 -P3306 -S /data/mysql3306/mysql.sock </span>
+mysql<span class="token operator">&gt;</span> <span class="token keyword">set</span> sql_log_bin<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+mysql<span class="token operator">&gt;</span> source <span class="token operator">/</span>root<span class="token operator">/</span>all_db<span class="token punctuation">.</span><span class="token keyword">sql</span><span class="token punctuation">;</span>
+
+<span class="token number">3.3307</span>从库还原主库备份数据
+<span class="token punctuation">[</span>root<span class="token variable">@mysql</span><span class="token operator">-</span><span class="token number">2</span> <span class="token operator">~</span><span class="token punctuation">]</span><span class="token comment"># mysql -uroot -p123456 -P3307 -S /data/mysql3307/mysql.sock </span>
+mysql<span class="token operator">&gt;</span> <span class="token keyword">set</span> sql_log_bin<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span>
+mysql<span class="token operator">&gt;</span> source <span class="token operator">/</span>root<span class="token operator">/</span>all_db<span class="token punctuation">.</span><span class="token keyword">sql</span><span class="token punctuation">;</span>
+</code></pre> 
+<h4><a id="34_400"></a>3.4.配置从库连接主库的复制信息</h4> 
+<p>接下来我们需要配置从库连接主库的信息，包括让从库知道主库的IP、端口号、复制的用户密码、Binlog相关的信息。</p> 
+<p><strong>1）获取主库Binlog的信息</strong></p> 
+<p>从库是通过Binlog复制主库数据的，首先要获取主库Binlog日志的一些信息，包括主库的Binlog日志使用的是哪个、要从Binlog日志中的哪一个事件标识号处开始复制数据。</p> 
+<p>从Binlog的哪一个事件标识号处开始复制数据，尤为关键，因为主库可能运行的时间长了，也有很多的数据，一定要从合适的位置处开始复制数据，要不然也会产生很大的资源浪费。</p> 
+<p>我们是用主库头一天的全库备份，然后还原到从库上的，在主库的备份文件中就记录了从库应该从哪一个Binlog事件标识位处开始复制数据。</p> 
+<pre><code class="prism language-sh"><span class="token function">vim</span> all_db.sql
+-- CHANGE MASTER TO <span class="token assign-left variable">MASTER_LOG_FILE</span><span class="token operator">=</span><span class="token string">'mysql-bin.000001'</span>, <span class="token assign-left variable">MASTER_LOG_POS</span><span class="token operator">=</span><span class="token number">452</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>从备份文件中得知，我们应该让从库从主库Binlog事件标识位号452处，开始复制数据。</p> 
+<p>如果主库不是运行很久的，不需要备份数据还原到从库，而是直接搭建的主从复制集群，那么直接可以从主库状态信息那里，获取Binlog的标识位号，在配置主从时，一定要指对Binlog标识位号，否则主从将会失败。</p> 
+<pre><code class="prism language-sql">mysql<span class="token operator">&gt;</span> <span class="token keyword">show</span> master <span class="token keyword">status</span><span class="token punctuation">;</span>
+<span class="token operator">+</span><span class="token comment">------------------+----------+--------------+------------------+----------------------------------------+</span>
+<span class="token operator">|</span> <span class="token keyword">File</span>             <span class="token operator">|</span> Position <span class="token operator">|</span> Binlog_Do_DB <span class="token operator">|</span> Binlog_Ignore_DB <span class="token operator">|</span> Executed_Gtid_Set                      <span class="token operator">|</span>
+<span class="token operator">+</span><span class="token comment">------------------+----------+--------------+------------------+----------------------------------------+</span>
+<span class="token operator">|</span> mysql<span class="token operator">-</span>bin<span class="token punctuation">.</span><span class="token number">000001</span> <span class="token operator">|</span>      <span class="token number">452</span> <span class="token operator">|</span>              <span class="token operator">|</span>                  <span class="token operator">|</span> <span class="token number">4</span>f87bad8<span class="token operator">-</span>fc67<span class="token operator">-</span><span class="token number">11</span>ec<span class="token operator">-</span>be7b<span class="token operator">-</span><span class="token number">005056</span>b791aa:<span class="token number">1</span> <span class="token operator">|</span>
+<span class="token operator">+</span><span class="token comment">------------------+----------+--------------+------------------+----------------------------------------+</span>
+<span class="token number">1</span> <span class="token keyword">row</span> <span class="token operator">in</span> <span class="token keyword">set</span> <span class="token punctuation">(</span><span class="token number">0.00</span> sec<span class="token punctuation">)</span>
+</code></pre> 
+<p><strong>2）配置从库连接主库进行复制的参数信息</strong></p> 
+<p>配置从库连接主库进行复制的参数有很多，不过只需要记住这一条命令：<code>help change master to</code>即可，在MySQL交互式下执行此命令可以打印出从库连接主库的所有配置参数。</p> 
+<pre><code class="prism language-sql"><span class="token number">1.3306</span>从库配置
+<span class="token punctuation">[</span>root<span class="token variable">@mysql</span><span class="token operator">-</span><span class="token number">2</span> <span class="token operator">~</span><span class="token punctuation">]</span><span class="token comment"># mysql -uroot -p123456 -P3306 -S /data/mysql3306/mysql.sock </span>
+mysql<span class="token operator">&gt;</span> CHANGE MASTER <span class="token keyword">TO</span>
+  MASTER_HOST<span class="token operator">=</span><span class="token string">'192.168.20.11'</span><span class="token punctuation">,</span>
+  MASTER_USER<span class="token operator">=</span><span class="token string">'replicas'</span><span class="token punctuation">,</span>
+  MASTER_PASSWORD<span class="token operator">=</span><span class="token string">'123456'</span><span class="token punctuation">,</span>
+  MASTER_PORT<span class="token operator">=</span><span class="token number">3306</span><span class="token punctuation">,</span>
+  MASTER_LOG_FILE<span class="token operator">=</span><span class="token string">'mysql-bin.000001'</span><span class="token punctuation">,</span>
+  MASTER_LOG_POS<span class="token operator">=</span><span class="token number">452</span><span class="token punctuation">,</span>
+  MASTER_CONNECT_RETRY<span class="token operator">=</span><span class="token number">10</span><span class="token punctuation">;</span>
+  
+<span class="token number">1.3307</span>从库配置
+<span class="token punctuation">[</span>root<span class="token variable">@mysql</span><span class="token operator">-</span><span class="token number">2</span> <span class="token operator">~</span><span class="token punctuation">]</span><span class="token comment"># mysql -uroot -p123456 -P3307 -S /data/mysql3307/mysql.sock </span>
+mysql<span class="token operator">&gt;</span> CHANGE MASTER <span class="token keyword">TO</span>
+  MASTER_HOST<span class="token operator">=</span><span class="token string">'192.168.20.11'</span><span class="token punctuation">,</span>
+  MASTER_USER<span class="token operator">=</span><span class="token string">'replicas'</span><span class="token punctuation">,</span>
+  MASTER_PASSWORD<span class="token operator">=</span><span class="token string">'123456'</span><span class="token punctuation">,</span>
+  MASTER_PORT<span class="token operator">=</span><span class="token number">3306</span><span class="token punctuation">,</span>
+  MASTER_LOG_FILE<span class="token operator">=</span><span class="token string">'mysql-bin.000001'</span><span class="token punctuation">,</span>
+  MASTER_LOG_POS<span class="token operator">=</span><span class="token number">452</span><span class="token punctuation">,</span>
+  MASTER_CONNECT_RETRY<span class="token operator">=</span><span class="token number">10</span><span class="token punctuation">;</span>  
+</code></pre> 
+<p>参数解释：</p> 
+<table><thead><tr><th>参数</th><th>含义</th></tr></thead><tbody><tr><td>MASTER_HOST</td><td>主库的地址</td></tr><tr><td>MASTER_USER</td><td>主从复制的专用用户</td></tr><tr><td>MASTER_PASSWORD</td><td>主从复制用户的密码</td></tr><tr><td>MASTER_PORT</td><td>主库的端口号</td></tr><tr><td>MASTER_LOG_FILE</td><td>主库的Binlog日志名</td></tr><tr><td>MASTER_LOG_POS</td><td>从主库BInlog日志的哪一个标识位处开始复制</td></tr><tr><td>MASTER_CONNECT_RETRY</td><td>主从连接失败的重试时间间隔</td></tr></tbody></table> 
+<h4><a id="35_473"></a>3.5.启动主从复制线程</h4> 
+<pre><code class="prism language-sql"><span class="token number">1.3306</span>从库配置
+<span class="token punctuation">[</span>root<span class="token variable">@mysql</span><span class="token operator">-</span><span class="token number">2</span> <span class="token operator">~</span><span class="token punctuation">]</span><span class="token comment"># mysql -uroot -p123456 -P3306 -S /data/mysql3306/mysql.sock </span>
+mysql<span class="token operator">&gt;</span> <span class="token keyword">start</span> slave<span class="token punctuation">;</span>
+
+<span class="token number">1.3307</span>从库配置
+<span class="token punctuation">[</span>root<span class="token variable">@mysql</span><span class="token operator">-</span><span class="token number">2</span> <span class="token operator">~</span><span class="token punctuation">]</span><span class="token comment"># mysql -uroot -p123456 -P3307 -S /data/mysql3307/mysql.sock </span>
+mysql<span class="token operator">&gt;</span> <span class="token keyword">start</span> slave<span class="token punctuation">;</span>
+</code></pre> 
+<h3><a id="4_487"></a>4.查看主从复制集群状态</h3> 
+<pre><code class="prism language-sql"><span class="token number">1.3306</span>从库配置
+<span class="token punctuation">[</span>root<span class="token variable">@mysql</span><span class="token operator">-</span><span class="token number">2</span> <span class="token operator">~</span><span class="token punctuation">]</span><span class="token comment"># mysql -uroot -p123456 -P3306 -S /data/mysql3306/mysql.sock </span>
+mysql<span class="token operator">&gt;</span> <span class="token keyword">show</span> slave <span class="token keyword">status</span>\G<span class="token punctuation">;</span>
+
+<span class="token number">1.3307</span>从库配置
+<span class="token punctuation">[</span>root<span class="token variable">@mysql</span><span class="token operator">-</span><span class="token number">2</span> <span class="token operator">~</span><span class="token punctuation">]</span><span class="token comment"># mysql -uroot -p123456 -P3307 -S /data/mysql3307/mysql.sock </span>
+mysql<span class="token operator">&gt;</span> <span class="token keyword">show</span> slave <span class="token keyword">status</span>\G<span class="token punctuation">;</span>
+</code></pre> 
+<p>当每个从库的IO线程和SQL线程的状态都是Yes，就表示主从复制集群搭建完毕了。</p> 
+<p><img src="https://images2.imgbox.com/83/95/5jssYtmV_o.png" alt="image-20220706000742368"></p> 
+<p>MySQL主从配置过程中从库连接主库的配置写错了应该如何解决？</p> 
+<p>只要不执行start slave，再执行一次change master to会覆盖上一次配置。</p> 
+<pre><code class="prism language-sql"><span class="token number">1.</span>停止主从复制
+mysql<span class="token operator">&gt;</span>stop slave<span class="token punctuation">;</span>
+
+<span class="token number">2.</span>清空从库连接主库的信息
+mysql<span class="token operator">&gt;</span> reset slave <span class="token keyword">all</span><span class="token punctuation">;</span>
+
+<span class="token number">3.</span>重新设置
+mysql<span class="token operator">&gt;</span> CHANGE MASTER <span class="token keyword">TO</span>
+  MASTER_HOST<span class="token operator">=</span><span class="token string">'192.168.20.11'</span><span class="token punctuation">,</span>
+  MASTER_USER<span class="token operator">=</span><span class="token string">'replicas'</span><span class="token punctuation">,</span>
+  MASTER_PASSWORD<span class="token operator">=</span><span class="token string">'123456'</span><span class="token punctuation">,</span>
+  MASTER_PORT<span class="token operator">=</span><span class="token number">3306</span><span class="token punctuation">,</span>
+  MASTER_LOG_FILE<span class="token operator">=</span><span class="token string">'mysql-bin.000001'</span><span class="token punctuation">,</span>
+  MASTER_LOG_POS<span class="token operator">=</span><span class="token number">452</span><span class="token punctuation">,</span>
+  MASTER_CONNECT_RETRY<span class="token operator">=</span><span class="token number">10</span><span class="token punctuation">;</span>
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/730fdbb5a7e07687995ad386377696cf/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">95%数据格式都支持？3D模型格式转换引擎HOOPS Exchange真绝了！</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/54fd52f33a56e40049711ec820c62921/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">uni-app小程序 uni.showToast字数超过两行自动省略显示不全问题</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

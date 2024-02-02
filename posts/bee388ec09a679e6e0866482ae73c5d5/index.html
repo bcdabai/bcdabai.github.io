@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>一起学ORBSLAM2（6）ORBSLAM中的特征匹配 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="一起学ORBSLAM2（6）ORBSLAM中的特征匹配" />
+<meta property="og:description" content="转载请注明原创地址：https://blog.csdn.net/qq_30356613/article/category/6897125
+ORBSLAM中对于特征点的匹配在不同情况下有不同的匹配方式。分为以下几种：
+1. 按照投影进行匹配
+2. 按照bow向量节点进行匹配
+3. 针对初始化地图点的匹配
+4. 针对单目三角化的匹配
+5. 基于相似矩阵的匹配
+6. 通过匹配来提出冗余地图点
+一、首先看按照投影进行的匹配
+按照投影方式的不同将其分为上一帧投影到当前帧（tracking线程的按照运动模型进行位姿估计），关键帧投影到当前帧（tracking线程的重定位），地图点投影到当前帧（tracking线程的局部地图追踪进行位姿估计），地图点通过相似矩阵投影到关键帧（回环检测线程中）
+1、地图点投影到当前帧的方式匹配（tracking线程的局部地图追踪进行位姿估计）
+总体思路是遍历所有地图点，分别向当前帧进行投影，在当前帧中找到一个描述子距离最相近的特征点作为其匹配点。
+首先根据地图点在金字塔中的层数确定该地图点在当前帧的搜索半径，然后以该地图点在当前帧的投影（在tracking线程中调用Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)来确定地图点在当前帧的投影像素坐标）为中心进一步确定地图点在当前帧的投影区域。得到当前帧在投影位置搜索半径内的所有特征点。分别计算这些特征点描述子与当前地图点最优描述子的距离，找到最小距离对应的特征点，作为当前地图点在该帧中的匹配。匹配筛选（剔除误匹配）：（1）匹配描述子距离小于阈值。（2）这里的匹配还计算了第二最优匹配点（描述子距离第二小），目的是计算第一匹配点/第二匹配点的比率（小于1），当比率大时说明第二匹配点和第一匹配点相当，第一匹配点描述子没有特别的“优越性”，在这种情况下不妨舍弃这对匹配，防止发生误匹配。将得到的匹配地图点添加进当前帧的地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。
+2、上一帧投影到当前帧的匹配方式（tracking线程的按照运动模型进行位姿估计）
+总体思路是遍历上一帧中所有地图点，分别向当前帧进行投影，在当前帧中找到一个描述子距离最相近的特征点作为其匹配点。
+首先根据上一帧地图点在上一帧图像金字塔中的层数确定该地图点在当前帧图像金字塔中的层数，根据金字塔层数确定搜索半径，然后将该地图点的世界坐标系下的坐标根据相机内参数矩阵和旋转平移矩阵（注意这里的旋转平移矩阵是根据上一帧的旋转平移矩阵和上一帧的位姿变化速度推算的当前帧的初始位姿）投影到当前帧，得到上一帧地图点在当前帧的像素坐标（判断投影后的像素坐标的有效性），以投影结果为中心以金字塔层数确定的搜索半径为半径作为搜索区域，从而得到当前帧在投影区域内的所有特征点。分别计算这些特征点描述子与上一帧待追踪地图点的最优描述子距离，找到最小距离对应的特征点，作为上一帧待追踪地图点在该帧中的匹配点。最后进行匹配筛选（剔除误匹配）：（1）匹配描述子距离小于阈值。（2）这里的匹配还计算了第二最优匹配点（描述子距离第二小），目的是计算第一匹配点/第二匹配点的比率（小于1），当比率大时说明第二匹配点和第一匹配点相当，第一匹配点描述子没有特别的“优越性”，在这种情况下不妨舍弃这对匹配，防止发生误匹配。（3）如果需要判别匹配点的方向则通过梯度方向直方图进行筛选。将得到的匹配地图点添加进当前帧的地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。
+3、关键帧投影投影到当前帧的匹配方式（tracking线程的重定位）
+总体思路是遍历关键帧中所有地图点，分别向当前帧进行投影，在当前帧中找到一个描述子距离最相近的特征点作为其匹配点。
+首先根据当前帧的初始位姿（在重定位过程中PNP方式来计算位姿作为当前帧的初始位姿）和相机内参数矩阵，将关键帧的地图点映射到当前帧，从而得到关键帧的地图点在当前帧的映射像素坐标，将映射的像素坐标作为中心，然后根据地图点到光心的距离推算该特征点对应的高斯金字塔层数，从而确定搜索半径并确定关键帧地图点在当前帧匹配的搜索区域，从而得到当前帧在投影区域内的所有特征点。分别计算这些特征点描述子与上一帧待追踪地图点的最优描述子距离，找到最小距离对应的特征点，作为上一帧待追踪地图点在该帧中的匹配点。最后进行匹配筛选（剔除误匹配）：（1）匹配描述子距离小于阈值。（2）这里的匹配还计算了第二最优匹配点（描述子距离第二小），目的是计算第一匹配点/第二匹配点的比率（小于1），当比率大时说明第二匹配点和第一匹配点相当，第一匹配点描述子没有特别的“优越性”，在这种情况下不妨舍弃这对匹配，防止发生误匹配。（3）如果需要判别匹配点的方向则通过梯度方向直方图进行筛选。将得到的匹配地图点添加进当前帧的地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。
+4、地图点通过相似矩阵投影到关键帧（回环检测线程中计算得到相似矩阵之后匹配当前检测关键帧（回环末端）和回环关键帧（回环始帧）的局部地图点进行匹配）
+总体思路是遍历回环关键帧的所有共视图地图点，将这些地图点利用求得的sim矩阵投影到当前检测关键帧下，在当前关键帧中找到一个描述子距离最相近的特征点作为其匹配点。
+首先根据当前帧的相似变换矩阵（在回环检测过程中通过sim求解器求解）和相机内参数矩阵，将回环关键帧的共视地图点映射到当前检测关键帧，从而得到共视地图点在当前待检测回环关键帧的映射像素坐标，将映射的像素坐标作为中心，然后根据地图点到光心的距离推算该特征点对应的高斯金字塔层数，从而确定搜索半径并确定关键帧地图点在当前帧匹配的搜索区域，从而得到当前帧在投影区域内的所有特征点。分别计算这些特征点描述子与上一帧待追踪地图点的最优描述子距离，找到最小距离对应的特征点，作为上一帧待追踪地图点在该帧中的匹配点。最后进行匹配筛选（剔除误匹配）：（1）匹配描述子距离小于阈值。
+二、按照bow向量节点进行匹配
+按照BOW向量节点进行匹配有一个明显的优势是在此之前不需要知道任何关于两个匹配对象的几何关系，在第一节中讲到的按照投影的方式进行的匹配，都是给定两匹配对象的初步几何关系，然后根据初步的几何关系确定一个投影区域（投影中心和投影半径），在投影区域内寻找匹配。而相对于投影的匹配方式，按照BOW节点向量进行搜索匹配就不需要预先的集合关系了，按照BOW向量进行的匹配直接根据之前维护的词袋模型，在所有相同bow节点下的特征点中进行搜索匹配，同样更快速。这种方式往往在无法给定两匹配对象之间的初步几何关系时使用。根据匹配对象不同又分为：（1）关键帧和当前帧通过词袋进行快速匹配（1.用在tracking线程根据参考关键帧进行线程追踪过程中2.重定位）（2）关键帧和当前帧通过词袋进行快速匹配（回环检测）
+具体如下：
+1、关键帧和当前帧通过词袋进行快速匹配（1.用在tracking线程根据参考关键帧进行线程追踪过程中2.重定位）
+总体思路是遍历关键帧中所有特征向量和当前帧中的所有特征向量，计算在同一BOW节点下两特征向量的距离，找到一对描述子距离最相近的特征点作为匹配点。
+首先取出关键帧和当前帧的特征向量（注意这里的特征向量是根据节点id排序好的特征向量（用DBOW库中的特征向量），便于我们进行搜索），然后遍历关键帧的每一个特征向量，在当前帧的同一节点下搜索其匹配点（计算同一节点特征向量对应描述子的距离最小匹配作为其匹配点）。最后进行匹配筛选（剔除误匹配）：（1）匹配描述子距离小于阈值。（2）这里的匹配还计算了第二最优匹配点（描述子距离第二小），目的是计算第一匹配点/第二匹配点的比率（小于1），当比率大时说明第二匹配点和第一匹配点相当，第一匹配点描述子没有特别的“优越性”，在这种情况下不妨舍弃这对匹配，防止发生误匹配。（3）如果需要判别匹配点的方向则通过梯度方向直方图进行筛选。将得到的匹配地图点添加进匹配地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。
+2、关键帧和关键帧帧通过词袋进行快速匹配（回环检测）
+总体思路是遍历关键帧1中所有特征向量和关键帧2中的所有特征向量，计算在同一BOW节点下两特征向量的距离，找到一对描述子距离最相近的特征点作为匹配点。
+首先取出关键帧1和关键帧2的特征向量（注意这里的特征向量是根据节点id排序好的特征向量（用DBOW库中的特征向量），便于我们进行搜索），然后遍历关键帧1的每一个特征向量，在关键帧2的同一节点下搜索其匹配点（计算同一节点特征向量对应描述子的距离最小匹配作为其匹配点）。最后进行匹配筛选（剔除误匹配）：（1）匹配描述子距离小于阈值。（2）这里的匹配还计算了第二最优匹配点（描述子距离第二小），目的是计算第一匹配点/第二匹配点的比率（小于1），当比率大时说明第二匹配点和第一匹配点相当，第一匹配点描述子没有特别的“优越性”，在这种情况下不妨舍弃这对匹配，防止发生误匹配。（3）如果需要判别匹配点的方向则通过梯度方向直方图进行筛选。将得到的匹配地图点添加进匹配地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。
+三、针对单目初始化的匹配（单目初始化中）
+总体思路是针对单目初始化的匹配，由于在单目初始化之前并没有深度信息即还没有计算地图点，因此不能和一般的匹配一样通过遍历地图点进行匹配，只能通过遍历图像的特征点。
+首先取帧1中的所有特征点，根据给定参数搜索窗口确定搜索半径，根据该特征点在帧1中的2D位置估计其在帧2中的搜索中心，从而根据搜索中心和半径确定搜索范围，在帧2中搜索当前特征点的匹配点。最后进行匹配筛选（剔除误匹配）：（1）匹配描述子距离小于阈值。（2）这里的匹配还计算了第二最优匹配点（描述子距离第二小），目的是计算第一匹配点/第二匹配点的比率（小于1），当比率大时说明第二匹配点和第一匹配点相当，第一匹配点描述子没有特别的“优越性”，在这种情况下不妨舍弃这对匹配，防止发生误匹配。（3）如果需要判别匹配点的方向则通过梯度方向直方图进行筛选。将得到的匹配地图点添加进匹配地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。
+四、针对单目三角化的匹配(在localmapping线程中新建地图点时调用)
+此匹配方式主要应用于localmapping线程中新建地图点，此次新建地图点是针对于tracking线程中没有匹配到的地图点。总体思路是针对单目的尺度不确定性，在计算地图点深度时进行的匹配，利用三角测量筛选匹配点的正确性。匹配的是当前处理的关键帧及其相邻关键帧。
+首先循环所有关键帧1中的所有BOW节点，并在关键帧2中寻找与其具有相同BOW节点的特征点索引，循环关键帧2中找到的相同BOW节点下特征点索引，计算两关键帧中特征点的描述子距离，从而选择最小的描述子距离的一对特征点作为一对匹配点。注意这里在确定匹配之前需要进行对极约束（关键帧2中的匹配点距离根据关键帧1计算得到的极线的距离来判断匹配点是否满足对极几何）。最后进行匹配筛选（剔除误匹配）：（1）匹配描述子距离小于阈值。（2）如果需要判别匹配点的方向则通过梯度方向直方图进行筛选。将得到的匹配地图点添加进匹配地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。
+五、基于相似矩阵的匹配（用于回环检测计算相似矩阵之后）
+获取关键帧1 2的相机位姿以及相机1-&gt;相机2的位姿变换相似矩阵
+双向匹配:
+根据相似矩阵将关键帧1中的地图点向关键帧2中投影,确定投影区域,并在投影区域内寻找关键帧1中地图点的匹配
+根据相似矩阵将关键帧2中的地图点向关键帧1中投影,确定投影区域,并在投影区域内寻找关键帧2中地图点的匹配
+根据双向匹配结果,如果两次匹配都能成功,则确定该对匹配是有效的.将其存入vpMatches12容器 最终返回匹配点对个数
+六、通过匹配来提出冗余地图点
+1、融合地图点匹配（用于局部建图线程的关键帧地图点及其相邻帧的融合）
+将MapPoints投影到关键帧pKF中，并判断是否有重复的MapPoints
+1&gt; 如果MapPoint能匹配关键帧的特征点，并且该点有对应的MapPoint，那么将两个MapPoint合并（选择观测数多的）
+2&gt; 如果MapPoint能匹配关键帧的特征点，并且该点没有对应的MapPoint，那么为该点添加MapPoint
+投影方式和剔除误匹配的方式与上述方式类似，不再赘述。
+2、融合地图点（用于回环检查线程，根据相似矩阵融合当前关键帧和地图点融合）
+根据相似矩阵Scw映射地图点到关键帧。
+主要思路: 将回环地图点根据当前关键帧的位姿(相似矩阵)映射到当前关键帧,在当前关键帧中寻找回环地图点的代替点,存储进vpReplacePoint
+投影方式和剔除误匹配的方式与上述方式类似，不再赘述。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/bee388ec09a679e6e0866482ae73c5d5/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-06-05T21:53:00+08:00" />
+<meta property="article:modified_time" content="2018-06-05T21:53:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">一起学ORBSLAM2（6）ORBSLAM中的特征匹配</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p><span style="font-size:18px;">转载请注明原创地址：</span><span style="font-size:18px;">https://blog.csdn.net/qq_30356613/article/category/6897125</span><br></p> 
+<p>ORBSLAM<span style="font-family:'宋体';">中对于特征点的匹配在不同情况下有不同的匹配方式</span>。分为以下几种：</p> 
+<p>1. <span style="font-family:'宋体';">按照投影进行匹配</span></p> 
+<p>2. <span style="font-family:'宋体';">按照</span><span style="font-family:Calibri;">bow</span><span style="font-family:'宋体';">向量节点进行匹配</span></p> 
+<p>3. <span style="font-family:'宋体';">针对初始化地图点的匹配</span></p> 
+<p>4. <span style="font-family:'宋体';">针对单目三角化的匹配</span></p> 
+<p>5. <span style="font-family:'宋体';">基于相似矩阵的匹配</span></p> 
+<p>6. <span style="font-family:'宋体';">通过匹配来提出冗余地图点</span></p> 
+<p> </p> 
+<p><strong>一、首先看按照投影进行的匹配</strong></p> 
+<p>按照投影方式的不同将其分为上一帧投影到当前帧（<span style="font-family:Calibri;">tracking</span><span style="font-family:'宋体';">线程的按照运动模型进行位姿估计），关键帧投影到当前帧（</span><span style="font-family:Calibri;">tracking</span><span style="font-family:'宋体';">线程的重定位），地图点投影到当前帧（</span><span style="font-family:Calibri;">tracking</span><span style="font-family:'宋体';">线程的局部地图追踪进行位姿估计），地图点通过相似矩阵投影到关键帧（回环检测线程中）</span></p> 
+<p><strong>1<span style="font-family:'宋体';">、地图点投影到当前帧的方式匹配</span><span style="color:rgb(255,192,0);">（<span style="font-family:Calibri;">tracking</span><span style="font-family:'宋体';">线程的局部地图追踪进行位姿估计）</span></span></strong></p> 
+<p>总体思路是遍历所有地图点，分别向当前帧进行投影，在当前帧中找到一个描述子距离最相近的特征点作为其匹配点。</p> 
+<p>首先根据地图点在金字塔中的层数确定该地图点在当前帧的搜索半径，然后以该地图点在当前帧的投影（在<span style="font-family:Calibri;">tracking</span><span style="font-family:'宋体';">线程中调用</span>Frame::isInFrustum(MapPoint *pMP, float viewingCosLimit)<span style="font-family:'宋体';">来确定地图点在当前帧的投影像素坐标</span>）为中心进一步确定地图点在当前帧的投影区域。得到当前帧在投影位置搜索半径内的所有特征点。分别计算这些特征点描述子与当前地图点最优描述子的距离，找到最小距离对应的特征点，作为当前地图点在该帧中的匹配。匹配筛选（剔除误匹配）：（<span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">）匹配描述子距离小于阈值。（</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">）</span><span style="color:rgb(0,176,80);">这里的匹配还计算了第二最优匹配点（描述子距离第二小），目的是计算第一匹配点<span style="font-family:Calibri;">/</span><span style="font-family:'宋体';">第二匹配点的比率（小于</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">），当比率大时说明第二匹配点和第一匹配点相当，第一匹配点描述子没有特别的“优越性”，在这种情况下不妨舍弃这对匹配，防止发生误匹配。</span></span>将得到的匹配地图点添加进当前帧的地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。</p> 
+<p><strong>2<span style="font-family:'宋体';">、上一帧投影到当前帧的匹配方式</span><span style="color:rgb(255,192,0);">（<span style="font-family:Calibri;">tracking</span><span style="font-family:'宋体';">线程的按照运动模型进行位姿估计）</span></span></strong></p> 
+<p>总体思路是遍历上一帧中所有地图点，分别向当前帧进行投影，在当前帧中找到一个描述子距离最相近的特征点作为其匹配点。</p> 
+<p>首先根据上一帧地图点在上一帧图像金字塔中的层数确定该地图点在当前帧图像金字塔中的层数，根据金字塔层数确定搜索半径，然后将该地图点的世界坐标系下的坐标根据相机内参数矩阵和旋转平移矩阵（注意这里的旋转平移矩阵是根据上一帧的旋转平移矩阵和上一帧的位姿变化速度推算的当前帧的初始位姿）投影到当前帧，得到上一帧地图点在当前帧的像素坐标（判断投影后的像素坐标的有效性），以投影结果为中心以金字塔层数确定的搜索半径为半径作为搜索区域，从而得到当前帧在投影区域内的所有特征点。分别计算这些特征点描述子与上一帧待追踪地图点的最优描述子距离，找到最小距离对应的特征点，作为上一帧待追踪地图点在该帧中的匹配点。最后进行匹配筛选（剔除误匹配）：（<span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">）匹配描述子距离小于阈值。（</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">）</span><span style="color:rgb(0,176,80);">这里的匹配还计算了第二最优匹配点（描述子距离第二小），目的是计算第一匹配点<span style="font-family:Calibri;">/</span><span style="font-family:'宋体';">第二匹配点的比率（小于</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">），当比率大时说明第二匹配点和第一匹配点相当，第一匹配点描述子没有特别的“优越性”，在这种情况下不妨舍弃这对匹配，防止发生误匹配。</span></span>（<span style="font-family:Calibri;">3</span><span style="font-family:'宋体';">）如果需要判别匹配点的方向则通过</span><span style="color:rgb(255,0,0);">梯度方向直方图</span>进行筛选。将得到的匹配地图点添加进当前帧的地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。</p> 
+<p><strong>3<span style="font-family:'宋体';">、关键帧投影投影到当前帧的匹配方式</span><span style="color:rgb(255,192,0);">（<span style="font-family:Calibri;">tracking</span><span style="font-family:'宋体';">线程的重定位）</span></span></strong></p> 
+<p>总体思路是遍历关键帧中所有地图点，分别向当前帧进行投影，在当前帧中找到一个描述子距离最相近的特征点作为其匹配点。</p> 
+<p>首先根据当前帧的初始位姿（在重定位过程中<span style="font-family:Calibri;">PNP</span><span style="font-family:'宋体';">方式来计算位姿作为当前帧的初始位姿）和相机内参数矩阵，将关键帧的地图点映射到当前帧，从而得到关键帧的地图点在当前帧的映射像素坐标，将映射的像素坐标作为中心，然后根据地图点到光心的距离推算该特征点对应的高斯金字塔层数，从而确定搜索半径并确定关键帧地图点在当前帧匹配的搜索区域，从而</span>得到当前帧在投影区域内的所有特征点。分别计算这些特征点描述子与上一帧待追踪地图点的最优描述子距离，找到最小距离对应的特征点，作为上一帧待追踪地图点在该帧中的匹配点。最后进行匹配筛选（剔除误匹配）：（<span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">）匹配描述子距离小于阈值。（</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">）</span><span style="color:rgb(0,176,80);">这里的匹配还计算了第二最优匹配点（描述子距离第二小），目的是计算第一匹配点<span style="font-family:Calibri;">/</span><span style="font-family:'宋体';">第二匹配点的比率（小于</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">），当比率大时说明第二匹配点和第一匹配点相当，第一匹配点描述子没有特别的“优越性”，在这种情况下不妨舍弃这对匹配，防止发生误匹配。</span></span>（<span style="font-family:Calibri;">3</span><span style="font-family:'宋体';">）如果需要判别匹配点的方向则通过</span><span style="color:rgb(255,0,0);">梯度方向直方图</span>进行筛选。将得到的匹配地图点添加进当前帧的地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。</p> 
+<p><strong>4、地图点通过相似矩阵投影到关键帧<span style="color:rgb(255,192,0);">（回环检测线程中计算得到相似矩阵之后匹配当前检测关键帧（回环末端）和回环关键帧（回环始帧）的局部地图点进行匹配）</span></strong></p> 
+<p>总体思路是遍历回环关键帧的所有共视图地图点，将这些地图点利用求得的<span style="font-family:Calibri;">sim</span><span style="font-family:'宋体';">矩阵投影到当前检测关键帧下</span>，在当前关键帧中找到一个描述子距离最相近的特征点作为其匹配点。</p> 
+<p>首先根据当前帧的相似变换矩阵（在回环检测过程中通过<span style="font-family:Calibri;">sim</span><span style="font-family:'宋体';">求解器求解）和相机内参数矩阵，将回环关键帧的共视地图点映射到当前检测关键帧，从而得到共视地图点在当前待检测回环关键帧的映射像素坐标，将映射的像素坐标作为中心，然后根据地图点到光心的距离推算该特征点对应的高斯金字塔层数，从而确定搜索半径并确定关键帧地图点在当前帧匹配的搜索区域，从而</span>得到当前帧在投影区域内的所有特征点。分别计算这些特征点描述子与上一帧待追踪地图点的最优描述子距离，找到最小距离对应的特征点，作为上一帧待追踪地图点在该帧中的匹配点。最后进行匹配筛选（剔除误匹配）：（<span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">）匹配描述子距离小于阈值。</span></p> 
+<p><strong>二、按照<span style="font-family:Calibri;">bow</span><span style="font-family:'宋体';">向量节点进行匹配</span></strong></p> 
+<p>按照BOW<span style="font-family:'宋体';">向量节点进行匹配有一个明显的优势是在此之前不需要知道任何关于两个匹配对象的几何关系，在第一节中讲到的按照投影的方式进行的匹配，都是给定两匹配对象的初步几何关系，然后根据初步的几何关系确定一个投影区域（投影中心和投影半径），在投影区域内寻找匹配。而相对于投影的匹配方式，按照</span><span style="font-family:Calibri;">BOW</span><span style="font-family:'宋体';">节点向量进行搜索匹配就不需要预先的集合关系了，按照</span><span style="font-family:Calibri;">BOW</span><span style="font-family:'宋体';">向量进行的匹配直接根据之前维护的词袋模型，在所有相同</span><span style="font-family:Calibri;">bow</span><span style="font-family:'宋体';">节点下的特征点中进行搜索匹配，同样更快速。</span><span style="color:rgb(112,48,160);">这种方式往往在无法给定两匹配对象之间的初步几何关系时使用</span>。根据匹配对象不同又分为：（<span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">）关键帧和当前帧通过词袋进行快速匹配（</span><span style="font-family:Calibri;">1.</span><span style="font-family:'宋体';">用在</span><span style="font-family:Calibri;">tracking</span><span style="font-family:'宋体';">线程根据参考关键帧进行线程追踪过程中</span><span style="font-family:Calibri;">2.</span><span style="font-family:'宋体';">重定位）（</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">）关键帧和当前帧通过词袋进行快速匹配（回环检测）</span></p> 
+<p>具体如下：</p> 
+<p>1<span style="font-family:'宋体';">、关键帧和当前帧通过词袋进行快速匹配</span><strong><span style="color:rgb(255,192,0);">（<span style="font-family:Calibri;">1.</span><span style="font-family:'宋体';">用在</span><span style="font-family:Calibri;">tracking</span><span style="font-family:'宋体';">线程根据参考关键帧进行线程追踪过程中</span><span style="font-family:Calibri;">2.</span><span style="font-family:'宋体';">重定位）</span></span></strong></p> 
+<p>总体思路是遍历关键帧中所有特征向量和当前帧中的所有特征向量，计算在同一<span style="font-family:Calibri;">BOW</span><span style="font-family:'宋体';">节点下两特征向量的距离，找到一对描述子距离最相近的特征点作为匹配点。</span></p> 
+<p>首先取出关键帧和当前帧的特征向量（注意这里的特征向量是根据节点<span style="font-family:Calibri;">id</span><span style="font-family:'宋体';">排序好的特征向量</span>（用<span style="font-family:Calibri;">DBOW</span><span style="font-family:'宋体';">库中的特征向量），</span>便于我们进行搜索），然后遍历关键帧的每一个特征向量，在当前帧的同一节点下搜索其匹配点（计算同一节点特征向量对应描述子的距离最小匹配作为其匹配点）。最后进行匹配筛选（剔除误匹配）：（<span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">）匹配描述子距离小于阈值。（</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">）</span><span style="color:rgb(0,176,80);">这里的匹配还计算了第二最优匹配点（描述子距离第二小），目的是计算第一匹配点<span style="font-family:Calibri;">/</span><span style="font-family:'宋体';">第二匹配点的比率（小于</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">），当比率大时说明第二匹配点和第一匹配点相当，第一匹配点描述子没有特别的“优越性”，在这种情况下不妨舍弃这对匹配，防止发生误匹配。</span></span>（<span style="font-family:Calibri;">3</span><span style="font-family:'宋体';">）如果需要判别匹配点的方向则通过</span><span style="color:rgb(255,0,0);">梯度方向直方图</span>进行筛选。将得到的匹配地图点添加进匹配地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。</p> 
+<p>2、关键帧和关键帧帧通过词袋进行快速匹配<strong><span style="color:rgb(255,192,0);">（回环检测）</span></strong></p> 
+<p>总体思路是遍历关键帧<span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">中所有特征向量和关键帧</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">中的所有特征向量，计算在同一</span><span style="font-family:Calibri;">BOW</span><span style="font-family:'宋体';">节点下两特征向量的距离，找到一对描述子距离最相近的特征点作为匹配点。</span></p> 
+<p>首先取出关键帧1和关键帧<span style="font-family:Calibri;">2</span>的特征向量（注意这里的特征向量是根据节点<span style="font-family:Calibri;">id</span><span style="font-family:'宋体';">排序好的特征向量</span>（用<span style="font-family:Calibri;">DBOW</span><span style="font-family:'宋体';">库中的特征向量），</span>便于我们进行搜索），然后遍历关键帧<span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">的每一个特征向量，在关键帧</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">的同一节点下搜索其匹配点（计算同一节点特征向量对应描述子的距离最小匹配作为其匹配点）。最后进行匹配筛选（剔除误匹配）：（</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">）匹配描述子距离小于阈值。（</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">）</span><span style="color:rgb(0,176,80);">这里的匹配还计算了第二最优匹配点（描述子距离第二小），目的是计算第一匹配点<span style="font-family:Calibri;">/</span><span style="font-family:'宋体';">第二匹配点的比率（小于</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">），当比率大时说明第二匹配点和第一匹配点相当，第一匹配点描述子没有特别的“优越性”，在这种情况下不妨舍弃这对匹配，防止发生误匹配。</span></span>（<span style="font-family:Calibri;">3</span><span style="font-family:'宋体';">）如果需要判别匹配点的方向则通过</span><span style="color:rgb(255,0,0);">梯度方向直方图</span>进行筛选。将得到的匹配地图点添加进匹配地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。</p> 
+<p><strong>三、针对单目初始化的匹配（<span style="color:rgb(255,192,0);">单目初始化中</span>）</strong></p> 
+<p>总体思路是针对单目初始化的匹配，由于在单目初始化之前并没有深度信息即还没有计算地图点，因此不能和一般的匹配一样通过遍历地图点进行匹配，只能通过遍历图像的特征点。</p> 
+<p>首先取帧1<span style="font-family:'宋体';">中的所有特征点，根据给定参数搜索窗口确定搜索半径，根据该特征点在帧</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">中的</span><span style="font-family:Calibri;">2D</span><span style="font-family:'宋体';">位置估计其在帧</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">中的搜索中心，从而根据搜索中心和半径确定搜索范围，在帧</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">中搜索当前特征点的匹配点。最后进行匹配筛选（剔除误匹配）：（</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">）匹配描述子距离小于阈值。（</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">）</span><span style="color:rgb(0,176,80);">这里的匹配还计算了第二最优匹配点（描述子距离第二小），目的是计算第一匹配点<span style="font-family:Calibri;">/</span><span style="font-family:'宋体';">第二匹配点的比率（小于</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">），当比率大时说明第二匹配点和第一匹配点相当，第一匹配点描述子没有特别的“优越性”，在这种情况下不妨舍弃这对匹配，防止发生误匹配。</span></span>（<span style="font-family:Calibri;">3</span><span style="font-family:'宋体';">）如果需要判别匹配点的方向则通过</span><span style="color:rgb(255,0,0);">梯度方向直方图</span>进行筛选。将得到的匹配地图点添加进匹配地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。</p> 
+<p><strong>四、针对单目三角化的匹配<span style="font-family:Calibri;">(</span><span style="color:rgb(255,192,0);">在<span style="font-family:Calibri;">localmapping</span><span style="font-family:'宋体';">线程中新建地图点时调用</span></span>)</strong></p> 
+<p>此匹配方式主要应用于<span style="font-family:Calibri;">localmapping</span><span style="font-family:'宋体';">线程中新建地图点，此次新建地图点是针对于</span><span style="font-family:Calibri;">tracking</span><span style="font-family:'宋体';">线程中没有匹配到的地图点。总体思路是针对单目的尺度不确定性，在计算地图点深度时进行的匹配，利用三角测量筛选匹配点的正确性。匹配的是当前处理的关键帧及其相邻关键帧。</span></p> 
+<p>首先循环所有关键帧1<span style="font-family:'宋体';">中的所有</span><span style="font-family:Calibri;">BOW</span><span style="font-family:'宋体';">节点，并在关键帧</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">中寻找与其具有相同</span><span style="font-family:Calibri;">BOW</span><span style="font-family:'宋体';">节点的特征点索引，循环关键帧</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">中找到的相同</span><span style="font-family:Calibri;">BOW</span><span style="font-family:'宋体';">节点下特征点索引，计算两关键帧中特征点的描述子距离，从而选择最小的描述子距离的一对特征点作为一对匹配点。注意这里在确定匹配之前需要进行对极约束（关键帧</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">中的匹配点距离根据关键帧</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">计算得到的极线的距离来判断匹配点是否满足对极几何）。最后进行匹配筛选（剔除误匹配）：（</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">）匹配描述子距离小于阈值。（</span>2）如果需要判别匹配点的方向则通过<span style="color:rgb(255,0,0);">梯度方向直方图</span>进行筛选。将得到的匹配地图点添加进匹配地图点容器中，索引坐标为该地图点对应的特征点在当前帧的特征索引。</p> 
+<p><strong>五、基于相似矩阵的匹配（<span style="color:rgb(255,192,0);">用于回环检测计算相似矩阵之后</span>）</strong></p> 
+<p>获取关键帧<span style="font-family:Calibri;">1 2</span><span style="font-family:'宋体';">的相机位姿以及相机</span><span style="font-family:Calibri;">1-&gt;</span><span style="font-family:'宋体';">相机</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">的位姿变换相似矩阵</span></p> 
+<p>双向匹配<span style="font-family:Calibri;">:</span></p> 
+<p>根据相似矩阵将关键帧<span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">中的地图点向关键帧</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">中投影</span><span style="font-family:Calibri;">,</span><span style="font-family:'宋体';">确定投影区域</span><span style="font-family:Calibri;">,</span><span style="font-family:'宋体';">并在投影区域内寻找关键帧</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">中地图点的匹配</span></p> 
+<p>根据相似矩阵将关键帧<span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">中的地图点向关键帧</span><span style="font-family:Calibri;">1</span><span style="font-family:'宋体';">中投影</span><span style="font-family:Calibri;">,</span><span style="font-family:'宋体';">确定投影区域</span><span style="font-family:Calibri;">,</span><span style="font-family:'宋体';">并在投影区域内寻找关键帧</span><span style="font-family:Calibri;">2</span><span style="font-family:'宋体';">中地图点的匹配</span></p> 
+<p>根据双向匹配结果<span style="font-family:Calibri;">,</span><span style="font-family:'宋体';">如果两次匹配都能成功</span><span style="font-family:Calibri;">,</span><span style="font-family:'宋体';">则确定该对匹配是有效的</span><span style="font-family:Calibri;">.</span><span style="font-family:'宋体';">将其存入</span><span style="font-family:Calibri;">vpMatches12</span><span style="font-family:'宋体';">容器   </span></p> 
+<p>最终返回匹配点对个数</p> 
+<p><strong>六、通过匹配来提出冗余地图点</strong></p> 
+<p>1<span style="font-family:'宋体';">、融合地图点匹配（用于局部建图线程的关键帧地图点及其相邻帧的融合）</span></p> 
+<p>将<span style="font-family:Calibri;">MapPoints</span><span style="font-family:'宋体';">投影到关键帧</span><span style="font-family:Calibri;">pKF</span><span style="font-family:'宋体';">中，并判断是否有重复的</span><span style="font-family:Calibri;">MapPoints</span></p> 
+<p>1&gt; 如果<span style="font-family:Calibri;">MapPoint</span><span style="font-family:'宋体';">能匹配关键帧的特征点，并且该点有对应的</span><span style="font-family:Calibri;">MapPoint</span><span style="font-family:'宋体';">，那么将两个</span><span style="font-family:Calibri;">MapPoint</span><span style="font-family:'宋体';">合并（选择观测数多的）</span></p> 
+<p>2&gt; <span style="font-family:'宋体';">如果</span><span style="font-family:Calibri;">MapPoint</span><span style="font-family:'宋体';">能匹配关键帧的特征点，并且该点没有对应的</span><span style="font-family:Calibri;">MapPoint</span><span style="font-family:'宋体';">，那么为该点添加</span><span style="font-family:Calibri;">MapPoint</span></p> 
+<p>投影方式和剔除误匹配的方式与上述方式类似，不再赘述。</p> 
+<p> </p> 
+<p>2<span style="font-family:'宋体';">、融合地图点（用于回环检查线程，根据相似矩阵融合当前关键帧和地图点融合）</span></p> 
+<p>根据相似矩阵<span style="font-family:Calibri;">Scw</span><span style="font-family:'宋体';">映射地图点到关键帧。</span></p> 
+<p>主要思路<span style="font-family:Calibri;">: </span><span style="font-family:'宋体';">将回环地图点根据当前关键帧的位姿</span><span style="font-family:Calibri;">(</span><span style="font-family:'宋体';">相似矩阵</span><span style="font-family:Calibri;">)</span><span style="font-family:'宋体';">映射到当前关键帧</span><span style="font-family:Calibri;">,</span><span style="font-family:'宋体';">在当前关键帧中寻找回环地图点的代替点</span><span style="font-family:Calibri;">,</span><span style="font-family:'宋体';">存储进</span><span style="font-family:Calibri;">vpReplacePoint</span></p> 
+<p>投影方式和剔除误匹配的方式与上述方式类似，不再赘述。</p> 
+<p> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/adeb42383901914501bec16c943e0d6d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">一起学ORBSLAM2（5）ORBSLAM的单目视觉处理方式</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/f323b53434d8c1b20803f46051bc0e64/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Ubuntu安装opencv报错：You should create a separate directory for build files.</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>分布式事务（五）———可靠消息队列解决方案 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="分布式事务（五）———可靠消息队列解决方案" />
+<meta property="og:description" content="分布式事务（五）———可靠消息队列解决方案 一、本地消息事务表1.核心思想2.流程步骤3.优缺点 二、RokcetMQ一.流程步骤二、优缺点及注意事项三、示例1.RokcetMq事务消息状态2.发送事务消息3.实现TransactionListener接口 三、最大努力通知系列文章 该系列参考：
+https://www.jianshu.com/p/962271bbf4ea
+https://blog.csdn.net/a745233700/article/details/122402303
+https://cloud.tencent.com/developer/article/2048776
+https://icyfenix.cn/
+本地消息事务、RocketMq、最大努力通知都是基于消息队列来实现的解决方案，所以我就放一起来介绍了
+一、本地消息事务表 1.核心思想 将分布式事务拆分成本地事务进行处理，通过在分布式事务主动发起方额外新建事务消息表，事务发起方把业务处理和记录事务消息在本地事务中完成，轮询事务消息表发送事务消息，事务被动方基于消息中间件消费事务消息表中的事务消息
+2.流程步骤 事务主动方在同一个本地事务中处理业务和写消息表操作 （消息表状态为待处理）事务主动方通过消息中间件通知事务被动方处理事务（此过程需要加定时任务，扫描消息表内状态为待处理的消息，重新发送消息）事务被动方收到消息，处理业务后，发送事务已处理的消息给事务主动方事务主动方收到消息后，将该条事务消息状态更新为已处理 过程分析：
+假设步骤1 异常或宕机：消息跟业务处理的数据一起回滚了，啥事没发生假设步骤2 消息发送失败或者消息丢失：有定时任务，定时扫描消息表重复发送消息（保证消息一定发送成功）假设步骤3业务处理失败或者消息发送失败：业务数据会回滚（必要时需要人工介入），反馈消息丢失，会有步骤2的定时任务重复唤起假设步骤4更新失败：数据会回滚，依旧依赖定时任务的重复执行 直至成功 注意事项：
+消息一定要带有唯一性事务ID两边的消息处理一定要具备幂等性一个事务涉及多个服务，就要有多个状态或者多条不同业务类型的消息整个过程过于依赖主动方的定时任务，可视情况优化上述过程保证了事务一定成功，如果某些场景允许回滚，步骤3处理失败也可以发起回滚消息，主动方收到消息回滚处理，并更新事务状态为已回滚即可，即无论是正向成功还是反向回滚，保持最终一致性即可 （该方案不太建议回滚处理，毕竟核心思想就是保证第一步业务成功，后续一定成功！ 但是万事看业务场景嘛） 3.优缺点 优点: 简单实现，没有过度依赖中间件
+缺点：
+与具体的业务场景绑定，耦合性强，不可公用消息数据与业务数据同库，占用业务系统资源业务系统在使用关系型数据库的情况下，消息服务性能会受到关系型数据库并发性能的局限每个事务入口的业务系统都需要有消息表 特点： 柔性事务，数据最终一致性，最大努力交付思想
+二、RokcetMQ 基于MQ的分布式事务方案本质上是对本地消息表的封装，整体流程与本地消息表一致，唯一不同的就是将本地消息表存在了MQ内部，而不是业务数据库中
+一.流程步骤 服务主动方发送半消息给Broker，Broker返回ACK服务主动方收到Broker返回的ACK后提交本地事务根据本地事务的结果向Broker发送commit消息或者回滚消息Broker收到commit消息则会向消费端投递消息，如果是回滚消息则会清掉该事务消息，无事发生 过程分析：
+步骤1失败：无事发生步骤2失败：事务回滚，并向broker发送rollback消息，broker清掉消息，无事发生步骤3消息发送失败或消息丢失（broker没收到消息）：borker会回调checkLocalTransaction检查事务的结果（也有检测次数阈值），如果事务已经成功则Commit消息，如果失败则rollback消息，无事发生 （上图的5.6.7步骤）步骤4投递消息失败或者消费消息失败：会重试，RokcetMq的重试机制，达到默认次数则进死信队列，人工处理 二、优缺点及注意事项 优点： 业务系统和消息系统解耦，无需在新建消息表以及额外的定时处理，性能比消息表高
+缺点： 额外的网络请求开销，要有额外的事务检查接口
+注意事项： 要保证幂等性
+三、示例 1.RokcetMq事务消息状态 TransactionStatus.CommitTransaction：提交事务，表示允许消费者消费该消息。TransactionStatus.RollbackTransaction：回滚事务，表示该消息将被删除，不允许消费。TransactionStatus.Unknown：中间状态，表示需要MQ回查才能确定状态。 2.发送事务消息 使用TransactionMQProducer类创建生产者客户端，并指定唯一的producerGroup，可以设置自定义线程池来处理检查请求。本地事务执行后，需要根据执行结果回复MQ
+public class TransactionProducer { public static void main(String[] args) throws MQClientException, InterruptedException { TransactionListener transactionListener = new TransactionListenerImpl(); TransactionMQProducer producer = new TransactionMQProducer(&#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/05699379c14c04c758a3310f1b6c2ab2/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-09-04T12:15:00+08:00" />
+<meta property="article:modified_time" content="2022-09-04T12:15:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">分布式事务（五）———可靠消息队列解决方案</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-tomorrow-night-eighties">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>分布式事务（五）———可靠消息队列解决方案</h4> 
+ <ul><li><a href="#_8" rel="nofollow">一、本地消息事务表</a></li><li><ul><li><a href="#1_9" rel="nofollow">1.核心思想</a></li><li><a href="#2_16" rel="nofollow">2.流程步骤</a></li><li><a href="#3_44" rel="nofollow">3.优缺点</a></li></ul> 
+  </li><li><a href="#RokcetMQ_59" rel="nofollow">二、RokcetMQ</a></li><li><ul><li><a href="#_67" rel="nofollow">一.流程步骤</a></li><li><a href="#_83" rel="nofollow">二、优缺点及注意事项</a></li><li><a href="#_93" rel="nofollow">三、示例</a></li><li><ul><li><a href="#1RokcetMq_95" rel="nofollow">1.RokcetMq事务消息状态</a></li><li><a href="#2_101" rel="nofollow">2.发送事务消息</a></li><li><a href="#3TransactionListener_146" rel="nofollow">3.实现TransactionListener接口</a></li></ul> 
+  </li></ul> 
+  </li><li><a href="#_185" rel="nofollow">三、最大努力通知</a></li><li><a href="#_196" rel="nofollow">系列文章</a></li></ul> 
+</div> 
+<p></p> 
+<blockquote> 
+ <p>该系列参考：<br> <a href="https://www.jianshu.com/p/962271bbf4ea" rel="nofollow">https://www.jianshu.com/p/962271bbf4ea</a><br> <a href="https://blog.csdn.net/a745233700/article/details/122402303">https://blog.csdn.net/a745233700/article/details/122402303</a><br> <a href="https://cloud.tencent.com/developer/article/2048776" rel="nofollow">https://cloud.tencent.com/developer/article/2048776</a><br> <a href="https://icyfenix.cn/" rel="nofollow">https://icyfenix.cn/</a></p> 
+</blockquote> 
+<p>本地消息事务、RocketMq、最大努力通知都是基于消息队列来实现的解决方案，所以我就放一起来介绍了</p> 
+<h2><a id="_8"></a>一、本地消息事务表</h2> 
+<h3><a id="1_9"></a>1.核心思想</h3> 
+<p><strong>将分布式事务拆分成本地事务进行处理，通过在分布式事务主动发起方额外新建事务消息表，事务发起方把业务处理和记录事务消息在本地事务中完成，轮询事务消息表发送事务消息，事务被动方基于消息中间件消费事务消息表中的事务消息</strong></p> 
+<p><img src="https://images2.imgbox.com/3d/8a/GZg2s9cR_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="2_16"></a>2.流程步骤</h3> 
+<ol><li><strong>事务主动方在同一个本地事务中处理业务和写消息表操作</strong> <strong>（消息表状态为待处理）</strong></li><li><strong>事务主动方通过消息中间件通知事务被动方处理事务（此过程需要加定时任务，扫描消息表内状态为待处理的消息，重新发送消息）</strong></li><li><strong>事务被动方收到消息，处理业务后，发送事务已处理的消息给事务主动方</strong></li><li><strong>事务主动方收到消息后，将该条事务消息状态更新为已处理</strong></li></ol> 
+<p><strong>过程分析</strong>：</p> 
+<ol><li><strong>假设步骤1 异常或宕机：消息跟业务处理的数据一起回滚了，啥事没发生</strong></li><li><strong>假设步骤2 消息发送失败或者消息丢失：有定时任务，定时扫描消息表重复发送消息（保证消息一定发送成功）</strong></li><li><strong>假设步骤3业务处理失败或者消息发送失败：业务数据会回滚（必要时需要人工介入），反馈消息丢失，会有步骤2的定时任务重复唤起</strong></li><li><strong>假设步骤4更新失败：数据会回滚，依旧依赖定时任务的重复执行</strong> <strong>直至成功</strong></li></ol> 
+<p><strong>注意事项</strong>：</p> 
+<ol><li><strong>消息一定要带有唯一性事务ID</strong></li><li><strong>两边的消息处理一定要具备幂等性</strong></li><li><strong>一个事务涉及多个服务，就要有多个状态或者多条不同业务类型的消息</strong></li><li><strong>整个过程过于依赖主动方的定时任务，可视情况优化</strong></li><li><strong>上述过程保证了事务一定成功，如果某些场景允许回滚，步骤3处理失败也可以发起回滚消息，主动方收到消息回滚处理，并更新事务状态为已回滚即可，即无论是正向成功还是反向回滚，保持最终一致性即可</strong> <strong>（该方案不太建议回滚处理，毕竟核心思想就是保证第一步业务成功，后续一定成功！ 但是万事看业务场景嘛）</strong></li></ol> 
+<h3><a id="3_44"></a>3.优缺点</h3> 
+<p><strong>优点:</strong> 简单实现，没有过度依赖中间件</p> 
+<p><strong>缺点：</strong></p> 
+<ul><li>与具体的业务场景绑定，耦合性强，不可公用</li><li>消息数据与业务数据同库，占用业务系统资源</li><li>业务系统在使用关系型数据库的情况下，消息服务性能会受到关系型数据库并发性能的局限</li><li>每个事务入口的业务系统都需要有消息表</li></ul> 
+<p><strong>特点：</strong> <strong>柔性事务，数据最终一致性，最大努力交付思想</strong></p> 
+<h2><a id="RokcetMQ_59"></a>二、RokcetMQ</h2> 
+<blockquote> 
+ <p>基于MQ的分布式事务方案本质上是对本地消息表的封装，整体流程与本地消息表一致，唯一不同的就是将本地消息表存在了MQ内部，而不是业务数据库中</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/1d/f9/3EqwBSSv_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="_67"></a>一.流程步骤</h3> 
+<ol><li><strong>服务主动方发送半消息给Broker，Broker返回ACK</strong></li><li><strong>服务主动方收到Broker返回的ACK后提交本地事务</strong></li><li><strong>根据本地事务的结果向Broker发送commit消息或者回滚消息</strong></li><li><strong>Broker收到commit消息则会向消费端投递消息，如果是回滚消息则会清掉该事务消息，无事发生</strong></li></ol> 
+<p><strong>过程分析：</strong></p> 
+<ol><li><strong>步骤1失败：无事发生</strong></li><li><strong>步骤2失败：事务回滚，并向broker发送rollback消息，broker清掉消息，无事发生</strong></li><li><strong>步骤3消息发送失败或消息丢失（broker没收到消息）：borker会回调checkLocalTransaction检查事务的结果（也有检测次数阈值），如果事务已经成功则Commit消息，如果失败则rollback消息，无事发生</strong> <strong>（上图的5.6.7步骤）</strong></li><li><strong>步骤4投递消息失败或者消费消息失败：会重试，RokcetMq的重试机制，达到默认次数则进死信队列，人工处理</strong></li></ol> 
+<h3><a id="_83"></a>二、优缺点及注意事项</h3> 
+<p><strong>优点：</strong> 业务系统和消息系统解耦，无需在新建消息表以及额外的定时处理，性能比消息表高</p> 
+<p><strong>缺点：</strong> 额外的网络请求开销，要有额外的事务检查接口</p> 
+<p><strong>注意事项：</strong> 要保证幂等性</p> 
+<h3><a id="_93"></a>三、示例</h3> 
+<h4><a id="1RokcetMq_95"></a>1.RokcetMq事务消息状态</h4> 
+<ol><li>TransactionStatus.CommitTransaction：提交事务，表示允许消费者消费该消息。</li><li>TransactionStatus.RollbackTransaction：回滚事务，表示该消息将被删除，不允许消费。</li><li>TransactionStatus.Unknown：中间状态，表示需要MQ回查才能确定状态。</li></ol> 
+<h4><a id="2_101"></a>2.发送事务消息</h4> 
+<blockquote> 
+ <p>使用TransactionMQProducer类创建生产者客户端，并指定唯一的producerGroup，可以设置自定义线程池来处理检查请求。本地事务执行后，需要根据执行结果回复MQ</p> 
+</blockquote> 
+<pre><code class="prism language-Java">public class TransactionProducer {
+    public static void main(String[] args) throws MQClientException, InterruptedException {
+        TransactionListener transactionListener = new TransactionListenerImpl();
+        TransactionMQProducer producer = new TransactionMQProducer("please_rename_unique_group_name");
+        ExecutorService executorService = new ThreadPoolExecutor(2, 5, 100, TimeUnit.SECONDS, new ArrayBlockingQueue&lt;Runnable&gt;(2000), new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread thread = new Thread(r);
+                thread.setName("client-transaction-msg-check-thread");
+                return thread;
+            }
+        });
+
+        producer.setExecutorService(executorService);
+        producer.setTransactionListener(transactionListener);
+        producer.start();
+
+        String[] tags = new String[] {"TagA", "TagB", "TagC", "TagD", "TagE"};
+        for (int i = 0; i &lt; 10; i++) {
+            try {
+                Message msg =
+                    new Message("TopicTest1234", tags[i % tags.length], "KEY" + i,
+                        ("Hello RocketMQ " + i).getBytes(RemotingHelper.DEFAULT_CHARSET));
+                SendResult sendResult = producer.sendMessageInTransaction(msg, null);
+                System.out.printf("%s%n", sendResult);
+
+                Thread.sleep(10);
+            } catch (MQClientException | UnsupportedEncodingException e) {
+                e.printStackTrace();
+            }
+        }
+
+        for (int i = 0; i &lt; 100000; i++) {
+            Thread.sleep(1000);
+        }
+        producer.shutdown();
+    }
+}
+</code></pre> 
+<h4><a id="3TransactionListener_146"></a>3.实现TransactionListener接口</h4> 
+<blockquote> 
+ <p>“<strong>executeLocalTransaction</strong>”方法用于在发送半消息成功时执行本地事务。它返回上一节中提到的三个事务状态之一。<br> “<strong>checkLocalTransaction</strong>”方法用于检查本地事务状态并响应MQ检查请求。它还返回上一节中提到的三个事务状态之一</p> 
+</blockquote> 
+<pre><code class="prism language-Java">public class TransactionListenerImpl implements TransactionListener {
+    private AtomicInteger transactionIndex = new AtomicInteger(0);
+
+    private ConcurrentHashMap&lt;String, Integer&gt; localTrans = new ConcurrentHashMap&lt;&gt;();
+
+    @Override
+    public LocalTransactionState executeLocalTransaction(Message msg, Object arg) {
+        //这里做事务处理，根据结果返回消息状态 见RokcetMq事务消息状态
+        int value = transactionIndex.getAndIncrement();
+        int status = value % 3;
+        localTrans.put(msg.getTransactionId(), status);
+        return LocalTransactionState.UNKNOW;
+    }
+
+    @Override
+    public LocalTransactionState checkLocalTransaction(MessageExt msg) {
+        //这里是broker回调查询事务状态，根据事务状态返回对应的消息状态 见RokcetMq事务消息状态 
+        Integer status = localTrans.get(msg.getTransactionId());
+        if (null != status) {
+            switch (status) {
+                case 0:
+                    return LocalTransactionState.UNKNOW;
+                case 1:
+                    return LocalTransactionState.COMMIT_MESSAGE;
+                case 2:
+                    return LocalTransactionState.ROLLBACK_MESSAGE;
+            }
+        }
+        return LocalTransactionState.COMMIT_MESSAGE;
+    }
+}
+
+</code></pre> 
+<h2><a id="_185"></a>三、最大努力通知</h2> 
+<blockquote> 
+ <p>最大努力通知也称为定期校对。它在事务主动方增加了消息校对的接口，如果事务被动方没有接收到主动方发送的消息，此时可以调用事务主动方提供的消息校对的接口主动获取</p> 
+</blockquote> 
+<p><img src="https://images2.imgbox.com/a3/82/wswdDRRl_o.png" alt="在这里插入图片描述"></p> 
+<blockquote> 
+ <p>在可靠消息事务中，事务主动方需要将消息发送出去，并且让接收方成功接收消息，这种可靠性发送是由事务主动方保证的；<strong>但是最大努力通知，事务主动方仅仅是尽最大努力（重试，轮询…）将事务发送给事务接收方，所以存在事务被动方接收不到消息的情况，此时需要事务被动方主动调用事务主动方的消息校对接口查询业务消息并消费，这种通知的可靠性是由事务被动方保证的</strong>。</p> 
+</blockquote> 
+<p><strong>特点</strong>： <strong>由被动方主动调用接口来校对业务情况是最核心的思想</strong></p> 
+<h2><a id="_196"></a>系列文章</h2> 
+<ul><li><strong><a href="https://blog.csdn.net/weixin_44102992/article/details/126437952?spm=1001.2014.3001.5501">分布式事务（一）———CAP、BASE理论</a></strong></li><li><strong><a href="https://blog.csdn.net/weixin_44102992/article/details/126448383?spm=1001.2014.3001.5501">分布式事务（二）———2PC/3PC（强一致性）解决方案</a></strong></li><li><strong><a href="https://blog.csdn.net/weixin_44102992/article/details/126493034?spm=1001.2014.3001.5501">分布式事务（三）———TCC 解决方案</a></strong></li><li><strong><a href="https://blog.csdn.net/weixin_44102992/article/details/126593341?spm=1001.2014.3001.5501">分布式事务（四）———SAGA 解决方案</a></strong></li><li><strong><a href="https://blog.csdn.net/weixin_44102992/article/details/126687205?spm=1001.2014.3001.5501">分布式事务（五）———可靠消息队列解决方案</a></strong></li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/0f9c64ca25a069d47dd05be6fcc425d6/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">C语言 - 三子棋（井字棋）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/1e808b5aab1cdb00bf60e753ce08a1df/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">分布式事务（三）———TCC 解决方案</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

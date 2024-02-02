@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>kubernetes -- 删除namespace的过程以及遇到的bug解决 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="kubernetes -- 删除namespace的过程以及遇到的bug解决" />
+<meta property="og:description" content="通过阅读本篇文章你可以收获如下知识：
+解决一个bug。理解k8s的controller中，删除namespace的源码，理解其中的删除过程。 问题 执行kubectl delete ns {ns-name}命令来删除ns-name的时候，发现状态一直停留在Terminating。
+[root@k8smaster k8slearn]# kubectl get ns NAME STATUS AGE default Active 99m hello Terminating 36m kube-node-lease Active 99m kube-public Active 99m kube-system Active 99m 我想到的是可能是namespace底下有资源，等资源被删除之后系统才能安心删除掉namespace，然后我们来看一下资源：
+[root@k8smaster k8slearn]# kubectl get all -n hello No resources found in hello namespace. 发现是没有资源的，那么到底是什么原因让删除失败了呢？
+我们看一下namespace的具体内容：
+[root@k8smaster k8slearn]# kubectl get ns hello -o yaml apiVersion: v1 kind: Namespace metadata: creationTimestamp: &#34;2023-02-01T06:42:00Z&#34; managedFields: - apiVersion: v1 fieldsType: FieldsV1 fieldsV1: f:status: f:phase: {} manager: kubectl-create operation: Update time: &#34;" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/6bf7854fdaf7c6a0d7f649df04e3efcc/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-02-01T15:26:08+08:00" />
+<meta property="article:modified_time" content="2023-02-01T15:26:08+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">kubernetes -- 删除namespace的过程以及遇到的bug解决</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>通过阅读本篇文章你可以收获如下知识：</p> 
+<ul><li>解决一个bug。</li><li>理解k8s的controller中，删除namespace的源码，理解其中的删除过程。</li></ul> 
+<h2><a id="_5"></a>问题</h2> 
+<p>执行<code>kubectl delete ns {ns-name}</code>命令来删除<code>ns-name</code>的时候，发现状态一直停留在<code>Terminating</code>。</p> 
+<pre><code class="prism language-sh"><span class="token punctuation">[</span>root@k8smaster k8slearn<span class="token punctuation">]</span><span class="token comment"># kubectl get ns</span>
+NAME              STATUS        AGE
+default           Active        99m
+hello             Terminating   36m
+kube-node-lease   Active        99m
+kube-public       Active        99m
+kube-system       Active        99m
+</code></pre> 
+<p>我想到的是可能是namespace底下有资源，等资源被删除之后系统才能安心删除掉namespace，然后我们来看一下资源：</p> 
+<pre><code class="prism language-sh"><span class="token punctuation">[</span>root@k8smaster k8slearn<span class="token punctuation">]</span><span class="token comment"># kubectl get all -n hello</span>
+No resources found <span class="token keyword">in</span> hello namespace.
+</code></pre> 
+<p>发现是没有资源的，那么到底是什么原因让删除失败了呢？</p> 
+<p>我们看一下namespace的具体内容：</p> 
+<pre><code class="prism language-yaml"><span class="token punctuation">[</span>root@k8smaster k8slearn<span class="token punctuation">]</span><span class="token comment"># kubectl get ns hello -o yaml</span>
+<span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+<span class="token key atrule">kind</span><span class="token punctuation">:</span> Namespace
+<span class="token key atrule">metadata</span><span class="token punctuation">:</span>
+  <span class="token key atrule">creationTimestamp</span><span class="token punctuation">:</span> <span class="token string">"2023-02-01T06:42:00Z"</span>
+  <span class="token key atrule">managedFields</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> <span class="token key atrule">apiVersion</span><span class="token punctuation">:</span> v1
+    <span class="token key atrule">fieldsType</span><span class="token punctuation">:</span> FieldsV1
+    <span class="token key atrule">fieldsV1</span><span class="token punctuation">:</span>
+      <span class="token key atrule">f:status</span><span class="token punctuation">:</span>
+        <span class="token key atrule">f:phase</span><span class="token punctuation">:</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+    <span class="token key atrule">manager</span><span class="token punctuation">:</span> kubectl<span class="token punctuation">-</span>create
+    <span class="token key atrule">operation</span><span class="token punctuation">:</span> Update
+    <span class="token key atrule">time</span><span class="token punctuation">:</span> <span class="token string">"2023-02-01T06:42:00Z"</span>
+  <span class="token key atrule">name</span><span class="token punctuation">:</span> hello
+  <span class="token key atrule">resourceVersion</span><span class="token punctuation">:</span> <span class="token string">"5676"</span>
+  <span class="token key atrule">uid</span><span class="token punctuation">:</span> bc48ddf5<span class="token punctuation">-</span>7456<span class="token punctuation">-</span>44f0<span class="token punctuation">-</span>8f7f<span class="token punctuation">-</span>597c6a141a0f
+<span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">finalizers</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> kubernetes
+<span class="token key atrule">status</span><span class="token punctuation">:</span>
+  <span class="token key atrule">phase</span><span class="token punctuation">:</span> Active
+</code></pre> 
+<p>我猜测问题出在这里：</p> 
+<pre><code class="prism language-yaml"><span class="token key atrule">spec</span><span class="token punctuation">:</span>
+  <span class="token key atrule">finalizers</span><span class="token punctuation">:</span>
+  <span class="token punctuation">-</span> kubernetes
+</code></pre> 
+<p>那系统在什么情况下才能最终删除掉上面的<code>spec.finalizers.kubernetes</code>，从而删除namespace呢，有必要分析一下<code>namespace controller</code>的源码实现。</p> 
+<h2><a id="_65"></a>源码分析</h2> 
+<p>从kubernetes架构可以推测出，删除namespace时系统删除namespace关联资源的处理应该是在contorller里面实现的。因此顺其自然去分析<code>namespace controller</code>的源码。</p> 
+<p>这个源码的位置我很快就发现了，因为删除一个命名空间肯定是controller做的事情，所以我们打开controller的这样一个文件，然后很快就发现了namespace，里面有一个deletion，打开之后很容易就发现了。</p> 
+<p><img src="https://images2.imgbox.com/55/c9/XUG5VIJx_o.png" alt="在这里插入图片描述"></p> 
+<p>我们来看一下删除命名空间的这个源码：</p> 
+<pre><code class="prism language-go"><span class="token comment">// Delete deletes all resources in the given namespace.</span>
+<span class="token comment">// Before deleting resources:</span>
+<span class="token comment">//   - It ensures that deletion timestamp is set on the</span>
+<span class="token comment">//     namespace (does nothing if deletion timestamp is missing).</span>
+<span class="token comment">//   - Verifies that the namespace is in the "terminating" phase</span>
+<span class="token comment">//     (updates the namespace phase if it is not yet marked terminating)</span>
+<span class="token comment">//</span>
+<span class="token comment">// After deleting the resources:</span>
+<span class="token comment">// * It removes finalizer token from the given namespace.</span>
+<span class="token comment">//</span>
+<span class="token comment">// Returns an error if any of those steps fail.</span>
+<span class="token comment">// Returns ResourcesRemainingError if it deleted some resources but needs</span>
+<span class="token comment">// to wait for them to go away.</span>
+<span class="token comment">// Caller is expected to keep calling this until it succeeds.</span>
+<span class="token keyword">func</span> <span class="token punctuation">(</span>d <span class="token operator">*</span>namespacedResourcesDeleter<span class="token punctuation">)</span> <span class="token function">Delete</span><span class="token punctuation">(</span>nsName <span class="token builtin">string</span><span class="token punctuation">)</span> <span class="token builtin">error</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token comment">// Multiple controllers may edit a namespace during termination</span>
+	<span class="token comment">// first get the latest state of the namespace before proceeding</span>
+	<span class="token comment">// if the namespace was deleted already, don't do anything</span>
+	namespace<span class="token punctuation">,</span> err <span class="token operator">:=</span> d<span class="token punctuation">.</span>nsClient<span class="token punctuation">.</span><span class="token function">Get</span><span class="token punctuation">(</span>context<span class="token punctuation">.</span><span class="token function">TODO</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> nsName<span class="token punctuation">,</span> metav1<span class="token punctuation">.</span>GetOptions<span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">if</span> errors<span class="token punctuation">.</span><span class="token function">IsNotFound</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> <span class="token boolean">nil</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">return</span> err
+	<span class="token punctuation">}</span>
+	<span class="token keyword">if</span> namespace<span class="token punctuation">.</span>DeletionTimestamp <span class="token operator">==</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> <span class="token boolean">nil</span>
+	<span class="token punctuation">}</span>
+
+	klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Infof</span><span class="token punctuation">(</span><span class="token string">"namespace controller - syncNamespace - namespace: %s, finalizerToken: %s"</span><span class="token punctuation">,</span> namespace<span class="token punctuation">.</span>Name<span class="token punctuation">,</span> d<span class="token punctuation">.</span>finalizerToken<span class="token punctuation">)</span>
+
+	<span class="token comment">// ensure that the status is up to date on the namespace</span>
+	<span class="token comment">// if we get a not found error, we assume the namespace is truly gone</span>
+	namespace<span class="token punctuation">,</span> err <span class="token operator">=</span> d<span class="token punctuation">.</span><span class="token function">retryOnConflictError</span><span class="token punctuation">(</span>namespace<span class="token punctuation">,</span> d<span class="token punctuation">.</span>updateNamespaceStatusFunc<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">if</span> errors<span class="token punctuation">.</span><span class="token function">IsNotFound</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> <span class="token boolean">nil</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">return</span> err
+	<span class="token punctuation">}</span>
+
+	<span class="token comment">// the latest view of the namespace asserts that namespace is no longer deleting..</span>
+	<span class="token keyword">if</span> namespace<span class="token punctuation">.</span>DeletionTimestamp<span class="token punctuation">.</span><span class="token function">IsZero</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> <span class="token boolean">nil</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token comment">// return if it is already finalized.</span>
+	<span class="token keyword">if</span> <span class="token function">finalized</span><span class="token punctuation">(</span>namespace<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> <span class="token boolean">nil</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token comment">// there may still be content for us to remove</span>
+	estimate<span class="token punctuation">,</span> err <span class="token operator">:=</span> d<span class="token punctuation">.</span><span class="token function">deleteAllContent</span><span class="token punctuation">(</span>namespace<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> err
+	<span class="token punctuation">}</span>
+	<span class="token keyword">if</span> estimate <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> <span class="token operator">&amp;</span>ResourcesRemainingError<span class="token punctuation">{<!-- --></span>estimate<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token comment">// we have removed content, so mark it finalized by us</span>
+	<span class="token boolean">_</span><span class="token punctuation">,</span> err <span class="token operator">=</span> d<span class="token punctuation">.</span><span class="token function">retryOnConflictError</span><span class="token punctuation">(</span>namespace<span class="token punctuation">,</span> d<span class="token punctuation">.</span>finalizeNamespace<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">// in normal practice, this should not be possible, but if a deployment is running</span>
+		<span class="token comment">// two controllers to do namespace deletion that share a common finalizer token it's</span>
+		<span class="token comment">// possible that a not found could occur since the other controller would have finished the delete.</span>
+		<span class="token keyword">if</span> errors<span class="token punctuation">.</span><span class="token function">IsNotFound</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">return</span> <span class="token boolean">nil</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">return</span> err
+	<span class="token punctuation">}</span>
+	<span class="token keyword">return</span> <span class="token boolean">nil</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>我们把几行关键的源码分析一下：</p> 
+<pre><code class="prism language-go">	<span class="token comment">// return if it is already finalized.</span>
+	<span class="token keyword">if</span> <span class="token function">finalized</span><span class="token punctuation">(</span>namespace<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> <span class="token boolean">nil</span>
+	<span class="token punctuation">}</span>
+</code></pre> 
+<p>我们来看一下这个里面发生了什么？</p> 
+<pre><code class="prism language-go"><span class="token comment">// finalized returns true if the namespace.Spec.Finalizers is an empty list</span>
+<span class="token keyword">func</span> <span class="token function">finalized</span><span class="token punctuation">(</span>namespace <span class="token operator">*</span>v1<span class="token punctuation">.</span>Namespace<span class="token punctuation">)</span> <span class="token builtin">bool</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token keyword">return</span> <span class="token function">len</span><span class="token punctuation">(</span>namespace<span class="token punctuation">.</span>Spec<span class="token punctuation">.</span>Finalizers<span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token number">0</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>这个代表如果我的finalized数组为空的话，那么就算作清理完成了，直接退出函数。</p> 
+<p>所以说到底，这个Finalizers到底是什么呢？我们区kubernetes的官方文档里面查看一下。</p> 
+<p>以下内容来自于kubernetes的官方文档：</p> 
+<p>https://kubernetes.io/zh-cn/docs/concepts/overview/working-with-objects/finalizers/</p> 
+<blockquote> 
+ <p>Finalizer 是带有命名空间的键，告诉 Kubernetes 等到特定的条件被满足后， 再完全删除被标记为删除的资源。 Finalizer 提醒<a href="https://kubernetes.io/zh-cn/docs/concepts/architecture/controller/" rel="nofollow">控制器</a>清理被删除的对象拥有的资源。</p> 
+ <p>当你使用清单文件创建资源时，你可以在 <code>metadata.finalizers</code> 字段指定 Finalizers。 当你试图删除该资源时，处理删除请求的 API 服务器会注意到 <code>finalizers</code> 字段中的值， 并进行以下操作：</p> 
+ <ul><li>修改对象，将你开始执行删除的时间添加到<code>metadata.deletionTimestamp</code>字段。</li><li>禁止对象被删除，直到其 <code>metadata.finalizers</code> 字段为空。</li><li>返回 <code>202</code> 状态码（HTTP “Accepted”）。</li></ul> 
+ <p>管理 finalizer 的控制器注意到对象上发生的更新操作，对象的 <code>metadata.deletionTimestamp</code> 被设置，意味着已经请求删除该对象。然后，控制器会试图满足资源的 Finalizers 的条件。 每当一个 Finalizer 的条件被满足时，控制器就会从资源的 <code>finalizers</code> 字段中删除该键。 当 <code>finalizers</code> 字段为空时，<code>deletionTimestamp</code> 字段被设置的对象会被自动删除。 你也可以使用 Finalizers 来阻止删除未被管理的资源。</p> 
+ <p>一个常见的 Finalizer 的例子是 <code>kubernetes.io/pv-protection</code>， 它用来防止意外删除 <code>PersistentVolume</code> 对象。 当一个 <code>PersistentVolume</code> 对象被 Pod 使用时， Kubernetes 会添加 <code>pv-protection</code> Finalizer。 如果你试图删除 <code>PersistentVolume</code>，它将进入 <code>Terminating</code> 状态， 但是控制器因为该 Finalizer 存在而无法删除该资源。 当 Pod 停止使用 <code>PersistentVolume</code> 时， Kubernetes 清除 <code>pv-protection</code> Finalizer，控制器就会删除该卷。</p> 
+</blockquote> 
+<p>那么接下来我们就在源码中看一看这个过程：</p> 
+<pre><code class="prism language-go">	estimate<span class="token punctuation">,</span> err <span class="token operator">:=</span> d<span class="token punctuation">.</span><span class="token function">deleteAllContent</span><span class="token punctuation">(</span>namespace<span class="token punctuation">)</span>
+</code></pre> 
+<p>首先是删除namespace所有关联资源。</p> 
+<pre><code class="prism language-go">	<span class="token comment">// we have removed content, so mark it finalized by us</span>
+	<span class="token boolean">_</span><span class="token punctuation">,</span> err <span class="token operator">=</span> d<span class="token punctuation">.</span><span class="token function">retryOnConflictError</span><span class="token punctuation">(</span>namespace<span class="token punctuation">,</span> d<span class="token punctuation">.</span>finalizeNamespace<span class="token punctuation">)</span>
+</code></pre> 
+<p>然后删除namespace中的spec.finalizers。</p> 
+<p>而由官方文档得知删除finalizers之后，ns才能被删除。</p> 
+<p>因此问题就出现在了deleteAllContent这个函数里面，这个函数里面某些东西出现了问题，导致finalizers无法被删除，从而出现上面的情况。</p> 
+<p>所以我们来读一下deleteAllContent的源码。</p> 
+<pre><code class="prism language-go"><span class="token comment">// deleteAllContent will use the dynamic client to delete each resource identified in groupVersionResources.</span>
+<span class="token comment">// It returns an estimate of the time remaining before the remaining resources are deleted.</span>
+<span class="token comment">// If estimate &gt; 0, not all resources are guaranteed to be gone.</span>
+<span class="token keyword">func</span> <span class="token punctuation">(</span>d <span class="token operator">*</span>namespacedResourcesDeleter<span class="token punctuation">)</span> <span class="token function">deleteAllContent</span><span class="token punctuation">(</span>ns <span class="token operator">*</span>v1<span class="token punctuation">.</span>Namespace<span class="token punctuation">)</span> <span class="token punctuation">(</span><span class="token builtin">int64</span><span class="token punctuation">,</span> <span class="token builtin">error</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+	namespace <span class="token operator">:=</span> ns<span class="token punctuation">.</span>Name
+	namespaceDeletedAt <span class="token operator">:=</span> <span class="token operator">*</span>ns<span class="token punctuation">.</span>DeletionTimestamp
+	<span class="token keyword">var</span> errs <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">error</span>
+	conditionUpdater <span class="token operator">:=</span> namespaceConditionUpdater<span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+	estimate <span class="token operator">:=</span> <span class="token function">int64</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+	klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">4</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Infof</span><span class="token punctuation">(</span><span class="token string">"namespace controller - deleteAllContent - namespace: %s"</span><span class="token punctuation">,</span> namespace<span class="token punctuation">)</span>
+
+	resources<span class="token punctuation">,</span> err <span class="token operator">:=</span> d<span class="token punctuation">.</span><span class="token function">discoverResourcesFn</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">// discovery errors are not fatal.  We often have some set of resources we can operate against even if we don't have a complete list</span>
+		errs <span class="token operator">=</span> <span class="token function">append</span><span class="token punctuation">(</span>errs<span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+		conditionUpdater<span class="token punctuation">.</span><span class="token function">ProcessDiscoverResourcesErr</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+	<span class="token comment">// TODO(sttts): get rid of opCache and pass the verbs (especially "deletecollection") down into the deleter</span>
+	deletableResources <span class="token operator">:=</span> discovery<span class="token punctuation">.</span><span class="token function">FilteredBy</span><span class="token punctuation">(</span>discovery<span class="token punctuation">.</span>SupportsAllVerbs<span class="token punctuation">{<!-- --></span>Verbs<span class="token punctuation">:</span> <span class="token punctuation">[</span><span class="token punctuation">]</span><span class="token builtin">string</span><span class="token punctuation">{<!-- --></span><span class="token string">"delete"</span><span class="token punctuation">}</span><span class="token punctuation">}</span><span class="token punctuation">,</span> resources<span class="token punctuation">)</span>
+	groupVersionResources<span class="token punctuation">,</span> err <span class="token operator">:=</span> discovery<span class="token punctuation">.</span><span class="token function">GroupVersionResources</span><span class="token punctuation">(</span>deletableResources<span class="token punctuation">)</span>
+	<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">// discovery errors are not fatal.  We often have some set of resources we can operate against even if we don't have a complete list</span>
+		errs <span class="token operator">=</span> <span class="token function">append</span><span class="token punctuation">(</span>errs<span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+		conditionUpdater<span class="token punctuation">.</span><span class="token function">ProcessGroupVersionErr</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span>
+	<span class="token punctuation">}</span>
+
+	numRemainingTotals <span class="token operator">:=</span> allGVRDeletionMetadata<span class="token punctuation">{<!-- --></span>
+		gvrToNumRemaining<span class="token punctuation">:</span>        <span class="token keyword">map</span><span class="token punctuation">[</span>schema<span class="token punctuation">.</span>GroupVersionResource<span class="token punctuation">]</span><span class="token builtin">int</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">,</span>
+		finalizersToNumRemaining<span class="token punctuation">:</span> <span class="token keyword">map</span><span class="token punctuation">[</span><span class="token builtin">string</span><span class="token punctuation">]</span><span class="token builtin">int</span><span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">,</span>
+	<span class="token punctuation">}</span>
+	<span class="token keyword">for</span> gvr <span class="token operator">:=</span> <span class="token keyword">range</span> groupVersionResources <span class="token punctuation">{<!-- --></span>
+		gvrDeletionMetadata<span class="token punctuation">,</span> err <span class="token operator">:=</span> d<span class="token punctuation">.</span><span class="token function">deleteAllContentForGroupVersionResource</span><span class="token punctuation">(</span>gvr<span class="token punctuation">,</span> namespace<span class="token punctuation">,</span> namespaceDeletedAt<span class="token punctuation">)</span>
+		<span class="token keyword">if</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token comment">// If there is an error, hold on to it but proceed with all the remaining</span>
+			<span class="token comment">// groupVersionResources.</span>
+			errs <span class="token operator">=</span> <span class="token function">append</span><span class="token punctuation">(</span>errs<span class="token punctuation">,</span> err<span class="token punctuation">)</span>
+			conditionUpdater<span class="token punctuation">.</span><span class="token function">ProcessDeleteContentErr</span><span class="token punctuation">(</span>err<span class="token punctuation">)</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">if</span> gvrDeletionMetadata<span class="token punctuation">.</span>finalizerEstimateSeconds <span class="token operator">&gt;</span> estimate <span class="token punctuation">{<!-- --></span>
+			estimate <span class="token operator">=</span> gvrDeletionMetadata<span class="token punctuation">.</span>finalizerEstimateSeconds
+		<span class="token punctuation">}</span>
+		<span class="token keyword">if</span> gvrDeletionMetadata<span class="token punctuation">.</span>numRemaining <span class="token operator">&gt;</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+			numRemainingTotals<span class="token punctuation">.</span>gvrToNumRemaining<span class="token punctuation">[</span>gvr<span class="token punctuation">]</span> <span class="token operator">=</span> gvrDeletionMetadata<span class="token punctuation">.</span>numRemaining
+			<span class="token keyword">for</span> finalizer<span class="token punctuation">,</span> numRemaining <span class="token operator">:=</span> <span class="token keyword">range</span> gvrDeletionMetadata<span class="token punctuation">.</span>finalizersToNumRemaining <span class="token punctuation">{<!-- --></span>
+				<span class="token keyword">if</span> numRemaining <span class="token operator">==</span> <span class="token number">0</span> <span class="token punctuation">{<!-- --></span>
+					<span class="token keyword">continue</span>
+				<span class="token punctuation">}</span>
+				numRemainingTotals<span class="token punctuation">.</span>finalizersToNumRemaining<span class="token punctuation">[</span>finalizer<span class="token punctuation">]</span> <span class="token operator">=</span> numRemainingTotals<span class="token punctuation">.</span>finalizersToNumRemaining<span class="token punctuation">[</span>finalizer<span class="token punctuation">]</span> <span class="token operator">+</span> numRemaining
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+	conditionUpdater<span class="token punctuation">.</span><span class="token function">ProcessContentTotals</span><span class="token punctuation">(</span>numRemainingTotals<span class="token punctuation">)</span>
+
+	<span class="token comment">// we always want to update the conditions because if we have set a condition to "it worked" after it was previously, "it didn't work",</span>
+	<span class="token comment">// we need to reflect that information.  Recall that additional finalizers can be set on namespaces, so this finalizer may clear itself and</span>
+	<span class="token comment">// NOT remove the resource instance.</span>
+	<span class="token keyword">if</span> hasChanged <span class="token operator">:=</span> conditionUpdater<span class="token punctuation">.</span><span class="token function">Update</span><span class="token punctuation">(</span>ns<span class="token punctuation">)</span><span class="token punctuation">;</span> hasChanged <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">if</span> <span class="token boolean">_</span><span class="token punctuation">,</span> err <span class="token operator">=</span> d<span class="token punctuation">.</span>nsClient<span class="token punctuation">.</span><span class="token function">UpdateStatus</span><span class="token punctuation">(</span>context<span class="token punctuation">.</span><span class="token function">TODO</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> ns<span class="token punctuation">,</span> metav1<span class="token punctuation">.</span>UpdateOptions<span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span> err <span class="token operator">!=</span> <span class="token boolean">nil</span> <span class="token punctuation">{<!-- --></span>
+			utilruntime<span class="token punctuation">.</span><span class="token function">HandleError</span><span class="token punctuation">(</span>fmt<span class="token punctuation">.</span><span class="token function">Errorf</span><span class="token punctuation">(</span><span class="token string">"couldn't update status condition for namespace %q: %v"</span><span class="token punctuation">,</span> namespace<span class="token punctuation">,</span> err<span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token comment">// if len(errs)==0, NewAggregate returns nil.</span>
+	klog<span class="token punctuation">.</span><span class="token function">V</span><span class="token punctuation">(</span><span class="token number">4</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">Infof</span><span class="token punctuation">(</span><span class="token string">"namespace controller - deleteAllContent - namespace: %s, estimate: %v, errors: %v"</span><span class="token punctuation">,</span> namespace<span class="token punctuation">,</span> estimate<span class="token punctuation">,</span> utilerrors<span class="token punctuation">.</span><span class="token function">NewAggregate</span><span class="token punctuation">(</span>errs<span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token keyword">return</span> estimate<span class="token punctuation">,</span> utilerrors<span class="token punctuation">.</span><span class="token function">NewAggregate</span><span class="token punctuation">(</span>errs<span class="token punctuation">)</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>我们看有哪些<code>if err != nil</code>。就可以直到哪里会发生错误。</p> 
+<ul><li>错误1: 获取所有注册namesapce scope资源失败</li><li>错误2: 获取资源的gvr信息解析失败</li><li>错误3: namespace下某些gvr资源删除失败</li></ul> 
+<p>那么具体为什么，我们也不知道该怎么解决了，因此有一个治标不治本的方式，就是强行删除finalizers。</p> 
+<h2><a id="_288"></a>解决方法</h2> 
+<p>强制性删除spec.finalizer[]。</p> 
+<ul><li> <p>查看hello的namespace描述</p> <pre><code class="prism language-sh">kubectl get ns hello <span class="token parameter variable">-o</span> json <span class="token operator">&gt;</span> hello.json
+</code></pre> </li><li> <p>编辑json文件，删除spec字段的内存，因为k8s集群需要认证</p> <pre><code class="prism language-sh"> <span class="token function">vim</span> hello.json
+</code></pre> <pre><code class="prism language-sh"><span class="token string">"spec"</span><span class="token builtin class-name">:</span> <span class="token punctuation">{<!-- --></span>       
+	<span class="token string">"finalizers"</span><span class="token builtin class-name">:</span> <span class="token punctuation">[</span>           
+    		<span class="token string">"kubernetes"</span>
+        <span class="token punctuation">]</span>
+    <span class="token punctuation">}</span>,
+更改为：
+<span class="token string">"spec"</span><span class="token builtin class-name">:</span> <span class="token punctuation">{<!-- --></span>
+    
+  <span class="token punctuation">}</span>,
+</code></pre> </li><li> <p>新开一个窗口运行kubectl proxy跑一个API代理在本地的8081端口</p> <pre><code class="prism language-sh">kubectl proxy <span class="token parameter variable">--port</span><span class="token operator">=</span><span class="token number">8081</span>
+</code></pre> </li><li> <p>运行curl命令，直接调用kube api进行删除</p> <pre><code class="prism language-sh"><span class="token function">curl</span> <span class="token parameter variable">-k</span> <span class="token parameter variable">-H</span> <span class="token string">"Content-Type:application/json"</span> <span class="token parameter variable">-X</span> PUT --data-binary @hello.json http://127.0.0.1:8081/api/v1/namespaces/hello/finalize
+</code></pre> </li></ul> 
+<h2><a id="_328"></a>总结</h2> 
+<p>我们来梳理一下删除namespace的过程。</p> 
+<p><img src="https://images2.imgbox.com/e1/a4/1GaC7aNV_o.png" alt="es_user"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/968d095beae91dcda780206fdd0839d8/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">彻底卸载Ubuntu双系统</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/1b060171b139121bfd8fce50b8bb9c3c/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">从实测出发，掌握 NebulaGraph Exchange 性能最大化的秘密</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

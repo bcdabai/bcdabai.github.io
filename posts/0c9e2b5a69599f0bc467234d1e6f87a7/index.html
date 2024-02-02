@@ -1,0 +1,1960 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>DeIT:Training data-efficient image transformers &amp; distillation through attention论文解读 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="DeIT:Training data-efficient image transformers &amp; distillation through attention论文解读" />
+<meta property="og:description" content="Training data-efficient image transformers &amp; distillation through attention 论文：2012.12877.pdf (arxiv.org)
+代码：facebookresearch/deit: Official DeiT repository (github.com)
+期刊/会议：ICML 2021
+摘要 最近，基于注意力的神经网络被证明可以解决图像理解任务，如图像分类。这些高性能的vision transformer使用大量的计算资源来预训练了数亿张图像，从而限制了它们的应用。(简单来说就是需要大量的算力资源)
+在这项工作中，我们只通过在ImageNet上训练产生具有竞争力的无卷积的transformer模型。我们只用了不到三天的时间在一台电脑上训练他们。在没有外部数据的情况下，我们的vision transformer(86M参数)在ImageNet上达到了83.1%(单一模型)的top-1精度。
+更重要的是，我们引入了一种针对transformer的师生策略(teacher-student strategy)。它依赖于一个蒸馏令牌(distillation token)，确保学生通过注意力从老师那里学习。我们展示了这种基于token的蒸馏的兴趣，特别是在使用卷积网络作为教师时。这使得我们在ImageNet(我们获得高达85.2%的准确率)和转移到其他任务时报告的结果与卷积网络具有竞争力。
+1、简介 卷积神经网络一直是图像理解任务的主要设计范式，最初在图像分类任务中演示过。它们成功的一个因素是一个大型训练集的可用性，即ImageNet。由于自然语言处理中基于注意力的模型的成功，人们对利用卷积神经网络中的注意力机制的架构越来越感兴趣。最近，一些研究人员提出了混合架构，将transformer成分移植到卷积网络来解决视觉任务。
+Dosovitskiy等人引入的Vision transformer(ViT)是直接继承自自然语言处理的架构，但应用在图像分类中是以图像patch作为输入。他们的论文展示了出色结果，在用大型私有标记图像数据集(JFT-300M， 3亿张图像)训练transformer。这篇论文的结论是，transformer“在数据量不足的情况下训练时不能很好地泛化”，而且这些模型的训练需要涉及大量的计算资源。
+在本文中，我们在一个8-GPU节点上用两到三天的时间训练了一个vision transformer(53小时的预训练，可选的20小时的微调)，这与具有类似参数数量和效率的卷积神经网络模型具有竞争力。它使用ImageNet作为唯一的训练集。我们建立在Dosovitskiy等人的visual transformer架构上，并在timm库中进行了改进。使用我们的数据高效图像transformer(DeiT)，我们报告了比以前的结果有很大的改进，参见图1。我们的消融实验详细描述了成功训练的超参数和关键成分，例如重复增强(repeated augmentation)。
+我们解决了另一个问题:如何蒸馏这些模型?我们介绍了一种基于token的策略，具体到transformer，用 DeiT⚗ \text{DeiT⚗} DeiT⚗表示，并表明它有利地取代了通常的蒸馏。
+总之，我们的工作做出了以下贡献:
+我们表明，我们的神经网络不包含卷积层，可以在没有外部数据的情况下，与ImageNet上的最先进技术相比，获得具有竞争力的结果。它们是在3天内在4个gpu的单个机器上学习的。我们的两个新模型DeiT-S和DeiT-Ti的参数更少，可以看作是ResNet-50和ResNet-18的对应模型。我们引入了一种基于蒸馏token的新的蒸馏方式，它与class token的作用相同，除了它的目的是重现老师估计的标签。这两个token在transformer中通过注意力机制相互作用。这种transformer特定的策略显著优于vanilla distillation。有趣的是，通过我们的蒸馏，图像transformer从卷积网络中学到的比从另一个具有相同性能的transformer学到的更多。我们在ImageNet上预学习的模型在转移到不同的下游任务时具有竞争力，如细粒度分类，在几个流行的公共基准上:CIFAR-10, CIFAR-100，Oxford-102 flowers，Stanford Cars和iNaturalist-18/19。 本文的组织结构如下:第2节回顾相关工作，第3节重点介绍用于图像分类的transformer。我们将在第4节介绍transformer的蒸馏策略。实验第5节提供了对卷积神经网络和最近的transformer的分析和比较，以及对我们的transformer特定蒸馏的比较评估。第6节详细介绍了我们的训练方法。它包括对我们的数据高效训练选择的广泛消融实验，这对DeiT所涉及的关键成分提供了一些见解。我们在第7节中得出结论。
+2、相关工作 图像分类是计算机视觉的核心，经常被用作衡量图像理解进展的基准。任何进展通常都会转化为其他相关任务的改进，如检测或分割。自2012年AlexNet以来，卷积神经网络一直主导着这一基准，并已成为事实上的标准。ImageNet数据集的最新发展反映了卷积神经网络架构和学习的进展。
+尽管有几次尝试使用transformer进行图像分类，但到目前为止，它们的性能一直不如卷积神经网络。然而，结合卷积神经网络和transformer的混合架构，包括自注意机制，最近在图像分类、检测、视频处理、无监督对象发现和统一文本视觉任务方面展示了具有竞争力的结果。
+最近，vision transformer(ViT)在不使用任何卷积的情况下缩小了与ImageNet上最先进技术的差距。这种性能是显著的，因为卷积方法在图像分类受益于多年的调整和优化。然而，根据这项研究，需要对大量的数据进行预训练才能使学习的transformer有效。在我们的论文中，我们不需要大量的训练数据集，即仅使用ImageNet1k，就实现了强大的性能。
+由Vaswani等人为机器翻译引入的transformer架构是目前所有自然语言处理(NLP)任务的参考模型。许多用于图像分类的卷积算法的改进都是受到transformer的启发。例如，压缩(Squeeze)和激励(Excitation)、选择核(Select Kernel)和分裂注意网络(Split-Attention Network)机制利用了类似transformer自注意(SA)机制。
+由Hinton等人提出的知识蒸馏(KD)是指学生模型利用来自强大教师网络的“soft”标签的训练范式。这是教师的softmax函数的输出向量，而不仅仅是分数的最大值，它给出了一个“hard”标签。这样的训练提高了学生模型的表现(或者，它可以被看作是将教师模型压缩成一个更小的模型——学生)。一方面，老师的软(soft)标签将有类似的标签平滑的效果。另一方面，如Wei等人的研究，教师的监督考虑了数据增强的影响，有时会导致真实标签与图像之间的错位。例如，让我们考虑一个带有“猫(cat)”标签的图像，它代表一个大的风景和角落里的一只小猫。如果猫不再在数据增强的模型上，它会隐式地改变图像的标签。KD可以将归纳偏差(inductive bias)以一种软(soft)的方式转移到学生模型中，使用教师模型，其中它们将以一种硬(hard)的方式合并。例如，通过使用卷积模型作为教师，在transformer模型中由于卷积而产生的诱导偏差可能是有用的。在我们的论文中，我们研究了一个transformer学生或transformer教师的蒸馏。介绍了一种新的transformer蒸馏技术，并说明了该技术的优越性。
+3、Vision Transformer总览 在本节中，我们简要回顾与vision transformer相关的初步知识，并进一步讨论位置编码和分辨率。
+多头自注意力层(MSA)。注意机制是基于可训练的associative memory与(key，vale)向量对。query向量 q ∈ R d q \in \R^d q∈Rd与 k k k个key向量集进行内积(打包成一个矩阵 k ∈ R k × d k \in \R^{k×d} k∈Rk×d)匹配。然后对这些内积进行缩放，并使用softmax函数进行归一化，以获得 k k k个权重。注意力的输出是一组 k k k个值向量的加权和(装入 V ∈ R k × d V \in \R^{k×d} V∈Rk×d)。对于 N N N个查询向量序列(装入 Q ∈ R N × d Q \in \R^{N×d} Q∈RN×d)，它产生一个输出矩阵(大小为 N × d N×d N×d):" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/0c9e2b5a69599f0bc467234d1e6f87a7/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-02-09T08:00:00+08:00" />
+<meta property="article:modified_time" content="2023-02-09T08:00:00+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">DeIT:Training data-efficient image transformers &amp; distillation through attention论文解读</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="Training_dataefficient_image_transformers__distillation_through_attention_0"></a>Training data-efficient image transformers &amp; distillation through attention</h2> 
+<p><img src="https://images2.imgbox.com/67/49/pZOHlUsQ_o.png" alt=" )(Training data-efficient image transformers &amp; distillation through attention.assets/image-20230206145648748.png)]"></p> 
+<p>论文：<a href="https://arxiv.org/pdf/2012.12877.pdf" rel="nofollow">2012.12877.pdf (arxiv.org)</a></p> 
+<p>代码：<a href="https://github.com/facebookresearch/deit">facebookresearch/deit: Official DeiT repository (github.com)</a></p> 
+<p>期刊/会议：ICML 2021</p> 
+<h3><a id="_11"></a>摘要</h3> 
+<p>最近，基于注意力的神经网络被证明可以解决图像理解任务，如图像分类。这些高性能的vision transformer使用大量的计算资源来预训练了数亿张图像，从而限制了它们的应用。(简单来说就是需要<u>大量的算力资源</u>)</p> 
+<p>在这项工作中，我们只通过在ImageNet上训练产生具有竞争力的<strong>无卷积的transformer模型</strong>。我们只用了不到三天的时间在一台电脑上训练他们。在没有外部数据的情况下，我们的vision transformer(86M参数)在ImageNet上达到了83.1%(单一模型)的top-1精度。</p> 
+<p>更重要的是，我们引入了<u>一种针对transformer的师生策略(teacher-student strategy)</u>。它依赖于一个蒸馏令牌(distillation token)，确保学生通过注意力从老师那里学习。我们展示了这种基于token的蒸馏的兴趣，特别是在使用卷积网络作为教师时。这使得我们在ImageNet(我们获得高达85.2%的准确率)和转移到其他任务时报告的结果与卷积网络具有竞争力。</p> 
+<h3><a id="1_19"></a>1、简介</h3> 
+<p>卷积神经网络一直是图像理解任务的主要设计范式，最初在图像分类任务中演示过。它们成功的一个因素是一个大型训练集的可用性，即ImageNet。由于自然语言处理中基于注意力的模型的成功，人们对利用卷积神经网络中的注意力机制的架构越来越感兴趣。最近，一些研究人员提出了混合架构，将transformer成分移植到卷积网络来解决视觉任务。</p> 
+<p>Dosovitskiy等人引入的Vision transformer(ViT)是直接继承自自然语言处理的架构，但应用在图像分类中是以图像patch作为输入。他们的论文展示了出色结果，在用大型私有标记图像数据集(JFT-300M， 3亿张图像)训练transformer。这篇论文的结论是，<strong>transformer“在数据量不足的情况下训练时不能很好地泛化”</strong>，而且这些模型的训练需要涉及大量的计算资源。</p> 
+<p>在本文中，我们在一个8-GPU节点上用两到三天的时间训练了一个vision transformer(53小时的预训练，可选的20小时的微调)，这与具有类似参数数量和效率的卷积神经网络模型具有竞争力。它使用ImageNet作为唯一的训练集。我们建立在Dosovitskiy等人的visual transformer架构上，并在timm库中进行了改进。使用我们的数据高效图像transformer(DeiT)，我们报告了比以前的结果有很大的改进，参见图1。我们的消融实验详细描述了成功训练的超参数和关键成分，例如重复增强(repeated augmentation)。</p> 
+<p><img src="https://images2.imgbox.com/14/d3/7QgmdVsP_o.png" alt="在这里插入图片描述"></p> 
+<p>我们解决了另一个问题:如何蒸馏这些模型?我们介绍了一种基于token的策略，具体到transformer，用<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         DeiT⚗ 
+        
+       
+      
+        \text{DeiT⚗} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord text"><span class="mord">DeiT⚗</span></span></span></span></span></span>表示，并表明它有利地取代了通常的蒸馏。</p> 
+<p>总之，我们的工作做出了以下贡献:</p> 
+<ul><li>我们表明，我们的神经网络不包含卷积层，可以在没有外部数据的情况下，与ImageNet上的最先进技术相比，获得具有竞争力的结果。它们是在3天内在4个gpu的单个机器上学习的。我们的两个新模型DeiT-S和DeiT-Ti的参数更少，可以看作是ResNet-50和ResNet-18的对应模型。</li><li>我们引入了一种基于蒸馏token的新的蒸馏方式，它与class token的作用相同，除了它的目的是重现老师估计的标签。这两个token在transformer中通过注意力机制相互作用。这种transformer特定的策略显著优于vanilla distillation。</li><li>有趣的是，通过我们的蒸馏，图像transformer从卷积网络中学到的比从另一个具有相同性能的transformer学到的更多。</li><li>我们在ImageNet上预学习的模型在转移到不同的下游任务时具有竞争力，如细粒度分类，在几个流行的公共基准上:CIFAR-10, CIFAR-100，Oxford-102 flowers，Stanford Cars和iNaturalist-18/19。</li></ul> 
+<p>本文的组织结构如下:第2节回顾相关工作，第3节重点介绍用于图像分类的transformer。我们将在第4节介绍transformer的蒸馏策略。实验第5节提供了对卷积神经网络和最近的transformer的分析和比较，以及对我们的transformer特定蒸馏的比较评估。第6节详细介绍了我们的训练方法。它包括对我们的数据高效训练选择的广泛消融实验，这对DeiT所涉及的关键成分提供了一些见解。我们在第7节中得出结论。</p> 
+<h3><a id="2_41"></a>2、相关工作</h3> 
+<p><strong>图像分类</strong>是计算机视觉的核心，经常被用作衡量图像理解进展的基准。任何进展通常都会转化为其他相关任务的改进，如检测或分割。自2012年AlexNet以来，卷积神经网络一直主导着这一基准，并已成为事实上的标准。ImageNet数据集的最新发展反映了卷积神经网络架构和学习的进展。</p> 
+<p>尽管有几次尝试使用transformer进行图像分类，但到目前为止，它们的性能一直不如卷积神经网络。然而，结合卷积神经网络和transformer的混合架构，包括自注意机制，最近在图像分类、检测、视频处理、无监督对象发现和统一文本视觉任务方面展示了具有竞争力的结果。</p> 
+<p>最近，vision transformer(ViT)在不使用任何卷积的情况下缩小了与ImageNet上最先进技术的差距。这种性能是显著的，因为卷积方法在图像分类受益于多年的调整和优化。然而，根据这项研究，需要对大量的数据进行预训练才能使学习的transformer有效。在我们的论文中，我们不需要大量的训练数据集，即仅使用ImageNet1k，就实现了强大的性能。</p> 
+<p>由Vaswani等人为机器翻译引入的<strong>transformer架构</strong>是目前所有自然语言处理(NLP)任务的参考模型。许多用于图像分类的卷积算法的改进都是受到transformer的启发。例如，压缩(Squeeze)和激励(Excitation)、选择核(Select Kernel)和分裂注意网络(Split-Attention Network)机制利用了类似transformer自注意(SA)机制。</p> 
+<p>由Hinton等人提出的<strong>知识蒸馏</strong>(KD)是指学生模型利用来自强大教师网络的“soft”标签的训练范式。这是教师的softmax函数的输出向量，而不仅仅是分数的最大值，它给出了一个“hard”标签。这样的训练提高了学生模型的表现(或者，它可以被看作是将教师模型压缩成一个更小的模型——学生)。一方面，老师的软(soft)标签将有类似的标签平滑的效果。另一方面，如Wei等人的研究，教师的监督考虑了数据增强的影响，有时会导致真实标签与图像之间的错位。例如，让我们考虑一个带有“猫(cat)”标签的图像，它代表一个大的风景和角落里的一只小猫。如果猫不再在数据增强的模型上，它会隐式地改变图像的标签。KD可以将归纳偏差(inductive bias)以一种软(soft)的方式转移到学生模型中，使用教师模型，其中它们将以一种硬(hard)的方式合并。例如，通过使用卷积模型作为教师，在transformer模型中由于卷积而产生的诱导偏差可能是有用的。在我们的论文中，我们研究了一个transformer学生或transformer教师的蒸馏。介绍了一种新的transformer蒸馏技术，并说明了该技术的优越性。</p> 
+<h3><a id="3Vision_Transformer_53"></a>3、Vision Transformer总览</h3> 
+<p>在本节中，我们简要回顾与vision transformer相关的初步知识，并进一步讨论位置编码和分辨率。</p> 
+<p><strong>多头自注意力层(MSA)</strong>。注意机制是基于可训练的associative memory与(key，vale)向量对。query向量<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         q 
+        
+       
+         ∈ 
+        
+        
+        
+          R 
+         
+        
+          d 
+         
+        
+       
+      
+        q \in \R^d 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7335em; vertical-align: -0.1944em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">q</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">∈</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.8491em;"></span><span class="mord"><span class="mord mathbb">R</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8491em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">d</span></span></span></span></span></span></span></span></span></span></span></span>与<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         k 
+        
+       
+      
+        k 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal" style="margin-right: 0.0315em;">k</span></span></span></span></span>个key向量集进行内积(打包成一个矩阵<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         k 
+        
+       
+         ∈ 
+        
+        
+        
+          R 
+         
+         
+         
+           k 
+          
+         
+           × 
+          
+         
+           d 
+          
+         
+        
+       
+      
+        k \in \R^{k×d} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7335em; vertical-align: -0.0391em;"></span><span class="mord mathnormal" style="margin-right: 0.0315em;">k</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">∈</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.8491em;"></span><span class="mord"><span class="mord mathbb">R</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8491em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0315em;">k</span><span class="mbin mtight">×</span><span class="mord mathnormal mtight">d</span></span></span></span></span></span></span></span></span></span></span></span></span>)匹配。然后对这些内积进行缩放，并使用softmax函数进行归一化，以获得<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         k 
+        
+       
+      
+        k 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal" style="margin-right: 0.0315em;">k</span></span></span></span></span>个权重。注意力的输出是一组<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         k 
+        
+       
+      
+        k 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal" style="margin-right: 0.0315em;">k</span></span></span></span></span>个值向量的加权和(装入<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         V 
+        
+       
+         ∈ 
+        
+        
+        
+          R 
+         
+         
+         
+           k 
+          
+         
+           × 
+          
+         
+           d 
+          
+         
+        
+       
+      
+        V \in \R^{k×d} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7224em; vertical-align: -0.0391em;"></span><span class="mord mathnormal" style="margin-right: 0.2222em;">V</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">∈</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.8491em;"></span><span class="mord"><span class="mord mathbb">R</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8491em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0315em;">k</span><span class="mbin mtight">×</span><span class="mord mathnormal mtight">d</span></span></span></span></span></span></span></span></span></span></span></span></span>)。对于<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+      
+        N 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span></span></span></span></span>个查询向量序列(装入<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         Q 
+        
+       
+         ∈ 
+        
+        
+        
+          R 
+         
+         
+         
+           N 
+          
+         
+           × 
+          
+         
+           d 
+          
+         
+        
+       
+      
+        Q \in \R^{N×d} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8778em; vertical-align: -0.1944em;"></span><span class="mord mathnormal">Q</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">∈</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.8491em;"></span><span class="mord"><span class="mord mathbb">R</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8491em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.109em;">N</span><span class="mbin mtight">×</span><span class="mord mathnormal mtight">d</span></span></span></span></span></span></span></span></span></span></span></span></span>)，它产生一个输出矩阵(大小为<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+         × 
+        
+       
+         d 
+        
+       
+      
+        N×d 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7667em; vertical-align: -0.0833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">d</span></span></span></span></span>):<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+        
+          Attention 
+         
+        
+          ( 
+         
+        
+          Q 
+         
+        
+          , 
+         
+        
+          K 
+         
+        
+          , 
+         
+        
+          V 
+         
+        
+          ) 
+         
+        
+          = 
+         
+        
+          Softmax 
+         
+        
+          ( 
+         
+        
+          Q 
+         
+         
+         
+           K 
+          
+         
+           T 
+          
+         
+        
+          / 
+         
+         
+         
+           d 
+          
+         
+        
+          ) 
+         
+        
+          V 
+         
+        
+       
+         \text{Attention}(Q,K,V)=\text{Softmax}(QK^T/\sqrt{d})V 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord text"><span class="mord">Attention</span></span><span class="mopen">(</span><span class="mord mathnormal">Q</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord mathnormal" style="margin-right: 0.0715em;">K</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord mathnormal" style="margin-right: 0.2222em;">V</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1.2311em; vertical-align: -0.25em;"></span><span class="mord text"><span class="mord">Softmax</span></span><span class="mopen">(</span><span class="mord mathnormal">Q</span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0715em;">K</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8913em;"><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.1389em;">T</span></span></span></span></span></span></span></span><span class="mord">/</span><span class="mord sqrt"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.9811em;"><span class="svg-align" style="top: -3em;"><span class="pstrut" style="height: 3em;"></span><span class="mord" style="padding-left: 0.833em;"><span class="mord mathnormal">d</span></span></span><span class="" style="top: -2.9411em;"><span class="pstrut" style="height: 3em;"></span><span class="hide-tail" style="min-width: 0.853em; height: 1.08em;"> 
+            <svg width="400em" height="1.08em" viewbox="0 0 400000 1080" preserveaspectratio="xMinYMin slice"> 
+             <path d="M95,702
+c-2.7,0,-7.17,-2.7,-13.5,-8c-5.8,-5.3,-9.5,-10,-9.5,-14
+c0,-2,0.3,-3.3,1,-4c1.3,-2.7,23.83,-20.7,67.5,-54
+c44.2,-33.3,65.8,-50.3,66.5,-51c1.3,-1.3,3,-2,5,-2c4.7,0,8.7,3.3,12,10
+s173,378,173,378c0.7,0,35.3,-71,104,-213c68.7,-142,137.5,-285,206.5,-429
+c69,-144,104.5,-217.7,106.5,-221
+l0 -0
+c5.3,-9.3,12,-14,20,-14
+H400000v40H845.2724
+s-225.272,467,-225.272,467s-235,486,-235,486c-2.7,4.7,-9,7,-19,7
+c-6,0,-10,-1,-12,-3s-194,-422,-194,-422s-65,47,-65,47z
+M834 80h400000v40h-400000z"></path> 
+            </svg></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.0589em;"><span class=""></span></span></span></span></span><span class="mclose">)</span><span class="mord mathnormal" style="margin-right: 0.2222em;">V</span></span></span></span></span></span><br> 其中Softmax函数应用于输入矩阵的每一行，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          d 
+         
+        
+       
+      
+        \sqrt{d} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.04em; vertical-align: -0.1078em;"></span><span class="mord sqrt"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.9322em;"><span class="svg-align" style="top: -3em;"><span class="pstrut" style="height: 3em;"></span><span class="mord" style="padding-left: 0.833em;"><span class="mord mathnormal">d</span></span></span><span class="" style="top: -2.8922em;"><span class="pstrut" style="height: 3em;"></span><span class="hide-tail" style="min-width: 0.853em; height: 1.08em;"> 
+           <svg width="400em" height="1.08em" viewbox="0 0 400000 1080" preserveaspectratio="xMinYMin slice"> 
+            <path d="M95,702
+c-2.7,0,-7.17,-2.7,-13.5,-8c-5.8,-5.3,-9.5,-10,-9.5,-14
+c0,-2,0.3,-3.3,1,-4c1.3,-2.7,23.83,-20.7,67.5,-54
+c44.2,-33.3,65.8,-50.3,66.5,-51c1.3,-1.3,3,-2,5,-2c4.7,0,8.7,3.3,12,10
+s173,378,173,378c0.7,0,35.3,-71,104,-213c68.7,-142,137.5,-285,206.5,-429
+c69,-144,104.5,-217.7,106.5,-221
+l0 -0
+c5.3,-9.3,12,-14,20,-14
+H400000v40H845.2724
+s-225.272,467,-225.272,467s-235,486,-235,486c-2.7,4.7,-9,7,-19,7
+c-6,0,-10,-1,-12,-3s-194,-422,-194,-422s-65,47,-65,47z
+M834 80h400000v40h-400000z"></path> 
+           </svg></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.1078em;"><span class=""></span></span></span></span></span></span></span></span></span>项提供适当的归一化。</p> 
+<p>在[52]中，提出了一个Self-attention层。query、key和value矩阵本身是从<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+      
+        N 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span></span></span></span></span>个输入向量的序列(装入<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         X 
+        
+       
+         ∈ 
+        
+        
+        
+          R 
+         
+         
+         
+           N 
+          
+         
+           × 
+          
+         
+           D 
+          
+         
+        
+       
+      
+        X \in \R^{N×D} 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7224em; vertical-align: -0.0391em;"></span><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">∈</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.8413em;"></span><span class="mord"><span class="mord mathbb">R</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8413em;"><span class="" style="top: -3.063em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.109em;">N</span><span class="mbin mtight">×</span><span class="mord mathnormal mtight" style="margin-right: 0.0278em;">D</span></span></span></span></span></span></span></span></span></span></span></span></span>)中计算出来的:<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         Q 
+        
+       
+         = 
+        
+       
+         X 
+        
+        
+        
+          W 
+         
+        
+          Q 
+         
+        
+       
+      
+        Q = XW_Q 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8778em; vertical-align: -0.1944em;"></span><span class="mord mathnormal">Q</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.9694em; vertical-align: -0.2861em;"></span><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3283em;"><span class="" style="top: -2.55em; margin-left: -0.1389em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">Q</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span></span></span></span></span>, <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         K 
+        
+       
+         = 
+        
+       
+         X 
+        
+        
+        
+          W 
+         
+        
+          K 
+         
+        
+       
+      
+        K = XW_K 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.0715em;">K</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.8333em; vertical-align: -0.15em;"></span><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3283em;"><span class="" style="top: -2.55em; margin-left: -0.1389em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0715em;">K</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>, <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         V 
+        
+       
+         = 
+        
+       
+         X 
+        
+        
+        
+          W 
+         
+        
+          V 
+         
+        
+       
+      
+        V = XW_V 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.2222em;">V</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.8333em; vertical-align: -0.15em;"></span><span class="mord mathnormal" style="margin-right: 0.0785em;">X</span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3283em;"><span class="" style="top: -2.55em; margin-left: -0.1389em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.2222em;">V</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>，使用线性变换<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          W 
+         
+        
+          Q 
+         
+        
+       
+      
+        W_Q 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.9694em; vertical-align: -0.2861em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3283em;"><span class="" style="top: -2.55em; margin-left: -0.1389em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">Q</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span></span></span></span></span>, <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          W 
+         
+        
+          K 
+         
+        
+       
+      
+        W_K 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8333em; vertical-align: -0.15em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3283em;"><span class="" style="top: -2.55em; margin-left: -0.1389em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0715em;">K</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>, <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          W 
+         
+        
+          V 
+         
+        
+       
+      
+        W_V 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8333em; vertical-align: -0.15em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.1389em;">W</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3283em;"><span class="" style="top: -2.55em; margin-left: -0.1389em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight" style="margin-right: 0.2222em;">V</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>，约束<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         k 
+        
+       
+         = 
+        
+       
+         N 
+        
+       
+      
+        k = N 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal" style="margin-right: 0.0315em;">k</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span></span></span></span></span>，这意味着注意力在所有输入向量之间。</p> 
+<p>最后，考虑<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         h 
+        
+       
+      
+        h 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">h</span></span></span></span></span>个注意“头”，即<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         h 
+        
+       
+      
+        h 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">h</span></span></span></span></span>个自注意函数作用于输入，定义了多头自注意层(MSA)。每个head提供一个大小为<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+         × 
+        
+       
+         d 
+        
+       
+      
+        N × d 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7667em; vertical-align: -0.0833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">d</span></span></span></span></span>的序列。这些<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         h 
+        
+       
+      
+        h 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">h</span></span></span></span></span>序列被重排为<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+         × 
+        
+       
+         d 
+        
+       
+         h 
+        
+       
+      
+        N × dh 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7667em; vertical-align: -0.0833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">d</span><span class="mord mathnormal">h</span></span></span></span></span>序列，该<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+         × 
+        
+       
+         d 
+        
+       
+         h 
+        
+       
+      
+        N × dh 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7667em; vertical-align: -0.0833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">d</span><span class="mord mathnormal">h</span></span></span></span></span>序列被线性层重投影为<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+         × 
+        
+       
+         d 
+        
+       
+      
+        N × d 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7667em; vertical-align: -0.0833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">d</span></span></span></span></span>。</p> 
+<p><strong>transformer block for image</strong>。为了获得像[52]中那样的完整transformer block，我们在MSA层上添加了一个前馈网络(FFN)。该FFN由两个线性层组成，由GeLu激活分开。第一个线性层将维数从<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         D 
+        
+       
+      
+        D 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.0278em;">D</span></span></span></span></span>扩展到<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         4 
+        
+       
+         D 
+        
+       
+      
+        4D 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord">4</span><span class="mord mathnormal" style="margin-right: 0.0278em;">D</span></span></span></span></span>，第二层将维数从<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         4 
+        
+       
+         D 
+        
+       
+      
+        4D 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord">4</span><span class="mord mathnormal" style="margin-right: 0.0278em;">D</span></span></span></span></span>降回<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         D 
+        
+       
+      
+        D 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.0278em;">D</span></span></span></span></span>。由于跳跃连接，MSA和FFN都作为残差连接，并且层归一化。</p> 
+<p>为了得到一个transformer来处理图像，我们的工作建立在ViT模型之上。这是一个简单而优雅的体系结构，它处理输入图像，就像处理一系列输入token一样。将固定大小的输入RGB图像分解为一批固定大小为<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         16 
+        
+       
+         × 
+        
+       
+         16 
+        
+       
+      
+        16 × 16 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7278em; vertical-align: -0.0833em;"></span><span class="mord">16</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">16</span></span></span></span></span>像素(<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+         = 
+        
+       
+         14 
+        
+       
+         × 
+        
+       
+         14 
+        
+       
+      
+        N = 14 × 14 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.7278em; vertical-align: -0.0833em;"></span><span class="mord">14</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">14</span></span></span></span></span>)的<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+      
+        N 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span></span></span></span></span>块。每个patch都用线性层投影，保持其整体尺寸<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         3 
+        
+       
+         × 
+        
+       
+         16 
+        
+       
+         × 
+        
+       
+         16 
+        
+       
+         = 
+        
+       
+         768 
+        
+       
+      
+        3 × 16 × 16 = 768 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7278em; vertical-align: -0.0833em;"></span><span class="mord">3</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.7278em; vertical-align: -0.0833em;"></span><span class="mord">16</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">16</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">768</span></span></span></span></span>。</p> 
+<p>上述transformer block对patch嵌入的顺序是不变的，因此不考虑它们的相对位置。位置信息被合并为固定的[52]或可训练的[18]位置嵌入。它们在第一个transformer block之前添加到patch token，然后将这些token提供给堆叠的transformer bolck。</p> 
+<p><strong>class token</strong>是一个可训练的向量，附加到第一层之前的patch token中，通过transformer层，然后用线性层进行投影以预测图像类别。这个class token继承自NLP，并且与计算机视觉中用于预测类的典型池化层不同。因此，转换器处理一批<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         ( 
+        
+       
+         N 
+        
+       
+         + 
+        
+       
+         1 
+        
+       
+         ) 
+        
+       
+      
+        (N + 1) 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord">1</span><span class="mclose">)</span></span></span></span></span>维<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         D 
+        
+       
+      
+        D 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.0278em;">D</span></span></span></span></span>标记，其中只有类向量用于预测输出。这种体系结构迫使自注意在patch token和class token之间传播信息:在训练时，监督信号仅来自类嵌入，而patch token是模型唯一的变量输入。</p> 
+<p><strong>修复跨分辨率的位置编码</strong>。<u>Touvron等人[50]表明，使用较低的训练分辨率并在较大分辨率下微调网络是可取的</u>。这加快了整个的训练速度，并提高了当前数据增强方案下的准确性。当增加输入图像的分辨率时，我们保持patch大小不变，因此输入patch的数量<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+      
+        N 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span></span></span></span></span>会发生变化。由于transformer和class token的架构，模型和分类器不需要修改来处理更多的token。相反，我们需要调整位置嵌入，因为有<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         N 
+        
+       
+      
+        N 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.109em;">N</span></span></span></span></span>个位置嵌入，每个patch一个。Dosovitskiy等[15]在改变分辨率时插入位置编码，并证明该方法适用于后续的微调阶段。</p> 
+<h3><a id="4attention_77"></a>4、通过attention进行蒸馏</h3> 
+<p>在本节中，我们假设我们可以访问一个强大的图像分类器作为教师模型。它可以是纯卷积分类网络，也可以是混合的分类网络。我们解决的问题是如何通过利用这个老师来学习一个transformer。正如我们将在第5节中看到的，通过比较准确性和图像吞吐量之间的权衡，用transformer取代卷积神经网络是有益的。本节涵盖了蒸馏的两个轴:硬蒸馏(hard distillation)与软蒸馏(soft distillation)，经典蒸馏(classical distillation)与token蒸馏(token distillation)。</p> 
+<p><strong>软蒸馏</strong>使教师模型的软最大值和学生模型的软最大值之间的Kullback-Leibler散度最小。</p> 
+<p>设<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          Z 
+         
+        
+          t 
+         
+        
+       
+      
+        Z_t 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8333em; vertical-align: -0.15em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0715em;">Z</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.2806em;"><span class="" style="top: -2.55em; margin-left: -0.0715em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">t</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>为教师模型的对数，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          Z 
+         
+        
+          s 
+         
+        
+       
+      
+        Z_s 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8333em; vertical-align: -0.15em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0715em;">Z</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.1514em;"><span class="" style="top: -2.55em; margin-left: -0.0715em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">s</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>为学生模型的对数。我们用<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         τ 
+        
+       
+      
+        τ 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em;"></span><span class="mord mathnormal" style="margin-right: 0.1132em;">τ</span></span></span></span></span>表示蒸馏温度，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         λ 
+        
+       
+      
+        λ 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">λ</span></span></span></span></span>表示在真实标签<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         y 
+        
+       
+      
+        y 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.1944em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">y</span></span></span></span></span>上平衡Kullback-Leibler散度损失(KL)和交叉熵(LCE)的系数，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         ψ 
+        
+       
+      
+        ψ 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8889em; vertical-align: -0.1944em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">ψ</span></span></span></span></span>表示softmax函数。蒸馏的目的是<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+         
+           L 
+          
+          
+          
+            g 
+           
+          
+            l 
+           
+          
+            o 
+           
+          
+            b 
+           
+          
+            a 
+           
+          
+            l 
+           
+          
+         
+        
+          = 
+         
+        
+          ( 
+         
+        
+          1 
+         
+        
+          − 
+         
+        
+          λ 
+         
+        
+          ) 
+         
+         
+         
+           L 
+          
+          
+          
+            C 
+           
+          
+            E 
+           
+          
+         
+        
+          ( 
+         
+        
+          ψ 
+         
+        
+          ( 
+         
+         
+         
+           Z 
+          
+         
+           s 
+          
+         
+        
+          ) 
+         
+        
+          , 
+         
+        
+          y 
+         
+        
+          ) 
+         
+        
+          + 
+         
+        
+          λ 
+         
+         
+         
+           τ 
+          
+         
+           2 
+          
+         
+        
+          K 
+         
+        
+          L 
+         
+        
+          ( 
+         
+        
+          ψ 
+         
+        
+          ( 
+         
+         
+         
+           Z 
+          
+         
+           s 
+          
+         
+        
+          / 
+         
+        
+          τ 
+         
+        
+          ) 
+         
+        
+          , 
+         
+        
+          ψ 
+         
+        
+          ( 
+         
+         
+         
+           Z 
+          
+         
+           t 
+          
+         
+        
+          / 
+         
+        
+          τ 
+         
+        
+          ) 
+         
+        
+          ) 
+         
+        
+       
+         L_{global}=(1-\lambda)L_{CE}(\psi(Z_s),y)+\lambda \tau ^2 KL( \psi(Z_s/\tau),\psi(Z_t/\tau)) 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.9694em; vertical-align: -0.2861em;"></span><span class="mord"><span class="mord mathnormal">L</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3361em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0359em;">g</span><span class="mord mathnormal mtight" style="margin-right: 0.0197em;">l</span><span class="mord mathnormal mtight">o</span><span class="mord mathnormal mtight">ba</span><span class="mord mathnormal mtight" style="margin-right: 0.0197em;">l</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2861em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mopen">(</span><span class="mord">1</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathnormal">λ</span><span class="mclose">)</span><span class="mord"><span class="mord mathnormal">L</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3283em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0576em;">CE</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right: 0.0359em;">ψ</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0715em;">Z</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.1514em;"><span class="" style="top: -2.55em; margin-left: -0.0715em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">s</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">y</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 1.1141em; vertical-align: -0.25em;"></span><span class="mord mathnormal">λ</span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.1132em;">τ</span><span class="msupsub"><span class="vlist-t"><span class="vlist-r"><span class="vlist" style="height: 0.8641em;"><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight">2</span></span></span></span></span></span></span></span><span class="mord mathnormal" style="margin-right: 0.0715em;">K</span><span class="mord mathnormal">L</span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right: 0.0359em;">ψ</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0715em;">Z</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.1514em;"><span class="" style="top: -2.55em; margin-left: -0.0715em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">s</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mord">/</span><span class="mord mathnormal" style="margin-right: 0.1132em;">τ</span><span class="mclose">)</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">ψ</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0715em;">Z</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.2806em;"><span class="" style="top: -2.55em; margin-left: -0.0715em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">t</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mord">/</span><span class="mord mathnormal" style="margin-right: 0.1132em;">τ</span><span class="mclose">))</span></span></span></span></span></span><br> <strong>硬标签蒸馏</strong>。我们引入了一种蒸馏的变体，我们把老师的hard决定作为一个真实的标签。假设<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          y 
+         
+        
+          t 
+         
+        
+       
+         = 
+        
+        
+        
+          argmax 
+         
+        
+          c 
+         
+        
+        
+        
+          Z 
+         
+        
+          t 
+         
+        
+       
+         ( 
+        
+       
+         c 
+        
+       
+         ) 
+        
+       
+      
+        y_t = \text{argmax}_cZ_t(c) 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.1944em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0359em;">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.2806em;"><span class="" style="top: -2.55em; margin-left: -0.0359em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">t</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord"><span class="mord text"><span class="mord">argmax</span></span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.0573em;"><span class="" style="top: -2.4559em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">c</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.2441em;"><span class=""></span></span></span></span></span></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0715em;">Z</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.2806em;"><span class="" style="top: -2.55em; margin-left: -0.0715em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">t</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mopen">(</span><span class="mord mathnormal">c</span><span class="mclose">)</span></span></span></span></span>是老师的hard决定，与这个硬标签蒸馏相关的目标是:<br> <span class="katex--display"><span class="katex-display"><span class="katex"><span class="katex-mathml"> 
+      
+       
+        
+         
+         
+           L 
+          
+          
+          
+            g 
+           
+          
+            l 
+           
+          
+            o 
+           
+          
+            b 
+           
+          
+            a 
+           
+          
+            l 
+           
+          
+          
+          
+            h 
+           
+          
+            a 
+           
+          
+            r 
+           
+          
+            d 
+           
+          
+            D 
+           
+          
+            i 
+           
+          
+            s 
+           
+          
+            t 
+           
+          
+            i 
+           
+          
+            l 
+           
+          
+            l 
+           
+          
+         
+        
+          = 
+         
+         
+         
+           1 
+          
+         
+           2 
+          
+         
+         
+         
+           L 
+          
+          
+          
+            C 
+           
+          
+            E 
+           
+          
+         
+        
+          ( 
+         
+        
+          ψ 
+         
+        
+          ( 
+         
+         
+         
+           Z 
+          
+         
+           s 
+          
+         
+        
+          ) 
+         
+        
+          , 
+         
+        
+          y 
+         
+        
+          ) 
+         
+        
+          + 
+         
+         
+         
+           1 
+          
+         
+           2 
+          
+         
+         
+         
+           L 
+          
+          
+          
+            C 
+           
+          
+            E 
+           
+          
+         
+        
+          ( 
+         
+        
+          ψ 
+         
+        
+          ( 
+         
+         
+         
+           Z 
+          
+         
+           s 
+          
+         
+        
+          ) 
+         
+        
+          , 
+         
+         
+         
+           y 
+          
+         
+           t 
+          
+         
+        
+          ) 
+         
+        
+       
+         L_{global}^{hardDistill}=\frac{1}{2}L_{CE}(\psi(Z_s),y)+\frac{1}{2} L_{CE} (\psi(Z_s),y_t) 
+        
+       
+     </span><span class="katex-html"><span class="base"><span class="strut" style="height: 1.2822em; vertical-align: -0.3831em;"></span><span class="mord"><span class="mord mathnormal">L</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8991em;"><span class="" style="top: -2.453em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0359em;">g</span><span class="mord mathnormal mtight" style="margin-right: 0.0197em;">l</span><span class="mord mathnormal mtight">o</span><span class="mord mathnormal mtight">ba</span><span class="mord mathnormal mtight" style="margin-right: 0.0197em;">l</span></span></span></span><span class="" style="top: -3.113em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">ha</span><span class="mord mathnormal mtight" style="margin-right: 0.0278em;">r</span><span class="mord mathnormal mtight">d</span><span class="mord mathnormal mtight" style="margin-right: 0.0278em;">D</span><span class="mord mathnormal mtight">i</span><span class="mord mathnormal mtight">s</span><span class="mord mathnormal mtight">t</span><span class="mord mathnormal mtight">i</span><span class="mord mathnormal mtight" style="margin-right: 0.0197em;">ll</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.3831em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 2.0074em; vertical-align: -0.686em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.3214em;"><span class="" style="top: -2.314em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mord">2</span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.677em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mord">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.686em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mord"><span class="mord mathnormal">L</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3283em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0576em;">CE</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right: 0.0359em;">ψ</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0715em;">Z</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.1514em;"><span class="" style="top: -2.55em; margin-left: -0.0715em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">s</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">y</span><span class="mclose">)</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">+</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 2.0074em; vertical-align: -0.686em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 1.3214em;"><span class="" style="top: -2.314em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mord">2</span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.677em;"><span class="pstrut" style="height: 3em;"></span><span class="mord"><span class="mord">1</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.686em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mord"><span class="mord mathnormal">L</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3283em;"><span class="" style="top: -2.55em; margin-left: 0em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0576em;">CE</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mopen">(</span><span class="mord mathnormal" style="margin-right: 0.0359em;">ψ</span><span class="mopen">(</span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0715em;">Z</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.1514em;"><span class="" style="top: -2.55em; margin-left: -0.0715em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">s</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span><span class="mpunct">,</span><span class="mspace" style="margin-right: 0.1667em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0359em;">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.2806em;"><span class="" style="top: -2.55em; margin-left: -0.0359em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">t</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mclose">)</span></span></span></span></span></span><br> 对于给定的图像，与教师相关联的硬标签可能会根据特定的数据增强而改变。我们将看到这个选择比传统的选择更好，同时没有参数，概念上更简单:教师预测<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+        
+        
+          y 
+         
+        
+          t 
+         
+        
+       
+      
+        y_t 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.1944em;"></span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0359em;">y</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.2806em;"><span class="" style="top: -2.55em; margin-left: -0.0359em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mathnormal mtight">t</span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span></span></span></span></span>与真正的标签<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         y 
+        
+       
+      
+        y 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.625em; vertical-align: -0.1944em;"></span><span class="mord mathnormal" style="margin-right: 0.0359em;">y</span></span></span></span></span>发挥相同的作用。</p> 
+<p>还要注意，硬标签也可以通过标签平滑转换为软标签，其中真标签被认为具有<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         1 
+        
+       
+         − 
+        
+       
+         ε 
+        
+       
+      
+        1 - ε 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7278em; vertical-align: -0.0833em;"></span><span class="mord">1</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.4306em;"></span><span class="mord mathnormal">ε</span></span></span></span></span>的概率，其余的<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         ε 
+        
+       
+      
+        ε 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em;"></span><span class="mord mathnormal">ε</span></span></span></span></span>在其余类之间共享。在所有使用真标签的实验中，我们将这个参数固定为<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         ε 
+        
+       
+         = 
+        
+       
+         0.1 
+        
+       
+      
+        ε = 0.1 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em;"></span><span class="mord mathnormal">ε</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">0.1</span></span></span></span></span>。</p> 
+<p><strong>Distillation token</strong>。现在我们关注我们的提议，如图2所示。我们向初始嵌入(patch和class token)添加一个新的标记，即Distillation token。我们的Distillation token与class token的使用类似:它通过自关注与其他嵌入进行交互，并在最后一层之后由网络输出。它的目标函数是由蒸馏组分的损失给出的。蒸馏嵌入允许我们的模型从老师的输出中学习，就像常规的蒸馏一样，同时保持对类嵌入的补充。</p> 
+<p><img src="https://images2.imgbox.com/ea/a8/g0oQX0Fb_o.png" alt=" "></p> 
+<p>有趣的是，我们观察到所学的class和Distillation token收敛于不同的向量:这些标记之间的平均余弦相似度等于0.06。当在每一层计算类和蒸馏嵌入时，它们在网络中逐渐变得更加相似，一直到最后一层，它们的相似性很高(cos=0.93)，但仍然低于1。这是意料之中的，因为<u>它们的目标是产生相似但不相同的目标</u>。</p> 
+<p>我们验证了我们的Distillation token为模型添加了一些东西，而不是简单地添加一个与同一个目标标签相关的附加class token：我们使用了一个带有两个class token的transformer，而不是教师伪标签。即使我们随机独立地初始化它们，在训练过程中，它们也会收敛到相同的向量(cos=0.999)，并且输出嵌入也是准相同的。这个额外的class token对分类性能没有任何影响。相比之下，我们的蒸馏策略比vanilla distillation基准提供了显著的改进，正如我们在5.2节中的实验所验证的那样。</p> 
+<p><strong>蒸馏微调</strong>。我们在更高分辨率的微调阶段同时使用真实标签和教师模型的预测。我们使用具有相同目标分辨率的teacher，通常是通过Touvron等人的方法从低分辨率的teacher中获得的。我们也只用真标签进行了测试，但这降低了教师的利益，导致了较低的表现。</p> 
+<p><strong>用我们的方法分类:联合分类器</strong>。在测试时，由transformer产生的类或蒸馏嵌入都与线性分类器相关联，并且能够推断图像标签。而我们的参考方法是这两个独立头部的后期融合，为此我们添加两个分类器的softmax输出来进行预测。我们将在第5节中评估这三个选项。</p> 
+<h3><a id="5_108"></a>5、实验</h3> 
+<p>本节介绍了一些分析实验和结果。我们首先讨论蒸馏策略。然后比较分析了卷积网络和vision transformer的效率和精度。</p> 
+<h4><a id="51_transformer_112"></a>5.1 transformer模型</h4> 
+<p>如前所述，我们的架构设计与Dosovitskiy等人[15]提出的架构设计相同，没有卷积。我们唯一的区别是训练策略和蒸馏token。此外，我们不使用MLP头进行预训练，而仅使用线性分类器。为了避免任何混淆，我们参考了ViT在先前工作中获得的结果，并用DeiT为我们的结果加上前缀。如果没有指定，DeiT指的是我们的参考模型DeiT-B，它与ViT-B具有相同的架构。当我们以更大的分辨率微调DeiT时，我们会在末尾附加最终的操作分辨率，例如DeiT-B↑384。最后，当使用我们的蒸馏处理时，我们用alembic符号将其标识为<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         D 
+        
+       
+         e 
+        
+       
+         i 
+        
+       
+         T 
+        
+       
+         ⚗ 
+        
+       
+      
+        DeiT⚗ 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal">De</span><span class="mord mathnormal">i</span><span class="mord mathnormal" style="margin-right: 0.1389em;">T</span><span class="mord">⚗</span></span></span></span></span>.</p> 
+<p>ViT-B（因此DeiT-B）的参数固定为<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         D 
+        
+       
+         = 
+        
+       
+         768 
+        
+       
+      
+        D=768 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.0278em;">D</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">768</span></span></span></span></span>、<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         h 
+        
+       
+         = 
+        
+       
+         12 
+        
+       
+      
+        h=12 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">h</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">12</span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         d 
+        
+       
+         = 
+        
+       
+         D 
+        
+       
+         / 
+        
+       
+         h 
+        
+       
+         = 
+        
+       
+         64 
+        
+       
+      
+        d=D/h=64 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">d</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1em; vertical-align: -0.25em;"></span><span class="mord mathnormal" style="margin-right: 0.0278em;">D</span><span class="mord">/</span><span class="mord mathnormal">h</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">64</span></span></span></span></span>。我们引入了两个较小的模型，即DeiT-S和DeiT-Ti，我们改变了head的数量，保持<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         d 
+        
+       
+      
+        d 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">d</span></span></span></span></span>不变。表1总结了我们在论文中考虑的模型。</p> 
+<p><img src="https://images2.imgbox.com/e8/a6/6ivsCc5V_o.png" alt=" "></p> 
+<h4><a id="52__121"></a>5.2 蒸馏</h4> 
+<p>我们的蒸馏方法产生了一种vision transformer，在精度和吞吐量之间的权衡方面，该vision transformer与最佳的卷积模型不相上下，见表5。有趣的是，在精度和吞吐量之间的权衡方面，蒸馏模型优于其教师模型。我们在ImageNet-1k上的最佳模型为85.2%，top-1精度优于在JFT-300M上以分辨率384（84.15%）预训练的最佳Vit-B模型。作为参考，通过在JFT-300M上以分辨率512训练的ViT-H模型（600M参数）获得了88.55%的当前技术状态。在下文中，我们提供了一些分析和观察。</p> 
+<p><strong>卷积教师模型</strong>。我们观察到，使用卷积教师模型比使用transformer模型的表现更好。表2比较了不同教师架构的蒸馏结果。正如Abnar等人[1]所解释的，卷积网络是一个更好的老师，这可能是由于transformer通过蒸馏继承的inductive bias。在我们的所有后续蒸馏实验中，默认教师是RegNetY-16GF[40]（84M参数），我们使用与DeiT相同的数据和相同的数据扩充进行训练。这个教师模型在ImageNet上的top-1准确率达到了82.9%。</p> 
+<p><img src="https://images2.imgbox.com/5b/0d/c25MLJI8_o.png" alt=" "></p> 
+<p><strong>对比其他的蒸馏方式</strong>。我们在表3中比较了不同蒸馏策略的性能。即使仅使用class token，硬(hard)蒸馏也显著优于transformer的软(soft)蒸馏：硬(hard)蒸馏在分辨率224×224时达到83.0%，而软(soft)蒸馏精度为81.8%。第4节中的蒸馏策略进一步提高了性能，表明两个标记提供了对分类有用的补充信息：两个标记上的分类器明显优于独立类(independence class)和蒸馏分类器(distillation classifies)，它们本身已经优于蒸馏基线。</p> 
+<p><img src="https://images2.imgbox.com/a4/04/DrJBkLis_o.png" alt=" "></p> 
+<p>蒸馏token给出的结果略好于class token。它也与卷积模型预测更相关。这种性能上的差异可能是因为它更多地受益于卷积模型的inductive bias。我们将在下一段中给出更多细节和分析。蒸馏token对于初始训练具有不可否认的优势。</p> 
+<p><strong>是否同意教师模型和归纳偏见</strong>，如上所述，教师模型的架构具有重要影响。它是否继承了有助于训练的现有inductive bias？虽然我们认为很难正式回答这个问题，但我们在表4中分析了卷积模型老师、我们的图像transformer DeiT（仅从标签学习）和我们的transformer <span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         D 
+        
+       
+         e 
+        
+       
+         i 
+        
+       
+         T 
+        
+       
+         ⚗ 
+        
+       
+      
+        DeiT⚗ 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal">De</span><span class="mord mathnormal">i</span><span class="mord mathnormal" style="margin-right: 0.1389em;">T</span><span class="mord">⚗</span></span></span></span></span>之间的决策一致性。</p> 
+<p><img src="https://images2.imgbox.com/94/d6/WOm6FZ9r_o.png" alt=" "></p> 
+<p>与从头学习的transformer相比，我们的蒸馏模型与卷积网络的相关性更大。正如预期的那样，与蒸馏嵌入相关的分类器比与类嵌入相关的更接近于convnet，相反，与类嵌入关联的分类器更类似于未经蒸馏学习的DeiT。不出所料，联合class+distil分类器提供了一个中间点。</p> 
+<p><strong>训练的轮次</strong>。增加训练时间的数量显著提高了蒸馏的性能，见图3。凭借300个epoch，我们的蒸馏网络<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         D 
+        
+       
+         e 
+        
+       
+         i 
+        
+       
+         T 
+        
+       
+         − 
+        
+       
+         B 
+        
+       
+         ⚗ 
+        
+       
+      
+        DeiT-B⚗ 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7667em; vertical-align: -0.0833em;"></span><span class="mord mathnormal">De</span><span class="mord mathnormal">i</span><span class="mord mathnormal" style="margin-right: 0.1389em;">T</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.0502em;">B</span><span class="mord">⚗</span></span></span></span></span> 已经比DeiT-B好了。但是，对于后者来说，随着时间的延长，表现会饱和，我们的蒸馏网络显然受益于更长的训练时间。</p> 
+<p><img src="https://images2.imgbox.com/08/9e/VeB6pNgi_o.png" alt=" "></p> 
+<h4><a id="53__149"></a>5.3 效率与准确性：与卷积模型的比较研究</h4> 
+<p>在文献中，通常将图像分类方法作为精度与另一标准（如FLOP、参数数量、网络大小等）之间的折衷进行比较。</p> 
+<p>我们在图1中关注吞吐量（每秒处理的图像）和ImageNet上排名前1的分类精度之间的权衡。我们专注于目前最先进的EfficientNet卷积网络，它得益于多年来对卷积网络的研究，并通过ImageNet验证集上的架构搜索进行了优化。</p> 
+<p>我们的方法DeiT略低于EfficientNet，这表明我们在仅使用ImageNet进行训练时几乎缩小了vision transformer和卷积网络之间的差距。与仅在ImageNet1k上训练的先前ViT模型相比，这些结果是一项重大改进（在可比设置中top-1的提高6.3%）。此外，当DeiT从相对较弱的RegNetY蒸馏而产生<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         D 
+        
+       
+         e 
+        
+       
+         i 
+        
+       
+         T 
+        
+       
+         ⚗ 
+        
+       
+      
+        DeiT⚗ 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal">De</span><span class="mord mathnormal">i</span><span class="mord mathnormal" style="margin-right: 0.1389em;">T</span><span class="mord">⚗</span></span></span></span></span>, 它优于EfficientNet。在分辨率384（85.2%对84.15%）下，它也比在JFT300M上预训练的ViT-B模型超过了1%（top-1精度），同时训练速度明显更快。</p> 
+<p>表5报告了ImageNet V2和ImageNet Real的更详细的数值结果和附加评估，这些测试集与ImageNet验证不同，这减少了验证集上的过度拟合。我们的结果表明，<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         D 
+        
+       
+         e 
+        
+       
+         i 
+        
+       
+         T 
+        
+       
+         − 
+        
+       
+         B 
+        
+       
+         ⚗ 
+        
+       
+      
+        DeiT-B⚗ 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7667em; vertical-align: -0.0833em;"></span><span class="mord mathnormal">De</span><span class="mord mathnormal">i</span><span class="mord mathnormal" style="margin-right: 0.1389em;">T</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6833em;"></span><span class="mord mathnormal" style="margin-right: 0.0502em;">B</span><span class="mord">⚗</span></span></span></span></span> 和<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         D 
+        
+       
+         e 
+        
+       
+         i 
+        
+       
+         T 
+        
+       
+         − 
+        
+       
+         B 
+        
+       
+         ⚗ 
+        
+       
+         ↑ 
+        
+       
+         384 
+        
+       
+      
+        DeiT-B⚗ ↑384 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.7667em; vertical-align: -0.0833em;"></span><span class="mord mathnormal">De</span><span class="mord mathnormal">i</span><span class="mord mathnormal" style="margin-right: 0.1389em;">T</span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">−</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.8889em; vertical-align: -0.1944em;"></span><span class="mord mathnormal" style="margin-right: 0.0502em;">B</span><span class="mord">⚗</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">↑</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">384</span></span></span></span></span>在GPU上的准确度和推理时间之间的权衡上，在一定程度上超过现有SOTA。</p> 
+<p><img src="https://images2.imgbox.com/f6/2c/tYItZwLY_o.png" alt=" "></p> 
+<h4><a id="54__162"></a>5.4 迁移学习：下游任务的效果</h4> 
+<p>尽管DeiT在ImageNet上表现很好，但重要的是在其他数据集上使用迁移学习对其进行评估，以衡量DeiT的泛化能力。我们通过对表6中的数据集进行微调，对迁移学习任务进行了评估。表7将DeiT转移学习结果与ViT和现有SOTA的卷积架构的结果进行了比较。DeiT与卷积模型效果的不相上下，这与我们之前对ImageNet的结论一致。</p> 
+<p><img src="https://images2.imgbox.com/6d/d8/JSjEMTqV_o.png" alt=" "></p> 
+<p><img src="https://images2.imgbox.com/3a/0d/JEzEjQeZ_o.png" alt=" "></p> 
+<p><strong>对比与从头开始的训练</strong>。我们研究了在没有ImageNet预训练的情况下，在小数据集上从头开始训练时的性能。我们在小型CIFAR-10上得到了以下结果，相对于图像和标签的数量而言，它都很小：</p> 
+<p><img src="https://images2.imgbox.com/6d/60/9SlWmycr_o.png" alt=" "></p> 
+<p>对于这个实验，我们试图尽可能接近Imagenet的预训练匹配，这意味着（1）我们考虑更长的训练计划（最多7200个epoch，对应于300个ImageNet时间段），使得网络总共被馈送了相当数量的图像；（2） 我们将图像重新缩放到224×224，以确保具有相同的增强。结果不如ImageNet预训练（98.5%对99.1%），这是预期的，因为网络的多样性要低得多。然而，他们表明，仅在CIFAR-10上学习合理的transformer是可能的。</p> 
+<h3><a id="6_179"></a>6、训练设置和消融实验</h3> 
+<p>在本节中，我们讨论了以数据高效的方式学习vision transformer的DeiT训练策略。我们建立在PyTorch和timm库的基础上。我们提供了超参数以及消融实验，其中我们分析了每种选择的影响。</p> 
+<p><strong>初始化和超参数</strong>。transformer对初始化相对敏感。在初步实验中测试了几个选项后，其中一些没有收敛，我们遵循Hanin和Rolnick[20]的建议，用截尾正态分布(truncated normal distribution)初始化权重。</p> 
+<p>表9显示了我们在所有实验的训练时间默认使用的超参数，除非另有说明。对于蒸馏，我们遵循Cho等人[9]的建议来选择参数<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         τ 
+        
+       
+      
+        τ 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em;"></span><span class="mord mathnormal" style="margin-right: 0.1132em;">τ</span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         λ 
+        
+       
+      
+        λ 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">λ</span></span></span></span></span>。我们采用通常（软）蒸馏的典型值<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         τ 
+        
+       
+         = 
+        
+       
+         3.0 
+        
+       
+      
+        τ=3.0 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.4306em;"></span><span class="mord mathnormal" style="margin-right: 0.1132em;">τ</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">3.0</span></span></span></span></span>和<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         λ 
+        
+       
+         = 
+        
+       
+         0.1 
+        
+       
+      
+        λ=0.1 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">λ</span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 0.6444em;"></span><span class="mord">0.1</span></span></span></span></span>。</p> 
+<p><img src="https://images2.imgbox.com/77/db/BUxR825N_o.png" alt=" "></p> 
+<p><img src="https://images2.imgbox.com/a6/81/BFch4cjY_o.png" alt=" "></p> 
+<p><strong>数据增强</strong>。与集成更多先验（如卷积）的模型相比，transformer需要更大量的数据。因此，为了使用相同大小的数据集进行训练，我们需要大量的数据扩充。我们评估了不同类型的强大数据增强，目的是达到数据高效的训练机制。自动增强(Auto-Augment)[11]、随机增强(Rand-Augment)[12]和随机擦除(random erasing)[62]改善了结果。对于后者，我们使用timm定制，消融后，我们选择随机增强而不是自动增强。总体而言，我们的实验证实了transformer需要强大的数据扩充：我们评估的几乎所有数据扩充方法都证明是有用的。一个例外是droupt，我们将其排除在训练程序之外。</p> 
+<p><strong>正则化和优化器</strong>。我们考虑了不同的优化器，并交叉验证了不同的学习率和权重衰减。transformer对优化超参数的设置很敏感。因此，在交叉验证期间，我们尝试了3种不同的学习率（5.10−4、3.10−4、5.10−5）和3种权重衰减（0.03、0.04、0.05）。我们根据批次大小使用公式：<span class="katex--inline"><span class="katex"><span class="katex-mathml"> 
+     
+      
+       
+       
+         l 
+        
+        
+        
+          r 
+         
+         
+         
+           s 
+          
+         
+           c 
+          
+         
+           a 
+          
+         
+           l 
+          
+         
+           e 
+          
+         
+           d 
+          
+         
+        
+       
+         = 
+        
+        
+         
+         
+           l 
+          
+         
+           r 
+          
+         
+        
+          512 
+         
+        
+       
+         × 
+        
+       
+         b 
+        
+       
+         a 
+        
+       
+         t 
+        
+       
+         c 
+        
+       
+         h 
+        
+       
+         s 
+        
+       
+         i 
+        
+       
+         z 
+        
+       
+         e 
+        
+       
+      
+        lr_{scaled}=\frac{lr}{512}×batchsize 
+       
+      
+    </span><span class="katex-html"><span class="base"><span class="strut" style="height: 0.8444em; vertical-align: -0.15em;"></span><span class="mord mathnormal" style="margin-right: 0.0197em;">l</span><span class="mord"><span class="mord mathnormal" style="margin-right: 0.0278em;">r</span><span class="msupsub"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.3361em;"><span class="" style="top: -2.55em; margin-left: -0.0278em; margin-right: 0.05em;"><span class="pstrut" style="height: 2.7em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight">sc</span><span class="mord mathnormal mtight">a</span><span class="mord mathnormal mtight" style="margin-right: 0.0197em;">l</span><span class="mord mathnormal mtight">e</span><span class="mord mathnormal mtight">d</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.15em;"><span class=""></span></span></span></span></span></span><span class="mspace" style="margin-right: 0.2778em;"></span><span class="mrel">=</span><span class="mspace" style="margin-right: 0.2778em;"></span></span><span class="base"><span class="strut" style="height: 1.2251em; vertical-align: -0.345em;"></span><span class="mord"><span class="mopen nulldelimiter"></span><span class="mfrac"><span class="vlist-t vlist-t2"><span class="vlist-r"><span class="vlist" style="height: 0.8801em;"><span class="" style="top: -2.655em;"><span class="pstrut" style="height: 3em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mtight">512</span></span></span></span><span class="" style="top: -3.23em;"><span class="pstrut" style="height: 3em;"></span><span class="frac-line" style="border-bottom-width: 0.04em;"></span></span><span class="" style="top: -3.394em;"><span class="pstrut" style="height: 3em;"></span><span class="sizing reset-size6 size3 mtight"><span class="mord mtight"><span class="mord mathnormal mtight" style="margin-right: 0.0197em;">l</span><span class="mord mathnormal mtight" style="margin-right: 0.0278em;">r</span></span></span></span></span><span class="vlist-s">​</span></span><span class="vlist-r"><span class="vlist" style="height: 0.345em;"><span class=""></span></span></span></span></span><span class="mclose nulldelimiter"></span></span><span class="mspace" style="margin-right: 0.2222em;"></span><span class="mbin">×</span><span class="mspace" style="margin-right: 0.2222em;"></span></span><span class="base"><span class="strut" style="height: 0.6944em;"></span><span class="mord mathnormal">ba</span><span class="mord mathnormal">t</span><span class="mord mathnormal">c</span><span class="mord mathnormal">h</span><span class="mord mathnormal">s</span><span class="mord mathnormal">i</span><span class="mord mathnormal">ze</span></span></span></span></span>来缩放学习率，与Goyal等人[19]类似，只是我们使用512而不是256作为基值。</p> 
+<p>最好的结果是使用AdamW优化器，其学习率与ViT相同，但权重衰减要小得多，因为论文中报告的权重衰减会影响我们设置中的收敛性。</p> 
+<p>我们采用了随机深度(stochastic depth)[29]，这有助于transformer的收敛，特别是深度transformer[16,17]。对于vision transformer，Wightman首先在训练程序中采用了它们[55]。Mixup[60]和Cutmix[59]等正则化改进了性能。我们还使用了重复增强[4,25]，这显著提高了性能，是我们提出的训练程序的关键组成部分之一。</p> 
+<p><strong>指数移动平均（EMA）</strong>。我们评估了训练后获得的网络的EMA。有一些小的增益，在微调后会消失：EMA模型的边缘为0.1个精度点，但经过微调后，两个模型达到了相同的(改进的)性能。</p> 
+<p><strong>在不同分辨率下进行微调</strong>。我们采用了Touvron等人[51]的微调程序：我们的计划(schedule)、正则化(regularization)和优化程序(optimization procedure)与FixEfficientNet的相同，但我们保持训练时间数据增强(与Touvron et al[51]的阻尼数据增强相反)。我们还插值位置嵌入:原则上，任何经典的图像缩放技术，如双线性插值，都可以使用。然而，与相邻向量相比，一个向量的双线性插值减少了它的L2范数。这些低范数向量不适应预训练的transformer，如果我们直接使用而不进行任何形式的微调，我们会观察到精度的显著下降。因此，我们采用双三次插值，在使用AdamW或SGD微调网络之前，近似地保留向量的范数。这些优化器在微调阶段具有类似的性能，请参见表8。</p> 
+<p>默认情况下，类似于ViT，我们在分辨率224上训练DeiT模型，并在分辨率384上进行微调。我们将在第3节详细介绍如何进行插值。但是，为了测量分辨率的影响，我们在不同的分辨率下对DeiT进行了微调。我们在表10中报告了这些结果。</p> 
+<p><img src="https://images2.imgbox.com/e0/9b/xgI2TUbA_o.png" alt=" "></p> 
+<p><strong>训练时间</strong>。对于DeiT-B，典型的300个epoch的训练在2个节点上需要37小时，在单个节点上需要53小时。作为比较点，使用RegNetY-16GF [40] (84M参数)进行类似的训练要慢20%。DeiT-S和DeiT-Ti在4个GPU上的训练时间不超过3天。然后，我们可以选择以更大的分辨率微调模型。在单个节点(8个GPU)上需要20个小时才能生成分辨率为384×384的FixDeiT-B模型，对应25个epoch。不需要依赖批量范数可以在不影响性能的情况下减少批量大小，这使得训练更大的模型更容易。请注意，由于我们使用重复3次的重复增强[4,25]，因此在单个epoch中我们只能看到三分之一的图像。</p> 
+<h3><a id="7_212"></a>7、总结</h3> 
+<p>在本文中，我们介绍了DeiT，这是一种图像transformer模型，不需要非常大量的数据来训练，这要归功于改进的训练，特别是一种新的蒸馏方法。在近十年的时间里，卷积神经网络在架构和优化方面都进行了优化，包括通过广泛的架构搜索，这很容易出现过拟合，例如EfficientNets[51]。对于DeiT，我们已经开始了现有的数据增强和正则化策略，除了我们新的蒸馏token之外，没有引入任何重要的架构。因此，更适合或更适合transformer的数据增强研究很可能会带来进一步的收获。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/c45a69be76df71ce95237b219f6ab0fc/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">STM32 HAL库 STM32CubeMx -- 串口的使用（USART/UART）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/6e4d9504ba887f224bb73ebf21535251/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">基于OpenCV 的车牌识别</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

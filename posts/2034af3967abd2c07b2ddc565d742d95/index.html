@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>TCP滑动窗口、流量控制及拥塞控制详解 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="TCP滑动窗口、流量控制及拥塞控制详解" />
+<meta property="og:description" content="一、TCP滑动窗口 TCP虽然是面向字节流的，但是TCP传输的单元确实报文段。一个TCP报文段分为首部和数据部分。TCP首部前20个字节是固定的，后面有4N个字节是可选的。因此，TCP首部最小字节数是20个字节。
+下面我们看下一TCP首部中几个重要的字段：
+源端口 和 目的端口 各占两个字节序号，占4个字节。序号范围是[0,2^32-1]，可以对4GB数据进行编号，到达最大值后，序号会重新从0开始。该序号指的是本报文段所发送数据的第一个字节的序号。确认号，占4个字节。期望收到对方数据报的第一个数据字节的序号。举例：假设B收到了A的一个报文，其序列号字段是301，数据长度是200字节，这表示B正确的收到了A发送的500序号为止的所有数据。因此，B期望收到的下一个数据的序号是501，于是B把在回复A的确认报文中的确认字段设置为501。确认ACK。当ACK字段为1时，确认号字段才有效。TCP规定，在连接建立后，传输的所有报文段的ACK都必须置1。同步SYN。在连接建立时用来同步序列，也就是三次握手的时候会用到。SYN=1，ACK=0，表示这是一个连接请求报文。若对方同一连接，则回复SYN=1,ACK=1。终止FIN。当FIN=1时，表示发送方数据已发送完毕，要求释放连接（四次挥手）。窗口，表示自己的接收窗口的大小。占两个字节，最大[0,2^32-1]，也就是64K。选项。长度可变，最大40个字节。当没有使用选项是TCP，首部20占个字节。 1.1 什么是MSS？为什么要有MSS？ 最大报文长度MSS（Maxium Segment Size），是每一个TCP报文段中数据字段的最大长度。而一个完整的 TCP报文段 = 数据字段 &#43; 首部长度。
+为什么要有MSS？因为TCP数据至少要添加20个字节的TCP首部和20个字节的IP首部，才能发送。所以，当发送的数据量少，如一个字节。那么网络的利用率就极低。如果数据太大，会在IP层进行分片。到接收端后还要重组。如果不幸，有数据丢失或者出错，还需要重新发送，导致开销增大。
+1.2 随着因特网的发展，又陆续增加了几个选项 窗口扩大选项：互联网早期，窗口大小两个字节，最大64K够用。为了满足发展需要，新增窗口扩大选项，占3个字节。其中有一个字节表示表示移位值S。新的窗口大小位数从16位增加到（16&#43;S），S最大14，故窗口最大值增加到[0,2^30-1].
+时间戳选项：占10个字节。其中主要时间戳字段和时间戳回送回答字段各占4字节。作用：（1）计算RTT；（2）用于处理序号超过2^32的情况。
+选择确认选项：适用于，收到的报文段无差错，只是未按序号，中间还缺少某些序号的数据。选择确认就可以只让发送方发送这些缺少的数据，后面还会详细介绍。
+二、TCP滑动窗口 Tcp的滑动窗口是以字节为单位的。
+2.1 滑动窗口收发数据流程举例 现在假设发送方A收到了接收方B的确认报文，其中确认字段是31（表示31之前的数据都已收到，需要A从31开始发数据），窗口大小是20。A会根据这两个数据构造出自己的发送窗口，如下：
+发送窗口：在没有收到B的确认情况下，A可以连续把窗口内的数据都发出去。发送窗口内的序号都是允许发送的序号。
+现假设A又发送了31~41的数据，如下图：
+B此时的接受窗口如下：
+此时，B虽然收到了32、33的分组，但是没有按序接收，所以B给出的确认只能还是31。
+再假设，B按序接收到了31、32、33。B把接收窗口往后往前移动3个序号，同时给A发出确认报文，窗口值仍为20，但是确认号为34。A在收到确认报文后，将自己的发送窗口也往前移动3个序号，注意，B还收到了37 38 40三个分组的数据，但是没有按照顺序，所以先暂存在自己的接收窗口。 如下：
+2.2 选择确认SACK原理 假设接收方收到若干不连续的报文段。序号1~ 1000收到了，但1000 ~ 1500没收到。序号1501~ 3000收到了，但30001~ 3500没收到。序号3501~4500又收到了。如果这些序号都在接受窗口内，接受方先收下这些数据，并把这些消息告诉发送方，让发送方不在发送重复数据。
+我们可以看到，每个字节块都有左右两个边界，我们只需要告诉发送方这些边界信息，让其从指定序号开始传就达到我们的预期了。
+但是，TCP首部没有哪个字段是来描述这些信息的。选择确认选项就派上用场了。如果要使用选择确认，就需要在TCP首部加上允许SACK选项。由于首部选项的长度只有40个字节，每个边界需要4个字节，所以，最多只能传递8个边界。为什么不是5个字节块（10个边界信息）呢？因为这40个字节，还要分出来两个字节，一个用来开启SACK；一个字节用来指出SACK选项占几个字节。
+三、TCP流量控制 所谓流量控制就是控制发送方的发送速率，不要太快，让接收方来得及接收处理。利用滑动窗口就可以很方便的在TCP连接上实现对发送方的流量控制。
+接收方每次收到数据后，在发送确认的报文的时候，同时告诉发送方自己的接收窗口的大小；发送方收到确认报文之后，就会调整自己的发送速率，也就是自己的发送窗口大小。当发送方收到win=0时，就会停止发送数据，同时开启一个定时器，每隔一段时间发送探测报文询问接收方是否有空间接受数据，如果收到win&gt;0就发送数据；如果win=0，您先忙，我待会再来问问… 四、拥塞控制 拥塞控制就是防止过多的数据注入网络，导致网络过载。注意与流量控制的区别，流量控制一般是点对点的控制。而拥塞控制是一个全局性的过程，涉及所有的主机和路由器等待。
+拥塞控制方法：
+4.1 慢开始、拥塞避免 发送方维持一个拥塞窗口cwnd（congestion window）的状态变量。取决于网络拥塞程度，动态变化。发送发控制cwnd的原则：只要网络没出现拥塞就增大cwnd，出现了就减小。
+4.1.1 发送方如何判断网络拥塞 当网络出现拥塞时，路由器就要丢弃分组。因此，如果发送方没有按时收到应该到达的确认报文，就认为网络出现拥塞。
+4.1.2 算法原理 为方便描述，我们用报文个数作为窗口大小的单位，实际上单位是字节。慢开始的思路就是，刚开始将cwnd设置为一个MSS的数值，每经过一个传输轮次cwnd就加倍。
+传输轮次：拥塞窗口所允许的发送的报文都连续发出去，且收到了对已发送的最后一个字节的确认。
+因为是加倍（指数）增长，为了防止增长过度引起网络阻塞，还设置一个慢开始门限ssthresh。当cwnd超过ssthresh时，就改为拥塞避免算法，也就是线性缓慢增长。
+无论是在慢开始还是拥塞避免阶段，只要发送方判断网络出现拥塞，就会把ssthresh设置为拥塞时发送窗口的一半，cwnd设置为1，重新执行慢开始算法。
+4.2 快重传和快恢复 快重传算法要求接收方每收到一个失序的报文段，就立即发出重复确认，目的是使发送方及早知道有报文段丢失。如果发送方连续手动三次重复的确认就立即重传对方未收到的报文。
+因为可以收到连续三个重复报文的确认，发送方不认为是网络出现了拥塞。使用快恢复算法。快恢复思路是：把cwnd设置为ssthresh的一半，然后开始拥塞避免算法。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/2034af3967abd2c07b2ddc565d742d95/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-09-04T14:14:22+08:00" />
+<meta property="article:modified_time" content="2022-09-04T14:14:22+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">TCP滑动窗口、流量控制及拥塞控制详解</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="TCP_1"></a>一、TCP滑动窗口</h3> 
+<p><img src="https://images2.imgbox.com/80/d0/W8BKWkee_o.png" alt="在这里插入图片描述">TCP虽然是面向字节流的，但是TCP传输的单元确实报文段。一个TCP报文段分为首部和数据部分。TCP首部前20个字节是固定的，后面有4N个字节是可选的。因此，TCP首部最小字节数是20个字节。</p> 
+<p>下面我们看下一TCP首部中几个重要的字段：</p> 
+<ol><li><strong>源端口</strong> 和 <strong>目的端口</strong> 各占两个字节</li><li><strong>序号</strong>，占4个字节。序号范围是[0,2^32-1]，可以对4GB数据进行编号，到达最大值后，序号会重新从0开始。该序号指的是本报文段所发送数据的第一个字节的序号。</li><li><strong>确认号</strong>，占4个字节。期望收到对方数据报的第一个数据字节的序号。举例：假设B收到了A的一个报文，其序列号字段是301，数据长度是200字节，这表示B正确的收到了A发送的500序号为止的所有数据。因此，B期望收到的下一个数据的序号是501，于是B把在回复A的确认报文中的确认字段设置为501。</li><li><strong>确认ACK</strong>。当ACK字段为1时，确认号字段才有效。TCP规定，在连接建立后，传输的所有报文段的ACK都必须置1。</li><li><strong>同步SYN</strong>。在连接建立时用来同步序列，也就是三次握手的时候会用到。SYN=1，ACK=0，表示这是一个连接请求报文。若对方同一连接，则回复SYN=1,ACK=1。</li><li><strong>终止FIN</strong>。当FIN=1时，表示发送方数据已发送完毕，要求释放连接（四次挥手）。</li><li><strong>窗口</strong>，表示自己的接收窗口的大小。占两个字节，最大[0,2^32-1]，也就是64K。</li><li><strong>选项</strong>。长度可变，最大40个字节。当没有使用选项是TCP，首部20占个字节。</li></ol> 
+<h5><a id="11_MSSMSS_15"></a>1.1 什么是MSS？为什么要有MSS？</h5> 
+<p><strong>最大报文长度MSS</strong>（Maxium Segment Size），是每一个TCP报文段中<strong>数据字段</strong>的最大长度。而一个完整的 <strong>TCP报文段 = 数据字段 + 首部长度</strong>。</p> 
+<p><strong>为什么要有MSS</strong>？因为TCP数据至少要添加20个字节的TCP首部和20个字节的IP首部，才能发送。所以，当发送的数据量少，如一个字节。那么网络的利用率就极低。如果数据太大，会在IP层进行分片。到接收端后还要重组。如果不幸，有数据丢失或者出错，还需要重新发送，导致开销增大。</p> 
+<h5><a id="12__20"></a>1.2 随着因特网的发展，又陆续增加了几个选项</h5> 
+<p><strong>窗口扩大选项</strong>：互联网早期，窗口大小两个字节，最大64K够用。为了满足发展需要，新增窗口扩大选项，占3个字节。其中有一个字节表示表示移位值S。新的窗口大小位数从16位增加到（16+S），S最大14，故窗口最大值增加到[0,2^30-1].</p> 
+<p><strong>时间戳选项</strong>：占10个字节。其中主要<strong>时间戳字段</strong>和<strong>时间戳回送回答</strong>字段各占4字节。作用：（1）计算RTT；（2）用于处理序号超过2^32的情况。</p> 
+<p><strong>选择确认选项</strong>：适用于，收到的报文段无差错，只是未按序号，中间还缺少某些序号的数据。选择确认就可以只让发送方发送这些缺少的数据，后面还会详细介绍。</p> 
+<h3><a id="TCP_27"></a>二、TCP滑动窗口</h3> 
+<p>Tcp的滑动窗口是以字节为单位的。</p> 
+<h5><a id="21__29"></a>2.1 滑动窗口收发数据流程举例</h5> 
+<p>现在假设发送方A收到了接收方B的确认报文，其中确认字段是31（表示31之前的数据都已收到，需要A从31开始发数据），窗口大小是20。A会根据这两个数据构造出自己的发送窗口，如下：<br> <img src="https://images2.imgbox.com/53/9d/HkaokI3U_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>发送窗口</strong>：在没有收到B的确认情况下，A可以连续把窗口内的数据都发出去。发送窗口内的序号都是允许发送的序号。</p> 
+<p>现假设A又发送了31~41的数据，如下图：<br> <img src="https://images2.imgbox.com/14/da/y8G8rX4Q_o.png" alt="在这里插入图片描述">B此时的接受窗口如下：<br> <img src="https://images2.imgbox.com/b7/4a/Q1cWt8M4_o.png" alt="在这里插入图片描述">此时，B虽然收到了32、33的分组，但是没有按序接收，所以B给出的确认只能还是31。</p> 
+<p>再假设，B按序接收到了31、32、33。B把接收窗口往后往前移动3个序号，同时给A发出确认报文，窗口值仍为20，但是确认号为34。A在收到确认报文后，将自己的发送窗口也往前移动3个序号，注意，B还收到了37 38 40三个分组的数据，但是没有按照顺序，所以先暂存在自己的接收窗口。 如下：<br> <img src="https://images2.imgbox.com/fa/db/83mYYotQ_o.png" alt="在这里插入图片描述"></p> 
+<h5><a id="22_SACK_41"></a>2.2 选择确认SACK原理</h5> 
+<p>假设接收方收到若干不连续的报文段。序号1~ 1000收到了，但1000 ~ 1500没收到。序号1501~ 3000收到了，但30001~ 3500没收到。序号3501~4500又收到了。如果这些序号都在接受窗口内，接受方先收下这些数据，并把这些消息告诉发送方，让发送方不在发送重复数据。<br> <img src="https://images2.imgbox.com/be/b2/1HLpsXt7_o.png" alt="在这里插入图片描述">我们可以看到，每个字节块都有左右两个边界，我们只需要告诉发送方这些边界信息，让其从指定序号开始传就达到我们的预期了。</p> 
+<p>但是，TCP首部没有哪个字段是来描述这些信息的。选择确认选项就派上用场了。如果要使用选择确认，就需要在TCP首部加上允许SACK选项。由于首部选项的长度只有40个字节，每个边界需要4个字节，所以，最多只能传递8个边界。为什么不是5个字节块（10个边界信息）呢？因为这40个字节，还要分出来两个字节，一个用来开启SACK；一个字节用来指出SACK选项占几个字节。</p> 
+<h3><a id="TCP_47"></a>三、TCP流量控制</h3> 
+<p>所谓流量控制就是控制发送方的发送速率，不要太快，让接收方来得及接收处理。利用滑动窗口就可以很方便的在TCP连接上实现对发送方的流量控制。<br> <img src="https://images2.imgbox.com/f5/0e/IA8cMBz2_o.png" alt="在这里插入图片描述"></p> 
+<ul><li>接收方每次收到数据后，在发送确认的报文的时候，同时告诉发送方自己的接收窗口的大小；</li><li>发送方收到确认报文之后，就会调整自己的发送速率，也就是自己的发送窗口大小。当发送方收到win=0时，就会停止发送数据，同时开启一个定时器，每隔一段时间发送探测报文询问接收方是否有空间接受数据，如果收到win&gt;0就发送数据；如果win=0，您先忙，我待会再来问问…</li></ul> 
+<h3><a id="_54"></a>四、拥塞控制</h3> 
+<p>拥塞控制就是防止过多的数据注入网络，导致网络过载。注意与流量控制的区别，流量控制一般是点对点的控制。而拥塞控制是一个全局性的过程，涉及所有的主机和路由器等待。</p> 
+<p>拥塞控制方法：</p> 
+<h5><a id="41__58"></a>4.1 慢开始、拥塞避免</h5> 
+<p>发送方维持一个拥塞窗口cwnd（congestion window）的状态变量。取决于网络拥塞程度，动态变化。发送发控制cwnd的原则：只要网络没出现拥塞就增大cwnd，出现了就减小。</p> 
+<h6><a id="411__60"></a>4.1.1 发送方如何判断网络拥塞</h6> 
+<p>当网络出现拥塞时，路由器就要丢弃分组。因此，如果发送方没有按时收到应该到达的确认报文，就认为网络出现拥塞。</p> 
+<h6><a id="412__62"></a>4.1.2 算法原理</h6> 
+<p>为方便描述，我们用报文个数作为窗口大小的单位，实际上单位是字节。<strong>慢开始</strong>的思路就是，刚开始将cwnd设置为一个MSS的数值，每经过一个<strong>传输轮次</strong>cwnd就加倍。</p> 
+<p><strong>传输轮次</strong>：拥塞窗口所允许的发送的报文都连续发出去，且收到了对已发送的最后一个字节的确认。</p> 
+<p>因为是加倍（指数）增长，为了防止增长过度引起网络阻塞，还设置一个慢开始门限ssthresh。当cwnd超过ssthresh时，就改为拥塞避免算法，也就是线性缓慢增长。</p> 
+<p>无论是在慢开始还是拥塞避免阶段，只要发送方判断网络出现拥塞，就会把ssthresh设置为拥塞时发送窗口的一半，cwnd设置为1，重新执行慢开始算法。<br> <img src="https://images2.imgbox.com/68/ab/x4peHe2K_o.png" alt="在这里插入图片描述"></p> 
+<h5><a id="42__71"></a>4.2 快重传和快恢复</h5> 
+<p>快重传算法要求接收方每收到一个失序的报文段，就立即发出重复确认，目的是使发送方及早知道有报文段丢失。如果发送方连续手动三次重复的确认就立即重传对方未收到的报文。</p> 
+<p><img src="https://images2.imgbox.com/0e/7b/JA3lwTbo_o.png" alt="在这里插入图片描述">因为可以收到连续三个重复报文的确认，发送方不认为是网络出现了拥塞。使用快恢复算法。<strong>快恢复思路是：把cwnd设置为ssthresh的一半，然后开始拥塞避免算法。</strong></p> 
+<p><img src="https://images2.imgbox.com/99/d0/4WfTGYix_o.png" alt="在这里插入图片描述">在采用快重传算法时，慢开始算法只在TCP建立连接和网络出现超时的时候使用。</p> 
+<p>上面的描述都是假定接收方总是有足够的空间接受数据。实际上接收方的空间也是有限的，接收方根据自己的接受能力设置接受窗口rwnd。因此：</p> 
+<p>发送方窗口 = MIN[rwnd, cwnd]</p> 
+<p>文章参考于<a href="https://course.0voice.com/v1/course/intro?courseId=5&amp;agentId=0" rel="nofollow">&lt;零声教育&gt;的C/C++linux服务期高级架构</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/1e808b5aab1cdb00bf60e753ce08a1df/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">分布式事务（三）———TCC 解决方案</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a3b40ecfc00b78e39877591eb3b0c25d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">linux awk命令的使用</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

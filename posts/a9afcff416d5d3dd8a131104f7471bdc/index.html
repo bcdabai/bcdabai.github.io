@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>关于SSD HMB与CMB - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="关于SSD HMB与CMB" />
+<meta property="og:description" content=" 关于Controller Memory Buffer（CMB） 每块SSD上，不管是SATA还是PCIE口的，都会有一定量的DRAM来做数据缓存。但是，这个数据缓存对Host端是不可见的，也就是说，Host端的代码是不可能直接使用访存指令访问到这块数据缓存的，这块内存空间并没有被映射到Host物理地址空间中。 我们知道，Host端的程序只能通过访问某个或者某些物理地址从而与SSD控制器通信。通常，Host端的驱动程序会将由上层协议栈准备好的IO指令及数据在Host主存中的基地址（也就是指针）采用Stor指令写入到SSD控制器的前端PCIE控制器模块所暴露的寄存器中，SSD控制器接收到该指针，便可以从Host主存中取回对应的指令及数据从而执行。SSD控制器的这些寄存器会被映射到Host物理地址空间中的某处，该动作由host端PCIE bus driver在枚举PCIE设备之后即执行。底层细节和过程冬瓜哥就不过多描述了。 可以看到，SSD控制器只向host端暴露了很少量的寄存器存储空间，并未将其内部的数百兆甚至上GB的DRAM空间映射到host物理地址空间。而且，驱动程序先把对应的指针通知给SSD控制器，然后SSD控制器需要主动从Host主存取指令和数据。有人可能会想，为何驱动程序不直接将指令及数据写入到SSD的DRAM中呢？原因是CPU如果把这事都自己干了，那就忙不过来了，会深陷到Load/Stor指令移动数据，其他活就没法干了。SSD控制器上有个DMA模块，在收到指针之后，DMA模块会主动读取host主存，此时host CPU可以做其他事情。 但是如果CPU将整条指令而不是指针直接写到SSD端的DRAM的话，并不耗费太多资源，此时能够节省一次PCIE往返及一次SSD控制器内部的中断处理。于是，人们就想将SSD控制器上的一小段DRAM空间映射到host物理地址空间从而可以让驱动直接写指令进去，甚至写一些数据进去也是可以的。这块被映射到host物理地址空间的DRAM空间便被称为CMB了。 CMB对NNMe Over Fabric场景下非常有用，因为节省了一趟往返，如果外部网络时延较大的话，每笔IO都节省了一次往返，每秒便能增加不少IOPS。 CMB还有另外一种应用场景，在5月19日的中国云计算大会上冬瓜哥有个分享，会向大家介绍，这里就不多说了。 关于Host Memory Buffer（HMB） 有些SSD产品为了节省成本，板载DRAM很小，或者根本没有。就像有些显卡没有板载显存一样。但是并不表示它们不需要DRAM。它们的DRAM可以与host端的主存共享，也就是分配一块主存用作其DRAM，这些外部设备控制器可以通过PCIE接口访问host端的DRAM。共享显存的模式下，系统bios会直接分割出一块连续的DRAM给显卡使用，此时，host端OS根本看不到这块空间，BIOS会配置系统IO桥上的地址路由表以及地址范围寄存器，从而实现不同访存请求的路由。 NVMe协议中也定义了这种场景，只不过，并非像共享显存那样直接从bios层面分配连续的空间，而是由NVMe驱动在OS所管理的物理地址空间内分配对应容量的RAM给SSD控制器使用，这段空间物理上可以不连续，NVMe驱动将对应的基地址&#43;长度的列表推送给SSD控制器，SSD控制器需要将对应的列表更新到内部的寄存器中用于访存查找。这样，SSD控制器就可以将比如FTL映射表存储到host端的这块RAM中，这也就意味着，每一笔IO请求发送到SSD之后，SSD控制器需要通过PCIE来访问host端的这块RAM从而提取出映射表中对应的条目来查找对应IO目标逻辑地址所被映射到的物理地址，也就意味着每一笔IO都需要产生更多的PCIE流量，时延就会大增。 当主机突然掉电之后，host端的这块RAM中数据就会丢失。重启之后，SSD需要从Flash Page中保存的元数据重构出这张大表，再次写入host端的ram。只不过，这个动作只有OS启动之后，NVMe驱动加载之后，才能执行，因为每次启动NVMe分配的这块RAM对应物理地址可能都不同。这会产生一个问题，如果用该SSD当做启动盘的话，重启之后bios阶段是无法给SSD分配host内存的，即便分配了，OS也不会认，除非改OS的内存管理部分。此时，SSD必须先使用其板载的小容量SRAM/DRAM，性能会比较差。OS启动后再后台继续重构FTL表。 HMB使用场景比较受限制，所以目前还没有出现使用HMB机制的SSD。 其他相关阅读（点击可直接进入）： 《 【冬瓜哥画PPT】浅谈闪存控制器架构 》 《 【冬瓜哥论文】浅析固态介质在存储系统中的应用方式 》 《 你绝对想不到的两种高逼格存储器 》 《 【冬瓜哥手绘】大话众核心处理器体系结构 》 《关于SSD元数据及掉电保护的误解 》 《 关于闪存FTL的Host Base和Device Based的误解 》 《帮你梳理一下各种存储协议及接口》 多少赏点吧 Reward people gave a reward " />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/a9afcff416d5d3dd8a131104f7471bdc/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2016-04-26T08:03:46+08:00" />
+<meta property="article:modified_time" content="2016-04-26T08:03:46+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">关于SSD HMB与CMB</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="js_article" class="rich_media"> 
+ <div class="rich_media_inner"> 
+  <div id="page-content"> 
+   <div id="img-content" class="rich_media_area_primary"> 
+    <div class="rich_media_content " id="js_content"> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); text-align: center; box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);"> <span style="max-width: 100%; color: rgb(0, 82, 255); box-sizing: border-box !important; word-wrap: break-word !important;"> <strong style="max-width: 100%; box-sizing: border-box !important; word-wrap: break-word !important;"> 关于Controller Memory Buffer（CMB） </strong> </span> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); text-align: left; box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);"> <span style="line-height: 25.6px;">         每块SSD上，不管是SATA还是PCIE口的，都会有一定量的DRAM来做数据缓存。但是，这个数据缓存对Host端是不可见的，也就是说，Host端的代码是不可能直接使用访存指令访问到这块数据缓存的，这块内存空间并没有被映射到Host物理地址空间中。 </span> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); text-align: left; box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);"> <span style="line-height: 25.6px;">         我们知道，Host端的程序只能通过访问某个或者某些物理地址从而与SSD控制器通信。通常，Host端的驱动程序会将由上层协议栈准备好的IO指令及数据在Host主存中的基地址（也就是指针）采用Stor指令写入到SSD控制器的前端PCIE控制器模块所暴露的寄存器中，SSD控制器接收到该指针，便可以从Host主存中取回对应的指令及数据从而执行。SSD控制器的这些寄存器会被映射到Host物理地址空间中的某处，该动作由host端PCIE bus driver在枚举PCIE设备之后即执行。底层细节和过程冬瓜哥就不过多描述了。 </span> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); text-align: left; box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);">         可以看到，SSD控制器只向host端暴露了很少量的寄存器存储空间，并未将其内部的数百兆甚至上GB的DRAM空间映射到host物理地址空间。而且，驱动程序先把对应的指针通知给SSD控制器，然后SSD控制器需要主动从Host主存取指令和数据。有人可能会想，为何驱动程序不直接将指令及数据写入到SSD的DRAM中呢？原因是CPU如果把这事都自己干了，那就忙不过来了，会深陷到Load/Stor指令移动数据，其他活就没法干了。SSD控制器上有个DMA模块，在收到指针之后，DMA模块会主动读取host主存，此时host CPU可以做其他事情。 <br> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); text-align: left; box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);">         但是如果CPU将整条指令而不是指针直接写到SSD端的DRAM的话，并不耗费太多资源，此时能够节省一次PCIE往返及一次SSD控制器内部的中断处理。于是，人们就想将SSD控制器上的一小段DRAM空间映射到host物理地址空间从而可以让驱动直接写指令进去，甚至写一些数据进去也是可以的。这块被映射到host物理地址空间的DRAM空间便被称为CMB了。 <br> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); text-align: left; box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);">         CMB对NNMe Over Fabric场景下非常有用，因为节省了一趟往返，如果外部网络时延较大的话，每笔IO都节省了一次往返，每秒便能增加不少IOPS。 <br> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); text-align: left; box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);">         CMB还有另外一种应用场景，在5月19日的中国云计算大会上冬瓜哥有个分享，会向大家介绍，这里就不多说了。 <br> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); text-align: center; box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);"> <span style="max-width: 100%; color: rgb(0, 82, 255); box-sizing: border-box !important; word-wrap: break-word !important;"> <strong style="max-width: 100%; box-sizing: border-box !important; word-wrap: break-word !important;"> 关于Host Memory Buffer（HMB） </strong> </span> <br style="max-width: 100%; box-sizing: border-box !important; word-wrap: break-word !important;"> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);">         有些SSD产品为了节省成本，板载DRAM很小，或者根本没有。就像有些显卡没有板载显存一样。但是并不表示它们不需要DRAM。它们的DRAM可以与host端的主存共享，也就是分配一块主存用作其DRAM，这些外部设备控制器可以通过PCIE接口访问host端的DRAM。共享显存的模式下，系统bios会直接分割出一块连续的DRAM给显卡使用，此时，host端OS根本看不到这块空间，BIOS会配置系统IO桥上的地址路由表以及地址范围寄存器，从而实现不同访存请求的路由。 <br> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);">         NVMe协议中也定义了这种场景，只不过，并非像共享显存那样直接从bios层面分配连续的空间，而是由NVMe驱动在OS所管理的物理地址空间内分配对应容量的RAM给SSD控制器使用，这段空间物理上可以不连续，NVMe驱动将对应的基地址+长度的列表推送给SSD控制器，SSD控制器需要将对应的列表更新到内部的寄存器中用于访存查找。这样，SSD控制器就可以将比如FTL映射表存储到host端的这块RAM中，这也就意味着，每一笔IO请求发送到SSD之后，SSD控制器需要通过PCIE来访问host端的这块RAM从而提取出映射表中对应的条目来查找对应IO目标逻辑地址所被映射到的物理地址，也就意味着每一笔IO都需要产生更多的PCIE流量，时延就会大增。 <br> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);">         当主机突然掉电之后，host端的这块RAM中数据就会丢失。重启之后，SSD需要从Flash Page中保存的元数据重构出这张大表，再次写入host端的ram。只不过，这个动作只有OS启动之后，NVMe驱动加载之后，才能执行，因为每次启动NVMe分配的这块RAM对应物理地址可能都不同。这会产生一个问题，如果用该SSD当做启动盘的话，重启之后bios阶段是无法给SSD分配host内存的，即便分配了，OS也不会认，除非改OS的内存管理部分。此时，SSD必须先使用其板载的小容量SRAM/DRAM，性能会比较差。OS启动后再后台继续重构FTL表。 <br> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);">         HMB使用场景比较受限制，所以目前还没有出现使用HMB机制的SSD。 </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);"> <span style="max-width: 100%; color: rgb(255, 76, 0); box-sizing: border-box !important; word-wrap: break-word !important;"> 其他相关阅读（点击可直接进入）： </span> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);"> <span style="max-width: 100%; text-decoration: underline; line-height: 25.6px; color: rgb(2, 30, 170); box-sizing: border-box !important; word-wrap: break-word !important;"> <strong style="max-width: 100%; box-sizing: border-box !important; word-wrap: break-word !important;"> <a href="http://mp.weixin.qq.com/s?__biz=MzAwNzU3NzQ0MA==&amp;mid=209735961&amp;idx=1&amp;sn=ce4f3a25fcd73a2629fcf258b727793f&amp;scene=21#wechat_redirect" rel="nofollow noopener noreferrer" target="_blank" style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> <strong style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> 《 </strong> <span style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> 【冬瓜哥画PPT】浅谈闪存控制器架构 </span> <strong style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> 》 </strong> </a> </strong> </span> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);"> <span style="max-width: 100%; text-decoration: underline; line-height: 25.6px; color: rgb(2, 30, 170); box-sizing: border-box !important; word-wrap: break-word !important;"> <span style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> <strong style="max-width: 100%; box-sizing: border-box !important; word-wrap: break-word !important;"> <a href="http://mp.weixin.qq.com/s?__biz=MzAwNzU3NzQ0MA==&amp;mid=210548858&amp;idx=1&amp;sn=8bb2727776b132db6f72ab651ca1fd10&amp;scene=21#wechat_redirect" rel="nofollow noopener noreferrer" target="_blank" style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> <strong style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> <strong style="max-width: 100%; box-sizing: border-box !important; word-wrap: break-word !important;"> 《 </strong> </strong> <span style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> 【冬瓜哥论文】浅析固态介质在存储系统中的应用方式 </span> <strong style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> <strong style="max-width: 100%; box-sizing: border-box !important; word-wrap: break-word !important;"> 》 </strong> </strong> </a> </strong> </span> </span> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);"> <span style="max-width: 100%; text-decoration: underline; line-height: 25.6px; color: rgb(2, 30, 170); box-sizing: border-box !important; word-wrap: break-word !important;"> <span style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> <a href="http://mp.weixin.qq.com/s?__biz=MzAwNzU3NzQ0MA==&amp;mid=401395959&amp;idx=1&amp;sn=43729d1411974b431de953a06cd513ef&amp;scene=21#wechat_redirect" rel="nofollow noopener noreferrer" target="_blank" style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> <span style="max-width: 100%; line-height: 1.6; color: rgb(2, 30, 170); box-sizing: border-box !important; word-wrap: break-word !important;"> <strong style="max-width: 100%; box-sizing: border-box !important; word-wrap: break-word !important;"> 《 </strong> <strong style="max-width: 100%; box-sizing: border-box !important; word-wrap: break-word !important;"> 你绝对想不到的两种高逼格存储器 </strong> <strong style="max-width: 100%; box-sizing: border-box !important; word-wrap: break-word !important;"> 》 </strong> </span> </a> </span> </span> </p> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);"> <span style="max-width: 100%; text-decoration: underline; line-height: 25.6px; color: rgb(2, 30, 170); box-sizing: border-box !important; word-wrap: break-word !important;"> <span style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> <span style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> <strong style="max-width: 100%; box-sizing: border-box !important; word-wrap: break-word !important;"> <a href="http://mp.weixin.qq.com/s?__biz=MzAwNzU3NzQ0MA==&amp;mid=209515817&amp;idx=1&amp;sn=705a018e2e675969dc092b21c5d5abba&amp;scene=21#wechat_redirect" rel="nofollow noopener noreferrer" target="_blank" style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> <strong style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> 《 </strong> <span style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important;"> 【冬瓜哥手绘】大话众核心处理器体系结构 </span> <strong style="max-width: 100%; line-height: 25.6px; box-sizing: border-box !important; word-wrap: break-word !important;"> 》 </strong> </a> </strong> </span> </span> </span> <span style="line-height: 25.6px; color: rgb(2, 30, 170); text-decoration: underline;"> </span> </p> 
+     <h3 style="line-height: 25.6px; white-space: normal;"> <a href="http://mp.weixin.qq.com/s?__biz=MzAwNzU3NzQ0MA==&amp;mid=2652088012&amp;idx=1&amp;sn=732d9dc1cdf63e6e903e7be3b11687fb&amp;scene=21#wechat_redirect" rel="nofollow noopener noreferrer" target="_blank"> <strong> <span style="color: rgb(2, 30, 170); text-decoration: underline;"> 《关于SSD元数据及掉电保护的误解 </span> </strong> <strong> <span style="line-height: 25.6px; color: rgb(2, 30, 170); text-decoration: underline;"> 》 </span> </strong> </a> </h3> 
+     <h3 style="line-height: 25.6px; white-space: normal;"> <a href="http://mp.weixin.qq.com/s?__biz=MzAwNzU3NzQ0MA==&amp;mid=2652088031&amp;idx=1&amp;sn=4d672fd019188da7b75541a945e0a1f6&amp;scene=21#wechat_redirect" rel="nofollow noopener noreferrer" target="_blank"> <strong> <span style="color: rgb(2, 30, 170); text-decoration: underline;"> 《 </span> </strong> <strong> <span style=""> 关于闪存FTL的Host Base和Device Based的误解 </span> </strong> <strong> <span style="color: rgb(2, 30, 170); text-decoration: underline;"> 》 </span> </strong> </a> </h3> 
+     <h3 style="line-height: 25.6px; white-space: normal;"> <a href="http://mp.weixin.qq.com/s?__biz=MzAwNzU3NzQ0MA==&amp;mid=2652088040&amp;idx=1&amp;sn=5def3e6afb4fc85df8de90d75b027406&amp;scene=21#wechat_redirect" rel="nofollow noopener noreferrer" target="_blank"> <strong> <span style="color: rgb(2, 30, 170); text-decoration: underline;"> 《帮你梳理一下各种存储协议及接口》 </span> </strong> </a> </h3> 
+     <h3 style="line-height: 25.6px; white-space: normal;"> <br> </h3> 
+     <p style="line-height: 25.6px; max-width: 100%; min-height: 1em; white-space: pre-wrap; color: rgb(62, 62, 62); text-align: center; box-sizing: border-box !important; word-wrap: break-word !important; background-color: rgb(255, 255, 255);"> <img style="width: auto; height: auto;" src="https://images2.imgbox.com/25/3b/vwvaWwCq_o.png"> </p> 
+     <p> <br> </p> 
+    </div> 
+    <div class="ct_mpda_wrp" id="js_sponsor_ad_area" style="display: none;"> 
+    </div> 
+    <div class="reward_area tc" id="js_reward_area" style="display:none;"> 
+     <p class="tips_global reward_tips"> 多少赏点吧 </p> 
+     <p> <a class="reward_access" id="js_reward_link" href="##" rel="nofollow"> Reward </a> </p> 
+     <div id="js_reward_inner" class="reward_area_inner" style="display: none; width: 1088px;"> 
+      <p class="tips_global reward_user_tips"> <a href="##" rel="nofollow" id="js_reward_total"> </a> people gave a reward </p> 
+      <div id="js_reward_list" class="reward_user_list"> 
+      </div> 
+     </div> 
+    </div> 
+   </div> 
+  </div> 
+ </div> 
+</div> 
+
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/fa99b146dd6ab93369b74d5cb381c040/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">opensuse  如何 连接中文（或其他）名称wifi？</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/5aa8f8d2aa9fdf85ab2779acbd41b15f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">学习笔记：解决 warning C4566</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>STM32F103 实例应用（3.1）——GPIO(增加深度) - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="STM32F103 实例应用（3.1）——GPIO(增加深度)" />
+<meta property="og:description" content="一、GPIO简介 GPIO是通用输入输出端口的简称，简单来说就是STM32可控的引脚。将STM32芯片的GPIO引脚与外设部分连接起来，即可实现与外部通信、控制以及数据采集功能。STM32芯片的GPIO被分成很多组，每组16个引脚，如型号STM32F103VET6的芯片有GPIOA至GPIOE共5组GPIO。芯片一共100个引脚，其中GPIO就占了很大一部分，所有的GPIO引脚都有基本的输入输出功能。
+最基本的输出功能是由STM32控制引脚输出高、低电平，实现开关控制，如把GPIO引脚接入LED灯，就可以控制等的亮灭；引脚接入继电器或者三极管，就可以通过继电器或者三极管控制外部大功率电路的通断。
+最基本的输入功能是检测外部输入电平，如把GPIO引脚连接到按键，然后通过电平高低区分按键是否按下。
+二、GPIO框图剖析 通过GPIO硬件结构框图，就可以从整体上深入了解GPIO外设及它的各种应用模式，见下图。从最右端看起，最右端就是代表STM32芯片引出的GPIO引脚，其余部件（左边）都位于芯片内部。
+2.1 基本结构分析 下面我们对上图中的GPIO端口的结构部件进行说明。
+2.1.1 保护二极管 引脚的两个保护二极管可以防止引脚外部过高或过低的电压输入（二极管的单向导电性），当引脚电压高于VDD时,上方的二极管导通（相当于IO引脚处是正极，VDD是负极，由于二极管单向导电，上方二极管导通），当引脚电压低于VSS时，下方二极管导通，防止不正常的电压引入芯片导致芯片烧毁。尽管由这样的保护，并不意味着STM32的引脚能直接外接大功率驱动期间==器件，如直接驱动电机，要么电机不转，要么板子冒烟，必须加大功率及隔离电路驱动。
+2.1.2 P-MOS 管和 N-MOS 管 GPIO引脚线路经过2个保护二极管后，向上流向“输入模式”结构，向下流向“输出模式”结构。先看输出模式部分，线路经过一个由P-MOS和N-MOS管组成的单元电路。这个结构使GPIO具有了“推挽输出”和“开漏输出”两种模式。
+所谓推挽输出模式，是根据这两个MOS管的工作方式来命名的。在该结构中输入高电平时（左边芯片内部给了高电平要向外输出），经过反向后，上方的P-MOS导通，下方的N-MOS关闭，对外输出高电平；而在该结构中输入低电平时，经过反向后，N-MOS管导通，P-MOS关闭，对外输出低电平。当引脚高低电平切换时，两个MOS管轮流导通，P管负责推电流，N管负责挽电流，使其负载能力和开关速度都比普通的方式有很大提高。推挽输出的低电平为0V，高电平为3.3V，推挽输出模式时的等效电路如下：
+我是这么认为的P-MOS的S级是P；N-MOS的S级是N；S级和G级之间同性相斥，异性相吸。P-MOS的S级是P意味着S级需要接3.3V，N-MOS的S级是N意味着S级需要接GND，那么S和G之间同性相斥，就是说再P-MOS的S级是3.3的时候，G如果也是3.3就不会导通，就像一个开关它不会闭合。异性相吸就是指P-MOS的S级是3.3的时候，G如果是0，就会导通，就像一个开关闭合。
+而在开漏输出模式时，上方的P-MOS管完全不工作。如果我们控制输出为0，低电平，则P-MOS管关闭，N-MOS管导通，使输出接地，若控制输出为1（它无法直接输出高电平）时，则P-MOS管和N-MOS管都关闭，所以引脚既不输出高电平，也不输出低电平，为高阻态。正常使用时必须外部接上拉电阻，等效电路如下图。
+它具有“线与”特性，也就是说若有很多个开漏模式引脚连接到一起时，只有当所有引脚都输出高阻态，才由上拉电阻提供高电平，此高电平的电压为外部上拉电阻所接电源的电压。若其中一个引脚为低电平，那线路就相当于短路接地，使得整条线路都为低电平，0V。
+（这里高阻态我理解为逻辑上的、理论上的断路。）
+推挽输出模式一般应用在输出电平为0V和3.3V而且需要高速切换开关状态的场合。在STM32应用中，除了必须用开漏模式的场合，一般习惯使用推挽输出模式。
+开漏输出一般应用在IIC、SMBUS通信等需要“线与”功能的总线电路中（这里总算明白为什么IIC需要配置开漏了，因为判断ACK需要此功能）。除此之外，还用在电平不匹配的场合，如需要5V的高电平，就可以在外部接上一个上拉电阻，上拉电源为5V，并且把GPIO设置为开漏模式，当输出高阻态时，由上拉电阻和电源向外输出5V。
+2.1.3 输出数据寄存器 前面提到的 双 MOS 管结构电路的输入信号，是由 GPIO“输出数据寄存器GPIOx_ODR”提供的，因此我们通过修改输出数据寄存器的值就可以修改 GPIO 引脚的输出电平。而“置位/复位寄存器 GPIOx_BSRR”可以通过修改输出数据寄存器的值从而影响电路的输出。
+2.1.4 复用功能输出 “复用功能输出”中的“复用”是指 STM32 的其它片上外设对 GPIO 引脚进行控制，此时 GPIO 引脚用作该外设功能的一部分，算是第二用途。从其它外设引出来的“复用功能输出信号”与 GPIO 本身的数据据寄存器都连接到双 MOS 管结构的输入中，通过图中的梯形结构作为开关切换选择。
+例如我们使用 USART 串口通讯时，需要用到某个 GPIO 引脚作为通讯发送引脚，这个时候就可以把该 GPIO 引脚配置成 USART 串口复用功能，由串口外设控制该引脚，发送数据。
+2.1.5 输入数据寄存器 看 GPIO 结构框图的上半部分，GPIO 引脚经过内部的上、下拉电阻，可以配置成上/下拉输入，然后再连接到施密特触发器，信号经过触发器后，模拟信号转化为 0、1 的数字信号，然后存储在“输入数据寄存器 GPIOx_IDR”中，通过读取该寄存器就可以了解GPIO 引脚的电平状态。
+上拉默认管脚高电平，下拉默认管脚低电平。
+2.1.6 复用功能输入 与“复用功能输出”模式类似，在“复用功能输入模式”时，GPIO 引脚的信号传输到STM32 其它片上外设，由该外设读取引脚状态。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/3fbc95ec8900c8de77eb381f9f8152e4/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-02-24T22:23:06+08:00" />
+<meta property="article:modified_time" content="2022-02-24T22:23:06+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">STM32F103 实例应用（3.1）——GPIO(增加深度)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <hr> 
+<h2><a id="GPIO_2"></a>一、GPIO简介</h2> 
+<p>GPIO是通用输入输出端口的简称，简单来说就是STM32可控的引脚。将STM32芯片的GPIO引脚与外设部分连接起来，即可实现与外部通信、控制以及数据采集功能。<code>STM32芯片的GPIO被分成很多组，每组16个引脚，</code>如型号STM32F103VET6的芯片有GPIOA至GPIOE共5组GPIO。芯片一共100个引脚，其中GPIO就占了很大一部分，所有的GPIO引脚都有基本的输入输出功能。<br> 最基本的输出功能是由STM32控制引脚输出高、低电平，实现开关控制，如把GPIO引脚接入LED灯，就可以控制等的亮灭；引脚接入继电器或者三极管，就可以通过继电器或者三极管控制外部大功率电路的通断。<br> 最基本的输入功能是检测外部输入电平，如把GPIO引脚连接到按键，然后通过电平高低区分按键是否按下。</p> 
+<h2><a id="GPIO_7"></a>二、GPIO框图剖析</h2> 
+<p>通过GPIO硬件结构框图，就可以从整体上深入了解GPIO外设及它的各种应用模式，见下图。从最右端看起，最右端就是代表STM32芯片引出的GPIO引脚，其余部件（左边）都位于芯片内部。<br> <img src="https://images2.imgbox.com/38/3a/zliqugUL_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="21__10"></a>2.1 基本结构分析</h3> 
+<p>下面我们对上图中的GPIO端口的结构部件进行说明。</p> 
+<h4><a id="211__13"></a>2.1.1 保护二极管</h4> 
+<p><img src="https://images2.imgbox.com/a4/1a/slzNcDIN_o.png" alt="在这里插入图片描述"><br> 引脚的两个保护二极管可以防止引脚外部过高或过低的电压输入（二极管的单向导电性），<code>当引脚电压高于</code>V<sub>DD</sub><code>时,上方的二极管导通（相当于IO引脚处是正极，</code>V<sub>DD</sub><code>是负极，由于二极管单向导电，上方二极管导通），当引脚电压低于</code>V<sub>SS</sub><code>时，下方二极管导通，防止不正常的电压引入芯片导致芯片烧毁。</code>尽管由这样的保护，并不意味着STM32的引脚能直接外接大功率驱动期间==器件，如直接驱动电机，要么电机不转，要么板子冒烟，必须加大功率及隔离电路驱动。</p> 
+<h4><a id="212_PMOS__NMOS__17"></a>2.1.2 P-MOS 管和 N-MOS 管</h4> 
+<p>GPIO引脚线路经过2个保护二极管后，向上流向“输入模式”结构，向下流向“输出模式”结构。先看输出模式部分，线路经过一个由P-MOS和N-MOS管组成的单元电路。这个结构使GPIO具有了“<strong>推挽输出</strong>”和“<strong>开漏输出</strong>”两种模式。<br> 所谓<strong>推挽输出</strong>模式，是根据这两个MOS管的工作方式来命名的。<code>在该结构中输入高电平时（左边芯片内部给了高电平要向外输出），经过反向后，上方的P-MOS导通，下方的N-MOS关闭，对外输出高电平；而在该结构中输入低电平时，经过反向后，N-MOS管导通，P-MOS关闭，对外输出低电平。</code>当引脚高低电平切换时，两个MOS管轮流导通，P管负责推电流，N管负责挽电流，使其负载能力和开关速度都比普通的方式有很大提高。推挽输出的低电平为0V，高电平为3.3V，推挽输出模式时的等效电路如下：<br> <img src="https://images2.imgbox.com/83/16/XrqpMQf4_o.png" alt="在这里插入图片描述"><br> 我是这么认为的<code>P-MOS的S级是P；N-MOS的S级是N；S级和G级之间同性相斥，异性相吸</code>。<code>P-MOS的S级是P意味着S级需要接3.3V，N-MOS的S级是N意味着S级需要接GND</code>，那么<code>S和G之间同性相斥，就是说再P-MOS的S级是3.3的时候，G如果也是3.3就不会导通，就像一个开关它不会闭合。异性相吸就是指P-MOS的S级是3.3的时候，G如果是0，就会导通，就像一个开关闭合。</code></p> 
+<p>而在<strong>开漏输出</strong>模式时，上方的P-MOS管完全不工作。如果我们控制输出为0，低电平，则P-MOS管关闭，N-MOS管导通，使输出接地，若控制输出为1（它无法直接输出高电平）时，则P-MOS管和N-MOS管都关闭，所以引脚既不输出高电平，也不输出低电平，为<strong>高阻态</strong>。正常使用时必须外部接上拉电阻，等效电路如下图。<br> <img src="https://images2.imgbox.com/97/d2/xb2Yx6kw_o.png" alt="在这里插入图片描述"><br> 它具有“<strong>线与</strong>”特性，也就是说若有很多个开漏模式引脚连接到一起时，只有当所有引脚都输出高阻态，才由上拉电阻提供高电平，此高电平的电压为外部上拉电阻所接电源的电压。若其中一个引脚为低电平，那线路就相当于短路接地，使得整条线路都为低电平，0V。<br> （这里高阻态我理解为逻辑上的、理论上的断路。）<br> 推挽输出模式一般应用在输出电平为0V和3.3V而且需要高速切换开关状态的场合。在STM32应用中，除了必须用开漏模式的场合，一般习惯使用推挽输出模式。<br> 开漏输出一般应用在IIC、SMBUS通信等需要“<strong>线与</strong>”功能的总线电路中（这里总算明白为什么IIC需要配置开漏了，因为判断ACK需要此功能）。除此之外，还用在电平不匹配的场合，如需要5V的高电平，就可以在外部接上一个上拉电阻，上拉电源为5V，并且把GPIO设置为开漏模式，当输出高阻态时，由上拉电阻和电源向外输出5V。</p> 
+<h4><a id="213__30"></a>2.1.3 输出数据寄存器</h4> 
+<p>前面提到的 双 MOS 管结构电路的输入信号，是由 GPIO“输出数据寄存器GPIOx_ODR”提供的，因此我们通过修改输出数据寄存器的值就可以修改 GPIO 引脚的输出电平。而“置位/复位寄存器 GPIOx_BSRR”可以通过修改输出数据寄存器的值从而影响电路的输出。</p> 
+<h4><a id="214__33"></a>2.1.4 复用功能输出</h4> 
+<p>“复用功能输出”中的“复用”是指 STM32 的其它片上外设对 GPIO 引脚进行控制，此时 GPIO 引脚用作该外设功能的一部分，算是第二用途。从其它外设引出来的“复用功能输出信号”与 GPIO 本身的数据据寄存器都连接到双 MOS 管结构的输入中，通过图中的梯形结构作为开关切换选择。<br> 例如我们使用 USART 串口通讯时，需要用到某个 GPIO 引脚作为通讯发送引脚，这个时候就可以把该 GPIO 引脚配置成 USART 串口复用功能，由串口外设控制该引脚，发送数据。<br> <img src="https://images2.imgbox.com/45/a5/s1p3lpdz_o.png" alt="在这里插入图片描述"></p> 
+<h4><a id="215__38"></a>2.1.5 输入数据寄存器</h4> 
+<p>看 GPIO 结构框图的上半部分，GPIO 引脚经过内部的上、下拉电阻，可以配置成上/下拉输入，然后再连接到施密特触发器，信号经过触发器后，模拟信号转化为 0、1 的数字信号，然后存储在“输入数据寄存器 GPIOx_IDR”中，通过读取该寄存器就可以了解GPIO 引脚的电平状态。<br> <img src="https://images2.imgbox.com/f3/a3/rnvZZFTH_o.png" alt="在这里插入图片描述"><br> 上拉默认管脚高电平，下拉默认管脚低电平。</p> 
+<h4><a id="216__43"></a>2.1.6 复用功能输入</h4> 
+<p>与“复用功能输出”模式类似，在“复用功能输入模式”时，GPIO 引脚的信号传输到STM32 其它片上外设，由该外设读取引脚状态。<br> 同样，如我们使用 USART 串口通讯时，需要用到某个 GPIO 引脚作为通讯接收引脚，这个时候就可以把该 GPIO 引脚配置成 USART 串口复用功能，使 USART 可以通过该通讯引脚的接收远端数据。</p> 
+<h4><a id="217__46"></a>2.1.7 模拟输入输出</h4> 
+<p>当 GPIO 引脚用于 ADC 采集电压的输入通道时，用作“模拟输入”功能，此时信号是不经过施密特触发器的，因为经过施密特触发器后信号只有 0、1 两种状态，所以 ADC 外设要采集到原始的模拟信号，信号源输入必须在施密特触发器之前。类似地，当 GPIO 引脚用于 DAC 作为模拟电压输出通道时，此时作为“模拟输出”功能，DAC 的模拟信号输出就不经过双 MOS 管结构，模拟信号直接输出到引脚。</p> 
+<hr> 
+<p>• 由 <a href="https://blog.csdn.net/qq_34118600?spm=1011.2124.3001.5113">青梅煮久</a> 写于 2022 年 02 月 24 日</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f0130486fb6d5610bcc629b944259095/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">ClickHouse常见问题排查与解决（一）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/40ac3caf745024d4820da3f3934cf20e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Oracle sid_name 和service_name的区别</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

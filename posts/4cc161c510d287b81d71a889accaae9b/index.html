@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>FIFO实战学习-同步FIFO/异步FIFO-格雷码 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="FIFO实战学习-同步FIFO/异步FIFO-格雷码" />
+<meta property="og:description" content="目录 FIFO一. 自定义同步FIFO1.1 代码设计1.2 Testbech1.3 行为仿真***学习位宽计算函数$clog2()***$clog2()系统函数使用,可以不关注***分布式资源或者BLOCK BRAM 二.异步FIFO2.1 在FIFO判满的时候有两种方式：2.2 异步FIFO为什么要使用格雷码2.2.1 介绍格雷码2.2.2 格雷码在异步FIFO中的应用2.2.2 格雷码判满 2.4 二进制与格雷码之间的转换2.4.1 二进制码转换为格雷码的方法2.4.2 格雷码转换为二进制码的方法 2.3 实现框图2.5 实现及仿真代码2.6 仿真图验证2.7 结论 FIFO 这篇更多的是记录FIFO学习，参考了众多优秀的文章，我都会标记出来，首先是关于同步FIFO的参考搞懂FIFO书写的关键是什么，异步FIFO参加这篇异步FIFO讲解
+FIFO 的英文全称是 First In First Out，即先进先出。 FPGA 使用的 FIFO 一般指的是对数据的存储具有先进先出特性的一个缓存器，常被用于数据的缓存,或者高速异步数据的交互也即所谓的跨时钟域信号传递。它与 FPGA 内部的 RAM 和 ROM 的区别是没有外部读写地址线，采取顺序写入数据，顺序读出数据的方式，使用起来简单方便，由此带来的缺点就是不能像 RAM 和 ROM 那样可以由地址线决定读取或写入某个指定的地址。
+一. 自定义同步FIFO 为了增强对FIFO的认识，用Verilog描述一个FIFO。
+FIFO是基于双口RAM衍生出来的，同步FIFO和异步FIFO的区别是主要是双口RAM的两套独立端口是否使用同一时钟，同步FIFO读写受同一时钟控制，其中设计的同步FIFO的信号如下所示。
+FIFO大致分为写端和读端，两者都拥有独自的使能信号，以及写数据，这里数据宽度是8Bit,输出端对于FIFO的空满有相应的标志位，以及计数器和读出的数据。
+FIFO读写的规则：
+永远不要写入满FIFO永远不要读空FIFO FIFO在外部端口上表现没有地址线，因为是第一个到达的数据也将是第一个输出的数据，所以 FIFO缓冲区是一种读/写存储阵列，可自动跟踪数据进入模块的顺序并以相同顺序读出数据。而内部的实现需要两个指针来分别表示读和写的地址，读指针和写指针。初始时读写指针指向第一个存储单元，此时FIFO队列为空，fifo_empty有效，当写入256个数据，也就是写指针重新指向第一个FIFO的存储单元，而计数data_count等于FIFO的深度（0~255，但是写指针总是指向在下一个写的存储单元，所以当写完地址为255，8’b1111 1111后，变为9位的256 = 9‘b1 0000 0000）时，fifo_full有效。由此可知读写指针相同，此时有可能是满状态（写一直有效，写完最后一个255地址后，取低8位= 8’b0000 0000，此时读写指针的地址相同），所以用地址差不能用于判断空满，而是使用计数器来判断，但是计数器要设置比深度的位数多一位 ，这里也就是9位。
+上面提到的博文中的这幅图，结合上一段的解释可以帮助理解地址的变化：
+1.1 代码设计 其实更加规范的模式是想其中的位宽设置为参数，接下来的代码书写使用参数声明宽度。
+//FIFO两条铁律就是不能满写 不能空读 module custom_FIFO( input wire clk, input wire rst_n, input wire wr_en, input wire [7:0] wr_data, input wire rd_en, output wire fifo_full, //空和满都是1有效 output reg [7:0] rd_data, output wire fifo_empty, output reg [8:0] data_count ); reg [7:0] mem [255:0]; reg [7:0] wr_add; reg [7:0] rd_add; //FIFO的书写方式应该是分信号进行书写 //wr_add总是指向下一个写的存储单元，在上升沿监测到写地址为255时，实际上的地址值重新因为溢出指向了地址0，此时溢出信号为真，而计数值达到256 //这里的逻辑是读写地址会自动从255变为0 always@(posedge clk)begin if(rst_n == 1&#39;b0)begin wr_add &lt;= 8&#39;b0; end else if(wr_en == 1&#39;b1 &amp;&amp; fifo_full== 1&#39;b0) begin wr_add &lt;= wr_add &#43; 1&#39;b1; end end // rd_add always@(posedge clk)begin if(rst_n == 1&#39;b0)begin rd_add &lt;= 8&#39;b0; end else if(rd_en == 1&#39;b1 &amp;&amp; fifo_empty == 1&#39;b0) begin rd_add &lt;= rd_add &#43; 1&#39;b1; end end //rd_data always@(posedge clk)begin if(rst_n == 1&#39;b0)begin rd_data &lt;= 8&#39;h00; end else if(rd_en == 1&#39;b1 &amp;&amp; fifo_empty == 1&#39;b0)begin rd_data &lt;= mem[rd_add]; end end //wr_data always@(posedge clk)begin if(wr_en == 1&#39;b1 &amp;&amp; fifo_full== 1&#39;b0)begin mem[wr_add] &lt;= wr_data; end end always@(posedge clk)begin if(rst_n == 1&#39;b0)begin data_count &lt;= 9&#39;h0; end else begin if(wr_en == 1&#39;b1 &amp;&amp; !" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/4cc161c510d287b81d71a889accaae9b/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-06-26T13:38:03+08:00" />
+<meta property="article:modified_time" content="2022-06-26T13:38:03+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">FIFO实战学习-同步FIFO/异步FIFO-格雷码</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p></p> 
+<div class="toc"> 
+ <h4>目录</h4> 
+ <ul><li><a href="#FIFO_1" rel="nofollow">FIFO</a></li><li><ul><li><a href="#_FIFO_5" rel="nofollow">一. 自定义同步FIFO</a></li><li><a href="#11__23" rel="nofollow">1.1 代码设计</a></li><li><a href="#12_Testbech_107" rel="nofollow">1.2 Testbech</a></li><li><a href="#13__194" rel="nofollow">1.3 行为仿真</a></li><li><a href="#clog2_203" rel="nofollow">***学习位宽计算函数$clog2()</a></li><li><ul><li><ul><li><ul><li><a href="#clog2_204" rel="nofollow">***$clog2()系统函数使用,可以不关注</a></li><li><a href="#BLOCK_BRAM_223" rel="nofollow">***分布式资源或者BLOCK BRAM</a></li></ul> 
+    </li></ul> 
+   </li></ul> 
+  </li></ul> 
+  </li><li><a href="#FIFO_239" rel="nofollow">二.异步FIFO</a></li><li><ul><li><a href="#21_FIFO_240" rel="nofollow">2.1 在FIFO判满的时候有两种方式：</a></li><li><a href="#22_FIFO_253" rel="nofollow">2.2 异步FIFO为什么要使用格雷码</a></li><li><ul><li><a href="#221__254" rel="nofollow">2.2.1 介绍格雷码</a></li><li><a href="#222_FIFO_267" rel="nofollow">2.2.2 格雷码在异步FIFO中的应用</a></li><li><a href="#222__274" rel="nofollow">2.2.2 格雷码判满</a></li></ul> 
+   </li><li><a href="#24___284" rel="nofollow">2.4 二进制与格雷码之间的转换</a></li><li><ul><li><a href="#241__286" rel="nofollow">2.4.1 二进制码转换为格雷码的方法</a></li><li><a href="#242__299" rel="nofollow">2.4.2 格雷码转换为二进制码的方法</a></li></ul> 
+   </li><li><a href="#23__327" rel="nofollow">2.3 实现框图</a></li><li><a href="#25__330" rel="nofollow">2.5 实现及仿真代码</a></li><li><a href="#26__553" rel="nofollow">2.6 仿真图验证</a></li><li><a href="#27__556" rel="nofollow">2.7 结论</a></li></ul> 
+ </li></ul> 
+</div> 
+<p></p> 
+<h2><a id="FIFO_1"></a>FIFO</h2> 
+<p>  这篇更多的是记录FIFO学习，参考了众多优秀的文章，我都会标记出来，首先是<a href="https://reborn.blog.csdn.net/article/details/106610848" rel="nofollow">关于同步FIFO的参考</a>搞懂FIFO书写的关键是什么，异步FIFO参加这篇<a href="https://www.cnblogs.com/SYoong/p/6110328.html" rel="nofollow">异步FIFO讲解</a></p> 
+<p>  FIFO 的英文全称是 First In First Out，即先进先出。 FPGA 使用的 FIFO 一般指的是对数据的存储具有先进先出特性的一个缓存器，常被用于数据的缓存,或者高速异步数据的交互也即所谓的跨时钟域信号传递。它与 FPGA 内部的 RAM 和 ROM 的区别是没有外部读写地址线，采取顺序写入数据，顺序读出数据的方式，使用起来简单方便，由此带来的缺点就是不能像 RAM 和 ROM 那样可以由地址线决定读取或写入某个指定的地址。</p> 
+<h3><a id="_FIFO_5"></a>一. 自定义同步FIFO</h3> 
+<p>  为了增强对FIFO的认识，用Verilog描述一个FIFO。</p> 
+<p>  FIFO是基于双口RAM衍生出来的，同步FIFO和异步FIFO的区别是主要是双口RAM的两套独立端口是否使用同一时钟，同步FIFO读写受同一时钟控制，其中设计的同步FIFO的信号如下所示。</p> 
+<p>  FIFO大致分为写端和读端，两者都拥有独自的使能信号，以及写数据，这里数据宽度是8Bit,输出端对于FIFO的空满有相应的标志位，以及计数器和读出的数据。<br> <img src="https://images2.imgbox.com/b4/b4/5nG3879Q_o.png" alt="在这里插入图片描述"></p> 
+<p>  FIFO读写的规则：</p> 
+<ul><li>永远不要写入满FIFO</li><li>永远不要读空FIFO</li></ul> 
+<p>  FIFO在外部端口上表现没有地址线，因为是第一个到达的数据也将是第一个输出的数据，所以 <strong>FIFO缓冲区是一种读/写存储阵列，可自动跟踪数据进入模块的顺序并以相同顺序读出数据</strong>。而内部的实现需要两个指针来分别表示读和写的地址，读指针和写指针。初始时读写指针指向第一个存储单元，此时FIFO队列为空，fifo_empty有效，当写入256个数据，也就是写指针重新指向第一个FIFO的存储单元，而计数data_count等于FIFO的<strong>深度</strong>（0~255，但是写指针总是指向在下一个写的存储单元，所以当写完地址为255，8’b1111 1111后，变为9位的256 = 9‘b1 0000 0000）时，fifo_full有效。由此可知读写指针相同，此时有可能是满状态（写一直有效，写完最后一个255地址后，取低8位= 8’b0000 0000，此时读写指针的地址相同），所以用地址差不能用于判断空满，而是使用计数器来判断，但是计数器要设置比深度的位数多一位 ，这里也就是9位。</p> 
+<p>  上面提到的博文中的这幅图，结合上一段的解释可以帮助理解地址的变化：</p> 
+<p><img src="https://images2.imgbox.com/37/8f/P9GkGsIP_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="11__23"></a>1.1 代码设计</h3> 
+<p>  其实更加规范的模式是想其中的位宽设置为参数，接下来的代码书写使用参数声明宽度。</p> 
+<pre><code class="prism language-c"><span class="token comment">//FIFO两条铁律就是不能满写  不能空读</span>
+
+module <span class="token function">custom_FIFO</span><span class="token punctuation">(</span>
+    input wire           clk<span class="token punctuation">,</span>
+    input wire           rst_n<span class="token punctuation">,</span>
+    input wire           wr_en<span class="token punctuation">,</span>
+    input wire <span class="token punctuation">[</span><span class="token number">7</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span>     wr_data<span class="token punctuation">,</span>
+    input wire           rd_en<span class="token punctuation">,</span>
+
+    output wire           fifo_full<span class="token punctuation">,</span>    <span class="token comment">//空和满都是1有效</span>
+    output reg <span class="token punctuation">[</span><span class="token number">7</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span>     rd_data<span class="token punctuation">,</span>
+    output wire           fifo_empty<span class="token punctuation">,</span>
+    output reg <span class="token punctuation">[</span><span class="token number">8</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span>     data_count
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    reg <span class="token punctuation">[</span><span class="token number">7</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span> mem <span class="token punctuation">[</span><span class="token number">255</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    reg <span class="token punctuation">[</span><span class="token number">7</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span> wr_add<span class="token punctuation">;</span>
+    reg <span class="token punctuation">[</span><span class="token number">7</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span> rd_add<span class="token punctuation">;</span>
+
+    <span class="token comment">//FIFO的书写方式应该是分信号进行书写</span>
+    <span class="token comment">//wr_add总是指向下一个写的存储单元，在上升沿监测到写地址为255时，实际上的地址值重新因为溢出指向了地址0，此时溢出信号为真，而计数值达到256</span>
+    <span class="token comment">//这里的逻辑是读写地址会自动从255变为0</span>
+    always@<span class="token punctuation">(</span>posedge clk<span class="token punctuation">)</span>begin
+        <span class="token keyword">if</span><span class="token punctuation">(</span>rst_n <span class="token operator">==</span> <span class="token number">1</span>'b0<span class="token punctuation">)</span>begin
+            wr_add <span class="token operator">&lt;=</span> <span class="token number">8</span>'b0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> <span class="token keyword">if</span><span class="token punctuation">(</span>wr_en <span class="token operator">==</span> <span class="token number">1</span><span class="token char">'b1 &amp;&amp; fifo_full== 1'</span>b0<span class="token punctuation">)</span> begin
+            wr_add <span class="token operator">&lt;=</span> wr_add <span class="token operator">+</span> <span class="token number">1</span>'b1<span class="token punctuation">;</span>
+        end
+    end
+
+    <span class="token comment">// rd_add</span>
+    always@<span class="token punctuation">(</span>posedge clk<span class="token punctuation">)</span>begin
+        <span class="token keyword">if</span><span class="token punctuation">(</span>rst_n <span class="token operator">==</span> <span class="token number">1</span>'b0<span class="token punctuation">)</span>begin
+            rd_add <span class="token operator">&lt;=</span> <span class="token number">8</span>'b0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> <span class="token keyword">if</span><span class="token punctuation">(</span>rd_en <span class="token operator">==</span> <span class="token number">1</span><span class="token char">'b1 &amp;&amp; fifo_empty == 1'</span>b0<span class="token punctuation">)</span> begin
+            rd_add <span class="token operator">&lt;=</span> rd_add <span class="token operator">+</span> <span class="token number">1</span>'b1<span class="token punctuation">;</span>
+        end
+    end
+
+
+    <span class="token comment">//rd_data</span>
+    always@<span class="token punctuation">(</span>posedge clk<span class="token punctuation">)</span>begin
+        <span class="token keyword">if</span><span class="token punctuation">(</span>rst_n <span class="token operator">==</span> <span class="token number">1</span>'b0<span class="token punctuation">)</span>begin
+            rd_data <span class="token operator">&lt;=</span> <span class="token number">8</span>'h00<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span> <span class="token keyword">if</span><span class="token punctuation">(</span>rd_en <span class="token operator">==</span> <span class="token number">1</span><span class="token char">'b1 &amp;&amp; fifo_empty == 1'</span>b0<span class="token punctuation">)</span>begin
+            rd_data <span class="token operator">&lt;=</span> mem<span class="token punctuation">[</span>rd_add<span class="token punctuation">]</span><span class="token punctuation">;</span>
+        end
+    end
+
+    <span class="token comment">//wr_data</span>
+    always@<span class="token punctuation">(</span>posedge clk<span class="token punctuation">)</span>begin
+        <span class="token keyword">if</span><span class="token punctuation">(</span>wr_en <span class="token operator">==</span> <span class="token number">1</span><span class="token char">'b1 &amp;&amp; fifo_full== 1'</span>b0<span class="token punctuation">)</span>begin
+            mem<span class="token punctuation">[</span>wr_add<span class="token punctuation">]</span> <span class="token operator">&lt;=</span> wr_data<span class="token punctuation">;</span>
+        end
+    end
+
+    always@<span class="token punctuation">(</span>posedge clk<span class="token punctuation">)</span>begin
+        <span class="token keyword">if</span><span class="token punctuation">(</span>rst_n <span class="token operator">==</span> <span class="token number">1</span>'b0<span class="token punctuation">)</span>begin
+            data_count <span class="token operator">&lt;=</span> <span class="token number">9</span>'h0<span class="token punctuation">;</span>
+        end
+        <span class="token keyword">else</span>   begin
+            <span class="token keyword">if</span><span class="token punctuation">(</span>wr_en <span class="token operator">==</span> <span class="token number">1</span><span class="token char">'b1 &amp;&amp; !rd_en &amp;&amp; fifo_full== 1'</span>b0<span class="token punctuation">)</span>begin  <span class="token comment">//当读写都有效，则不变</span>
+                data_count <span class="token operator">&lt;=</span> data_count <span class="token operator">+</span> <span class="token number">1</span>'b1<span class="token punctuation">;</span>
+            end
+            <span class="token keyword">else</span> <span class="token keyword">if</span><span class="token punctuation">(</span>rd_en <span class="token operator">==</span> <span class="token number">1</span><span class="token char">'b1 &amp;&amp; wr_en &amp;&amp; fifo_empty == 1'</span>b0<span class="token punctuation">)</span>begin
+                data_count <span class="token operator">&lt;=</span> data_count <span class="token operator">-</span> <span class="token number">1</span>'b1<span class="token punctuation">;</span>
+            end
+        end
+    end
+
+    assign fifo_full <span class="token operator">=</span>  <span class="token punctuation">(</span>data_count <span class="token operator">==</span> <span class="token number">9</span>'h100<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">//数据计数的范围是1-256，当为256时数据满</span>
+    assign fifo_empty <span class="token operator">=</span> <span class="token punctuation">(</span>data_count  <span class="token operator">==</span> <span class="token number">9</span>'h00<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+endmodule
+
+</code></pre> 
+<h3><a id="12_Testbech_107"></a>1.2 Testbech</h3> 
+<p>  读取的TXT中有259个数据，可以看到第256个数据为8‘h25，仿真文件中将所有的259个数据全部读取到mem中，然后将读到的数据写256到FIFO中。<br> <img src="https://images2.imgbox.com/c4/24/IQDugTE1_o.png" alt="在这里插入图片描述"></p> 
+<pre><code class="prism language-c">module <span class="token function">tb_custom_FIFO</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    reg        clk<span class="token punctuation">;</span>
+    reg        rst_n<span class="token punctuation">;</span>
+    reg        wr_en<span class="token punctuation">;</span>
+    reg <span class="token punctuation">[</span><span class="token number">7</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span>  wr_data<span class="token punctuation">;</span>
+    reg        rd_en<span class="token punctuation">;</span>
+
+    wire        fifo_full<span class="token punctuation">;</span>    <span class="token comment">//空和满都是1有效</span>
+    wire <span class="token punctuation">[</span><span class="token number">7</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span>  rd_data<span class="token punctuation">;</span>
+    wire        fifo_empty<span class="token punctuation">;</span>
+    wire <span class="token punctuation">[</span><span class="token number">8</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span>   data_count<span class="token punctuation">;</span>
+
+
+
+    reg <span class="token punctuation">[</span><span class="token number">7</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span> mem <span class="token punctuation">[</span><span class="token number">258</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+
+    always begin
+        #<span class="token number">5</span> clk <span class="token operator">=</span> <span class="token operator">~</span>clk<span class="token punctuation">;</span>
+    end
+
+    initial begin
+        clk <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        rst_n <span class="token operator">=</span> <span class="token number">1</span>'b1<span class="token punctuation">;</span>
+        #<span class="token number">10</span><span class="token punctuation">;</span>
+        rst_n <span class="token operator">=</span> <span class="token number">1</span>'b0<span class="token punctuation">;</span>
+        #<span class="token number">10</span> rst_n <span class="token operator">=</span> <span class="token number">1</span>'b1<span class="token punctuation">;</span>
+    end
+
+    initial begin
+        $<span class="token function">readmemh</span><span class="token punctuation">(</span><span class="token string">"D:/vivado_pf/Basic_pratice/uart_data.txt"</span><span class="token punctuation">,</span>mem<span class="token punctuation">)</span><span class="token punctuation">;</span>  
+        $<span class="token function">display</span><span class="token punctuation">(</span><span class="token string">"the file is load to mem"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        $<span class="token function">display</span><span class="token punctuation">(</span><span class="token string">"Read memory1: %h"</span><span class="token punctuation">,</span> mem<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token punctuation">;</span>
+        $<span class="token function">display</span><span class="token punctuation">(</span><span class="token string">"Read memory2: %h"</span><span class="token punctuation">,</span> mem<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token punctuation">;</span>
+        $<span class="token function">display</span><span class="token punctuation">(</span><span class="token string">"Read memory3: %h"</span><span class="token punctuation">,</span> mem<span class="token punctuation">[</span><span class="token number">2</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token punctuation">;</span>
+        $<span class="token function">display</span><span class="token punctuation">(</span><span class="token string">"Read memory4: %h"</span><span class="token punctuation">,</span> mem<span class="token punctuation">[</span><span class="token number">3</span><span class="token punctuation">]</span><span class="token punctuation">)</span> <span class="token punctuation">;</span>
+    end
+
+    initial begin
+        wr_en <span class="token operator">&lt;=</span> <span class="token number">1</span>'b0<span class="token punctuation">;</span>
+        rd_en <span class="token operator">&lt;=</span> <span class="token number">1</span>'b0<span class="token punctuation">;</span>
+        wr_data <span class="token operator">&lt;=</span> <span class="token number">8</span>'h00<span class="token punctuation">;</span>
+        #<span class="token number">50</span><span class="token punctuation">;</span>
+        <span class="token function">wr_data_to_fifo</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        #<span class="token number">2620</span><span class="token punctuation">;</span>
+        rd_en <span class="token operator">&lt;=</span> <span class="token number">1</span>'b1<span class="token punctuation">;</span>
+
+
+
+
+    end
+
+
+    <span class="token comment">//写256个数据到FIFO中</span>
+    task <span class="token function">wr_data_to_fifo</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span> <span class="token comment">//任务没有返回值</span>
+        integer i<span class="token punctuation">;</span>
+        begin
+            <span class="token keyword">for</span> <span class="token punctuation">(</span>i <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span> i <span class="token operator">&lt;</span> <span class="token number">257</span><span class="token punctuation">;</span> i <span class="token operator">=</span> i <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span>begin
+                wr_data <span class="token operator">=</span> mem<span class="token punctuation">[</span>i<span class="token punctuation">]</span><span class="token punctuation">;</span>
+                wr_en <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+                #<span class="token number">10</span><span class="token punctuation">;</span> <span class="token comment">//任务不能出现always语句，但是可以包含时序控制，任务可以没有或者多个输入、输出</span>
+            end 
+            wr_en <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        end 
+    endtask
+
+    custom_FIFO <span class="token function">custom_FIFO_inst</span><span class="token punctuation">(</span>
+        <span class="token punctuation">.</span><span class="token function">clk</span><span class="token punctuation">(</span>clk<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">rst_n</span><span class="token punctuation">(</span>rst_n<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">wr_en</span><span class="token punctuation">(</span>wr_en<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">wr_data</span><span class="token punctuation">(</span>wr_data<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">rd_en</span><span class="token punctuation">(</span>rd_en<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">fifo_full</span><span class="token punctuation">(</span>fifo_full<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">rd_data</span><span class="token punctuation">(</span>rd_data<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">fifo_empty</span><span class="token punctuation">(</span>fifo_empty<span class="token punctuation">)</span><span class="token punctuation">,</span>
+        <span class="token punctuation">.</span><span class="token function">data_count</span><span class="token punctuation">(</span>data_count<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+endmodule
+
+</code></pre> 
+<h3><a id="13__194"></a>1.3 行为仿真</h3> 
+<p>  写数据在上升沿前后要有效一段时间，首先是正常工作的仿真，在设置的时候就没有溢出的情况，第一张图是开始写入，第二张图是写入结束。</p> 
+<p><img src="https://images2.imgbox.com/f8/50/oXBnLA1D_o.png" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/f7/f6/oTKRebUk_o.png" alt="在这里插入图片描述"><br>   修改仿真文件，第一张表示溢出写，可以看到，溢出写无效。第二章可以看到读空出两个单元后，写入读写地址相同也就停止了写。到这里同步的FIFO功能就是正确的。<br> <img src="https://images2.imgbox.com/52/45/4N8PmZZ9_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/47/da/FvEHsKml_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="clog2_203"></a>***学习位宽计算函数$clog2()</h3> 
+<h6><a id="clog2_204"></a>***$clog2()系统函数使用,可以不关注</h6> 
+<p>  该系统函数可用于计算寻址给定大小的存储器所需的最小地址宽度或表示给定数量的状态所需的最小向量宽度。</p> 
+<pre><code class="prism language-c"><span class="token comment">//位宽计算函数</span>
+function integer <span class="token function">clog2</span> <span class="token punctuation">(</span>input integer depth<span class="token punctuation">)</span><span class="token punctuation">;</span>
+begin
+    <span class="token keyword">for</span> <span class="token punctuation">(</span>clog2<span class="token operator">=</span><span class="token number">0</span><span class="token punctuation">;</span> depth<span class="token operator">&gt;</span><span class="token number">0</span><span class="token punctuation">;</span> clog2<span class="token operator">=</span>clog2<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">)</span> 
+        depth <span class="token operator">=</span> depth <span class="token operator">&gt;&gt;</span><span class="token number">1</span><span class="token punctuation">;</span>                          
+end
+endfunction
+<span class="token comment">//$clog2(8) == 3;</span>
+</code></pre> 
+<p>  使用方法</p> 
+<pre><code class="prism language-c">parameter p_cnt_max <span class="token operator">=</span> p_rev_time<span class="token operator">*</span>p_clk_fre<span class="token operator">*</span><span class="token number">1000</span>_000 <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">;</span> <span class="token comment">//翻转时间内所需计数的最大值</span>
+wire <span class="token punctuation">[</span>$<span class="token function">clog2</span><span class="token punctuation">(</span>p_cnt_max<span class="token punctuation">)</span><span class="token operator">-</span><span class="token number">1</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span> w_cnt_max<span class="token punctuation">;</span>
+</code></pre> 
+<h6><a id="BLOCK_BRAM_223"></a>***分布式资源或者BLOCK BRAM</h6> 
+<p>  还是参考博主的讲解，学习这个知识</p> 
+<p>  FPGA中FIFO的实现可以使用分布式资源或者BLOCK RAM，当使用FIFO缓冲空间较小时，我们选择使用Distributed RAM；当使用FIFO缓冲空间较大时，我们选择使用BLOCK RAM资源；这是一般的选择原则。而我们在声明我们的mem类型的变量时，通过添加约束（*ram_style = “distributed”）/(*ram_style = “block”)来指定。</p> 
+<pre><code class="prism language-c"><span class="token punctuation">(</span><span class="token operator">*</span>ram_style <span class="token operator">=</span> <span class="token string">"distributed"</span><span class="token operator">*</span><span class="token punctuation">)</span> reg <span class="token punctuation">[</span>DATA_WIDTH <span class="token operator">-</span> <span class="token number">1</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span> fifo_buffer<span class="token punctuation">[</span><span class="token number">0</span> <span class="token operator">:</span> DATA_DEPTH <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+
+或者：
+
+<span class="token punctuation">(</span><span class="token operator">*</span>ram_style <span class="token operator">=</span> <span class="token string">"block"</span><span class="token operator">*</span><span class="token punctuation">)</span> reg <span class="token punctuation">[</span>DATA_WIDTH <span class="token operator">-</span> <span class="token number">1</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span> fifo_buffer<span class="token punctuation">[</span><span class="token number">0</span> <span class="token operator">:</span> DATA_DEPTH <span class="token operator">-</span> <span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+————————————————
+版权声明：本文为CSDN博主「李锐博恩」的原创文章
+原文链接：https<span class="token operator">:</span><span class="token comment">//blog.csdn.net/Reborn_Lee/article/details/106619999</span>
+</code></pre> 
+<p>  这个点我想补充一下，在底层是如何实现的，<a href="https://blog.csdn.net/pioneerzdn/article/details/115235478">VIVADO中资源之间的关系</a>，FPGA 主要资源为： CLB、DSP、Block RAM、CMTs、GT以及XADC等等。一个CLB由2个Slice组成，Slice分为SLICEM和SLICEL，一个CLB里最多有一个SLICEM，即一个CLB可由两个SLICEL或一个SLICEL加一个SLICEM组成。SLICEL可用于逻辑，算术运算， SLICEM除了用于逻辑，算术运算外，还可配置成<strong>分布式RAM</strong>或32位的移位寄存器。</p> 
+<h2><a id="FIFO_239"></a>二.异步FIFO</h2> 
+<h3><a id="21_FIFO_240"></a>2.1 在FIFO判满的时候有两种方式：</h3> 
+<ul><li><strong>通过计数器的方式</strong></li></ul> 
+<p>  也就是上面同步FIFO中的方式，优点是：逻辑简单，便于理解，且能够获得当前FIFO中的数据量；缺点：资源使用多，代码量大</p> 
+<ul><li><strong>通过将读写指针增加一位</strong></li></ul> 
+<p>  增加的一位用来表示轮数，如果两个的附加位相同说明处于同一轮，如果附加位不同，则处于不同的轮数，此时，对于深度为2n的FIFO，需要的读/写指针位宽为(n+1)位，如对于深度为8的FIFO，需要采用4bit的计数器，0000～1000、1001～1111，MSB作为折回标志位，而低3位作为地址指针。<br>   <strong>判空满的逻辑如下</strong><a href="https://www.cnblogs.com/SYoong/p/6110328.html" rel="nofollow">图展示更加清晰</a>：</p> 
+<ul><li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox" disabled> 当在同一轮，且读写指针相同，则为空；空的情况可能是复位，或者读指针赶上写指针</li><li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox" disabled> 当不在同一轮，但读写指针（地址）相同，则表示写指针转了一圈，追上都指针，判满</li></ul> 
+<h3><a id="22_FIFO_253"></a>2.2 异步FIFO为什么要使用格雷码</h3> 
+<h4><a id="221__254"></a>2.2.1 介绍格雷码</h4> 
+<p><img src="https://images2.imgbox.com/f9/86/mcauk2F6_o.png" alt="在这里插入图片描述"></p> 
+<p>  自然二进制数在表示一个连续变化的数值时，可能会有多个位同时发生变化，每个位翻转（变化）的频率是比较高的，这在某些应用场合，如在FPGA内部跨时钟域传输数据时，是十分不利的。<br>   上图展示了格雷码，十进制0-15的格雷码的对应关系，格雷码有两个特性，一个是循环特性，一个是单布特性。</p> 
+<ul><li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox" disabled> 循环特性：当格雷码表示的数，当最大值表示位最小值时，只有以为发生翻转。可以看到0-7，8-15除过最高位不同，上下是对称的，7到8的格雷码只变了一位，0-15也只变了一位。</li><li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox" disabled> 单步特性：当表示来连续变换的数值时，仅有一个位发生翻转，保证传输的稳定性，较少传输误码率。</li></ul> 
+<blockquote> 
+ <p>不过格雷码也有一个缺点，那就是相比于自然二进制码来说，它是一种无权码（而自然二进制码实际上是“8421”码，因此很难直接进行比较和数学运算，所以一般都需要将采集到的以格雷码为表示形式的数据先转换成自然二进制码，然后再参与运算。</p> 
+</blockquote> 
+<h4><a id="222_FIFO_267"></a>2.2.2 格雷码在异步FIFO中的应用</h4> 
+<p>  异步FIFO通过对比读写指针来进行满空判断，但是读写地址属于不同的时钟域，在比较之前需要将读写地址进行同步处理，然后进行判空满操作后才能够读写。这样会存在两个问题：<strong>第一个是跨时钟域容易发生亚稳态</strong>，导致判断出错。<strong>第二个问题是时钟是不同频</strong>，或者读快写慢，或者读慢写快，这时候尽管进行了地址同步，也可能有一定的滞后性。以读慢写快为例，在写入端需要判满，因为写的时钟快，所以对于同步后的读端的地址不会遗漏，读的地址只存在等于小于当前读地址，所以满标志只会提前产生。在读端，同步写的地址，写时钟满，必然会遗漏一部分地址，且及有可能写地址小于真实地址，所以，空标志也会提前产生，尽管地址有遗漏，但时对于FIFO的逻辑操作不会产生影响。这里不管是采用二进制编码还是格雷码编码，都会存在同步后的读写地址不符合实际情况，但是依然能够保证FIFO功能的正确性，需要注意gray码只是在相邻两次跳变之间才会出现只有1位数据不一致的情形，超过两个周期则不一定，所有地址总线bus 偏差一定不能超过一个周期，否则可能出现gray码多位数据跳变的情况，这个时候gray码就失去了作用，因为这时候同步后的地址已经不能保证只有1位跳变了。</p> 
+<p>  可以看到二进制编码的地址跨时钟同步最主要的问题是要<strong>消除亚稳态</strong>以及<strong>减少跳变</strong>。binary编码的地址总线在跳变时极易产生毛刺，因为binary编码是<strong>多位跳变</strong>，在实现电路时不可能做到所有的地址总线等长，address bus 偏差必然存在，而且写地址和读地址分属不同时钟域异步，这样地址总线在进行同步过程中出错不可避免，比如写地址在从0111到1000转换时4条地址线同时跳变，这样读时钟在进行写地址同步后得到的写地址可能是0000-1111的某个值，这个完全不能确定，所以用这个同步后的写地址进行FIFO空判断的时候难免出错。</p> 
+<p>  通过上面的分析可得，异步FIFO采用地址增加额外一位来判满，然后通过将二进制地址转换位格雷码，降低读写地址在连续变换时的位翻转概率，跨时钟域，然后大拍消除亚稳态，然后在转换为格雷码，进行地址比较，判断满空状态。</p> 
+<h4><a id="222__274"></a>2.2.2 格雷码判满</h4> 
+<p>  格雷码解决了一个问题，但同时也带来了另一个问题，即格雷码如何判断空与满?<br>   **<strong>对于“空”的判断依然是两者完全相等</strong>（**包括增加的位）；</p> 
+<p>  对于“满”的判断由于于gray码除了MSB外，具有镜像对称的特点，存储深度为8，最多MSB表示的读写之间之间最大的差距是一轮，所以，格雷码的表示的深度是16。例如,当读指针指向7，写指针指向8时，除了MSB，其余位皆相同，但这个判满的条件显然不成立。因此不能单纯的只检测最高位了，<strong>在gray码上判断为满必须同时满足以下3条：</strong></p> 
+<p>  1.wptr和同步过来的rptr的MSB不相等，因为wptr必须比rptr多折回一次。<br>   2.wptr与rptr的次高位不相等，如上图位置7和位置15，转化为二进制对应的是0111和1111，MSB不同说明多折回一次，111相同代表同一位置。<br>   3.剩下的其余位完全相等。<br> <img src="https://images2.imgbox.com/d1/db/qatlTN6b_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="24___284"></a>2.4 二进制与格雷码之间的转换</h3> 
+<h4><a id="241__286"></a>2.4.1 二进制码转换为格雷码的方法</h4> 
+<p>  该过程也称为格雷码的编码，方法是从二进制码的最右边一位（最低位）起，依次将每一位与左边一位进行异或运算，作为对应格雷码该位的值，而最左边一位（最高位）不变。 对应公式如下：</p> 
+<blockquote> 
+ <p>g[n] &lt;= b[n] //其中g[n]代表的是n位的格雷码，b[n]代表的是二进制码</p> 
+ <p>g[n] &lt;= g[n] ^ (g[n}] &gt;&gt; 1)</p> 
+ <p>例如，将自然二进制码“10110”转换为格雷码，可以形象的用下图表示其转换过程：</p> 
+ <p><img src="https://images2.imgbox.com/a9/d4/B4L1h6Ig_o.png" alt="在这里插入图片描述"><br> 简单说来，就是对二进制码右移移位，与其本身相异或即可。</p> 
+</blockquote> 
+<h4><a id="242__299"></a>2.4.2 格雷码转换为二进制码的方法</h4> 
+<p>  该过程也称为格雷码的解码，方法是从格雷码左边第二位（次高位）起，将每一位与其左边一位解码后的值异或，作为该位解码后的值，而最左边一位（最高位）的解码结果就是它本身。对应公式如下：</p> 
+<blockquote> 
+ <p>b[n] &lt;= g[n] //其中g[n]代表的是n位的格雷码，b[n]代表的是二进制码<br> b[n] &lt;= g[n]^b[n+1] //只需要计算n-1位 的即可<br> 例如，将格雷码“11101”转换为自然二进制码，可以形象的用下图表示其转换过程：<br> <img src="https://images2.imgbox.com/7e/a7/Q0P4uShy_o.png" alt="在这里插入图片描述"><br> 代码实现的过程要注意当二进制的最高位和格雷码的最高位是相同的，不需要计算直接赋值。</p> 
+</blockquote> 
+<pre><code class="prism language-c">module gray2bin # <span class="token punctuation">(</span>
+	parameter N <span class="token operator">=</span> <span class="token number">4</span><span class="token punctuation">;</span>
+<span class="token punctuation">)</span><span class="token punctuation">(</span>
+	input <span class="token punctuation">[</span>N<span class="token operator">-</span><span class="token number">1</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span> gray<span class="token punctuation">,</span>
+	output <span class="token punctuation">[</span>N<span class="token operator">-</span><span class="token number">1</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span> bin
+	<span class="token punctuation">)</span><span class="token punctuation">;</span>
+	
+	assign bin<span class="token punctuation">[</span>N<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span> <span class="token operator">=</span> gray<span class="token punctuation">[</span>N<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+	
+	genvar i<span class="token punctuation">;</span>
+	generate
+	<span class="token keyword">for</span><span class="token punctuation">(</span>i <span class="token operator">=</span> N<span class="token operator">-</span><span class="token number">2</span><span class="token punctuation">;</span> i <span class="token operator">&gt;=</span> <span class="token number">0</span> <span class="token punctuation">;</span>i<span class="token operator">++</span><span class="token punctuation">)</span>begin<span class="token operator">:</span>gray_2_bin
+		bin<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">&lt;=</span> gray<span class="token punctuation">[</span>i<span class="token punctuation">]</span> <span class="token operator">^</span> bin<span class="token punctuation">[</span>i<span class="token operator">+</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+	end
+	endgenerate
+endmodule
+</code></pre> 
+<h3><a id="23__327"></a>2.3 实现框图</h3> 
+<p><img src="https://images2.imgbox.com/1d/1a/6bdlW3vy_o.jpg" alt="在这里插入图片描述"><br>   图和代码是对应的，以左边的写端为例输入到fifo_mem的地址为waddr[ADDR_SIZE-1 : 0],waddr[ADDR_SIZE:0] 转换格雷码为waddr_gray,在读端打两拍分为为：wr_gray2,wr_gray2。</p> 
+<h3><a id="25__330"></a>2.5 实现及仿真代码</h3> 
+<pre><code class="prism language-c">`timescale <span class="token number">1</span>ns <span class="token operator">/</span> <span class="token number">1</span>ps
+module asy_FIFO_gray#<span class="token punctuation">(</span>
+    parameter DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span><span class="token punctuation">,</span>                            <span class="token comment">//数据位宽</span>
+    parameter DATA_DEPTH <span class="token operator">=</span> <span class="token number">8</span>                            <span class="token comment">//数据深度</span>
+    <span class="token punctuation">)</span><span class="token punctuation">(</span>
+        input  wire                     wclk<span class="token punctuation">,</span>
+        input  wire                     wrst_n<span class="token punctuation">,</span>
+        input  wire                     winc<span class="token punctuation">,</span>            <span class="token comment">//有效时写入数据</span>
+        input  wire  <span class="token punctuation">[</span>DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span> wdata<span class="token punctuation">,</span>
+        output wire                     wfull<span class="token punctuation">,</span>
+
+        input  wire                     rclk<span class="token punctuation">,</span>
+        input  wire                     rrst_n<span class="token punctuation">,</span>
+        input  wire                     rinc<span class="token punctuation">,</span>
+        output reg   <span class="token punctuation">[</span>DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span> rdata<span class="token punctuation">,</span>
+        output wire                      rempty
+    <span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    localparam  ADDR_SIZE <span class="token operator">=</span> $<span class="token function">clog2</span><span class="token punctuation">(</span>DATA_DEPTH<span class="token punctuation">)</span><span class="token punctuation">;</span>     <span class="token comment">//ARR_SIZE = 3;</span>
+    reg  <span class="token punctuation">[</span>ADDR_SIZE <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span> waddr<span class="token punctuation">,</span>raddr<span class="token punctuation">;</span>               <span class="token comment">//注意这里的地址宽度[3:0],是5</span>
+    wire <span class="token punctuation">[</span>ADDR_SIZE <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span> waddr_gray<span class="token punctuation">,</span> raddr_gray<span class="token punctuation">;</span>    <span class="token comment">//转换后的格雷码位宽为[5:0]</span>
+
+    reg  <span class="token punctuation">[</span>ADDR_SIZE <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span> wr_gray1<span class="token punctuation">,</span> wr_gray2<span class="token punctuation">;</span>           <span class="token comment">//读时钟域———打拍后的格雷码</span>
+    reg  <span class="token punctuation">[</span>ADDR_SIZE <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span> rw_gray1<span class="token punctuation">,</span> rw_gray2<span class="token punctuation">;</span>           <span class="token comment">//写时钟域———打拍后的格雷码</span>
+
+
+
+
+   <span class="token comment">//二进制转换为格雷码 </span>
+    assign waddr_gray <span class="token operator">=</span> waddr <span class="token operator">^</span> <span class="token punctuation">(</span>waddr <span class="token operator">&gt;&gt;</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">;</span>           <span class="token comment">//逻辑移位与算术移位的右移符号分别为“&gt;&gt;”和“&gt;&gt;&gt;”，左移同理,逻辑移位不考虑符号位</span>
+    assign raddr_gray <span class="token operator">=</span> raddr <span class="token operator">^</span> <span class="token punctuation">(</span>raddr <span class="token operator">&gt;&gt;</span> <span class="token number">1</span><span class="token punctuation">)</span> <span class="token punctuation">;</span>           <span class="token comment">//左移和右移都只补零；算术移位考虑符号位，左移补零，右移补符号位</span>
+
+
+
+    <span class="token comment">//将读端的读格雷码地址同步到写端</span>
+    <span class="token comment">//主要功能是将读写端的格雷码进行打拍,r_to_w</span>
+    <span class="token comment">//首先要注意格雷码的位宽大于地址位宽一位，所以rptr位宽为6,addrsize = 5,[5;0]</span>
+    <span class="token comment">//1</span>
+    always @<span class="token punctuation">(</span>posedge wclk or negedge wrst_n<span class="token punctuation">)</span>begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>wrst_n<span class="token punctuation">)</span> 
+            <span class="token punctuation">{<!-- --></span>rw_gray2<span class="token punctuation">,</span>rw_gray1<span class="token punctuation">}</span> <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">else</span> 
+            <span class="token punctuation">{<!-- --></span>rw_gray2<span class="token punctuation">,</span>rw_gray1<span class="token punctuation">}</span> <span class="token operator">&lt;=</span> <span class="token punctuation">{<!-- --></span>rw_gray1<span class="token punctuation">,</span>raddr_gray<span class="token punctuation">}</span><span class="token punctuation">;</span>
+    end
+
+
+    <span class="token comment">//将写端的写格雷码地址同步到读端</span>
+    <span class="token comment">//主要功能是将读写端的格雷码进行打拍，w_to_r</span>
+    <span class="token comment">//2</span>
+    always @<span class="token punctuation">(</span>posedge rclk or negedge rrst_n<span class="token punctuation">)</span>begin
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>rrst_n<span class="token punctuation">)</span> 
+            <span class="token punctuation">{<!-- --></span>wr_gray2<span class="token punctuation">,</span>wr_gray1<span class="token punctuation">}</span> <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        <span class="token keyword">else</span> 
+            <span class="token punctuation">{<!-- --></span>wr_gray2<span class="token punctuation">,</span>wr_gray1<span class="token punctuation">}</span> <span class="token operator">&lt;=</span> <span class="token punctuation">{<!-- --></span>wr_gray1<span class="token punctuation">,</span>waddr_gray<span class="token punctuation">}</span><span class="token punctuation">;</span>
+    end
+
+
+
+    <span class="token comment">//存储器读写，写信号的有效需要判断你，读总是有效的，读出当前地址内的数据</span>
+    reg <span class="token punctuation">[</span>DATA_DEPTH<span class="token operator">-</span><span class="token number">1</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span> fifo_mem <span class="token punctuation">[</span>DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">;</span>
+    wire  wclken<span class="token punctuation">,</span> rclken<span class="token punctuation">;</span>
+
+
+    <span class="token comment">//写端，当写有效时，写入数据</span>
+    always@<span class="token punctuation">(</span>posedge wclk or negedge wrst_n<span class="token punctuation">)</span> begin
+		<span class="token keyword">if</span><span class="token punctuation">(</span>wrst_n <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> begin
+			waddr <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		end
+		<span class="token keyword">else</span> <span class="token keyword">if</span><span class="token punctuation">(</span>wclken<span class="token punctuation">)</span> begin
+			fifo_mem<span class="token punctuation">[</span>waddr<span class="token punctuation">[</span>ADDR_SIZE<span class="token operator">-</span><span class="token number">1</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token operator">&lt;=</span> wdata<span class="token punctuation">;</span>
+            waddr <span class="token operator">&lt;=</span> waddr <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+		end
+	end
+
+    <span class="token comment">//读端，当读有效时，读出数据</span>
+    always@<span class="token punctuation">(</span>posedge rclk or negedge rrst_n<span class="token punctuation">)</span> begin
+		<span class="token keyword">if</span><span class="token punctuation">(</span>rrst_n <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span> begin
+			raddr <span class="token operator">&lt;=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		end
+		<span class="token keyword">else</span> <span class="token keyword">if</span><span class="token punctuation">(</span>rclken<span class="token punctuation">)</span> begin
+			rdata <span class="token operator">&lt;=</span> fifo_mem<span class="token punctuation">[</span>raddr<span class="token punctuation">[</span>ADDR_SIZE<span class="token operator">-</span><span class="token number">1</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">]</span> <span class="token punctuation">;</span>
+            raddr <span class="token operator">&lt;=</span> raddr <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">;</span>
+		end
+	end
+
+
+    <span class="token comment">//判满逻辑</span>
+    <span class="token comment">//wire wfull;</span>
+    localparam  ADDRSIZE <span class="token operator">=</span> $<span class="token function">clog2</span><span class="token punctuation">(</span>DATA_DEPTH<span class="token punctuation">)</span><span class="token punctuation">;</span>     <span class="token comment">//ARR_SIZE = 3;</span>
+    assign wfull <span class="token operator">=</span> wrst_n<span class="token operator">?</span> <span class="token punctuation">(</span>waddr_gray<span class="token operator">==</span><span class="token punctuation">{<!-- --></span><span class="token operator">~</span>rw_gray2<span class="token punctuation">[</span>ADDRSIZE<span class="token operator">:</span>ADDRSIZE<span class="token operator">-</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">,</span> rw_gray2<span class="token punctuation">[</span>ADDRSIZE<span class="token operator">-</span><span class="token number">2</span><span class="token operator">:</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">}</span><span class="token punctuation">)</span> <span class="token operator">:</span> <span class="token number">1</span>'b0<span class="token punctuation">;</span>
+
+    <span class="token comment">//判空逻辑</span>
+    <span class="token comment">//wire rempty;</span>
+    assign rempty <span class="token operator">=</span> rrst_n <span class="token operator">?</span> <span class="token punctuation">(</span>raddr_gray <span class="token operator">==</span> wr_gray2<span class="token punctuation">)</span><span class="token operator">:</span> <span class="token number">1</span>'b0<span class="token punctuation">;</span>
+
+    assign wclken <span class="token operator">=</span> winc <span class="token operator">&amp;</span> <span class="token operator">!</span>wfull<span class="token punctuation">;</span>
+    assign rclken <span class="token operator">=</span> rinc <span class="token operator">&amp;</span> <span class="token operator">!</span>rempty<span class="token punctuation">;</span>
+endmodule
+</code></pre> 
+<p>  <strong>其中需要注意的有如下几点：</strong></p> 
+<ul><li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox" disabled> 首先重要的是fifo_mem的地址深度，这里便于解释深度设置为8，但其中因为存在覆盖写，所以在格雷码的转换时Waddr要能够表示16深度的地址，所以，Waddr设置位宽为[3:0],但是在fifo_mem的输入地址要取waddr[2:0],这可以在代码的写端和读端可以有体现</li><li class="task-list-item"><input type="checkbox" class="task-list-item-checkbox" disabled> 同步地址的时钟应该使用本域时钟</li></ul> 
+<pre><code class="prism language-c">`timescale <span class="token number">1</span>ns <span class="token operator">/</span> <span class="token number">1</span>ps
+module <span class="token function">sim_asy_FIFO_gray</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    parameter DATA_WIDTH <span class="token operator">=</span> <span class="token number">8</span><span class="token punctuation">;</span>
+	parameter DATA_DEPTH <span class="token operator">=</span> <span class="token number">8</span><span class="token punctuation">;</span>
+
+    reg                      wclk<span class="token punctuation">;</span>
+    reg                      wrst_n<span class="token punctuation">;</span>
+    reg                      winc<span class="token punctuation">;</span>           <span class="token comment">//有效时写入数据</span>
+    reg   <span class="token punctuation">[</span>DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span> wdata<span class="token punctuation">;</span>
+    wire                     wfull<span class="token punctuation">;</span>
+
+    reg                      rclk<span class="token punctuation">;</span>
+    reg                      rrst_n<span class="token punctuation">;</span>
+    reg                      rinc<span class="token punctuation">;</span>
+    wire  <span class="token punctuation">[</span>DATA_WIDTH<span class="token operator">-</span><span class="token number">1</span> <span class="token operator">:</span> <span class="token number">0</span><span class="token punctuation">]</span> rdata<span class="token punctuation">;</span>
+    wire                     rempty<span class="token punctuation">;</span>
+
+
+	initial begin
+		wclk <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		forever begin
+			#<span class="token number">5</span> wclk <span class="token operator">=</span> <span class="token operator">~</span>wclk<span class="token punctuation">;</span>
+		end
+	end
+
+	initial begin
+		rclk <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		forever begin
+			#<span class="token number">10</span> rclk <span class="token operator">=</span> <span class="token operator">~</span>rclk<span class="token punctuation">;</span>
+		end
+	end
+
+	initial begin
+		wrst_n <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+		rrst_n <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+		winc <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		rinc <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		#<span class="token number">30</span> 
+		wrst_n <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		rrst_n <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+        #<span class="token number">30</span>
+		wrst_n <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+		rrst_n <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+
+
+		<span class="token comment">//write data into fifo buffer</span>
+		@<span class="token punctuation">(</span>negedge wclk<span class="token punctuation">)</span> 
+		wdata <span class="token operator">=</span> $random<span class="token punctuation">;</span>
+		winc <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+
+		<span class="token function">repeat</span><span class="token punctuation">(</span><span class="token number">8</span><span class="token punctuation">)</span> begin
+			@<span class="token punctuation">(</span>negedge wclk<span class="token punctuation">)</span> 
+			wdata <span class="token operator">=</span> $random<span class="token punctuation">;</span> <span class="token comment">// write into fifo 8 datas in all;</span>
+		end
+        
+        <span class="token comment">// read parts</span>
+		@<span class="token punctuation">(</span>negedge wclk<span class="token punctuation">)</span> 
+		winc <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+		@<span class="token punctuation">(</span>negedge rclk<span class="token punctuation">)</span> 
+		rinc <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+
+		<span class="token function">repeat</span><span class="token punctuation">(</span><span class="token number">8</span><span class="token punctuation">)</span> begin
+			@<span class="token punctuation">(</span>negedge rclk<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// read empty </span>
+		end 
+		@<span class="token punctuation">(</span>negedge rclk<span class="token punctuation">)</span>
+		rinc <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+		<span class="token comment">//write full</span>
+		# <span class="token number">80</span>
+
+		@<span class="token punctuation">(</span>negedge wclk<span class="token punctuation">)</span>
+		winc <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+		wdata <span class="token operator">=</span> $random<span class="token punctuation">;</span>
+
+		<span class="token function">repeat</span><span class="token punctuation">(</span><span class="token number">15</span><span class="token punctuation">)</span> begin
+		@<span class="token punctuation">(</span>negedge wclk<span class="token punctuation">)</span>
+			wdata <span class="token operator">=</span> $random<span class="token punctuation">;</span>
+		end
+               
+		@<span class="token punctuation">(</span>negedge rclk<span class="token punctuation">)</span> 
+		rinc <span class="token operator">=</span> <span class="token number">1</span><span class="token punctuation">;</span>
+		
+		<span class="token function">repeat</span><span class="token punctuation">(</span><span class="token number">8</span><span class="token punctuation">)</span> begin
+			@<span class="token punctuation">(</span>negedge rclk<span class="token punctuation">)</span><span class="token punctuation">;</span>  <span class="token comment">// read empty </span>
+		end 
+		@<span class="token punctuation">(</span>negedge rclk<span class="token punctuation">)</span>
+		rinc <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+		
+		@<span class="token punctuation">(</span>negedge wclk<span class="token punctuation">)</span>
+		winc <span class="token operator">=</span> <span class="token number">0</span><span class="token punctuation">;</span>
+
+
+		#<span class="token number">50</span> $finish<span class="token punctuation">;</span>
+	end
+
+	asy_FIFO_gray #<span class="token punctuation">(</span>
+			<span class="token punctuation">.</span><span class="token function">DATA_WIDTH</span><span class="token punctuation">(</span>DATA_WIDTH<span class="token punctuation">)</span><span class="token punctuation">,</span>
+			<span class="token punctuation">.</span><span class="token function">DATA_DEPTH</span><span class="token punctuation">(</span>DATA_DEPTH<span class="token punctuation">)</span>
+    <span class="token punctuation">)</span> <span class="token function">inst_asy_FIFO_gray</span> <span class="token punctuation">(</span>
+			<span class="token punctuation">.</span><span class="token function">wclk</span><span class="token punctuation">(</span>wclk<span class="token punctuation">)</span><span class="token punctuation">,</span>
+			<span class="token punctuation">.</span><span class="token function">wrst_n</span><span class="token punctuation">(</span>wrst_n<span class="token punctuation">)</span><span class="token punctuation">,</span>
+			<span class="token punctuation">.</span><span class="token function">winc</span><span class="token punctuation">(</span>winc<span class="token punctuation">)</span><span class="token punctuation">,</span>
+			<span class="token punctuation">.</span><span class="token function">wdata</span><span class="token punctuation">(</span>wdata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+			<span class="token punctuation">.</span><span class="token function">wfull</span><span class="token punctuation">(</span>wfull<span class="token punctuation">)</span><span class="token punctuation">,</span>
+
+			<span class="token punctuation">.</span><span class="token function">rclk</span><span class="token punctuation">(</span>rclk<span class="token punctuation">)</span><span class="token punctuation">,</span>
+			<span class="token punctuation">.</span><span class="token function">rrst_n</span><span class="token punctuation">(</span>rrst_n<span class="token punctuation">)</span><span class="token punctuation">,</span>
+			<span class="token punctuation">.</span><span class="token function">rinc</span><span class="token punctuation">(</span>rinc<span class="token punctuation">)</span><span class="token punctuation">,</span>
+			<span class="token punctuation">.</span><span class="token function">rdata</span><span class="token punctuation">(</span>rdata<span class="token punctuation">)</span><span class="token punctuation">,</span>
+			<span class="token punctuation">.</span><span class="token function">rempty</span><span class="token punctuation">(</span>rempty<span class="token punctuation">)</span>
+		<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+endmodule
+</code></pre> 
+<h3><a id="26__553"></a>2.6 仿真图验证</h3> 
+<p><img src="https://images2.imgbox.com/ab/de/ZQ3vMIZN_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/5f/89/lSnChSXN_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="27__556"></a>2.7 结论</h3> 
+<p>  这篇从原理和实现上都进行了记录，可以看到功能实现正确。如果有问题，可以评论交流。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/cf3778139699e4df69d8d6cc53a75a57/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Expression #1 of ORDER BY clause is not in GROUP BY clause and contains nonaggregated column ‘</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/3c962c7ff41bfd86ca583a8d8cd10daf/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Python后端Flask学习项目实践---搭建一个问答网站</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

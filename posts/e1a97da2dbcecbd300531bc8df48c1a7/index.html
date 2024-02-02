@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Hystrix浅入浅出：（二）断路器和滑动窗口 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Hystrix浅入浅出：（二）断路器和滑动窗口" />
+<meta property="og:description" content="上文《Hystrix浅入浅出：（一）背景与功能初探》已经提到过，使用Hystrix我们需要将自动熔断的业务逻辑通过Command模式来包装，于是，我们只需要继承HystrixCommand抽象类，实现run、getFallback等方法，你就拥有了一个具有基本熔断功能的类。从使用来看，所有的核心逻辑都由AbstractCommand（即HystrixCommand的父类，HystrixCommand只是对AbstractCommand进行了简单包装）抽象类串起来，从功能上来说，AbstractCommand必须将如下功能联系起来：
+策略配置：Hystrix有两种降级模型，即信号量（同步）模型和线程池（异步）模型，这两种模型所有可定制的部分都体现在了HystrixCommandProperties和HystrixThreadPoolProperties两个类中。然而还是那句老话，Hystrix只提供了配置修改的入口，没有将配置界面化，如果想在页面上动态调整配置，还需要自己实现。
+数据统计：Hystrix以命令模式的方式来控制业务逻辑以及熔断逻辑的调用时机，所以说数据统计对它来说不算难事，但如何高效、精准的在内存中统计数据，还需要一定的技巧。
+断路器：断路器可以说是Hystrix内部最重要的状态机，是它决定着每个Command的执行过程。
+监控露出：能通过某种可配置方式将统计数据展现在仪表盘上。
+一. Hystrix内部流程
+本文将主要阐述【断路器】和【数据统计】两大组件的设计和实现。在介绍两大组件之前，我们先简单了解下Hystrix工作时的内部流程，官方的图有些复杂（https://github.com/Netflix/Hystrix/wiki/How-it-Works），过于细节，这里画个简单的（只显示了关键环节）：
+上图简单罗列的一个请求（即我们包装的Command）在Hystrix内部被执行的关键过程。
+【创建Command对象】这一过程也包含了策略、资源的初始化，参看AbstractCommand的构造函数：
+protected AbstractCommand(...) { // 初始化group，group主要是用来对不同的command key进行统一管理，比如统一监控、告警等 this.commandGroup = initGroupKey(...); // 初始化command key，用来标识降级逻辑，可以理解成command的id this.commandKey = initCommandKey(...); // 初始化自定义的降级策略 this.properties = initCommandProperties(...); // 初始化线程池key，相同的线程池key将公用线程池 this.threadPoolKey = initThreadPoolKey(...); // 初始化监控器 this.metrics = initMetrics(...); // 初始化断路器 this.circuitBreaker = initCircuitBreaker(...); // 初始化线程池 this.threadPool = initThreadPool(...); // Hystrix通过SPI实现了插件机制，允许用户对事件通知、处理和策略进行自定义 this.eventNotifier = HystrixPlugins.getInstance().getEventNotifier(); this.concurrencyStrategy = HystrixPlugins.getInstance().getConcurrencyStrategy(); HystrixMetricsPublisherFactory.createOrRetrievePublisherForCommand(this.commandKey, this.commandGroup, this.metrics, this.circuitBreaker, this.properties); this.executionHook = initExecutionHook(executionHook); this.requestCache = HystrixRequestCache.getInstance(this.commandKey, this." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/e1a97da2dbcecbd300531bc8df48c1a7/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2018-05-13T08:57:30+08:00" />
+<meta property="article:modified_time" content="2018-05-13T08:57:30+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Hystrix浅入浅出：（二）断路器和滑动窗口</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p style="text-align:left;margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span lang="zh-cn">上文《</span><span lang="en-us">Hystrix浅入浅出</span><span lang="zh-cn">：（一）背景与功能初探》已经提到过，使用Hystrix我们需要将自动熔断的业务逻辑通过Command模式来包装，于是，我们只需要继承HystrixCommand抽象类，实现run、getFallback等</span><span lang="en-us">方法</span><span lang="zh-cn">，你就拥有了一个具有基本熔断功能的类。从使用来看，所有的核心逻辑都由AbstractCommand（即HystrixCommand的父类，HystrixCommand</span><span lang="en-us">只是对</span><span lang="zh-cn">AbstractCommand进行了简单包装）抽象类串起来，从功能上来说，AbstractCommand必须将如下功能联系起来：</span></p> 
+<p style="text-align:left;margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span lang="zh-cn"><img src="https://images2.imgbox.com/0d/3c/jG6iEk3Q_o.png" alt=""><br></span></p> 
+<p style="text-align:left;margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span lang="zh-cn"></span></p> 
+<p><span style="background:#00FF00;">策略配置</span>：Hystrix有两种降级模型，即信号量（同步）模型和线程池（异步）模型，这两种模型所有可定制的部分都体现在了HystrixCommandProperties和HystrixThreadPoolProperties两个类中。然而还是那句老话，Hystrix只提供了配置修改的入口，没有将配置界面化，如果想在页面上动态调整配置，还需要自己实现。</p> 
+<p><span style="background:#00FF00;">数据统计</span>：Hystrix以命令模式的方式来控制业务逻辑以及熔断逻辑的调用时机，所以说数据统计对它来说不算难事，但如何高效、精准的在内存中统计数据，还需要一定的技巧。</p> 
+<p><span style="background:#00FF00;">断路器</span>：断路器可以说是Hystrix内部最重要的状态机，是它决定着每个Command的执行过程。</p> 
+<p><span style="background:#00FF00;">监控露出</span>：能通过某种可配置方式将统计数据展现在仪表盘上。</p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;" lang="en-us"><span style="font-weight:bold;">一. Hystrix内部流程</span></p> 
+<p style="margin:0in;font-size:11pt;"><span style="font-family:'Microsoft YaHei';">本文将主要阐述【断路器】和【数据统计】两大组件的设计和实现。在介绍两大组件之前，我们先简单了解下Hystrix工作时的内部流程，官方的图有些复杂（</span><span style="font-family:Calibri;">https://github.com/Netflix/Hystrix/wiki/How-it-Works</span><span style="font-family:'Microsoft YaHei';">），过于细节，这里画个简单的（只显示了关键环节）：</span></p> 
+<p style="margin:0in;font-size:11pt;"><span style="font-family:'Microsoft YaHei';"><img src="https://images2.imgbox.com/37/a3/IQCvvPyy_o.png" alt=""><br></span></p> 
+<p style="margin:0in;font-size:11pt;"><span style="font-family:'Microsoft YaHei';"></span></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span lang="zh-cn">上图简单罗列的一个请求（即我们包装的</span><span lang="en-us">Command</span><span lang="zh-cn">）在Hystrix内部被执行的关键过程。</span></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"> </p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;">【创建Command对象】这一过程也包含了策略、资源的初始化，参看AbstractCommand的构造函数：</p> 
+<pre><code class="language-java">protected AbstractCommand(...) {
+    // 初始化group，group主要是用来对不同的command key进行统一管理，比如统一监控、告警等
+    this.commandGroup = initGroupKey(...);
+    // 初始化command key，用来标识降级逻辑，可以理解成command的id
+    this.commandKey = initCommandKey(...);
+    // 初始化自定义的降级策略
+    this.properties = initCommandProperties(...);
+    // 初始化线程池key，相同的线程池key将公用线程池
+    this.threadPoolKey = initThreadPoolKey(...);
+    // 初始化监控器
+    this.metrics = initMetrics(...);
+    // 初始化断路器
+    this.circuitBreaker = initCircuitBreaker(...);
+    // 初始化线程池
+    this.threadPool = initThreadPool(...);
+
+    // Hystrix通过SPI实现了插件机制，允许用户对事件通知、处理和策略进行自定义
+    this.eventNotifier = HystrixPlugins.getInstance().getEventNotifier();
+    this.concurrencyStrategy = HystrixPlugins.getInstance().getConcurrencyStrategy();
+    HystrixMetricsPublisherFactory.createOrRetrievePublisherForCommand(this.commandKey, this.commandGroup, this.metrics, this.circuitBreaker, this.properties);
+    this.executionHook = initExecutionHook(executionHook);
+
+    this.requestCache = HystrixRequestCache.getInstance(this.commandKey, this.concurrencyStrategy);
+    this.currentRequestLog = initRequestLog(this.properties.requestLogEnabled().get(), this.concurrencyStrategy);
+
+    /* fallback semaphore override if applicable */
+    this.fallbackSemaphoreOverride = fallbackSemaphore;
+
+    /* execution semaphore override if applicable */
+    this.executionSemaphoreOverride = executionSemaphore;
+}</code></pre> 
+<p style="margin:0in;font-size:11pt;"><span style="font-family:'Microsoft YaHei';" lang="en-us">上一篇</span><span style="font-family:'Microsoft YaHei';" lang="zh-cn">《</span><span style="font-family:'Microsoft YaHei';" lang="en-us">Hystrix浅入浅出</span><span style="font-family:'Microsoft YaHei';" lang="zh-cn">：（一）背景与功能初探》</span><span style="font-family:'Microsoft YaHei';" lang="en-us">说过</span><span style="font-family:'Microsoft YaHei';" lang="zh-cn">，因为Command对象是有状态的（比如每次请求参数可能不同），</span><span style="font-family:'Microsoft YaHei';" lang="en-us">所以每次请求都需要新创建</span><span style="font-family:Calibri;" lang="en-us">Command</span><span style="font-family:'Microsoft YaHei';" lang="zh-cn">，这么多初始化工作，如果并发量过高，会不会带来过大的系统开销？</span><span style="font-family:'Microsoft YaHei';" lang="en-us">其实构造函数中的很多初始化工作只会集中在创建第一个Command时来做</span><span style="font-family:'Microsoft YaHei';" lang="zh-cn">，后续创建的Command对象主要是从静态Map中取对应的实例来赋值，比如监控器、断路器和线程池的初始化，因为相同的Command的command</span><span style="font-family:'Microsoft YaHei';" lang="en-us"> key和</span><span style="font-family:'Microsoft YaHei';" lang="zh-cn">线程池key都是一致的，在</span><span style="font-family:'Microsoft YaHei';" lang="en-us">HystrixCommandMetrics</span><span style="font-family:'Microsoft YaHei';" lang="zh-cn">、</span><span style="font-family:'Microsoft YaHei';" lang="en-us">HystrixCircuitBreaker.Factory</span><span style="font-family:'Microsoft YaHei';" lang="zh-cn">、</span><span style="font-family:'Microsoft YaHei';" lang="en-us">HystrixThreadPool</span><span style="font-family:'Microsoft YaHei';" lang="zh-cn">中会分别有如下静态属性：</span></p> 
+<pre><code class="language-java">private static final ConcurrentHashMap&lt;String, HystrixCommandMetrics&gt; metrics = new ConcurrentHashMap&lt;String, HystrixCommandMetrics&gt;();
+ 
+private static ConcurrentHashMap&lt;String, HystrixCircuitBreaker&gt; circuitBreakersByCommand = new ConcurrentHashMap&lt;String, HystrixCircuitBreaker&gt;();
+ 
+final static ConcurrentHashMap&lt;String, HystrixThreadPool&gt; threadPools = new ConcurrentHashMap&lt;String, HystrixThreadPool&gt;();</code></pre> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span lang="en-us">可见所有Command对象都可以在这里找到自己对应的资源实例</span><span lang="zh-cn">。</span></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;" lang="en-us"><span style="font-weight:bold;">二. Hystrix的断路器设计</span></p> 
+<p style="margin:0in;font-size:11pt;"><span style="font-family:'Microsoft YaHei';" lang="en-us">断路器是</span><span style="font-family:Calibri;" lang="en-us">Hystrix</span><span style="font-family:'Microsoft YaHei';" lang="en-us">最核心的状态机</span><span style="font-family:'Microsoft YaHei';" lang="zh-cn">，只有了解它的变更条件，我们才能准确掌握Hystrix的内部行为。上面的内部流程图中【断路器状态判断】这个环节直接决定着这次请求（或者说这个Command对象）是尝试去执行正常业务逻辑（即run</span><span style="font-family:'Microsoft YaHei';" lang="en-us">()</span><span style="font-family:'Microsoft YaHei';" lang="zh-cn">）还是走降级后的逻辑（即getFallback()），断路器HystrixCircuitBreaker有三个状态，</span></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span style="background:#FFFF99;" lang="en-us">CLOSED关闭状态</span><span lang="zh-cn">：</span><span lang="en-us">允许流量通过</span><span lang="zh-cn">。</span></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span style="background:#FFFF99;" lang="en-us">OPEN打开状态</span><span lang="en-us">：不允许流量通过</span><span lang="zh-cn">，即处于降级状态，走降级逻辑。</span></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span style="background:#FFFF99;" lang="en-us">HALF_OPEN半开状态</span><span lang="en-us">：允许某些流量通过</span><span lang="zh-cn">，并关注这些流量的结果，如果出现超时、异常等情况，将进入</span><span lang="en-us">OPEN状态</span><span lang="zh-cn">，如果成功，那么将进入</span><span lang="en-us">CLOSED状态</span><span lang="zh-cn">。</span></p> 
+<p style="margin:0in;font-size:11pt;"><span style="font-family:'Microsoft YaHei';">为了能做到状态能按照指定的顺序来流转，并且是线程安全的，断路器的实现类</span><span style="font-family:Calibri;">HystrixCircuitBreakerImpl</span><span style="font-family:'Microsoft YaHei';">使用了</span><span style="font-family:Calibri;">AtomicReference</span><span style="font-family:'Microsoft YaHei';">：</span></p> 
+<pre><code class="language-java">enum Status {
+    CLOSED, OPEN, HALF_OPEN;
+}
+
+// 断路器初始状态肯定是关闭状态
+private final AtomicReference&lt;Status&gt; status = new AtomicReference&lt;Status&gt;(Status.CLOSED);</code></pre> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:12pt;"><span lang="en-us">断路器在状态变化时</span><span lang="zh-cn">，使用了</span><span lang="en-us">AtomicReference#</span><span lang="zh-cn">compareAndSet来确保当条件满足时，只有一笔请求能成功改变状态。各状态流转顺序如下：</span></p> 
+<p><img src="https://images2.imgbox.com/08/71/qURU1eGE_o.png" alt=""></p> 
+<p><span style="font-family:'Microsoft YaHei';font-size:12pt;text-align:left;">那么，什么条件下断路器会改变状态？</span></p> 
+<p><span style="font-family:'Microsoft YaHei';font-size:12pt;background:rgb(219,229,241);">1. </span><span style="font-family:'Microsoft YaHei';font-size:11pt;background:rgb(219,229,241);">CLOSED -&gt; OPEN</span><span style="font-family:'Microsoft YaHei';font-size:11pt;"> :</span></p> 
+<p><span lang="en-us" style="font-family:'Microsoft YaHei';font-size:11pt;">时间窗口内</span><span lang="zh-cn" style="font-family:'Microsoft YaHei';font-size:11pt;">（默认</span><span lang="en-us" style="font-family:'Microsoft YaHei';font-size:11pt;">10秒</span><span lang="zh-cn" style="font-family:'Microsoft YaHei';font-size:11pt;">）</span><span lang="en-us" style="font-family:'Microsoft YaHei';font-size:11pt;">请求量大于请求量阈值（即circuitBreakerRequestVolumeThreshold</span><span lang="zh-cn" style="font-family:'Microsoft YaHei';font-size:11pt;">，默认值是</span><span lang="en-us" style="font-family:'Microsoft YaHei';font-size:11pt;">20），并且该时间窗口内错误率大于错误率阈值（即circuitBreakerErrorThresholdPercentage</span><span lang="zh-cn" style="font-family:'Microsoft YaHei';font-size:11pt;">，默认值为</span><span lang="en-us" style="font-family:'Microsoft YaHei';font-size:11pt;">50</span><span lang="zh-cn" style="font-family:'Microsoft YaHei';font-size:11pt;">，表示</span><span lang="en-us" style="font-family:'Microsoft YaHei';font-size:11pt;">50%），那么断路器的状态将由默认的CLOSED状态变为OPEN状态。看代码可能更直接</span><span lang="zh-cn" style="font-family:'Microsoft YaHei';font-size:11pt;">：</span></p> 
+<pre><code class="language-java">// 检查是否超过了我们设置的断路器请求量阈值
+if (hc.getTotalRequests() &lt; properties.circuitBreakerRequestVolumeThreshold().get()) {
+    // 如果没有超过统计窗口的请求量阈值,则不改变断路器状态，
+    // 如果它是CLOSED状态，那么仍然是CLOSED.
+    // 如果它是HALF-OPEN状态，我们需要等待请求被成功执行，
+    // 如果它是OPEN状态， 我们需要等待睡眠窗口过去。
+} else {
+    if (hc.getErrorPercentage() &lt; properties.circuitBreakerErrorThresholdPercentage().get()) {
+        //如果没有超过统计窗口的错误率阈值,则不改变断路器状态，,
+        // 如果它是CLOSED状态，那么仍然是CLOSED.
+        // 如果它是HALF-OPEN状态，我们需要等待请求被成功执行，
+        // 如果它是OPEN状态， 我们需要等待【睡眠窗口】过去。
+    } else {
+        // 如果错误率太高，那么将变为OPEN状态
+        if (status.compareAndSet(Status.CLOSED, Status.OPEN)) {
+            // 因为断路器处于打开状态会有一个时间范围，所以这里记录了变成OPEN的时间
+            circuitOpened.set(System.currentTimeMillis());
+        }
+    }
+}</code></pre> 
+<p style="margin:0in;"><span style="font-family:'Microsoft YaHei';font-size:12pt;" lang="en-us">这里的错误率是个整数</span><span style="font-family:'Microsoft YaHei';font-size:12pt;" lang="zh-cn">，即</span><span style="font-family:Menlo;font-size:9pt;color:#660E7A;background:#FFFFFF;" lang="en-us"><strong>errorPercentage</strong></span><span style="font-family:Menlo;font-size:9pt;color:#000000;background:#FFFFFF;" lang="en-us">= (</span><span style="font-family:Menlo;font-size:9pt;color:#000080;background:#FFFFFF;" lang="en-us"><strong>int</strong></span><span style="font-family:Menlo;font-size:9pt;color:#000000;background:#FFFFFF;" lang="en-us">) ((</span><span style="font-family:Menlo;font-size:9pt;color:#000080;background:#FFFFFF;" lang="en-us"><strong>double</strong></span><span style="font-family:Menlo;font-size:9pt;color:#000000;background:#FFFFFF;" lang="en-us">) </span><span style="font-family:Menlo;font-size:9pt;color:#660E7A;background:#FFFFFF;" lang="en-us"><strong>errorCount </strong></span><span style="font-family:Menlo;font-size:9pt;color:#000000;background:#FFFFFF;" lang="en-us">/ </span><span style="font-family:Menlo;font-size:9pt;color:#660E7A;background:#FFFFFF;" lang="en-us"><strong>totalCount </strong></span><span style="font-family:Menlo;font-size:9pt;color:#000000;background:#FFFFFF;" lang="en-us">* </span><span style="font-family:Menlo;font-size:9pt;color:#0000FF;background:#FFFFFF;" lang="en-us">100</span><span style="font-family:Menlo;font-size:9pt;color:#000000;background:#FFFFFF;" lang="en-us">);</span><span style="font-family:'Microsoft YaHei';font-size:12pt;" lang="zh-cn">，至于睡眠窗口，下面会提到。</span></p> 
+<br> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:12pt;" lang="en-us"><span style="background:#DBE5F1;">2. OPEN -&gt;HALF_OPEN</span>: </p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:12pt;" lang="en-us"></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span lang="zh-cn">前面说过，当进入</span><span lang="en-us">OPEN状态后</span><span lang="zh-cn">，会进入一段睡眠窗口，即只会</span><span lang="en-us">OPEN一段时间</span><span lang="zh-cn">，所以这个睡眠窗口过去，就会“自动”从</span><span lang="en-us">OPEN状态变成HALF_OPEN状态</span><span lang="zh-cn">，这种设计是为了能做到弹性恢复，这种状态的变更，并不是由调度线程来做，而是由请求来触发，每次请求都会进行如下检查：</span></p> 
+<pre><code class="language-java">@Override
+public boolean attemptExecution() {
+    if (properties.circuitBreakerForceOpen().get()) {
+        return false;
+    }
+    if (properties.circuitBreakerForceClosed().get()) {
+        return true;
+    }
+    // circuitOpened值等于1说明断路器状态为CLOSED
+    if (circuitOpened.get() == -1) {
+        return true;
+    } else {
+        if (isAfterSleepWindow()) {
+            // 睡眠窗口过去后只有第一个请求能被执行
+            // 如果执行成功，那么状态将会变成CLOSED
+            // 如果执行失败，状态仍变成OPEN
+            if (status.compareAndSet(Status.OPEN, Status.HALF_OPEN)) {
+                return true;
+            } else {
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+}
+
+// 睡眠窗口是否过去
+private boolean isAfterSleepWindow() {
+    // 还记得上面CLOSED-&gt;OPEN时记录的时间吗？
+    final long circuitOpenTime = circuitOpened.get();
+    final long currentTime = System.currentTimeMillis();
+    final long sleepWindowTime = properties.circuitBreakerSleepWindowInMilliseconds().get();
+    return currentTime &gt; circuitOpenTime + sleepWindowTime;
+}
+</code></pre> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;" lang="en-us"><span style="background:#DBE5F1;">3. HALF_OPEN -&gt;CLOSED </span>: </p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;" lang="en-us"></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span lang="en-us">变为半开状态后</span><span lang="zh-cn">，会放第一笔请求去执行，并跟踪它</span><span lang="en-us">的执行结果</span><span lang="zh-cn">，如果是成功，那么将由</span><span lang="en-us">HALF_OPEN状态变成CLOSED状态</span><span lang="zh-cn">：</span></p> 
+<pre><code class="language-java">@Override
+public void markSuccess() {
+    if (status.compareAndSet(Status.HALF_OPEN, Status.CLOSED)) {
+        //This thread wins the race to close the circuit - it resets the stream to start it over from 0
+        metrics.resetStream();
+        Subscription previousSubscription = activeSubscription.get();
+        if (previousSubscription != null) {
+            previousSubscription.unsubscribe();
+        }
+        Subscription newSubscription = subscribeToStream();
+        activeSubscription.set(newSubscription);
+        // 已经进入了CLOSED阶段，所以将OPEN的修改时间设置成-1
+        circuitOpened.set(-1L);
+    }
+}
+</code></pre> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;" lang="en-us"><span style="background:#DBE5F1;">4. HALF_OPEN -&gt;OPEN </span>: </p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;" lang="en-us"></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span lang="en-us">变为半开状态时</span><span lang="zh-cn">，</span><span lang="en-us">如果第一笔被放去执行的请求执行失败</span><span lang="zh-cn">（资源获取失败、异常、超时等），就会由</span><span lang="en-us">HALP_OPEN状态再变为OPEN状态</span><span lang="zh-cn">：</span></p> 
+<pre><code class="language-java">@Override
+public void markNonSuccess() {
+    if (status.compareAndSet(Status.HALF_OPEN, Status.OPEN)) {
+        // This thread wins the race to re-open the circuit - it resets the start time for the sleep window
+        circuitOpened.set(System.currentTimeMillis());
+    }
+}</code></pre> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:12pt;"><span style="font-weight:bold;" lang="en-us">三. 滑动窗口</span><span style="font-weight:bold;" lang="zh-cn">（滚动窗口）</span></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span lang="zh-cn">上面提到的断路器需要的</span><span lang="en-us">时间窗口请求量和错误率这两个统计数据</span><span lang="zh-cn">，都是指固定时间长度内的统计数据，断路器的目标，就是根据这些统计数据来预判并决定系统下一步的行为，Hystrix通过滑动窗口来对数据进行“平滑”统计，默认情况下，一个滑动窗口包含</span><span lang="en-us">10个桶</span><span lang="zh-cn">（</span><span lang="en-us">Bucket</span><span lang="zh-cn">），每个桶时间宽度是</span><span lang="en-us">1秒</span><span lang="zh-cn">，负责</span><span lang="en-us">1秒的数据统计</span><span lang="zh-cn">。滑动窗口包含的总时间以及其中的桶数量都是可以配置的，来张官方的截图认识下滑动窗口：</span></p> 
+<p><img src="https://images2.imgbox.com/39/b0/5REljJUg_o.png" alt=""></p> 
+<p></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span lang="zh-cn">上图的每个小矩形代表一个桶，可以看到，每个桶都记录着</span><span lang="en-us">1</span><span lang="zh-cn">秒内的四个指标数据：成功量、失败量、超时量和拒绝量，这里的拒绝量指的就是上面流程图中【信号量</span><span lang="en-us">/线程池资源检查</span><span lang="zh-cn">】中被拒绝的流量。</span><span lang="en-us">10个桶合起来是一个完整的滑动窗口</span><span lang="zh-cn">，所以计算一个滑动窗口的总数据需要将</span><span lang="en-us">10个桶的数据加起来</span><span lang="zh-cn">。</span></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"> </p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"><span lang="zh-cn">我们现在来具体看看滑动窗口和桶的设计，如果将滑动窗口设计成对一个长度为10的整形数组的操作，第一个想到的应该是AtomicLongArray，AtomicLongArray中每个位置的数据都能线程安全的操作，提供了譬如incrementAndGet、getAndSet、compareAndSet等常用方法。但由于一个桶需要维护四个指标，如果用四个AtomicLongArray来实现，做法不够高级，于是我们想到了AtomicReferenceArray</span><span lang="en-us">&lt;Bucket&gt;</span><span lang="zh-cn">，</span><span lang="en-us">Bucket对象内部可以用</span><span lang="zh-cn">AtomicLong来</span><span lang="en-us">维护着这四个指标</span><span lang="zh-cn">。滑动窗口和桶的设计特别讲究技巧，需要尽可能做到性能、数据准确性两方面的极致，我们来看Hystrix是如何做到的。</span></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;"> </p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:11pt;">桶的数据统计简单来说可以分为两类，一类是简单自增计数器，比如请求量、错误量等，另一类是并发最大值，比如一段时间内的最大并发量（或者说线程池的最大任务数），下面是桶类Bucket的定义：</p> 
+<pre><code class="language-java">class Bucket {
+    // 标识是哪一秒的桶数据
+    final long windowStart;
+    // 如果是简单自增统计数据，那么将使用adderForCounterType
+    final LongAdder[] adderForCounterType;
+    // 如果是最大并发类的统计数据，那么将使用updaterForCounterType
+    final LongMaxUpdater[] updaterForCounterType;
+
+    Bucket(long startTime) {
+        this.windowStart = startTime;
+
+        // 预分配内存，提高效率，不同事件对应不同的数组index
+        adderForCounterType = new LongAdder[HystrixRollingNumberEvent.values().length];
+        for (HystrixRollingNumberEvent type : HystrixRollingNumberEvent.values()) {
+            if (type.isCounter()) {
+                adderForCounterType[type.ordinal()] = new LongAdder();
+            }
+        }
+
+        // 预分配内存，提高效率，不同事件对应不同的数组index
+        updaterForCounterType = new LongMaxUpdater[HystrixRollingNumberEvent.values().length];
+        for (HystrixRollingNumberEvent type : HystrixRollingNumberEvent.values()) {
+            if (type.isMaxUpdater()) {
+                updaterForCounterType[type.ordinal()] = new LongMaxUpdater();
+                // initialize to 0 otherwise it is Long.MIN_VALUE
+                updaterForCounterType[type.ordinal()].update(0);
+            }
+        }
+    }
+    ...略...
+ }</code></pre> 
+<p>我们可以看到，并没有用所谓的AtomicLong，为了方便的管理各种事件（参见com.netflix.hystrix.HystrixEventType）的数据统计，Hystrix对不同的事件使用不同的数组index（即枚举的顺序），这样对于某个桶（即某一秒）的指定类型的数据，总能从数组中找到对应的<span style="background:#00FF00;">LongAdder</span><span style="background:#00FF00;">（用于统计前面说的简单自增）</span>或<span style="background:#00FF00;">LongMaxUpdater</span><span style="background:#00FF00;">（用于统计前面说的最大并发值）</span>对象来进行自增或更新操作。对于性能有要求的中间件或库类都避不开要CPUCache优化的问题，比如cache line，以及cache line带来的false sharing问题。Bucket的内部并没有使用AtomicLong，而是使用了JDK8新提供的LongAdder，在高并发的单调自增场景，LongAdder提供了比AtomicLong更好的性能，至于LongAdder的设计思想，本文不展开，感兴趣的朋友可以去拜读Doug Lea大神的代码（有意思的是Hystrix没有直接使用JDK中的LongAdder，而是copy过来改了改）。LongMaxUpdater也是类似的，它和LongAddr一样都派生于Striped64，这里不再展开。</p> 
+<p>滑动窗口由多个桶组成，业界一般的做法是将数组做成环，Hystrix中也类似，多个桶是放在AtomicReferenceArray&lt;Bucket&gt;来维护的，为了将其做成环，需要保存头尾的引用，于是有了ListState类： </p> 
+<pre><code class="language-java">class ListState {
+    /*
+     * 这里的data之所以用AtomicReferenceArray而不是普通数组，是因为data需要
+     * 在不同的ListState对象中跨线程来引用，需要可见性和并发性的保证。
+     */
+    private final AtomicReferenceArray&lt;Bucket&gt; data;
+    private final int size;
+    private final int tail;
+    private final int head;
+
+    private ListState(AtomicReferenceArray&lt;Bucket&gt; data, int head, int tail) {
+        this.head = head;
+        this.tail = tail;
+        if (head == 0 &amp;&amp; tail == 0) {
+            size = 0;
+        } else {
+            this.size = (tail + dataLength - head) % dataLength;
+        }
+        this.data = data;
+    }
+   ...略...
+}
+</code></pre> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:12pt;"><span lang="en-us">我们可以发现</span><span lang="zh-cn">，真正的数据是data，而ListState只是一个时间段的数据快照而已，所以tail和head都是final，这样做的好处是我们不需要去为head、tail的原子操作而苦恼，转而变成对ListState的持有操作，所以滑动窗口看起来如下：</span></p> 
+<div style="text-align:center;"> 
+ <img src="https://images2.imgbox.com/09/ef/pFBIN4EI_o.png" style="font-size:11pt;" alt=""> 
+</div> 
+<div style="text-align:left;"> 
+ <p style="margin:0in;font-family:'Microsoft YaHei';"><span style="font-size:11pt;" lang="zh-cn">我们可以看到，由于默认一个滑动窗口包含</span><span style="font-size:11pt;" lang="en-us">10个桶</span><span style="font-size:11pt;" lang="zh-cn">，所以</span><span style="font-size:11pt;" lang="en-us">AtomicReferenceArray&lt;Bucket&gt;的size得达到10+1=11才能“滑动/滚动”起来</span><span style="font-size:11pt;" lang="zh-cn">，在确定的某一秒内，只有一个桶被更新，其他的桶数据都没有变化。既然通过</span><span style="font-size:12pt;" lang="zh-cn">ListState可以拿到所有的数据，那么我们只需要持有最新的ListState对象即可，为了能做到可见性和原子操作，于是有了环形桶类</span><span style="font-size:11pt;" lang="en-us">BucketCircularArray</span><span style="font-size:11pt;" lang="zh-cn">：</span></p> 
+</div> 
+<pre><code class="language-java">class BucketCircularArray implements Iterable&lt;Bucket&gt; {
+    // 持有最新的ListState
+    private final AtomicReference&lt;ListState&gt; state;
+        ...略...
+}</code></pre> 
+<p style="margin:0in;font-family:'Microsoft YaHei';"><span style="font-size:12pt;" lang="en-us">我们注意到</span><span style="font-size:11pt;" lang="en-us">Buck</span><span style="font-size:12pt;" lang="en-us">etCircularArray实现了迭代器接口</span><span style="font-size:12pt;" lang="zh-cn">，这是因为我们输出给断路器的数据需要计算滑动窗口中的所有桶，于是你可以看到真正的滑动窗口类</span><span style="font-size:12pt;" lang="en-us">HystrixRollingNumber</span><span style="font-size:12pt;" lang="zh-cn">有如下属性和方法：</span></p> 
+<pre><code class="language-java">public class HystrixRollingNumber {
+    // 环形桶数组
+    final BucketCircularArray buckets;
+ 
+    // 获取该事件类型当前滑动窗口的统计值
+    public long getRollingSum(HystrixRollingNumberEvent type) {
+        Bucket lastBucket = getCurrentBucket();
+        if (lastBucket == null)
+            return 0;
+    
+        long sum = 0;
+        // BucketCircularArray实现了迭代器接口环形桶数组
+        for (Bucket b : buckets) {
+            sum += b.getAdder(type).sum();
+        }
+        return sum;
+    }
+    ...略...
+}
+</code></pre> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:12pt;"><span lang="en-us">断路器就是通过监控来从HystrixRollingNumber的getRollingSum方法来获取统计值的</span><span lang="zh-cn">。</span></p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:12pt;"> </p> 
+<p style="margin:0in;font-family:'Microsoft YaHei';font-size:12pt;"><span lang="zh-cn">到这里断路器和滑动窗口的核心部分已经分析完了，当然里面还有不少细节没有提到，感兴趣的朋友可以去看一下源码。Hystrix中通过RxJava来实现了事件的发布和订阅，所以如果想深入了解Hystrix，需要熟悉RxJava，而Rx</span><span lang="en-us">Java在服务端的应用没有像客户端那么广</span><span lang="zh-cn">，一个原因是场景的限制，还一个原因是大多数开发者认为RxJava设计的过于复杂，加上响应式编程模型，有一定的入门门槛。</span></p> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br> 
+<br>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/7360a50bc14430447b10571351daa451/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">华为eNSP静态路由下一跳实验</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/3816d426c8f21d540d3a9febd9022620/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">长腔耗散孤子锁模光纤激光器</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

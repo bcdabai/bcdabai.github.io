@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>MWORKS.Syslab 如何统一 Julia、C/C&#43;&#43;、Python 乃至 MATLAB —— 解密多语言统一的底层机制 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="MWORKS.Syslab 如何统一 Julia、C/C&#43;&#43;、Python 乃至 MATLAB —— 解密多语言统一的底层机制" />
+<meta property="og:description" content="科学世界蓬勃发展，注入了许多时代特有的活力。年轻理科生们的口中逐渐出现了诸如“调参侠”“调包小子”“炼丹师”等新潮的调侃词语，这些来自机器学习/深度学习领域的“梗”在社交网络中逐渐扩散，让人们不禁感叹科学计算已经成为了炙手可热的“显学”。
+虽然科学计算正呈现大兴之势，但其内生的复杂性和综合性仍然导致生态分化严重。尽管Python和C/C&#43;&#43;是主流方案，但该方案在科学计算领域并非万能；注重开箱即用的工程师们依然使用MATLAB和R，而追求抽象复用和语言底层能力的框架开发者们则热衷于折腾Julia。
+同元软控MWORKS.Syslab是现代化统一科学计算环境，经多年综合权衡，底层选用性能/功能上限相对高的Julia语言，同时，集成诸如Python、M语言等现有科学计算生态。虽然MWORKS.Syslab使用Julia作为底层，但生态体量庞大的Python开发者也能平滑适应Syslab开发环境。在MWORKS.Syslab中，用户可以点击左上方“新建”按钮，轻松创建Python脚本进行开发，对于熟悉Python开发的用户，他们会发现MWORKS.Syslab移植了Python开发的常见工作流，其中一个不可忽视的关键特性是，在MWORKS.Syslab中，Python程序可以通过先进的“Seamless FFI”方式轻松访问 Julia 编写的 MWORKS.Syslab 函数库。
+△ Syslab Python调用Julia案例
+图中的TyPlot和TyMathCore其实是由Julia编写的图形库和数学库，然而它们如图被导入和使用时，看起来就像普通的Python库一样。这种方便的技术是如何实现的呢？
+答案就是利用了前面所提到的FFI（外部函数接口）。FFI 技术用于实现不同编程语言间的相互调用，从而使上图中这种跨语言的兼容成为可能。正如上图所示，Syslab 通过FFI技术，实现了在Python中调用Julia编写的TyPlot和 TyMathCore。部分读者或许并不熟悉FFI，但其相关技术却无处不在，尽管整个科学计算生态错综复杂，但底层则是统一的：一个经典例子是 Fortran 编写的线性代数计算库，无论是 NumPy、PyTorch、Julia 还是 R，都依赖 FFI 技术调用这些 Fortran 库。
+在解释什么是FFI以及MWORKS.Syslab做了什么有趣的事之前，我们不妨先看看这个领域的背景。
+基于C语言的 FFI 技术，是科学计算领域统合多语言的基石。全球有成百上千种独特的编程语言，其中大部分都在其特定领域发挥着不可替代的作用。为了满足现实场景的复杂需求，我们常常需将多种技术整合在一块。因此，很多时候我们需要某种跨语言调用技术，以便同时使用多种编程语言来达成目的，而对科学计算领域来说，这个技术就是基于C FFI的多语言互调用。
+我们常见的网络服务就是一种简洁的跨语言调用技术，但由于性能问题，该技术不适用科学计算领域。总的来说，网络服务端提供的服务可以被视为由服务器所用的编程语言导出的“函数”，来自网络的JSON数据则作为这些函数的“参数”。“参数”通过反序列化过程转化为相应语言能够理解的数据格式，然后被服务器提供的服务处理，这个过程就被视为“函数调用”。最后，函数调用的结果会被序列化为JSON数据，并反馈给客户端。在跨语言调用的意义上，客户端处理数据的过程与服务端是相似的。
+虽然，基于网络服务的跨语言调用方案普遍适用于非科学计算领域。但对科学计算领域来说，情况则截然不同。
+让我们看下图这个例子：
+△Python远程调用：服务端/客户端
+根据上图代码启动服务器，并在客户端运行10000次本地请求，运行时间超过20s。
+根据上述实验可知，仅仅10000次基于网络的同步跨语言调用，Python的开销长达20s。熟悉Python底层的朋友都知道，Python的基础四则运算，性能基本在100 纳秒内，在网络调用中却退化到毫秒级，性能上相差四个数量级。这样的性能损耗，对于科学计算这样大部分都是低开销密集计算的场景来说，即使基于网络的跨语言调用再怎么方便，也无法满足要求。
+实际上，在计算性能要求较高的场景中，传统的跨语言互调用方案通常采用的是“进程内互调用”的FFI技术，且通常是基于C的FFI技术。在这种方案中，C API成为了C FFI的核心概念。
+C语言作为几乎所有编程语言的底层，有着一项特别的殊荣：绝大多数语言都提供一组C API，从而支持与C语言的进程内互操作。像Python这样有运行时的语言，以动态链接库的形式存在 (libpython.so)，这些动态链接库导出一组完整的、能精细控制该语言的C函数符号；而像Rust这样没有运行时的语言，则由编译器直接生成二进制文件，其编译器支持按需导入或导出指定的C函数符号。上述C函数符号，以及对其调用方式、参数内存的约定，就是技术领域常说的C API。
+△ Python Stable C API 例子：PyLong_FromSsize_t
+上述事实揭示了一项普遍情况：绝大多数语言都支持导出C API，让外部语言操作自身；同时，它们也支持导入C API，以便操作其他外部语言。因此，从理论上来说，基于C API，任意两门编程语言都可以轻松相互调用。
+△ 基于C API的Python/Julia简单互调用
+但是，事情真的如此简单吗？
+△ Python/Julia互调用问题：复杂数据类型
+以上述例子为例，它揭示了一个关键问题：不同语言之间复杂数据的不兼容性。具体来说，在Julia中如上图所示定义一个MyStruct类型，与在Python中定义MyStruct类型存在本质差异。
+为了更好地理解这种差异，我们可以从一个简单的角度来考察：比较Julia的MyStruct实例和Python的MyStruct实例在内存方面的差异。
+△ Python/Julia定义的相似结构MyStruct的内存差异
+结果显示，Julia的MyStruct和C结构体类似，共16字节，其内存结构相对易于理解。然而，Python作为一种高级解释语言，依赖于一个复杂的数据模型。在Python中，MyStruct的一个实例表面上占据了48个字节，其中包含了大量的指针（类似于C&#43;&#43;的虚表结构），还包含一个指向哈希结构的数据指针，这个哈希结构中存储了MyStruct实例的字段。
+如此不同的结构，为什么两者都能使用简单的a.b语法来存取字段呢？
+这是因为：在C API层面，不同编程语言的语义截然不同。Julia为语法a.b赋予了指针简单存取的语义，而Python则具有更复杂的语义。在Python中，对象首先查找其类型头指针，再经过一系列复杂的查找，最终找到适用于MyStruct类型的函数指针，用于对象属性访问。通过调用该函数指针，最终在用户层面呈现为一种黑盒式的、易于理解的字段存取行为。
+△ 疑惑：Julia结构体在Python中是一个整数？" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/1aba9b71efaa9b6293752c58915fc304/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2024-01-25T17:34:52+08:00" />
+<meta property="article:modified_time" content="2024-01-25T17:34:52+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">MWORKS.Syslab 如何统一 Julia、C/C&#43;&#43;、Python 乃至 MATLAB —— 解密多语言统一的底层机制</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>科学世界蓬勃发展，注入了许多时代特有的活力。年轻理科生们的口中逐渐出现了诸如“调参侠”“调包小子”“炼丹师”等新潮的调侃词语，这些来自机器学习/深度学习领域的“梗”在社交网络中逐渐扩散，让人们不禁感叹科学计算已经成为了炙手可热的“显学”。</p> 
+<p></p> 
+<p>虽然科学计算正呈现大兴之势，但其内生的复杂性和综合性仍然导致生态分化严重。尽管Python和C/C++是主流方案，但该方案在科学计算领域并非万能；注重开箱即用的工程师们依然使用MATLAB和R，而追求抽象复用和语言底层能力的框架开发者们则热衷于折腾Julia。</p> 
+<p></p> 
+<p>同元软控MWORKS.Syslab是现代化统一科学计算环境，经多年综合权衡，底层选用性能/功能上限相对高的Julia语言，同时，集成诸如Python、M语言等现有科学计算生态。虽然MWORKS.Syslab使用Julia作为底层，但生态体量庞大的Python开发者也能平滑适应Syslab开发环境。在MWORKS.Syslab中，用户可以点击左上方“新建”按钮，轻松创建Python脚本进行开发，对于熟悉Python开发的用户，他们会发现MWORKS.Syslab移植了Python开发的常见工作流，其中一个不可忽视的关键特性是，在MWORKS.Syslab中，Python程序可以通过先进的“Seamless FFI”方式轻松访问 Julia 编写的 MWORKS.Syslab 函数库。</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="812" src="https://images2.imgbox.com/28/4b/XEpv9Fvu_o.png" width="1080"></p> 
+<p style="text-align:center;">△ Syslab Python调用Julia案例</p> 
+<p></p> 
+<p>图中的TyPlot和TyMathCore其实是由Julia编写的图形库和数学库，然而它们如图被导入和使用时，看起来就像普通的Python库一样。这种方便的技术是如何实现的呢？</p> 
+<p></p> 
+<p>答案就是利用了前面所提到的<strong>FFI</strong>（外部函数接口）。<strong>FFI 技术用于实现不同编程语言间的相互调用</strong>，从而使上图中这种<strong>跨语言的兼容成为可能</strong>。正如上图所示，Syslab 通过FFI技术，实现了在Python中调用Julia编写的TyPlot和 TyMathCore。部分读者或许并不熟悉FFI，但其相关技术却无处不在，尽管整个科学计算生态错综复杂，但底层则是统一的：一个经典例子是 Fortran 编写的线性代数计算库，无论是 NumPy、PyTorch、Julia 还是 R，都依赖 FFI 技术调用这些 Fortran 库。</p> 
+<p></p> 
+<p>在解释什么是FFI以及MWORKS.Syslab做了什么有趣的事之前，我们不妨先看看这个领域的背景。</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="335" src="https://images2.imgbox.com/e3/28/fnvD7mCF_o.png" width="1054"></p> 
+<p></p> 
+<p>基于C语言的 FFI 技术，是科学计算领域统合多语言的基石。全球有成百上千种独特的编程语言，其中大部分都在其特定领域发挥着不可替代的作用。为了满足现实场景的复杂需求，我们常常需将多种技术整合在一块。因此，很多时候我们需要某种跨语言调用技术，以便同时使用多种编程语言来达成目的，而对科学计算领域来说，这个技术就是基于C FFI的多语言互调用。</p> 
+<p></p> 
+<p>我们常见的网络服务就是一种简洁的跨语言调用技术，但由于性能问题，该技术不适用科学计算领域。总的来说，网络服务端提供的服务可以被视为由服务器所用的编程语言导出的“函数”，来自网络的JSON数据则作为这些函数的“参数”。“参数”通过反序列化过程转化为相应语言能够理解的数据格式，然后被服务器提供的服务处理，这个过程就被视为“函数调用”。最后，函数调用的结果会被序列化为JSON数据，并反馈给客户端。在跨语言调用的意义上，客户端处理数据的过程与服务端是相似的。</p> 
+<p></p> 
+<p>虽然，基于网络服务的跨语言调用方案普遍适用于非科学计算领域。但对科学计算领域来说，情况则截然不同。</p> 
+<p></p> 
+<p>让我们看下图这个例子：</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="642" src="https://images2.imgbox.com/5c/7f/GSoe9P8L_o.png" width="1080"></p> 
+<p style="text-align:center;">△Python远程调用：服务端/客户端</p> 
+<p></p> 
+<p>根据上图代码启动服务器，并在客户端运行10000次本地请求，运行时间超过20s。</p> 
+<p></p> 
+<p>根据上述实验可知，仅仅10000次基于网络的同步跨语言调用，Python的开销长达20s。熟悉Python底层的朋友都知道，Python的基础四则运算，性能基本在100 纳秒内，在网络调用中却退化到毫秒级，性能上相差四个数量级。这样的性能损耗，对于科学计算这样大部分都是低开销密集计算的场景来说，即使基于网络的跨语言调用再怎么方便，也无法满足要求。</p> 
+<p></p> 
+<p>实际上，<strong>在计算性能要求较高的场景中，传统的跨语言互调用方案通常采用的是“进程内互调用”的FFI技术，且通常是基于C的FFI技术。</strong><strong>在这种方案中，C  API成为了C FFI的核心概念。</strong></p> 
+<p></p> 
+<p>C语言作为几乎所有编程语言的底层，有着一项特别的殊荣：绝大多数语言都提供一组C API，从而支持与C语言的进程内互操作。像Python这样有运行时的语言，以动态链接库的形式存在 (libpython.so)，这些动态链接库导出一组完整的、能精细控制该语言的C函数符号；而像Rust这样没有运行时的语言，则由编译器直接生成二进制文件，其编译器支持按需导入或导出指定的C函数符号。<strong>上述C函数符号，以及对其调用方式、参数内存的约定，就是技术领域常说的C API。</strong></p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="112" src="https://images2.imgbox.com/a7/69/4GGBt8lr_o.png" width="630"></p> 
+<p style="text-align:center;">△ Python Stable C API 例子：PyLong_FromSsize_t</p> 
+<p></p> 
+<p>上述事实揭示了一项普遍情况：绝大多数语言都支持导出C API，让外部语言操作自身；同时，它们也支持导入C API，以便操作其他外部语言。因此，<strong>从理论上来说，基于C API，任意两门编程语言都可以轻松相互调用。</strong></p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="846" src="https://images2.imgbox.com/0b/eb/jTNijD6A_o.png" width="1080"></p> 
+<p style="text-align:center;">△ 基于C API的Python/Julia简单互调用</p> 
+<p></p> 
+<p>但是，事情真的如此简单吗？</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="579" src="https://images2.imgbox.com/b5/22/IpeJWiAX_o.png" width="1080"></p> 
+<p style="text-align:center;">△ Python/Julia互调用问题：复杂数据类型</p> 
+<p></p> 
+<p>以上述例子为例，它揭示了一个关键问题：<strong>不同语言之间复杂数据的不兼容性。</strong>具体来说，在Julia中如上图所示定义一个MyStruct类型，与在Python中定义MyStruct类型存在本质差异。</p> 
+<p></p> 
+<p>为了更好地理解这种差异，我们可以从一个简单的角度来考察：<strong>比较Julia的MyStruct实例和Python的MyStruct实例在内存方面的差异。</strong></p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="668" src="https://images2.imgbox.com/37/60/4Trwe8Pt_o.png" width="1080"></p> 
+<p style="text-align:center;">△ Python/Julia定义的相似结构MyStruct的内存差异</p> 
+<p></p> 
+<p>结果显示，Julia的MyStruct和C结构体类似，共16字节，其内存结构相对易于理解。然而，Python作为一种高级解释语言，依赖于一个复杂的数据模型。在Python中，MyStruct的一个实例表面上占据了48个字节，其中包含了大量的指针（类似于C++的虚表结构），还包含一个指向哈希结构的数据指针，这个哈希结构中存储了MyStruct实例的字段。</p> 
+<p></p> 
+<p>如此不同的结构，为什么两者都能使用简单的a.b语法来存取字段呢？</p> 
+<p></p> 
+<p>这是因为：<strong>在C API层面，不同编程语言的语义截然不同。</strong>Julia为语法a.b赋予了指针简单存取的语义，而Python则具有更复杂的语义。在Python中，对象首先查找其类型头指针，再经过一系列复杂的查找，最终找到适用于MyStruct类型的函数指针，用于对象属性访问。通过调用该函数指针，最终在用户层面呈现为一种黑盒式的、易于理解的字段存取行为。</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="769" src="https://images2.imgbox.com/9a/25/whq0WxHU_o.png" width="1080"></p> 
+<p style="text-align:center;">△ 疑惑：Julia结构体在Python中是一个整数？</p> 
+<p></p> 
+<p>我们注意到，即使是执行如上图所示的简单操作myjitfunc2(MyStruct)，也难以将参数数据在Python/Julia间正确传递。</p> 
+<p></p> 
+<p>真实世界可不是简单的数字计算，类似上文中的复杂问题，在现实世界的跨语言调用场景下可谓无处不在。<strong>因此，仅仅依靠C API无法为跨语言互调用提供一个简单实用的解决方案。</strong></p> 
+<p></p> 
+<p>在介绍C API相关细节时，我们不可避免地涉及了一些晦涩的技术，这对于部分用户来说可能比较复杂。一些读者可能会问：既然对象只是用来存储基础数据类型（如数字和字符串）的容器，并且在两种语言中都被命名为MyStruct且字段一致，那么为什么不能在Python调用Julia函数时直接将Python的MyStruct转换为Julia的MyStruct呢？</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="667" src="https://images2.imgbox.com/3c/c7/PRycCQVi_o.png" width="1080"></p> 
+<p style="text-align:center;">△ 基于类型转换器的跨语言调用原理</p> 
+<p></p> 
+<p>上述代码展示了这种朴素方案的基本思路。当然，在实际操作中，序列化过程并不一定需要通过JSON格式，也可以使用更加紧凑的结构。事实上，这种方案在Julia社区的早期Python互调用方案PyCall.jl中就得到了应用，同时也展示了Python/C++著名的互调用方案pybind11的默认数据类型转换。该方案的核心思想在于将不同语言之间的数据转换和兼容性看作一种特定的序列化与反序列化过程，类似于网络服务中的数据处理方式。</p> 
+<p></p> 
+<p>然而，遗憾的是，这种方案并不具备通用性，它们面临着正确性、功能、及性能方面的缺陷。</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="748" src="https://images2.imgbox.com/31/dd/ieK8JEe4_o.png" width="1080"></p> 
+<p style="text-align:center;">△ PyCall.jl 跨语言数据转换缺陷</p> 
+<p></p> 
+<p>在上图 PyCall.jl 的例子中，我们将Julia字典传给Python函数，随后对其做修改。然而，相关改动并未同步到原Julia字典上。可以发现，当用户在Julia/Python中调用另一侧的函数时，任何修改操作都可能导致非预期行为。</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="642" src="https://images2.imgbox.com/17/45/JEz3EtBg_o.png" width="1080"></p> 
+<p style="text-align:center;">△ pybind11 跨语言转换问题 </p> 
+<p></p> 
+<p>上图中pybind 11的问题是类似的，我们编写的函数 add_inplace 对数据做了就地修改，但实际使用该函数时，参数未如预期修改。</p> 
+<p></p> 
+<p>首先，该方案基于序列化进行跨语言数据转换，但转换后的数据与原始对象实际上是两个不同的事物。因此，对转换后数据做的任何修改都无法有效地同步到原始数据；其次，该方案还面临性能方面的挑战。由于科学计算常常涉及庞大数据数组/图的存储问题，数据的拷贝开销则会随数据规模线性增长。这种无上界的性能损耗是不可取的，通常应该避免大规模数据的拷贝以优化性能。</p> 
+<p></p> 
+<p>那么，如何解决这些问题呢？</p> 
+<p></p> 
+<p><strong>解决复杂的难题有时需要简单的洞察：变换视角有时比盲目深入挖掘更为有效。</strong>在调用外部语言函数时，参数处理往往是个棘手的问题。主流做法是基于序列化进行数据转换，虽然它易于理解且实现简单，但我们已经讨论过它在正确性、功能和性能方面的不足。我们需要回归初心，思考为什么要将Python中的MyStruct转换成Julia的MyStruct。</p> 
+<p></p> 
+<p>让我们一起来看一个具体的例子，以便进一步说明这个问题。</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="728" src="https://images2.imgbox.com/f7/2e/YqxiEuHL_o.png" width="1080"></p> 
+<p style="text-align:center;">△ 假设：某Python库已提供 myjitfunc2和MyStruct类型</p> 
+<p></p> 
+<p>根据该假设可知，如果已经有库提供了MyStruct，我们的代码应该直接导入MyStruct，而无需在Python中重新定义一次。在Python中，两个同名的类型对象并非同一事物，两个不同类型之间的转换也没有通用的方法。</p> 
+<p></p> 
+<p>从这个角度来看，<strong>跨语言调用的参数数据兼容问题实际上是一个隐含的XY问题。</strong>XY问题指的是一种沟通难题，具体来说，在人们寻求帮助时，他们可能关注的是他们认为的解决方案（即Y问题），而不是真正的根本问题（即X问题）。如果我们从Python的角度来看待问题，即使Julia是一种外部语言，Julia的数据类型、函数以及所有Julia对象，又何尝不能被视为一种特殊的Python对象呢？反之亦然。</p> 
+<p></p> 
+<p>因此，我们需要打破思维的局限。既然Julia数组和Python列表本质上是不同的，那么我们就应该坦然接受它们的差异。这样一来，外部语言就像一个巨大的程序包，为我们带来了大量功能各异的新函数、新类型和新的底层能力。以这样的视角来看待外部语言，岂不美哉？</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="728" src="https://images2.imgbox.com/d1/ad/snqpnRjS_o.png" width="1080"></p> 
+<p style="text-align:center;">△ 外部语言提供不同的数据结构，支撑不同的场景</p> 
+<p></p> 
+<p>上述观点在某些情况下并不适用。编程语言的基本类型，由于其不可变性（语义上）以及占用空间很小，因此对其进行序列化或深度拷贝的操作，性能甚至要快过引用数据本身。因此，<strong>对于这些基本类型，实现语言间的自动转换是必要且有益的。</strong></p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="587" src="https://images2.imgbox.com/e2/ff/BjSIsFoF_o.png" width="688"></p> 
+<p style="text-align:center;">△ 同元库 TyJuliaCall.py 所使用的 Julia/Python 基本类型对应表</p> 
+<p></p> 
+<p><strong>基于上述考虑，同元软控开发了自己的Python/Julia互调用实现，并命名为TyJuliaCall。</strong><strong>针对示例程序myjitfunc2，我们对其Python代码进行了简化，使其能够更方便地调用Julia函数，</strong>如下所示：</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="1162" src="https://images2.imgbox.com/f1/0d/9WXVSBhR_o.png" width="974"></p> 
+<p style="text-align:center;">△ 基于TyJuliaCall使用Julia的函数、类型和对象</p> 
+<p></p> 
+<p>那么，问题来了：<strong>TyJuliaCall这个库是如何实现将Julia对象转换为Python对象的呢？</strong></p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="335" src="https://images2.imgbox.com/01/e6/YS2IZmf4_o.png" width="1054"></p> 
+<p></p> 
+<p>让我们回到之前的例子，从C FFI的基座——C API出发，深入探讨Python如何处理来自Julia的数据，并使其能够作为Python数据存在。</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="824" src="https://images2.imgbox.com/5e/96/JKDETYa0_o.png" width="1080"></p> 
+<p style="text-align:center;">△ Julia结构体在Python中是一个指针地址</p> 
+<p></p> 
+<p>通过上图，我们可以清晰地看到，在C的层面，Julia对象实际上是一个指针。</p> 
+<p></p> 
+<p>假如我们能够了解Julia使用哪些C API来操作这个对象指针，我们就可以进行相应的封装工作，使得Julia对象能够摇身一变，成为Python对象。</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="757" src="https://images2.imgbox.com/d3/cd/l4JrxOCR_o.png" width="1080"></p> 
+<p style="text-align:center;">△ 方案极简实现示意：Julia对接Python数据模型</p> 
+<p></p> 
+<p>在上图中，我们通过定义的__getattr__方法，为数据ptr赋予了具体意义。按照指定的协议进行操作，我们能够以预期的行为方式来理解和操作Julia的数据。</p> 
+<p></p> 
+<p>当然，这只是一个非常简单的示意实现，真实世界中的情况会更加复杂。在这个示例代码中，我们展示的__getattr__方法能够从Julia的指针中提取属性，并尝试将它们转换为Python的整数。这里所做的事情，可以被称为接入Python的数据模型。数据模型是一个有趣且深奥的概念，它研究的课题是什么呢？简而言之，当我们面对一段内存数据时，通常它是没有任何意义的。例如，数据0x01既可以表示一个8位有符号整数，可以代表某种硬件架构下的一条CPU指令。数据模型领域研究的就是如何为这些数据赋予意义，以及如何组织和协调数据与数据操作的方式。</p> 
+<p></p> 
+<p>因此，<strong>当我们以Python数据模型的方式，将Julia对象的数据和操作组织起来时，它实际上就变成了一个Python对象！</strong>现在，让我们来尝试一下这种转换吧！</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="867" src="https://images2.imgbox.com/b7/82/SCIdqgcU_o.png" width="1080"></p> 
+<p style="text-align:center;">△ 方案极简实现示意：试用Python调用Julia</p> 
+<p></p> 
+<p>好的，让我们再多尝试几次！同时，为了更全面地测试，我们顺便随机穿插一些其他的Julia代码！</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="867" src="https://images2.imgbox.com/c7/01/uWYIA63F_o.png" width="1080"></p> 
+<p style="text-align:center;">△ 触发GC导致方案极简实现崩溃</p> 
+<p></p> 
+<p>不幸的是，程序崩溃了。我们是否还遗漏了某些考虑因素呢？在技术应用的过程中，我们似乎再次遇到了瓶颈。涉及如此众多的技术细节，要想制定一个完备的技术方案，确实面临着重重困难，但是再艰难的任务也难不倒同元软控的工程师们。这一次，让我们进一步探讨一个新领域——<strong>程序语言运行时的内存管理</strong>。</p> 
+<p></p> 
+<p>了解程序语言的朋友应该都知道垃圾回收这个概念。时至今日，绝大多数程序语言已经实现自动管理内存。内存管理器主要包括垃圾回收和引用计数两大机制，它们使得程序员无需关注内存的分配和释放，得以更加专注于上层开发。然而，内存管理器并非魔法，它们严格遵循一套规则来工作。<strong>在我们的示例中，Julia的GC发生了崩溃，但这并非Julia的bug，而是我们的demo代码未能遵守规则。</strong></p> 
+<p></p> 
+<p>Julia使用GC来管理内存，GC通过扫描合适的计算机内存区域，以确定哪些Julia对象仍在使用，哪些可以被释放。当Julia对象的指针被传递给Python，并且仅在Python中使用时，Julia GC就无法正确追踪这个Julia对象了。因此，程序崩溃的原因便一目了然：<strong>Python没有通知Julia GC禁止清理ptr指针</strong>。那么，我们该如何解决这个问题呢？</p> 
+<p></p> 
+<p>通常来说，程序语言的C API会提供“禁止GC清理该对象”和“允许GC清理该对象”的功能，相关功能叫做“pinning”，是Java和C#中常见的互操作性功能。在Julia中，尽管GC和相应的C API具备此功能，但该功能是RAII式的。总的来说，Julia GC对某个对象的生命周期的特殊控制仅限于函数内部。这显然无法满足我们的使用场景。</p> 
+<p></p> 
+<p>虽然这是一个新的技术难点，但同元软控的工程师们依然不会被难倒。<strong>同元软控的MWORKS.Syslab语言组在FFI应用的开发过程中，注意到并归纳总结了一种巧妙的内存管理方案。</strong><strong>该方案可以将静态根GC转化为动态根GC，我们称其为GC Pooling。</strong><strong>这项技术使得我们能够在库级别实现对Julia对象的精确生命周期管理。</strong></p> 
+<p></p> 
+<p><strong>其核心思路如下：</strong></p> 
+<p></p> 
+<p>1.当Julia启动时，创建一个GC存根保证其中对象存活，我们称之为对象池；</p> 
+<p>2.当将Julia对象传到 Python 或 其他外部语言时，将其加入对象池，且该对象在池中的索引被外部语言持有；</p> 
+<p>3.当外部语言不再引用该Julia对象的索引时，将该索引通知到对象池，对象池将不再持有真实的Julia引用，使得该Julia对象可被GC回收。</p> 
+<p></p> 
+<p><strong>以下是GC Pooling技术的示意图：</strong></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="650" src="https://images2.imgbox.com/0e/c1/lBi9axS6_o.png" width="1080"></p> 
+<p>第一步，考虑从外部语言（如Python）创建或引用Julia对象。为此，我们设立一个容器，即对象池，用于按槽位存放Julia对象。这个对象池的核心作用是确保池中的Julia对象始终存活，不会被Julia GC回收。</p> 
+<p></p> 
+<p class="img-center"><img alt="" height="674" src="https://images2.imgbox.com/b4/09/RMgg2294_o.png" width="1080"></p> 
+<p>第二步，当从Python中引用Julia对象时，我们将该对象放入对象池。对象池会寻找合适的槽位放置该对象，并将对应槽位的索引交付给Python。由此，Python可以通过这个索引随时访问对应的Julia对象，且无需担心其生命周期问题。</p> 
+<p></p> 
+<p class="img-center"><img alt="" height="628" src="https://images2.imgbox.com/96/53/gQ2hDIbz_o.png" width="1080"></p> 
+<p>第三步，当Python需要使用Julia对象进行计算时，只需将槽位索引传递给Julia函数。Julia函数会从索引中以统一的流程恢复出真实的Julia对象，进而进行实际的计算。如果函数需要返回新的Julia对象，该对象也会被放入对象池，并将对应的索引作为返回值返回给Python。</p> 
+<p></p> 
+<p class="img-center"><img alt="" height="776" src="https://images2.imgbox.com/0d/90/fMoafckK_o.png" width="1080"></p> 
+<p>第四步，当Python的内存管理器发现不再引用某个槽位索引时，将触发终止器（finalizer）。终止器会通知对象池释放相应槽位上的Julia对象。此时，如果该Julia对象不再有其他引用，Julia GC就可以在适当的时机将其回收。</p> 
+<p></p> 
+<p><strong>通过GC Pooling技术，我们仅需传递一个小小的索引到外部，就实现了外部语言对Julia对象的引用。同时，我们也巧妙地协调了两种语言的内存管理器，确保了跨语言软件的稳定运行。</strong></p> 
+<p></p> 
+<p><strong>此外，这套技术并不局限于某两门程序语言间的互调用，其通用性已在MWORKS.Syslab中得到了充分的应用，</strong><strong>同元软控M语言就是规模较大的实践案例之一。</strong></p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="582" src="https://images2.imgbox.com/e3/3e/NTSxpSW9_o.png" width="1080"></p> 
+<p style="text-align:center;">△ 代码资产复用：Julia/同元M语言互调用</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="335" src="https://images2.imgbox.com/c6/b2/CRugvUUC_o.png" width="1054"></p> 
+<p></p> 
+<p>虽然近年来科学计算工具有长足的发展，但数量庞大的工程师们仍在坚持使用M语言相关软件，究其原因，除开使用习惯、学习曲线等表面问题，深层次的历史代码资产复用、不同编程语言间固有的深刻差异问题，才更为严重。</p> 
+<p></p> 
+<p>例如下图，其问题来自实际生产环境：一个小小的右除计算符，在不同科学计算环境中含义相差巨大，最终导致用户难以进行代码迁移工作。</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="867" src="https://images2.imgbox.com/aa/84/FDNXJ7cW_o.png" width="1080"></p> 
+<p style="text-align:center;">△ 同元软控M语言结果与MATLAB一致，但Python、Julia结果互不相同且不对标MATLAB</p> 
+<p></p> 
+<p>为了方便具备MATLAB/Octave背景的工程师们将代码迁移到MWORKS，MWORKS.Syslab开发了对于MATLAB的语言级对标实现，即同元软控M语言。该语言由MWORKS.Syslab直接内置，除具备一套基于现代编程语言技术实现的语言内核外，同元M语言还提供相当数量的、与MATLAB用法一致的内置函数。这些内置函数将在23年底覆盖对标MATLAB的基础、数学和绘图库，即使不考虑同一函数在用法重载上的显著差异，函数数量也会超过1000条。</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="594" src="https://images2.imgbox.com/2a/e8/TbZeO8cu_o.png" width="692"></p> 
+<p style="text-align:center;">△ 旧代码兼容：同元软控M语言从语言层面解决Julia/Python不兼容MATLAB问题</p> 
+<p></p> 
+<p>由于科技领域的后发优势，新生编程语言通常具备更好的底层基础，能根除一些历史问题，但很多老一辈的技术工作者很清楚新生语言的固有问题：“初期生态不足”，这是一个无法打破的、相当普遍的“死局”。在过去，为了应对Python在JIT、GIL等方面的不足，Python语言出现过多个变体实现  (variant implementation)，例如PyPy、Jython和IronPython。这些Python变体，均能完整支持纯Python代码，却不一定能支持由C代码编写的外部扩展程序，这一点与MATLAB类似，后者也大量使用C程序编写内置函数。然而，Python语言的流行建立在它功能强大且复杂的标准库和知名的第三方C扩展库上，其中相当一部分无法由Python变体直接兼容，进而导致“初期生态不足”的问题，甚至始终无法走出初期的瓶颈，时至今日，这些早期变体里也只有PyPy支持了NumPy和比较完整的Python标准库，而其他Python变体的发展已经严重滞后。</p> 
+<p></p> 
+<p>但同元软控M语言就像是打破了客观规律，作为新生语言而言，其初期生态有些过于丰富。而之所以能做到这一点，其中应用的一项重点技术方案，正是本文所介绍的进程内跨语言调用。同元软控M语言虽然是一门全新的M语言变体，但它基于MWORKS.Syslab多语言互调用能力，能够集成MWORKS.Syslab 丰富的函数库，并以较短的周期提供了相当数量的、与MATLAB用法一致的内置函数。这些函数均由Julia代码编写，在运行时间长的大程序上具备性能优势；又通过同元软控M语言提供与MATLAB一致的用法，能让熟悉M语言的用户无缝接入。</p> 
+<p></p> 
+<p>同元软控M语言为跨语言编程技术的实践提供了更广阔的应用前景。通过同元软控M语言兼容MATLAB旧代码，MWORKS.Syslab能一定复用工程师们过去的代码资产，更方便地集成到新的平台上来。</p> 
+<p></p> 
+<p></p> 
+<p class="img-center"><img alt="" height="335" src="https://images2.imgbox.com/be/34/629fSpH3_o.png" width="1054"></p> 
+<p></p> 
+<p>本文详细阐述了MWORKS.Syslab多语言互调用的技术背景及其所涉及的领域，涵盖了C FFI/C API、数据模型、内存管理，讲述了各种技术问题产生的背景，并解释了诸如GC Pooling等解决其中难题的关键技术。</p> 
+<p></p> 
+<p>对于MWORKS.Syslab来说，支持常用科学计算语言并实现它们之间的相互调用是一项必不可少的基础工作。尽管在实现这一过程中遇到了诸多困难，但如同本文所述，同元软控的开发者和工程师们始终秉持着坚定的追求。在他们看来，挑战与机遇并存，困难亦伴随着创新与突破。</p> 
+<p></p> 
+<p>目前，MWORKS.Syslab在多语言互调用方面仍存在一些不足之处。为了解决这些问题，同元软控正在积极寻求改进，并与开源软件社区保持密切交流与合作。我们致力于解决软件的潜在bug，提高易用性，为用户带来更加卓越的多语言互调用体验。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/a4bd97c61754f1cc660d11c485a4d54c/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">K8S安全机制</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/47366f6dd8d3160479d18a7cd55b4f6d/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">电脑监控系统：企业网络安全解决方案</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

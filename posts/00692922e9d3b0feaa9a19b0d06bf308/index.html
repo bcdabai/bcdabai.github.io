@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Android后台驻留：保活和回收的机制 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Android后台驻留：保活和回收的机制" />
+<meta property="og:description" content="简介 众所周知，Android平台的管理机制下，App进入后台后，为了提供持续的及时服务（如推送、音乐），或进行驻留获取收益（跟踪、信息收集、广告）等，会利用一些方法来让自身保持活跃，躲过被Android系统或用户发觉、清理，实现后台驻留。
+其中，后台驻留的广义概念，除了保持在后台运行外，被其他组件拉起也属于驻留（唤醒）。
+由于驻留会对系统的性能、响应延迟、续航、发热等带来负面影响，令系统的资源管理效果降低，属于违背用户意愿和知情的恶劣行为，因此将这些App称为顽固（Diehard）应用，其利用的方法称为顽固方法。
+除了App利用的一些黑科技（甚至是在违法边缘的擦边手段）以外，Android系统本身自带的机制也可以实现保活和拉起。这些保活、拉起机制，粗略划分为两类：
+保持活跃，在后台运行不被清理、回收被其他组件唤醒，包括被其他App唤醒、被系统提供的功能唤醒 本文总结上述这两类会被顽固App利用的机制。
+进程和Task管理 首先简单梳理一下Android Framework层基本的进程管理。
+Android平台基于Linux，除了基于Linux的“进程”维度来进行管理外，还按照Task的概念来管理应用进程，分别为ProcessRecord和TaskRecord。系统可以按Task也可以按Process来管理进程。
+Android提供接口直接杀死Linux进程：1. ProcessRecord的kill()方法，其实现是向对应的进程发送SIGNAL_KILL信号；2. libc的kill()函数，也是发送信号
+OOM终止进程（LMK） App进程在系统中根据OOM（Out of Memory）ADJ（Adjustment）级别和进程状态来确定优先级，当系统需要杀死进程来释放内存时，优先级越低的会优先终止。OOM ADJ分数越小优先级越高。
+由于顽固App进程后台驻留时可能会被系统回收，因此顽固App通常通过一些手段（services、弹窗）等来降低OOM（提高优先级），减少自身被系统回收的几率。
+最近任务列表结束Task 用户在多任务界面（Recents）移除应用，系统会结束应用对应的Task：Removing Recent Task Item（RRT）。
+该操作会结束掉与Task关联的进程，但在一些场景下仍然会有对应App的进程没有被杀死。
+当App通过&#34;Exclude from recents&#34;功能（不在最近任务列表显示自己）时，没有提供给用户结束的机会，就没有手动结束掉Task的入口当一个进程属于多个Task时（该进程还需要为其他Task服务） 这类终止机制由用户操作触发，当顽固应用借助多进程、多任务、唤醒拉起、互拉等操作，被终止后仍在后台运行（或后续又被唤醒），给用户感受为“杀不干净”。
+强制结束App 强制结束（Force-Stop）时Android内建的功能，由ActivityManagerService提供接口，可以在设置-应用程序界面由用户手动调用。
+强制结束的范畴是App对应的所有Task（即可以杀死一般App所有进程）。FSA还额外会将App设置为“STOPPED“状态，禁止应用在下一次被用户手动启用或应用跳转前被广播、服务等唤醒。强制结束对顽固App的效果不佳，许多顽固App具备Native保活能力、互拉保活、唤醒拉起等对抗措施。
+此外，Android提供KILL_BACKGROUND_PROCESSES权限，允许具备权限的App调用API杀死ADJ大于SERVICE_ADJ的后台进程（即没有Service的后台进程可以被杀掉）。
+保持活跃或唤醒 从最近任务隐藏或多个最近任务 Android平台提供的excludeFromRecents功能可以让App的Task在多任务中隐藏。此外一个进程可以属于不同的Task，产生多个Task并隐藏其中几个Task可以实现”杀不干净“的效果。
+提升App进程优先级、阻止部分回收场景 LMK和OOM ADJ会受到进程状态和优先级的影响，提高优先级可以降低被系统回收的几率，阻止部分会杀进程的场景。
+其中，将借助前台进程绑定后台服务进程保活的手段，是较常见的“杀不死、杀不干净”的情况（最近任务移除后仍有进程）。
+接收广播，启动Receiver，具有Receiver的后台进程优先级高于无Receiver的后台进程创建前台Service（高版本Android前台service需要带有通知），OOM ADJ更低（SERVICE_ADJ），杀死概率更低，此时进程不会被“杀死后台进程”杀掉（会跳过ADJ小于等于SERVICE_ADJ的进程）保持前台Activity，OOM ADJ更低（用户可见的Task）创建前台窗口（悬浮窗）或覆盖窗口（将窗口盖在前台App上面）将后台服务绑定到前台进程，赋予后台服务在的进程更低的OOM，提升该进程的优先级，减少被杀的几率；同时对应进程不再属于后台进程，不会被“杀死后台进程”杀死，且该进程转为“需要为其他Task服务”，同样不会被最近任务移除时杀死对于涉及Service的场景，ContentProvider也适用 借助Sticky Service唤醒 黏性Service是系统提供的机制，被杀死后会由系统调度进行重启。前述的force-stop杀死的进程，由于设置的“STOPPED”状态是会被跳过的，因此这种情况杀死的进程不会再自动重启。大多数ROM对此都有限制（次数、频率）。
+借助广播唤醒 通过系统或其他App、组件发出的广播可以唤醒应用，顽固应用可以借助广播来完成唤醒自启。同样的，force-stop设置的“STOPPED”状态也会让广播跳过这些App，不会唤醒这些App来传递广播。但广播带有一个特例功能，带有FLAG_INCLUDE_STOPPED_PACKAGES的广播可以无视“STOPPED状态”，仍会唤醒force-stop的App。通常系统广播没有这个FLAG，基本上是其他应用发出的广播带有。
+高版本的Android已经不再触发静态广播和隐式广播，这种唤醒方式少了很多。（但有FLAG_RECEIVER_INCLUDE_BACKGROUND和FLAG_INCLUDE_STOPPED_PACKAGES规避）
+借助Alarm Service定时器唤醒 Alarm是Android提供的定时器功能，定时器timeout时会唤醒App。被force-stop的应用会自动移除掉注册的定时器，因此不会被唤醒。
+借助Job Scheduling Service任务调度唤醒 与Alarm类似，定时唤醒App。但是受到电源管理策略、功耗管理策略、系统休眠状态、WorkManager等的影响，唤醒的定时精度较低，且不同ROM可能表现一致性较差。同样的，会跳过被force-stop的App。
+借助其他App拉起唤醒 这是国内互联网App最恶心的一种机制，一群App（或集成的SDK）互相拉起对方、互相绑定提高优先级、互相拉起唤醒。其中，唤醒方式除了常规的四大组件外，还有一些黑科技、Native的方法。其中，App发出的广播带上FLAG_RECEIVER_INCLUDE_BACKGROUND和FLAG_INCLUDE_STOPPED_PACKAGES完全可以规避force-stop后&#34;STOPPED&#34;的应用，实现唤醒。
+总结 可以说，Android本身的管理机、提供的组件间通信功能，叠加App们的流氓行为，可以说后台驻留、拉起唤醒是防不胜防的，实现较好的后台驻留管理需要较高的投入，且对系统稳定性、App基本功能的影响较大，是高投入高难度的研究方向。其中，App互拉唤醒和保活的机制，让force-stop机制做不到太好的效果，其&#34;STOPPED&#34;实现的类似的轻度冻结状态几乎报废，也是各大ROM厂商在后台管理部分大展身手的重要因素。
+为了实现好的功耗、续航、性能，就需要在应用唤醒、冻结、暂停执行等方面下功夫了。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/00692922e9d3b0feaa9a19b0d06bf308/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-06-03T15:12:13+08:00" />
+<meta property="article:modified_time" content="2023-06-03T15:12:13+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Android后台驻留：保活和回收的机制</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2><a id="_0"></a>简介</h2> 
+<p>众所周知，Android平台的管理机制下，App进入后台后，为了提供持续的及时服务（如推送、音乐），或进行驻留获取收益（跟踪、信息收集、广告）等，会利用一些方法来让自身保持活跃，躲过被Android系统或用户发觉、清理，实现后台驻留。</p> 
+<p>其中，后台驻留的广义概念，除了保持在后台运行外，被其他组件拉起也属于驻留（唤醒）。</p> 
+<p>由于驻留会对系统的性能、响应延迟、续航、发热等带来负面影响，令系统的资源管理效果降低，属于违背用户意愿和知情的恶劣行为，因此将这些App称为顽固（Diehard）应用，其利用的方法称为顽固方法。</p> 
+<p>除了App利用的一些黑科技（甚至是在违法边缘的擦边手段）以外，Android系统本身自带的机制也可以实现保活和拉起。这些保活、拉起机制，粗略划分为两类：</p> 
+<ol><li>保持活跃，在后台运行不被清理、回收</li><li>被其他组件唤醒，包括被其他App唤醒、被系统提供的功能唤醒</li></ol> 
+<p>本文总结上述这两类会被顽固App利用的机制。</p> 
+<h2><a id="Task_15"></a>进程和Task管理</h2> 
+<p>首先简单梳理一下Android Framework层基本的进程管理。</p> 
+<p>Android平台基于Linux，除了基于Linux的“进程”维度来进行管理外，还按照Task的概念来管理应用进程，分别为ProcessRecord和TaskRecord。系统可以按Task也可以按Process来管理进程。</p> 
+<p>Android提供接口直接杀死Linux进程：1. ProcessRecord的kill()方法，其实现是向对应的进程发送SIGNAL_KILL信号；2. libc的kill()函数，也是发送信号</p> 
+<h3><a id="OOMLMK_23"></a>OOM终止进程（LMK）</h3> 
+<p>App进程在系统中根据OOM（Out of Memory）ADJ（Adjustment）级别和进程状态来确定优先级，当系统需要杀死进程来释放内存时，优先级越低的会优先终止。OOM ADJ分数越小优先级越高。</p> 
+<p>由于顽固App进程后台驻留时可能会被系统回收，因此顽固App通常通过一些手段（services、弹窗）等来降低OOM（提高优先级），减少自身被系统回收的几率。</p> 
+<h3><a id="Task_29"></a>最近任务列表结束Task</h3> 
+<p>用户在多任务界面（Recents）移除应用，系统会结束应用对应的Task：Removing Recent Task Item（RRT）。</p> 
+<p>该操作会结束掉与Task关联的进程，但在一些场景下仍然会有对应App的进程没有被杀死。</p> 
+<ol><li>当App通过"Exclude from recents"功能（不在最近任务列表显示自己）时，没有提供给用户结束的机会，就没有手动结束掉Task的入口</li><li>当一个进程属于多个Task时（该进程还需要为其他Task服务）</li></ol> 
+<p>这类终止机制由用户操作触发，当顽固应用借助多进程、多任务、唤醒拉起、互拉等操作，被终止后仍在后台运行（或后续又被唤醒），给用户感受为“杀不干净”。</p> 
+<h3><a id="App_40"></a>强制结束App</h3> 
+<p>强制结束（Force-Stop）时Android内建的功能，由ActivityManagerService提供接口，可以在设置-应用程序界面由用户手动调用。</p> 
+<p>强制结束的范畴是App对应的所有Task（即可以杀死一般App所有进程）。FSA还额外会将App设置为“STOPPED“状态，禁止应用在下一次被用户手动启用或应用跳转前被广播、服务等唤醒。强制结束对顽固App的效果不佳，许多顽固App具备Native保活能力、互拉保活、唤醒拉起等对抗措施。</p> 
+<p>此外，Android提供KILL_BACKGROUND_PROCESSES权限，允许具备权限的App调用API杀死ADJ大于SERVICE_ADJ的后台进程（即没有Service的后台进程可以被杀掉）。</p> 
+<h2><a id="_48"></a>保持活跃或唤醒</h2> 
+<h3><a id="_50"></a>从最近任务隐藏或多个最近任务</h3> 
+<p>Android平台提供的excludeFromRecents功能可以让App的Task在多任务中隐藏。此外一个进程可以属于不同的Task，产生多个Task并隐藏其中几个Task可以实现”杀不干净“的效果。</p> 
+<h3><a id="App_54"></a>提升App进程优先级、阻止部分回收场景</h3> 
+<p>LMK和OOM ADJ会受到进程状态和优先级的影响，提高优先级可以降低被系统回收的几率，阻止部分会杀进程的场景。</p> 
+<p>其中，将借助前台进程绑定后台服务进程保活的手段，是较常见的“杀不死、杀不干净”的情况（最近任务移除后仍有进程）。</p> 
+<ol><li>接收广播，启动Receiver，具有Receiver的后台进程优先级高于无Receiver的后台进程</li><li>创建前台Service（高版本Android前台service需要带有通知），OOM ADJ更低（SERVICE_ADJ），杀死概率更低，此时进程不会被“杀死后台进程”杀掉（会跳过ADJ小于等于SERVICE_ADJ的进程）</li><li>保持前台Activity，OOM ADJ更低（用户可见的Task）</li><li>创建前台窗口（悬浮窗）或覆盖窗口（将窗口盖在前台App上面）</li><li>将后台服务绑定到前台进程，赋予后台服务在的进程更低的OOM，提升该进程的优先级，减少被杀的几率；同时对应进程不再属于后台进程，不会被“杀死后台进程”杀死，且该进程转为“需要为其他Task服务”，同样不会被最近任务移除时杀死</li><li>对于涉及Service的场景，ContentProvider也适用</li></ol> 
+<h3><a id="Sticky_Service_67"></a>借助Sticky Service唤醒</h3> 
+<p>黏性Service是系统提供的机制，被杀死后会由系统调度进行重启。前述的force-stop杀死的进程，由于设置的“STOPPED”状态是会被跳过的，因此这种情况杀死的进程不会再自动重启。大多数ROM对此都有限制（次数、频率）。</p> 
+<h3><a id="_71"></a>借助广播唤醒</h3> 
+<p>通过系统或其他App、组件发出的广播可以唤醒应用，顽固应用可以借助广播来完成唤醒自启。同样的，force-stop设置的“STOPPED”状态也会让广播跳过这些App，不会唤醒这些App来传递广播。但广播带有一个特例功能，带有FLAG_INCLUDE_STOPPED_PACKAGES的广播可以无视“STOPPED状态”，仍会唤醒force-stop的App。通常系统广播没有这个FLAG，基本上是其他应用发出的广播带有。</p> 
+<p>高版本的Android已经不再触发静态广播和隐式广播，这种唤醒方式少了很多。（但有FLAG_RECEIVER_INCLUDE_BACKGROUND和FLAG_INCLUDE_STOPPED_PACKAGES规避）</p> 
+<h3><a id="Alarm_Service_77"></a>借助Alarm Service定时器唤醒</h3> 
+<p>Alarm是Android提供的定时器功能，定时器timeout时会唤醒App。被force-stop的应用会自动移除掉注册的定时器，因此不会被唤醒。</p> 
+<h3><a id="Job_Scheduling_Service_81"></a>借助Job Scheduling Service任务调度唤醒</h3> 
+<p>与Alarm类似，定时唤醒App。但是受到电源管理策略、功耗管理策略、系统休眠状态、WorkManager等的影响，唤醒的定时精度较低，且不同ROM可能表现一致性较差。同样的，会跳过被force-stop的App。</p> 
+<h3><a id="App_85"></a>借助其他App拉起唤醒</h3> 
+<p>这是国内互联网App最恶心的一种机制，一群App（或集成的SDK）互相拉起对方、互相绑定提高优先级、互相拉起唤醒。其中，唤醒方式除了常规的四大组件外，还有一些黑科技、Native的方法。其中，App发出的广播带上FLAG_RECEIVER_INCLUDE_BACKGROUND和FLAG_INCLUDE_STOPPED_PACKAGES完全可以规避force-stop后"STOPPED"的应用，实现唤醒。</p> 
+<h2><a id="_89"></a>总结</h2> 
+<p>可以说，Android本身的管理机、提供的组件间通信功能，叠加App们的流氓行为，可以说后台驻留、拉起唤醒是防不胜防的，实现较好的后台驻留管理需要较高的投入，且对系统稳定性、App基本功能的影响较大，是高投入高难度的研究方向。其中，App互拉唤醒和保活的机制，让force-stop机制做不到太好的效果，其"STOPPED"实现的类似的轻度冻结状态几乎报废，也是各大ROM厂商在后台管理部分大展身手的重要因素。</p> 
+<p>为了实现好的功耗、续航、性能，就需要在应用唤醒、冻结、暂停执行等方面下功夫了。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/64b984825c06160ddfbf69c48ad774e5/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">记录一下5道Java笔试算法题</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/0c54b264ee013cc4bc16ad46d0037b71/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">UNIX环境高级编程——高级I/O</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

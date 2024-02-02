@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>记忆网络之Dynamic Memory Networks模型介绍及代码实现 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="记忆网络之Dynamic Memory Networks模型介绍及代码实现" />
+<meta property="og:description" content="记忆网络之Dynamic Memory Networks 今天我们要介绍的论文是“Ask Me Anything: Dynamic Memory Networks for Natural Language Processing”，这篇论文发表于2015年6月，从题目中就可以看得出来，本文所提出的模型在多种任务中均取得了非常优秀的表现，论文一开始说道，NLP中很多任务都可以归结为QA问题，所以本文的DMN模型以QA为基础进行训练，但是可以扩展到很多别的任务中，包括序列标注、分类、seq-to-seq、QA等等。之所以有这么强的推广能力，原因就在于其使用RNN作为处理数据的工具，而大部分NLP任务都是序列问题，所以很方便就可以进行推广。而前面介绍的几篇Memory Networks的局限性就在于，其使用词袋子的方法处理输入，使用embedding来编码输入的信息，限制了模型用在别的任务上面。
+模型架构 本文提出的DMN网络模型包含输入、问题、情景记忆、回答四个模块，架构图如下所示。模型首先会计算输入和问题的向量表示，然后根据问题触发Attention机制，使用门控的方法选择出跟问题相关的输入。然后情景记忆模块会结合相关的输入和问题进行迭代生成记忆，并且生成一个答案的向量表示。最只答案模块结合该向量以及问题向量，生成最终的答案。从整个框架上看跟MemNN十分相似，也是四大模块，而且各模块的功能都很像。
+接下来我们看一个各个模块的细节是如何实现的，这也是其区别与MemNN的地方。首先结合实例和细节模型图了解一下模型的原理：
+如上图所示，假设我们的输入就是Input模块中的8句话，问题是“Where is the football？”首先，模型会将相应的输入都编码成向量表示（使用GRU），如图中的S1~S8和问题向量q。接下来q会触发Attention机制，对输入的向量进行评分计算，如上图中在计算第一层的memory时，只选择了S7（因为问题是足球在哪，而S7是jhon放下了足球，与问题最为相关）。然后q作为第一层GRU的初始隐层状态进行迭代计算得到第一层的记忆m1；之后因为第一层选择出了john这个关键词，所以在第二层memory计算时，q会选择出S2和S6（其中S2属于干扰信息，权重较小），同样结合m1进行迭代计算得到第二层的记忆m2，然后将其作为输出向量传递给Answer模块，最终生成最后的答案hallway。这就是整个模型直观的解释，然后我们在对每个模块一一介绍。
+Input Module 使用GRU对输入进行编码，（这里论文中有提到GRU和LSTM，说GRU可以达到与LSTM相似的准确度而且参数更少计算更为高效，但都比RNN要好），具体GRU的计算公式就不在详细列了，这里说一下当输入不通时应该如何区别对待。
+输入是一个句子时，直接输入GRU，步长就是句子的长度。最终也会输出句长个向量表示（对应S1~S8）,这是Attention机制用来选与Question最相关的单词；输入是一堆句子时，将句子连接成一个长的单词序列，然后每个句子之间使用end-of-sentence的特殊标志进行分割，然后将每个end-of-sentence处的隐层状态输出即可，这时Attention机制选择的就是与Question相关的句子表示； Question Module 这部分与Input Module一样，就是使用GRU将Question编码成向量。不同的是，最后只输出最后的隐层向量即可，而不需要像Input模块那样（输入是句子时，会输出句长个向量）。而且，q向量除了用于Attention外，还会作为Memory模块GRU的初始隐层状态~~
+Episodic Memory Module 本模块主要包含Attention机制、Memory更新机制两部分组成，每次迭代都会通过Attention机制对输入向量进行权重计算，然后生成新的记忆。
+首先看一下Attention机制，这里使用一个门控函数作为Attention。输入是本时刻的输入c，前一时刻的记忆m和问题q。首先计算相互之间的相似度作为特征向量传入一个两层的神经网络，最终计算出来的值就是门控函数的值，也就是该输入与问题之间的相似度。如下：
+其中相似度的特征向量是有c,m,q,c*m,c*q,|c-q|,|c-m|,cWq,cWm contact起来的向量，将其传入一个二层神经网络即可。
+接下来看一下记忆更新机制，计算出门控函数的值之后，我们就要根据其大小对记忆进行更新。更新方法就是GRU算出的记忆乘以门控值，再加上原始记忆乘以1-门控值，其实就类似于反向传播中的梯度更新一样。公式如下，更直观：
+Answer Module 仍然使用GRU最为本模块的模型，根据memory模块最后的输出向量（将其作为初始隐层状态），然后输入使用的是问题和上一时刻的输出值连接起来（每个时刻都是用q向量）。并使用交叉熵损失函数作为loss进行反向传播训练。
+模型扩展 以上就是DMN的模型架构及细节介绍，可以看得出来，其每个模块都使用GRU作为编码/记忆的基础模型，而且模型性能很依赖于Attention机制的效果。所以可以从以上两个方面对DMN进行改进，接下来我们就参考两篇论文来说一下他们对DMN作出的改进：
+DMTN 这是论文“Ask Me Even More: Dynamic Memory Tensor Networks (Extended Model)”所提出的改进模型，DMN在用于bAbI数据集时，和MemNN一样，需要对答案所依赖的事实进行监督训练。而本文所提出的模型由于改进了Attention机制，所以可以自己学习到这个点。本文提出的模型叫做Dynamic Memory Tensor Network（DMTN），主要的改进点就是DMN的Attention机制，其他地方未做改动。
+原始的Attention机制，首先根据c，m，q三个向量构造一个相似度的特征向量，然后通过一个二层神经网络计算门控值g（见上图）。而DMTN中，作者认为上面那种人工构造特征向量计算相似度的方法存在某种局限，所以推广到让模型自己学习参数构造该特征向量，最后仍适用一个二层神经网络计算门控值g。如下图所示，其实就是将原来的内积、|~|距离替换成使用矩阵参数学习两个向量之间的相似度而已（个人感觉比较牵强==）：
+然后作者有尝试了另外一种方案，令z=（c,m,q），然后使用下面的公式直接进行计算，而不再使用上面的几个变量连接的方法，这样可以减少参数量的同时保持比较高的准确度：
+DMN&#43; 这是论文“Dynamic Memory Networks for Visual and Textual Question Answering”提出的改进模型。上面的DMTN改动较小，仅仅是对特征向量表示方法的一些尝试。而本篇论文所提出的改进就相对较多，而且还把模型运用到了visual QA的任务上面并取得了较好地成果。其改进点主要集中在对Input module、Attention机制和Memory更新三个地方，是结合了End-to-End MemNN和DMN两个模型的优点作出的改进，可以说是比较完善的解决方案，下面我们看一下改进的点：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/db385f0a5e19a3bcb63fa2341f89bab1/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2017-10-11T17:14:26+08:00" />
+<meta property="article:modified_time" content="2017-10-11T17:14:26+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">记忆网络之Dynamic Memory Networks模型介绍及代码实现</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h2 id="记忆网络之dynamic-memory-networks">记忆网络之Dynamic Memory Networks</h2> 
+<p>今天我们要介绍的论文是“Ask Me Anything: Dynamic Memory Networks for Natural Language Processing”，这篇论文发表于2015年6月，从题目中就可以看得出来，本文所提出的模型在多种任务中均取得了非常优秀的表现，论文一开始说道，NLP中很多任务都可以归结为QA问题，所以本文的DMN模型以QA为基础进行训练，但是可以扩展到很多别的任务中，包括序列标注、分类、seq-to-seq、QA等等。之所以有这么强的推广能力，原因就在于其使用RNN作为处理数据的工具，而大部分NLP任务都是序列问题，所以很方便就可以进行推广。而前面介绍的几篇Memory Networks的局限性就在于，其使用词袋子的方法处理输入，使用embedding来编码输入的信息，限制了模型用在别的任务上面。</p> 
+<h3 id="模型架构">模型架构</h3> 
+<p>本文提出的DMN网络模型包含输入、问题、情景记忆、回答四个模块，架构图如下所示。模型首先会计算输入和问题的向量表示，然后根据问题触发Attention机制，使用门控的方法选择出跟问题相关的输入。然后情景记忆模块会结合相关的输入和问题进行迭代生成记忆，并且生成一个答案的向量表示。最只答案模块结合该向量以及问题向量，生成最终的答案。从整个框架上看跟MemNN十分相似，也是四大模块，而且各模块的功能都很像。</p> 
+<p><img src="https://images2.imgbox.com/8b/a8/MsGtkJxU_o.png" alt="" title=""></p> 
+<p>接下来我们看一个各个模块的细节是如何实现的，这也是其区别与MemNN的地方。首先结合实例和细节模型图了解一下模型的原理：</p> 
+<p><img src="https://images2.imgbox.com/6e/dc/Cvg0vIxr_o.png" alt="" title=""></p> 
+<p>如上图所示，假设我们的输入就是Input模块中的8句话，问题是“Where is the football？”首先，模型会将相应的输入都编码成向量表示（使用GRU），如图中的S1~S8和问题向量q。接下来q会触发Attention机制，对输入的向量进行评分计算，如上图中在计算第一层的memory时，只选择了S7（因为问题是足球在哪，而S7是jhon放下了足球，与问题最为相关）。然后q作为第一层GRU的初始隐层状态进行迭代计算得到第一层的记忆m1；之后因为第一层选择出了john这个关键词，所以在第二层memory计算时，q会选择出S2和S6（其中S2属于干扰信息，权重较小），同样结合m1进行迭代计算得到第二层的记忆m2，然后将其作为输出向量传递给Answer模块，最终生成最后的答案hallway。这就是整个模型直观的解释，然后我们在对每个模块一一介绍。</p> 
+<h4 id="input-module">Input Module</h4> 
+<p>使用GRU对输入进行编码，（这里论文中有提到GRU和LSTM，说GRU可以达到与LSTM相似的准确度而且参数更少计算更为高效，但都比RNN要好），具体GRU的计算公式就不在详细列了，这里说一下当输入不通时应该如何区别对待。</p> 
+<ul><li>输入是一个句子时，直接输入GRU，步长就是句子的长度。最终也会输出句长个向量表示（对应S1~S8）,这是Attention机制用来选与Question最相关的单词；</li><li>输入是一堆句子时，将句子连接成一个长的单词序列，然后每个句子之间使用end-of-sentence的特殊标志进行分割，然后将每个end-of-sentence处的隐层状态输出即可，这时Attention机制选择的就是与Question相关的句子表示；</li></ul> 
+<h4 id="question-module">Question Module</h4> 
+<p>这部分与Input Module一样，就是使用GRU将Question编码成向量。不同的是，最后只输出最后的隐层向量即可，而不需要像Input模块那样（输入是句子时，会输出句长个向量）。而且，q向量除了用于Attention外，还会作为Memory模块GRU的初始隐层状态~~</p> 
+<h4 id="episodic-memory-module">Episodic Memory Module</h4> 
+<p>本模块主要包含Attention机制、Memory更新机制两部分组成，每次迭代都会通过Attention机制对输入向量进行权重计算，然后生成新的记忆。</p> 
+<p>首先看一下Attention机制，这里使用一个门控函数作为Attention。输入是本时刻的输入c，前一时刻的记忆m和问题q。首先计算相互之间的相似度作为特征向量传入一个两层的神经网络，最终计算出来的值就是门控函数的值，也就是该输入与问题之间的相似度。如下：</p> 
+<p><img src="https://images2.imgbox.com/e2/e6/K4z5VOww_o.png" alt="" title=""></p> 
+<p>其中相似度的特征向量是有c,m,q,c*m,c*q,|c-q|,|c-m|,cWq,cWm contact起来的向量，将其传入一个二层神经网络即可。</p> 
+<p>接下来看一下记忆更新机制，计算出门控函数的值之后，我们就要根据其大小对记忆进行更新。更新方法就是GRU算出的记忆乘以门控值，再加上原始记忆乘以1-门控值，其实就类似于反向传播中的梯度更新一样。公式如下，更直观：</p> 
+<p><img src="https://images2.imgbox.com/f0/b5/0SHHCsVi_o.png" alt="" title=""></p> 
+<h4 id="answer-module">Answer Module</h4> 
+<p>仍然使用GRU最为本模块的模型，根据memory模块最后的输出向量（将其作为初始隐层状态），然后输入使用的是问题和上一时刻的输出值连接起来（每个时刻都是用q向量）。并使用交叉熵损失函数作为loss进行反向传播训练。</p> 
+<h3 id="模型扩展">模型扩展</h3> 
+<p>以上就是DMN的模型架构及细节介绍，可以看得出来，其每个模块都使用GRU作为编码/记忆的基础模型，而且模型性能很依赖于Attention机制的效果。所以可以从以上两个方面对DMN进行改进，接下来我们就参考两篇论文来说一下他们对DMN作出的改进：</p> 
+<h4 id="dmtn">DMTN</h4> 
+<p>这是论文“Ask Me Even More: Dynamic Memory Tensor Networks (Extended Model)”所提出的改进模型，DMN在用于bAbI数据集时，和MemNN一样，需要对答案所依赖的事实进行监督训练。而本文所提出的模型由于改进了Attention机制，所以可以自己学习到这个点。本文提出的模型叫做Dynamic Memory Tensor Network（DMTN），主要的改进点就是DMN的Attention机制，其他地方未做改动。</p> 
+<p>原始的Attention机制，首先根据c，m，q三个向量构造一个相似度的特征向量，然后通过一个二层神经网络计算门控值g（见上图）。而DMTN中，作者认为上面那种人工构造特征向量计算相似度的方法存在某种局限，所以推广到让模型自己学习参数构造该特征向量，最后仍适用一个二层神经网络计算门控值g。如下图所示，其实就是将原来的内积、|~|距离替换成使用矩阵参数学习两个向量之间的相似度而已（个人感觉比较牵强==）：</p> 
+<p><img src="https://images2.imgbox.com/a5/ed/uiU2IH2A_o.png" alt="" title=""></p> 
+<p>然后作者有尝试了另外一种方案，令z=（c,m,q），然后使用下面的公式直接进行计算，而不再使用上面的几个变量连接的方法，这样可以减少参数量的同时保持比较高的准确度：</p> 
+<p><img src="https://images2.imgbox.com/9a/78/HKice83k_o.png" alt="" title=""></p> 
+<h4 id="dmn">DMN+</h4> 
+<p>这是论文“Dynamic Memory Networks for Visual and Textual Question Answering”提出的改进模型。上面的DMTN改动较小，仅仅是对特征向量表示方法的一些尝试。而本篇论文所提出的改进就相对较多，而且还把模型运用到了visual QA的任务上面并取得了较好地成果。其改进点主要集中在对Input module、Attention机制和Memory更新三个地方，是结合了End-to-End MemNN和DMN两个模型的优点作出的改进，可以说是比较完善的解决方案，下面我们看一下改进的点：</p> 
+<p>1，<strong>Input Module的改进</strong>：考虑到DMN的强监督性，作者认为是由两点导致的，一是输入模块采用单向GRU，所以只能记住前向的上下文，而无法get到后向上下文的相关信息。二是答案的依据可能距离问题较远，单词水平的GRU无法记忆这么远的信息。所以模型无法自己学习到所以来的句子，而要靠监督学习辅助。因此本文提出了Input Fusion Layer来解决这个问题。</p> 
+<p>该模型分为两部分，首先将句子采用positional Encoding的方法编码成一个向量（这部分可以参考End-to-End那篇论文，其实就是对句子中每个单词进行位置编码，然后加权求和。这部分主要是解决上面第二个问题，也就是从句子层面编码，然后再输入GRU，以减小文体之间的距离。而且，根据要解决的任务，问题总是于某个句子相关，所以从句子层面进行建模更合理），这部分就是论文所说的sentence reader。这里作者说也尝试了使用GRU或者LSTM进行句子编码，然后回过拟合，而且计算量较大。所以直接使用这种位置编码的方法效果反而会更好。</p> 
+<p>接下来将所有句子表示输入一个双向GRU模型进行学习，得到其表示，也就是Input Fusion Layer。这部分主要是让句子之间进行信息的交互，学习到前后上下文的信息并进行编码。从而解决上面提出的第一个问题。其结构如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/ca/07/2u8wCzXQ_o.png" alt="" title=""></p> 
+<p>2，<strong>Attention机制的改进</strong>：这部分与DMN思想一样，但是细看会发现有一定区别。这里把一开始简单的门控值作为Attention的方法替换成了使用GRU来产生一个中间输出c。而这个c就相当于End-to-End模型中的softmax的评分向量~~（这里可能比较绕，需要好好理解一下）。</p> 
+<p>首先同样是使用特征向量来构造门控值，如下图所示，但是这里作者有省去了两项含有参数的部分，一方面是为了减少计算量，另一方面作者认为并不需要这些项，简直与上面那篇论文完全相反的思路，这里在特征向量的构造上做了尽可能的简化。</p> 
+<p><img src="https://images2.imgbox.com/ad/8e/XYXT9iyD_o.png" alt="" title=""></p> 
+<p>有了门控值之后就是计算Attention。这里作者提出两种方案，一是soft Attention，也就是直接加权求和，这样做好处是简单，而且在可微的情况下仅选择出一个与答案相关的依赖项。缺点是丢失了位置和顺序关系的信息==BOW就这个缺点。另外一种是Attention based GRU。其实我感觉这里就是DMN的Memory更新部分所采用的模型，及使用门控值g来控制h隐层值的更新。其与标准GRU的区别如下图所示，</p> 
+<p><img src="https://images2.imgbox.com/58/93/VhyMM8D0_o.png" alt="" title=""></p> 
+<p>这样我们就可以对所有的事实通过Attention机制得到一个中间变量c，恩，其实可以看成是一种f的加权求和~~然后基于c在对记忆进行更新。</p> 
+<p>3，<strong>Memory更新机制的改进</strong>：DMN中memory的更新采用以q向量为初始隐层状态的GRU进行更新。而这里作者参考End-to-End模型提出了一种ReLU的单层神经网络用于记忆更新。而记忆m就是上层的输出。这样做的好处应该是在于简化模型吧，毕竟Attention哪里已经用了GRU，产生的c相对来说已经拥有了比较精准的信息量（猜测），所以这里的模型就不用很复杂了。这两部分的架构如下图所示：</p> 
+<p><img src="https://images2.imgbox.com/59/5a/juNlu508_o.png" alt="" title=""></p> 
+<p>至此我们已经对DMN以及DMN的扩展模型进行了介绍，下面我们结合代码来看一下如何实现~~</p> 
+<h3 id="tensorflow-实现">TensorFlow 实现</h3> 
+<p>因为在github上面已经有比较好的实现方案，所以直接参考<a href="https://github.com/barronalex/Dynamic-Memory-Networks-in-TensorFlow">barronalex的代码</a>进行介绍。使用的数据集是之前用过的bAbI，所以也省去了数据集介绍和处理的过程。这里主要关注以下attention_gru_cell.py和dmn_plus.py两个文件，分别是构建Attention based GRU和模型构建两个部分。</p> 
+<h4 id="attentiongrucellpy">attention_gru_cell.py</h4> 
+<p>其实这里主要涉及到的知识点是如何在tensorflow中自定义RNN Cell，以满足自己的需求。按照论文中所提到的模型，作者在生成新的记忆时将原始的GRU中的ui替换成前面计算出来的门控值gi，也就是所谓的Attention based GRU，而tf中默认的GRU是采用的原始定义。所以需要定义自己的RNNCell。</p> 
+<p>这部分代码如下所示，其实很简单，就是定义一个新的类AttentionGRUCell，让其继承RNNCell，然后接下来重新定义他的<strong>call</strong>()函数即可，这个函数是RNNCell主要的功能实现。可以看下面的代码注释：</p> 
+<pre class="prettyprint"><code class=" hljs python">    <span class="hljs-class"><span class="hljs-keyword">class</span> <span class="hljs-title">AttentionGRUCell</span><span class="hljs-params">(RNNCell)</span>:</span>
+        <span class="hljs-string">"""Gated Recurrent Unit incoporating attention (cf. https://arxiv.org/abs/1603.01417).
+           Adapted from https://github.com/tensorflow/tensorflow/blob/master/tensorflow/contrib/rnn/python/ops/core_rnn_cell_impl.py
+           NOTE: Takes an input of shape:  (batch_size, max_time_step, input_dim + 1)
+           Where an input vector of shape: (batch_size, max_time_step, input_dim)
+           and scalar attention of shape:  (batch_size, max_time_step, 1)
+           are concatenated along the final axis"""</span>
+
+        <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">__init__</span><span class="hljs-params">(self, num_units, input_size=None, activation=tanh)</span>:</span>
+            <span class="hljs-keyword">if</span> input_size <span class="hljs-keyword">is</span> <span class="hljs-keyword">not</span> <span class="hljs-keyword">None</span>:
+                logging.warn(<span class="hljs-string">"%s: The input_size parameter is deprecated."</span>, self)
+            self._num_units = num_units
+            self._activation = activation
+
+        <span class="hljs-decorator">@property</span>
+        <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">state_size</span><span class="hljs-params">(self)</span>:</span>
+            <span class="hljs-keyword">return</span> self._num_units
+
+
+        <span class="hljs-decorator">@property</span>
+        <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">output_size</span><span class="hljs-params">(self)</span>:</span>
+            <span class="hljs-keyword">return</span> self._num_units
+
+        <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">__call__</span><span class="hljs-params">(self, inputs, state, scope=None)</span>:</span>
+            <span class="hljs-string">"""Attention GRU with nunits cells."""</span>
+            <span class="hljs-keyword">with</span> vs.variable_scope(scope <span class="hljs-keyword">or</span> <span class="hljs-string">"attention_gru_cell"</span>):
+                <span class="hljs-keyword">with</span> vs.variable_scope(<span class="hljs-string">"gates"</span>):  <span class="hljs-comment"># Reset gate and update gate.</span>
+                    <span class="hljs-comment"># We start with bias of 1.0 to not reset and not update.</span>
+                    <span class="hljs-keyword">if</span> inputs.get_shape()[-<span class="hljs-number">1</span>] != self._num_units + <span class="hljs-number">1</span>:
+                        <span class="hljs-keyword">raise</span> ValueError(<span class="hljs-string">"Input should be passed as word input concatenated with 1D attention on end axis"</span>)
+                    <span class="hljs-comment"># extract input vector and attention，输入是f和g向量，所以要先将其分开。</span>
+                    inputs, g = array_ops.split(inputs,
+                            num_or_size_splits=[self._num_units,<span class="hljs-number">1</span>],
+                            axis=<span class="hljs-number">1</span>)
+                    <span class="hljs-comment">#对应论文中的公式2中的r值，就是根据input和前一时刻的状态state，经过一个激活函数得到r值</span>
+                    r = _linear([inputs, state], self._num_units, <span class="hljs-keyword">True</span>)
+                    r = sigmoid(r)
+                <span class="hljs-comment">#下面五行计算的是新的记忆h_hat，对应公式3</span>
+                <span class="hljs-keyword">with</span> vs.variable_scope(<span class="hljs-string">"candidate"</span>):
+                    r = r*_linear(state, self._num_units, <span class="hljs-keyword">False</span>)
+                <span class="hljs-keyword">with</span> vs.variable_scope(<span class="hljs-string">"input"</span>):
+                    x = _linear(inputs, self._num_units, <span class="hljs-keyword">True</span>)
+                h_hat = self._activation(r + x)
+
+                <span class="hljs-comment">#Attention based。根据门控值更新记忆到state</span>
+                new_h = (<span class="hljs-number">1</span> - g) * state + g * h_hat
+            <span class="hljs-keyword">return</span> new_h, new_h
+
+    <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">_linear</span><span class="hljs-params">(args, output_size, bias, bias_start=<span class="hljs-number">0.0</span>)</span>:</span>
+        <span class="hljs-string">"""Linear map: sum_i(args[i] * W[i]), where W[i] is a variable.
+        Args:
+        args: a 2D Tensor or a list of 2D, batch x n, Tensors.
+        output_size: int, second dimension of W[i].
+        bias: boolean, whether to add a bias term or not.
+        bias_start: starting value to initialize the bias; 0 by default.
+        Returns:
+        A 2D Tensor with shape [batch x output_size] equal to
+        sum_i(args[i] * W[i]), where W[i]s are newly created matrices.
+        Raises:
+        ValueError: if some of the arguments has unspecified or wrong shape.
+        """</span>
+        <span class="hljs-keyword">if</span> args <span class="hljs-keyword">is</span> <span class="hljs-keyword">None</span> <span class="hljs-keyword">or</span> (nest.is_sequence(args) <span class="hljs-keyword">and</span> <span class="hljs-keyword">not</span> args):
+            <span class="hljs-keyword">raise</span> ValueError(<span class="hljs-string">"`args` must be specified"</span>)
+        <span class="hljs-keyword">if</span> <span class="hljs-keyword">not</span> nest.is_sequence(args):
+            args = [args]
+
+        <span class="hljs-comment"># Calculate the total size of arguments on dimension 1.</span>
+        total_arg_size = <span class="hljs-number">0</span>
+        shapes = [a.get_shape() <span class="hljs-keyword">for</span> a <span class="hljs-keyword">in</span> args]
+        <span class="hljs-keyword">for</span> shape <span class="hljs-keyword">in</span> shapes:
+            <span class="hljs-keyword">if</span> shape.ndims != <span class="hljs-number">2</span>:
+                <span class="hljs-keyword">raise</span> ValueError(<span class="hljs-string">"linear is expecting 2D arguments: %s"</span> % shapes)
+            <span class="hljs-keyword">if</span> shape[<span class="hljs-number">1</span>].value <span class="hljs-keyword">is</span> <span class="hljs-keyword">None</span>:
+                <span class="hljs-keyword">raise</span> ValueError(<span class="hljs-string">"linear expects shape[1] to be provided for shape %s, "</span>
+                    <span class="hljs-string">"but saw %s"</span> % (shape, shape[<span class="hljs-number">1</span>]))
+            <span class="hljs-keyword">else</span>:
+                total_arg_size += shape[<span class="hljs-number">1</span>].value
+
+        dtype = [a.dtype <span class="hljs-keyword">for</span> a <span class="hljs-keyword">in</span> args][<span class="hljs-number">0</span>]
+
+        <span class="hljs-comment"># Now the computation.</span>
+        scope = vs.get_variable_scope()
+        <span class="hljs-keyword">with</span> vs.variable_scope(scope) <span class="hljs-keyword">as</span> outer_scope:
+            <span class="hljs-comment">#Wx+b</span>
+            weights = vs.get_variable(
+                <span class="hljs-string">"weights"</span>, [total_arg_size, output_size], dtype=dtype)
+            <span class="hljs-keyword">if</span> len(args) == <span class="hljs-number">1</span>:
+                res = math_ops.matmul(args[<span class="hljs-number">0</span>], weights)
+            <span class="hljs-keyword">else</span>:
+                res = math_ops.matmul(array_ops.concat(args, <span class="hljs-number">1</span>), weights)
+            <span class="hljs-keyword">if</span> <span class="hljs-keyword">not</span> bias:
+                <span class="hljs-keyword">return</span> res
+            <span class="hljs-keyword">with</span> vs.variable_scope(outer_scope) <span class="hljs-keyword">as</span> inner_scope:
+                inner_scope.set_partitioner(<span class="hljs-keyword">None</span>)
+                biases = vs.get_variable(
+                            <span class="hljs-string">"biases"</span>, [output_size],
+                          dtype=dtype,
+                        initializer=init_ops.constant_initializer(bias_start, dtype=dtype))
+            <span class="hljs-keyword">return</span> nn_ops.bias_add(res, biases)</code></pre> 
+<p>有了attention_gru_cell之后，我们就可以把它当成是普通的RNNCell一样使用，直接传入dynamic_rnn()函数然后构建模型即可。</p> 
+<h4 id="dmnpluspy">dmn_plus.py</h4> 
+<p>这里我们按照上面模型的几个组件分别介绍其代码实现，首先看一下各placeholder的定义以及数据载入部分：</p> 
+<p><strong>1，数据placeholder占位符的定义：</strong></p> 
+<pre class="prettyprint"><code class=" hljs avrasm">
+    def add_placeholders(self):
+        self<span class="hljs-preprocessor">.question</span>_placeholder = tf<span class="hljs-preprocessor">.placeholder</span>(tf<span class="hljs-preprocessor">.int</span>32, shape=(self<span class="hljs-preprocessor">.config</span><span class="hljs-preprocessor">.batch</span>_size, self<span class="hljs-preprocessor">.max</span>_q_len))
+        self<span class="hljs-preprocessor">.input</span>_placeholder = tf<span class="hljs-preprocessor">.placeholder</span>(tf<span class="hljs-preprocessor">.int</span>32, shape=(self<span class="hljs-preprocessor">.config</span><span class="hljs-preprocessor">.batch</span>_size, self<span class="hljs-preprocessor">.max</span>_input_len, self<span class="hljs-preprocessor">.max</span>_sen_len))
+
+        <span class="hljs-preprocessor">#用于dynamic_rnn模型构建时传入各个数据的长度，不懂得可以具体查一下</span>
+        self<span class="hljs-preprocessor">.question</span>_len_placeholder = tf<span class="hljs-preprocessor">.placeholder</span>(tf<span class="hljs-preprocessor">.int</span>32, shape=(self<span class="hljs-preprocessor">.config</span><span class="hljs-preprocessor">.batch</span>_size,))
+        self<span class="hljs-preprocessor">.input</span>_len_placeholder = tf<span class="hljs-preprocessor">.placeholder</span>(tf<span class="hljs-preprocessor">.int</span>32, shape=(self<span class="hljs-preprocessor">.config</span><span class="hljs-preprocessor">.batch</span>_size,))
+
+        self<span class="hljs-preprocessor">.answer</span>_placeholder = tf<span class="hljs-preprocessor">.placeholder</span>(tf<span class="hljs-preprocessor">.int</span>64, shape=(self<span class="hljs-preprocessor">.config</span><span class="hljs-preprocessor">.batch</span>_size,))
+
+        self<span class="hljs-preprocessor">.rel</span>_label_placeholder = tf<span class="hljs-preprocessor">.placeholder</span>(tf<span class="hljs-preprocessor">.int</span>32, shape=(self<span class="hljs-preprocessor">.config</span><span class="hljs-preprocessor">.batch</span>_size, self<span class="hljs-preprocessor">.num</span>_supporting_facts))
+
+        self<span class="hljs-preprocessor">.dropout</span>_placeholder = tf<span class="hljs-preprocessor">.placeholder</span>(tf<span class="hljs-preprocessor">.float</span>32)</code></pre> 
+<p><strong>2，input module：</strong></p> 
+<pre class="prettyprint"><code class=" hljs avrasm">    def get_input_representation(self, embeddings):
+        <span class="hljs-preprocessor">#通过embedding得到词向量表示</span>
+        inputs = tf<span class="hljs-preprocessor">.nn</span><span class="hljs-preprocessor">.embedding</span>_lookup(embeddings, self<span class="hljs-preprocessor">.input</span>_placeholder)
+
+        <span class="hljs-preprocessor"># 用positional Encoding的方法对输入进行编码，将句子中的所有单词的词向量转化为一个向量表示。从四维tensor变成三维tensor</span>
+        inputs = tf<span class="hljs-preprocessor">.reduce</span>_sum(inputs * self<span class="hljs-preprocessor">.encoding</span>, <span class="hljs-number">2</span>)
+
+        <span class="hljs-preprocessor">#将句子向量传入双向GRU进行编码，也就是input fusion layer</span>
+        forward_gru_cell = tf<span class="hljs-preprocessor">.contrib</span><span class="hljs-preprocessor">.rnn</span><span class="hljs-preprocessor">.GRUCell</span>(self<span class="hljs-preprocessor">.config</span><span class="hljs-preprocessor">.hidden</span>_size)
+        backward_gru_cell = tf<span class="hljs-preprocessor">.contrib</span><span class="hljs-preprocessor">.rnn</span><span class="hljs-preprocessor">.GRUCell</span>(self<span class="hljs-preprocessor">.config</span><span class="hljs-preprocessor">.hidden</span>_size)
+        outputs, _ = tf<span class="hljs-preprocessor">.nn</span><span class="hljs-preprocessor">.bidirectional</span>_dynamic_rnn(
+                forward_gru_cell,
+                backward_gru_cell,
+                inputs,
+                dtype=np<span class="hljs-preprocessor">.float</span>32,
+                sequence_length=self<span class="hljs-preprocessor">.input</span>_len_placeholder
+        )
+
+        <span class="hljs-preprocessor"># f&lt;-&gt; = f-&gt; + f&lt;-，将双向GRU的结果相加</span>
+        fact_vecs = tf<span class="hljs-preprocessor">.reduce</span>_sum(tf<span class="hljs-preprocessor">.stack</span>(outputs), axis=<span class="hljs-number">0</span>)
+
+        <span class="hljs-preprocessor"># apply dropout</span>
+        fact_vecs = tf<span class="hljs-preprocessor">.nn</span><span class="hljs-preprocessor">.dropout</span>(fact_vecs, self<span class="hljs-preprocessor">.dropout</span>_placeholder)
+
+        return fact_vecs</code></pre> 
+<p><strong>3，Question layer：</strong></p> 
+<pre class="prettyprint"><code class=" hljs python">    <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">get_question_representation</span><span class="hljs-params">(self, embeddings)</span>:</span>
+        <span class="hljs-comment">#与输入一样，先embedding在GRU，将最后的状态作为输出</span>
+        questions = tf.nn.embedding_lookup(embeddings, self.question_placeholder)
+
+        gru_cell = tf.contrib.rnn.GRUCell(self.config.hidden_size)
+        _, q_vec = tf.nn.dynamic_rnn(gru_cell,
+                questions,
+                dtype=np.float32,
+                sequence_length=self.question_len_placeholder
+        )
+
+        <span class="hljs-keyword">return</span> q_vec</code></pre> 
+<p><strong>4，Attention layer</strong>，这里作者采用了DMN+的Attention和episode memory，而未使用DMN的：</p> 
+<pre class="prettyprint"><code class=" hljs python">    <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">get_attention</span><span class="hljs-params">(self, q_vec, prev_memory, fact_vec, reuse)</span>:</span>
+        <span class="hljs-keyword">with</span> tf.variable_scope(<span class="hljs-string">"attention"</span>, reuse=reuse):
+            <span class="hljs-comment">#构建特征向量</span>
+            features = [fact_vec*q_vec,
+                        fact_vec*prev_memory,
+                        tf.abs(fact_vec - q_vec),
+                        tf.abs(fact_vec - prev_memory)]
+
+            feature_vec = tf.concat(features, <span class="hljs-number">1</span>)
+
+            <span class="hljs-comment">#下面是两层的神经网络</span>
+            attention = tf.contrib.layers.fully_connected(feature_vec,
+                            self.config.embed_size,
+                            activation_fn=tf.nn.tanh,
+                            reuse=reuse, scope=<span class="hljs-string">"fc1"</span>)
+            <span class="hljs-comment">#这里不使用激活函数，在其后面直接添加softmax即可</span>
+            attention = tf.contrib.layers.fully_connected(attention,
+                            <span class="hljs-number">1</span>,
+                            activation_fn=<span class="hljs-keyword">None</span>,
+                            reuse=reuse, scope=<span class="hljs-string">"fc2"</span>)
+
+        <span class="hljs-keyword">return</span> attention</code></pre> 
+<p><strong>5，episode memory layer：</strong></p> 
+<pre class="prettyprint"><code class=" hljs python">    <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">generate_episode</span><span class="hljs-params">(self, memory, q_vec, fact_vecs, hop_index)</span>:</span>
+
+        <span class="hljs-comment">#得到Attention向量，并进行softmax处理</span>
+        attentions = [tf.squeeze(
+            self.get_attention(q_vec, memory, fv, bool(hop_index) <span class="hljs-keyword">or</span> bool(i)), axis=<span class="hljs-number">1</span>)
+            <span class="hljs-keyword">for</span> i, fv <span class="hljs-keyword">in</span> enumerate(tf.unstack(fact_vecs, axis=<span class="hljs-number">1</span>))]
+
+        attentions = tf.transpose(tf.stack(attentions))
+        self.attentions.append(attentions)
+        attentions = tf.nn.softmax(attentions)
+        attentions = tf.expand_dims(attentions, axis=-<span class="hljs-number">1</span>)
+
+        reuse = <span class="hljs-keyword">True</span> <span class="hljs-keyword">if</span> hop_index &gt; <span class="hljs-number">0</span> <span class="hljs-keyword">else</span> <span class="hljs-keyword">False</span>
+
+        <span class="hljs-comment"># 将facts和Attention连接，作为attention_gru_cell的输入</span>
+        gru_inputs = tf.concat([fact_vecs, attentions], <span class="hljs-number">2</span>)
+        <span class="hljs-comment">#Attention based GRU 更新记忆</span>
+        <span class="hljs-keyword">with</span> tf.variable_scope(<span class="hljs-string">'attention_gru'</span>, reuse=reuse):
+            _, episode = tf.nn.dynamic_rnn(AttentionGRUCell(self.config.hidden_size),
+                    gru_inputs,
+                    dtype=np.float32,
+                    sequence_length=self.input_len_placeholder
+            )
+
+        <span class="hljs-keyword">return</span> episode</code></pre> 
+<p><strong>6，answer layer：</strong></p> 
+<pre class="prettyprint"><code class=" hljs python">    <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">add_answer_module</span><span class="hljs-params">(self, rnn_output, q_vec)</span>:</span>
+
+        rnn_output = tf.nn.dropout(rnn_output, self.dropout_placeholder)
+
+        output = tf.layers.dense(tf.concat([rnn_output, q_vec], <span class="hljs-number">1</span>),
+                self.vocab_size,
+                activation=<span class="hljs-keyword">None</span>)
+
+        <span class="hljs-keyword">return</span> output</code></pre> 
+<p><strong>7，将上面几个模块穿起来构成模型的inference函数:</strong></p> 
+<pre class="prettyprint"><code class=" hljs python">
+    <span class="hljs-function"><span class="hljs-keyword">def</span> <span class="hljs-title">inference</span><span class="hljs-params">(self)</span>:</span>
+        <span class="hljs-string">"""Performs inference on the DMN model"""</span>
+
+        <span class="hljs-comment"># set up embedding</span>
+        embeddings = tf.Variable(self.word_embedding.astype(np.float32), name=<span class="hljs-string">"Embedding"</span>)
+
+        <span class="hljs-comment"># input fusion module</span>
+        <span class="hljs-keyword">with</span> tf.variable_scope(<span class="hljs-string">"question"</span>, initializer=tf.contrib.layers.xavier_initializer()):
+            print(<span class="hljs-string">'==&gt; get question representation'</span>)
+            q_vec = self.get_question_representation(embeddings)
+
+
+        <span class="hljs-keyword">with</span> tf.variable_scope(<span class="hljs-string">"input"</span>, initializer=tf.contrib.layers.xavier_initializer()):
+            print(<span class="hljs-string">'==&gt; get input representation'</span>)
+            fact_vecs = self.get_input_representation(embeddings)
+
+        <span class="hljs-comment"># keep track of attentions for possible strong supervision</span>
+        self.attentions = []
+
+        <span class="hljs-comment"># memory module</span>
+        <span class="hljs-keyword">with</span> tf.variable_scope(<span class="hljs-string">"memory"</span>, initializer=tf.contrib.layers.xavier_initializer()):
+            print(<span class="hljs-string">'==&gt; build episodic memory'</span>)
+
+            <span class="hljs-comment"># generate n_hops episodes</span>
+            prev_memory = q_vec
+
+            <span class="hljs-keyword">for</span> i <span class="hljs-keyword">in</span> range(self.config.num_hops):
+                <span class="hljs-comment"># get a new episode</span>
+                print(<span class="hljs-string">'==&gt; generating episode'</span>, i)
+                episode = self.generate_episode(prev_memory, q_vec, fact_vecs, i)
+
+                <span class="hljs-comment"># untied weights for memory update</span>
+                <span class="hljs-keyword">with</span> tf.variable_scope(<span class="hljs-string">"hop_%d"</span> % i):
+                    prev_memory = tf.layers.dense(tf.concat([prev_memory, episode, q_vec], <span class="hljs-number">1</span>),
+                            self.config.hidden_size,
+                            activation=tf.nn.relu)
+
+            output = prev_memory
+
+        <span class="hljs-comment"># pass memory module output through linear answer module</span>
+        <span class="hljs-keyword">with</span> tf.variable_scope(<span class="hljs-string">"answer"</span>, initializer=tf.contrib.layers.xavier_initializer()):
+            output = self.add_answer_module(output, q_vec)
+
+        <span class="hljs-keyword">return</span> output</code></pre> 
+<p>至此我们也分析完了DMN、DMN+的代码实现过程。结合代码可以对论文有更加深刻的理解和吸收。这篇博客到这里也就结束了~~</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/26a8d50189f54021f160e034bd30ddef/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Mac下安装mongoldb 报错 shutting down with code:100</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/0275f82086e713915efec8cd5ce16b30/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">NWERC 2013</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

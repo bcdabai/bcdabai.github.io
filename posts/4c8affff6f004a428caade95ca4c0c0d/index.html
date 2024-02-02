@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>深大操作系统实验-简易文件系统设计 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="深大操作系统实验-简易文件系统设计" />
+<meta property="og:description" content="目录
+问题描述
+设计思路
+文件逻辑设计
+用到的常量及数据结构
+一些基础功能接口（从小到大）
+对位图进行操作（位运算）
+对数据块进行操作（释放，申请，调用上面的位图控制函数实现）
+文件创建与删除
+文件的读取和修改
+文件夹的创建和删除
+cd和ls指令
+其他辅助功能函数
+进程同步
+总结
+问题描述 1.创建一个100M的文件或者创建一个100M的共享内存
+2.尝试自行设计一个C语言小程序，使用步骤1分配的100M空间（共享内存或mmap），然后假设这100M空间为一个空白磁盘，设计一个简单的文件系统管理这个空白磁盘，给出文件和目录管理的基本数据结构，并画出文件系统基本结构图，以及基本操作接口。
+3.在步骤1的基础上实现部分文件操作接口操作，创建目录mkdir，删除目录rmdir，修改名称，创建文件open，修改文件，删除文件rm，查看文件系统目录结构ls。
+4.参考进程同步的相关章节，通过信号量机制实现多个终端对上述文件系统的互斥访问，系统中的一个文件允许多个进程读，不允许写操作；或者只允许一个写操作，不允许读。
+设计思路 模拟FAT文件系统（软硬链接没做出来，数据结构也不支持，寄）
+首先100MB中拿出4MB作为文件管理系统的核心（存放位图，inode数组等等），100MB大小空间安排如下：
+对于后面的96MB，以4KB一页为单位，共24576页，对每一页使用1bit表示是否被占用，这个位图也存放在用于文件系统管理的4MB中。由于文件分页存储，用FAT表显式表达文件占用的数据页的跳转情况。
+每个文件和文件夹都占用一个inode，inode内记录当前文件类型（目录还是可读写文件），父节点、左右兄弟节点（这个下面解释）、子结点的inode编号以及对应的FCB编号。
+FCB用于记录文件名，一开始的设想是包含软、硬链接的功能，因此FCB的设定数量上限为inode的两倍，但实际实现起来过于复杂，FCB与inode一一对应。
+4MB管理核心结构：
+文件逻辑设计 如果区分一个inode是目录还是文件，对应不同类型的FCB，管理起来十分混乱，并且如果设置文件FCB和目录FCB，两种FCB储存的信息大小不一致，也不方便读取，因此采用所有文件都包含子结点inode编号的方式。（反正没有软硬链接要求，怎么方便怎么来）
+由于这种结构下的文件目录是一棵多叉树，不确定一个目录下有多少个子结点，因此采用“孩子兄弟表示法”，图示：
+用到的常量及数据结构 常量声明：
+// 一个数据块大小 #define BLOCK_SIZE 4096 // 96MB对应24576个数据块 #define BLOCK_NUM 24576 // 每块对应1bit, 需要3072bytes表示 #define BLOCK_MAP_LENGTH 3072 // inode最多每块一个, 共24576个 #define INODE_MAP_LENGTH 3072 // FCB考虑后续可能有硬链接、软链接等, 开多一倍 #define FCB_MAP_LENGTH 6144 // 硬盘管理核心占4MB(剩余96MB) #define CORE_SIZE (1 &lt;&lt; 22) 下面是用到的数据结构：
+// 32 bytes struct Inode { int file_type; // 文件类型, 0是文件夹, 1是可读写文件 int iblock; // 文件数据块起始下标(在FAT表中进行跳转) int size; // 文件大小, 可在touch创建文件时指定, 可大于内容长度 int parent_inode_number; // 父节点(当前所处文件夹)inode下标 int child_inode_number; // 第一个子节点下标 int brother_inode_number_left; // 左兄弟节点inode下标 int brother_inode_number_right; // 右兄弟inode下标 int FCB_number; // 该文件对应FCB下标 }; // 16 bytes struct FCB { int inode; // 该FCB对应inode下标 char FileName[12]; // 文件名 }; // 4KB union BlockMap { char block_map[BLOCK_MAP_LENGTH]; char temp[BLOCK_SIZE]; // 撑开一个数据块 }; // 789504 bytes struct InodeArray { char inode_map[INODE_MAP_LENGTH]; struct Inode inode_array[BLOCK_NUM]; }; // 792576 bytes struct FCBArray { char FCB_map[FCB_MAP_LENGTH]; struct FCB FCB_array[BLOCK_NUM &lt;&lt; 1]; }; // 790528 bytes -&gt; 772KB -&gt; 193 * 4KB union InodeArrayBlock { struct InodeArray inode_array; char temp[790528]; }; // 194 * 4KB union FCBArrayBlock { struct FCBArray fcb_array; char temp[794624]; }; // 1648 KB &#43; 8 bytes struct SystemCore { int block_used; // 已使用的数据块, int block_rest; // 剩余空闲的数据块, union BlockMap bit_map; // 4KB union InodeArrayBlock inode_array; // 193 * 4KB union FCBArrayBlock FCB_array; // 194 * 4KB int FAT[24576]; // 96KB }; // 4MB union SystemCore_union { struct SystemCore core; char temp[1 &lt;&lt; 22]; }; // 管理信号量的数据结构 union semun { int val; struct semid_ds *buf; unsigned short *arry; }; （ps：好几个地方用了union为了撑开一页，实际上没必要，后面写接口调用起来也麻烦。本来打算再包多一层，把100MB都放在一个结构体内，懒了）" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/4c8affff6f004a428caade95ca4c0c0d/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-06-20T16:53:38+08:00" />
+<meta property="article:modified_time" content="2022-06-20T16:53:38+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">深大操作系统实验-简易文件系统设计</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="%E9%97%AE%E9%A2%98%E6%8F%8F%E8%BF%B0-toc" style="margin-left:40px;"><a href="#%E9%97%AE%E9%A2%98%E6%8F%8F%E8%BF%B0" rel="nofollow">问题描述</a></p> 
+<p id="%E8%AE%BE%E8%AE%A1%E6%80%9D%E8%B7%AF-toc" style="margin-left:40px;"><a href="#%E8%AE%BE%E8%AE%A1%E6%80%9D%E8%B7%AF" rel="nofollow">设计思路</a></p> 
+<p id="%E6%96%87%E4%BB%B6%E9%80%BB%E8%BE%91%E8%AE%BE%E8%AE%A1%EF%BC%9A-toc" style="margin-left:40px;"><a href="#%E6%96%87%E4%BB%B6%E9%80%BB%E8%BE%91%E8%AE%BE%E8%AE%A1%EF%BC%9A" rel="nofollow">文件逻辑设计</a></p> 
+<p id="%E7%94%A8%E5%88%B0%E7%9A%84%E5%B8%B8%E9%87%8F%E5%8F%8A%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84-toc" style="margin-left:40px;"><a href="#%E7%94%A8%E5%88%B0%E7%9A%84%E5%B8%B8%E9%87%8F%E5%8F%8A%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84" rel="nofollow">用到的常量及数据结构</a></p> 
+<p id="%E4%B8%80%E4%BA%9B%E5%9F%BA%E7%A1%80%E5%8A%9F%E8%83%BD%E6%8E%A5%E5%8F%A3%EF%BC%88%E4%BB%8E%E5%B0%8F%E5%88%B0%E5%A4%A7%EF%BC%89-toc" style="margin-left:40px;"><a href="#%E4%B8%80%E4%BA%9B%E5%9F%BA%E7%A1%80%E5%8A%9F%E8%83%BD%E6%8E%A5%E5%8F%A3%EF%BC%88%E4%BB%8E%E5%B0%8F%E5%88%B0%E5%A4%A7%EF%BC%89" rel="nofollow">一些基础功能接口（从小到大）</a></p> 
+<p id="%E5%AF%B9%E4%BD%8D%E5%9B%BE%E8%BF%9B%E8%A1%8C%E6%93%8D%E4%BD%9C%EF%BC%88%E4%BD%8D%E8%BF%90%E7%AE%97%EF%BC%89-toc" style="margin-left:80px;"><a href="#%E5%AF%B9%E4%BD%8D%E5%9B%BE%E8%BF%9B%E8%A1%8C%E6%93%8D%E4%BD%9C%EF%BC%88%E4%BD%8D%E8%BF%90%E7%AE%97%EF%BC%89" rel="nofollow">对位图进行操作（位运算）</a></p> 
+<p id="%E5%AF%B9%E6%95%B0%E6%8D%AE%E5%9D%97%E8%BF%9B%E8%A1%8C%E6%93%8D%E4%BD%9C%EF%BC%88%E9%87%8A%E6%94%BE%EF%BC%8C%E7%94%B3%E8%AF%B7%EF%BC%8C%E8%B0%83%E7%94%A8%E4%B8%8A%E9%9D%A2%E7%9A%84%E4%BD%8D%E5%9B%BE%E6%8E%A7%E5%88%B6%E5%87%BD%E6%95%B0%E5%AE%9E%E7%8E%B0%EF%BC%89-toc" style="margin-left:80px;"><a href="#%E5%AF%B9%E6%95%B0%E6%8D%AE%E5%9D%97%E8%BF%9B%E8%A1%8C%E6%93%8D%E4%BD%9C%EF%BC%88%E9%87%8A%E6%94%BE%EF%BC%8C%E7%94%B3%E8%AF%B7%EF%BC%8C%E8%B0%83%E7%94%A8%E4%B8%8A%E9%9D%A2%E7%9A%84%E4%BD%8D%E5%9B%BE%E6%8E%A7%E5%88%B6%E5%87%BD%E6%95%B0%E5%AE%9E%E7%8E%B0%EF%BC%89" rel="nofollow">对数据块进行操作（释放，申请，调用上面的位图控制函数实现）</a></p> 
+<p id="%E6%96%87%E4%BB%B6%E5%88%9B%E5%BB%BA%E4%B8%8E%E5%88%A0%E9%99%A4-toc" style="margin-left:80px;"><a href="#%E6%96%87%E4%BB%B6%E5%88%9B%E5%BB%BA%E4%B8%8E%E5%88%A0%E9%99%A4" rel="nofollow">文件创建与删除</a></p> 
+<p id="%E6%96%87%E4%BB%B6%E7%9A%84%E8%AF%BB%E5%8F%96%E5%92%8C%E4%BF%AE%E6%94%B9-toc" style="margin-left:80px;"><a href="#%E6%96%87%E4%BB%B6%E7%9A%84%E8%AF%BB%E5%8F%96%E5%92%8C%E4%BF%AE%E6%94%B9" rel="nofollow">文件的读取和修改</a></p> 
+<p id="%E6%96%87%E4%BB%B6%E5%A4%B9%E7%9A%84%E5%88%9B%E5%BB%BA%E5%92%8C%E5%88%A0%E9%99%A4-toc" style="margin-left:80px;"><a href="#%E6%96%87%E4%BB%B6%E5%A4%B9%E7%9A%84%E5%88%9B%E5%BB%BA%E5%92%8C%E5%88%A0%E9%99%A4" rel="nofollow">文件夹的创建和删除</a></p> 
+<p id="cd%E5%92%8Cls%E6%8C%87%E4%BB%A4-toc" style="margin-left:80px;"><a href="#cd%E5%92%8Cls%E6%8C%87%E4%BB%A4" rel="nofollow">cd和ls指令</a></p> 
+<p id="%E5%85%B6%E4%BB%96%E8%BE%85%E5%8A%A9%E5%8A%9F%E8%83%BD%E5%87%BD%E6%95%B0-toc" style="margin-left:80px;"><a href="#%E5%85%B6%E4%BB%96%E8%BE%85%E5%8A%A9%E5%8A%9F%E8%83%BD%E5%87%BD%E6%95%B0" rel="nofollow">其他辅助功能函数</a></p> 
+<p id="%E8%BF%9B%E7%A8%8B%E5%90%8C%E6%AD%A5-toc" style="margin-left:40px;"><a href="#%E8%BF%9B%E7%A8%8B%E5%90%8C%E6%AD%A5" rel="nofollow">进程同步</a></p> 
+<p id="%E6%80%BB%E7%BB%93-toc" style="margin-left:40px;"><a href="#%E6%80%BB%E7%BB%93" rel="nofollow">总结</a></p> 
+<hr id="hr-toc"> 
+<h3>问题描述</h3> 
+<p><span style="background-color:#ffffff;"><span style="color:#111111;">1.</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">创建一个</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">100M</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">的文件或者创建一个</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">100M</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">的共享内存</span></span><br><span style="color:#111111;"><span style="background-color:#ffffff;">2.</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">尝试自行设计一个</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">C</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">语言小程序，使用步骤</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">1</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">分配的</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">100M</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">空间（共享内存或</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">mmap</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">），然后假设这</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">100M</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">空间为一个空白磁盘，设计一个简单的文件系统管理这个空白磁盘，给出文件和目录管理的基本数据结构，并画出文件系统基本结构图，以及基本操作接口。</span></span><br><span style="color:#111111;"><span style="background-color:#ffffff;">3.</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">在步骤</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">1</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">的基础上实现部分文件操作接口操作，创建目录</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">mkdir</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">，删除目录</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">rmdir</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">，修改名称，创建文件</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">open</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">，修改文件，删除文件</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">rm</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">，查看文件系统目录结构</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">ls</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">。</span></span><br><span style="color:#111111;"><span style="background-color:#ffffff;">4.</span></span><span style="background-color:#ffffff;"><span style="color:#111111;">参考进程同步的相关章节，通过信号量机制实现多个终端对上述文件系统的互斥访问，系统中的一个文件允许多个进程读，不允许写操作；或者只允许一个写操作，不允许读。</span></span></p> 
+<h3 id="%E8%AE%BE%E8%AE%A1%E6%80%9D%E8%B7%AF">设计思路</h3> 
+<p>模拟FAT文件系统（软硬链接没做出来，数据结构也不支持，寄）</p> 
+<p>首先100MB中拿出4MB作为文件管理系统的核心（存放位图，inode数组等等），100MB大小空间安排如下：</p> 
+<p><img alt="" height="74" src="https://images2.imgbox.com/9f/df/G6F7bvnd_o.png" width="523"></p> 
+<p>对于后面的96MB，以4KB一页为单位，共24576页，对每一页使用1bit表示是否被占用，这个位图也存放在用于文件系统管理的4MB中。由于文件分页存储，用FAT表显式表达文件占用的数据页的跳转情况。</p> 
+<p style="margin-left:0;text-align:justify;">每个文件和文件夹都占用一个inode，inode内记录当前文件类型（目录还是可读写文件），父节点、左右兄弟节点（这个下面解释）、子结点的inode编号以及对应的FCB编号。</p> 
+<p style="margin-left:0;text-align:justify;">FCB用于记录文件名，一开始的设想是包含软、硬链接的功能，因此FCB的设定数量上限为inode的两倍，但实际实现起来过于复杂，FCB与inode一一对应<strong>。</strong></p> 
+<p style="margin-left:0;text-align:justify;"></p> 
+<p style="margin-left:0;text-align:justify;"> 4MB管理核心结构：</p> 
+<p><img alt="" height="69" src="https://images2.imgbox.com/4e/ba/Nt1l0B21_o.png" width="541"></p> 
+<h3 id="%E6%96%87%E4%BB%B6%E9%80%BB%E8%BE%91%E8%AE%BE%E8%AE%A1%EF%BC%9A" style="margin-left:0px;text-align:justify;">文件逻辑设计</h3> 
+<p style="margin-left:0;text-align:justify;">如果区分一个inode是目录还是文件，对应不同类型的FCB，管理起来十分混乱，并且如果设置文件FCB和目录FCB，两种FCB储存的信息大小不一致，也不方便读取，因此采用所有文件都包含子结点inode编号的方式。<strong><s>（反正没有软硬链接要求，怎么方便怎么来）</s></strong></p> 
+<p style="margin-left:0;text-align:justify;"><strong>由于这种结构下的文件目录是一棵多叉树，不确定一个目录下有多少个子结点，因此采用“孩子兄弟表示法”，图示：</strong></p> 
+<table><tbody><tr><td></td></tr><tr><td></td><td><img alt="" height="699" src="https://images2.imgbox.com/97/af/bdzTEU5P_o.png" width="1200"></td></tr></tbody></table> 
+<h3 id="%E7%94%A8%E5%88%B0%E7%9A%84%E5%B8%B8%E9%87%8F%E5%8F%8A%E6%95%B0%E6%8D%AE%E7%BB%93%E6%9E%84">用到的常量及数据结构</h3> 
+<p>常量声明：</p> 
+<pre><code class="language-cpp">// 一个数据块大小
+#define BLOCK_SIZE 4096
+
+// 96MB对应24576个数据块
+#define BLOCK_NUM 24576
+
+// 每块对应1bit, 需要3072bytes表示
+#define BLOCK_MAP_LENGTH 3072
+
+// inode最多每块一个, 共24576个
+#define INODE_MAP_LENGTH 3072
+
+// FCB考虑后续可能有硬链接、软链接等, 开多一倍
+#define FCB_MAP_LENGTH 6144
+
+// 硬盘管理核心占4MB(剩余96MB)
+#define CORE_SIZE (1 &lt;&lt; 22)</code></pre> 
+<p>下面是用到的数据结构：</p> 
+<pre><code class="language-cpp">// 32 bytes
+struct Inode {
+    int file_type; // 文件类型, 0是文件夹, 1是可读写文件
+    int iblock; // 文件数据块起始下标(在FAT表中进行跳转)
+    int size; // 文件大小, 可在touch创建文件时指定, 可大于内容长度
+    int parent_inode_number; // 父节点(当前所处文件夹)inode下标
+    int child_inode_number; // 第一个子节点下标
+    int brother_inode_number_left; // 左兄弟节点inode下标
+    int brother_inode_number_right; // 右兄弟inode下标
+    int FCB_number; // 该文件对应FCB下标
+};
+
+// 16 bytes
+struct FCB {
+    int inode; // 该FCB对应inode下标
+    char FileName[12]; // 文件名
+};
+
+// 4KB
+union BlockMap {
+    char block_map[BLOCK_MAP_LENGTH];
+    char temp[BLOCK_SIZE]; // 撑开一个数据块
+};
+
+// 789504 bytes
+struct InodeArray {
+    char inode_map[INODE_MAP_LENGTH];
+    struct Inode inode_array[BLOCK_NUM];
+};
+
+// 792576 bytes
+struct FCBArray {
+    char FCB_map[FCB_MAP_LENGTH];
+    struct FCB FCB_array[BLOCK_NUM &lt;&lt; 1];
+};
+
+// 790528 bytes -&gt; 772KB -&gt; 193 * 4KB
+union InodeArrayBlock {
+    struct InodeArray inode_array;
+    char temp[790528];
+};
+
+// 194 * 4KB
+union FCBArrayBlock {
+    struct FCBArray fcb_array;
+    char temp[794624];
+};
+
+// 1648 KB + 8 bytes
+struct SystemCore {
+    int block_used; // 已使用的数据块, 
+    int block_rest; // 剩余空闲的数据块, 
+    union BlockMap bit_map; // 4KB
+    union InodeArrayBlock inode_array; // 193 * 4KB
+    union FCBArrayBlock FCB_array; // 194 * 4KB
+    int FAT[24576]; // 96KB
+};
+
+// 4MB
+union SystemCore_union {
+    struct SystemCore core;
+    char temp[1 &lt;&lt; 22];
+};
+
+// 管理信号量的数据结构
+union semun
+{
+    int val;
+    struct semid_ds *buf;
+    unsigned short *arry;
+};</code></pre> 
+<p>（ps：好几个地方用了union为了撑开一页，实际上没必要，后面写接口调用起来也麻烦。本来打算再包多一层，把100MB都放在一个结构体内，懒了）</p> 
+<h3 id="%E4%B8%80%E4%BA%9B%E5%9F%BA%E7%A1%80%E5%8A%9F%E8%83%BD%E6%8E%A5%E5%8F%A3%EF%BC%88%E4%BB%8E%E5%B0%8F%E5%88%B0%E5%A4%A7%EF%BC%89">一些基础功能接口（从小到大）</h3> 
+<h4 id="%E5%AF%B9%E4%BD%8D%E5%9B%BE%E8%BF%9B%E8%A1%8C%E6%93%8D%E4%BD%9C%EF%BC%88%E4%BD%8D%E8%BF%90%E7%AE%97%EF%BC%89">对位图进行操作（位运算）</h4> 
+<pre><code class="language-cpp">// 查看1bytes, 即8bit中哪一位为0(0表示可用)
+int searchBit(char byte) {
+    int res = 0;
+    while (byte &lt; 0) {
+        res++;
+        byte &lt;&lt;= 1;
+    }
+    return res &lt; 8 ? res : -1;
+}
+
+// 查找一个位图中, 第一个为0的bit的下标(0表示可用)
+int searchFirstBit(char *bytes, int length) {
+    int res, count = 0;
+    while ((res = searchBit(*bytes)) == -1) {
+        count++;
+        if (count == length)
+            break;
+    }
+    return count == length ? -1 : res + (count &lt;&lt; 3);
+}
+
+// 设置一个位图中第pos位的bit
+void setBit(char *bytes, int pos, int val) {
+    while (pos / 8) {
+        pos -= 8;
+        bytes++;
+    }
+    char new_val = 1 &lt;&lt; (7 - pos);
+    if (val == 0) {
+        new_val = ~new_val;
+        *bytes = *bytes &amp; new_val;
+    }
+    else {
+        *bytes = *bytes | new_val;
+    }
+}</code></pre> 
+<h4 id="%E5%AF%B9%E6%95%B0%E6%8D%AE%E5%9D%97%E8%BF%9B%E8%A1%8C%E6%93%8D%E4%BD%9C%EF%BC%88%E9%87%8A%E6%94%BE%EF%BC%8C%E7%94%B3%E8%AF%B7%EF%BC%8C%E8%B0%83%E7%94%A8%E4%B8%8A%E9%9D%A2%E7%9A%84%E4%BD%8D%E5%9B%BE%E6%8E%A7%E5%88%B6%E5%87%BD%E6%95%B0%E5%AE%9E%E7%8E%B0%EF%BC%89">对数据块进行操作（释放，申请，调用上面的位图控制函数实现）</h4> 
+<pre><code class="language-cpp">// 循环释放以iblock开始的数据块(操作位图实现)
+void freeMemBlock(int iblock, union SystemCore_union *system_core) {
+    int *FAT = system_core-&gt;core.FAT;
+    while (iblock != -1) {
+        setBit(system_core-&gt;core.bit_map.block_map, iblock, 0);
+        iblock = FAT[iblock];
+        system_core-&gt;core.block_used--;
+        system_core-&gt;core.block_rest++;
+    }
+}
+
+// 申请block_num个数据块, 自动连接FAT表, 返回起始数据块下标
+int allocMemBlock(int block_num, union SystemCore_union *system_core) {
+    if (block_num &gt; system_core-&gt;core.block_rest) {
+        printf("FAIL: no enough memory block.\n");
+        return -1;
+    }
+    system_core-&gt;core.block_used += block_num;
+    system_core-&gt;core.block_rest -= block_num;
+
+    int block_number = searchFirstBit(system_core-&gt;core.bit_map.block_map, BLOCK_MAP_LENGTH);
+    int res = block_number;
+    block_num--;
+    int temp = block_number;
+    setBit(system_core-&gt;core.bit_map.block_map, block_number, 1);
+    while (block_num &gt; 0) {
+        block_number = searchFirstBit(system_core-&gt;core.bit_map.block_map, BLOCK_MAP_LENGTH);
+        system_core-&gt;core.FAT[temp] = block_number;
+        temp = block_number;
+        setBit(system_core-&gt;core.bit_map.block_map, block_number, 1);
+        block_num--;
+    }
+    system_core-&gt;core.FAT[temp] = -1;
+    return res;
+}</code></pre> 
+<h4 id="%E6%96%87%E4%BB%B6%E5%88%9B%E5%BB%BA%E4%B8%8E%E5%88%A0%E9%99%A4">文件创建与删除</h4> 
+<p>有了位图和数据块的控制函数，文件的创建和删除就好办了。由于一块4096byte，测试的时候也不方便输太长的字符串，所以设置成<strong>文件的大小可大于内容的大小</strong>(文件大小4097byte，但内容为空也是允许的)，这样方便创建文件时检测数据块分配是否正常。(修改文件时，如果发现新的内容长度大于文件大小，会重新分配足够的空间，后面会放)</p> 
+<pre><code class="language-cpp">// 删除文件
+void remove_file(struct Inode *inode, union SystemCore_union *system_core) {
+    
+    int FCB_number = inode-&gt;FCB_number;
+    struct FCB *fcb = &amp;system_core-&gt;core.FCB_array.fcb_array.FCB_array[FCB_number];
+    int inode_number = fcb-&gt;inode;
+
+    freeMemBlock(inode-&gt;iblock, system_core); // 释放对应的数据块
+    if (inode-&gt;brother_inode_number_left == -1) { // 如果是当前文件夹下第一个文件
+        int father_inode_number = inode-&gt;parent_inode_number; // 右兄弟充当当前文件夹第一个孩子
+        struct Inode *father_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[father_inode_number];
+        father_inode-&gt;child_inode_number = inode-&gt;brother_inode_number_right;
+
+        int brother_right_inode_number = inode-&gt;brother_inode_number_right; // 右兄弟左指针清空
+        struct Inode *brother_right_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[brother_right_inode_number];
+        brother_right_inode-&gt;brother_inode_number_left = -1;
+    }
+    else {
+        int brother_inode_number = inode-&gt;brother_inode_number_left; // 左兄弟指向右兄弟
+        struct Inode *brother_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[brother_inode_number];
+        brother_inode-&gt;brother_inode_number_right = inode-&gt;brother_inode_number_right;
+
+        int brother_right_inode_number = inode-&gt;brother_inode_number_right; // 右兄弟指向左兄弟
+        struct Inode *brother_right_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[brother_right_inode_number];
+        brother_right_inode-&gt;brother_inode_number_left = brother_inode_number;
+    }
+    setBit(system_core-&gt;core.inode_array.inode_array.inode_map, inode_number, 0); // 释放inode
+    setBit(system_core-&gt;core.FCB_array.fcb_array.FCB_map, FCB_number, 0); // 释放FCB
+}
+
+// 根据文件名、文件大小创建文件
+void touch(struct FCB *dir_now, char file_name[], union SystemCore_union *system_core, int file_size) {
+    // 可能当前剩余块不够用
+    int block_to_use = file_size / BLOCK_SIZE + 1;
+    if (block_to_use &gt; system_core-&gt;core.block_rest) {
+        printf("FAIL: the file is too large.\n");
+        return;
+    }
+    system_core-&gt;core.block_used += block_to_use;
+    system_core-&gt;core.block_rest -= block_to_use;
+
+    // 获取当前文件夹下最后一个文件的inode编号
+    int last_childe_inode_number = system_core-&gt;core.inode_array.inode_array.inode_array[dir_now-&gt;inode].child_inode_number;
+    if (last_childe_inode_number != -1)
+        while (system_core-&gt;core.inode_array.inode_array.inode_array[last_childe_inode_number].brother_inode_number_right != -1)
+            last_childe_inode_number = system_core-&gt;core.inode_array.inode_array.inode_array[last_childe_inode_number].brother_inode_number_right;
+
+    // 为新文件夹获取inode
+    int new_file_inode_number = searchFirstBit(system_core-&gt;core.inode_array.inode_array.inode_map, INODE_MAP_LENGTH);
+    if (new_file_inode_number == -1) {
+        printf("FAIL: All inode have been used!\n");
+        return;
+    }
+    setBit(system_core-&gt;core.inode_array.inode_array.inode_map, new_file_inode_number, 1);
+
+    // 获取inode后, 初始化inode信息
+    struct Inode *new_file_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[new_file_inode_number];
+    new_file_inode-&gt;file_type = 1;
+    new_file_inode-&gt;parent_inode_number = dir_now-&gt;inode;
+    new_file_inode-&gt;brother_inode_number_left = -1;
+    new_file_inode-&gt;brother_inode_number_right = -1;
+    new_file_inode-&gt;child_inode_number = -1;
+    new_file_inode-&gt;size = file_size;
+    if (last_childe_inode_number != -1) {
+        setBit(system_core-&gt;core.inode_array.inode_array.inode_map, new_file_inode_number, 0);
+        new_file_inode-&gt;brother_inode_number_left = last_childe_inode_number;
+        system_core-&gt;core.inode_array.inode_array.inode_array[last_childe_inode_number].brother_inode_number_right = new_file_inode_number; // 新文件装入当前文件夹(连接在最后一个孩子后面)
+    }
+    else
+        system_core-&gt;core.inode_array.inode_array.inode_array[dir_now-&gt;inode].child_inode_number = new_file_inode_number;
+
+    // 分配数据块，默认分配一块
+    new_file_inode-&gt;iblock = allocMemBlock(block_to_use, system_core);
+    writeFile(new_file_inode, system_core, ""); // 清空文件内容
+
+    // 获取FCB
+    int new_file_fcb_number = searchFirstBit(system_core-&gt;core.FCB_array.fcb_array.FCB_map, FCB_MAP_LENGTH);
+    if (new_file_fcb_number == -1) {
+        printf("FAIL: All FCB have been used!\n");
+        return;
+    }
+    setBit(system_core-&gt;core.FCB_array.fcb_array.FCB_map, new_file_fcb_number, 1);
+    new_file_inode-&gt;FCB_number = new_file_fcb_number;
+
+    struct FCB *new_file_fcb = &amp;system_core-&gt;core.FCB_array.fcb_array.FCB_array[new_file_fcb_number];
+    new_file_fcb-&gt;inode = new_file_inode_number;
+    strncpy(new_file_fcb-&gt;FileName, file_name, 12);
+}</code></pre> 
+<h4 id="%E6%96%87%E4%BB%B6%E7%9A%84%E8%AF%BB%E5%8F%96%E5%92%8C%E4%BF%AE%E6%94%B9">文件的读取和修改</h4> 
+<p>修改是覆盖写入，个人写的是一个一个字节（也就是字符）读取/写入，其实可以一次读4096字节，因为一个数据块一定只属于一个文件，哪怕有浪费。（这部分写的好丑qaq）</p> 
+<pre><code class="language-cpp">// 读取文件内容, 放入data中
+void readFile(struct Inode *inode, union SystemCore_union *system_core, char data[]) {
+    char *data_start = (void *)system_core;
+    data_start += CORE_SIZE; // 定位到数据块开始位置
+    int count = 1, block_number = inode-&gt;iblock, write_pos = 0;
+    int *FAT = system_core-&gt;core.FAT;
+    char *read_p = data_start + block_number * BLOCK_SIZE;
+
+    while (*read_p != 0) { // 读取到结束符退出
+        data[write_pos++] = *read_p;
+        read_p++;
+        count++;
+
+        if (count == BLOCK_SIZE) { // 读取完一个数据块, 跳转到下一个
+            count = 1;
+            block_number = FAT[block_number];
+            read_p = data_start + block_number * BLOCK_SIZE;
+        }
+    }
+    data[write_pos] = *read_p;
+}
+
+// 把data中的内容写入文件对应的数据块
+void writeFile(struct Inode *inode, union SystemCore_union *system_core, char data[]) {
+    int block_num = inode-&gt;size / 4096 + 1;
+
+    if (block_num * 4096 &lt;= strlen(data)) { // 如果这个文件的大小不足以装下data, 重新分配
+        block_num = strlen(data) / 4096 + 1;
+        int temp = allocMemBlock(block_num, system_core);
+        if (temp == -1)
+            return;
+        freeMemBlock(inode-&gt;iblock, system_core);
+        inode-&gt;iblock = temp;
+        inode-&gt;size = strlen(data);
+    }
+
+    char *data_start = (void *)system_core;
+    data_start += CORE_SIZE;
+    int read_pos = 0, count = 1, block_number = inode-&gt;iblock;
+    int *FAT = system_core-&gt;core.FAT;
+    char *write_p = data_start + block_number * BLOCK_SIZE;
+    while (data[read_pos] != 0) { // 类似文件读取
+        *write_p = data[read_pos];
+        write_p++;
+        read_pos++;
+        count++;
+
+        if (count == BLOCK_SIZE) {
+            count = 1;
+            block_number = FAT[block_number];
+            write_p = data_start + block_number * BLOCK_SIZE;
+        }
+    }
+    *write_p = 0;
+    if (inode-&gt;size &lt; strlen(data))
+        inode-&gt;size = strlen(data);
+}</code></pre> 
+<h4 id="%E6%96%87%E4%BB%B6%E5%A4%B9%E7%9A%84%E5%88%9B%E5%BB%BA%E5%92%8C%E5%88%A0%E9%99%A4">文件夹的创建和删除</h4> 
+<p>创建文件简单多了，分配FCB和inode即可。删除文件夹就是普通递归，如果文件夹为空，直接删除；否则遍历孩子，空文件夹或文件直接删除，非空文件夹递归调用。</p> 
+<pre><code class="language-cpp">// 在当前文件夹下创建名为dir_name的文件夹
+void mkdir(struct FCB *dir_now, char dir_name[], union SystemCore_union *system_core) {
+    // 获取当前文件夹下最后一个文件的inode编号
+    int last_childe_inode_number = system_core-&gt;core.inode_array.inode_array.inode_array[dir_now-&gt;inode].child_inode_number;
+    if (last_childe_inode_number != -1) // 可能当前文件夹为空
+        while (system_core-&gt;core.inode_array.inode_array.inode_array[last_childe_inode_number].brother_inode_number_right != -1)
+            last_childe_inode_number = system_core-&gt;core.inode_array.inode_array.inode_array[last_childe_inode_number].brother_inode_number_right;
+
+    // 为新文件夹获取可用的inode
+    int new_dir_inode_number = searchFirstBit(system_core-&gt;core.inode_array.inode_array.inode_map, INODE_MAP_LENGTH);
+    if (new_dir_inode_number == -1) {
+        printf("FAIL: All inode have been used!\n");
+        return;
+    }
+    setBit(system_core-&gt;core.inode_array.inode_array.inode_map, new_dir_inode_number, 1);
+
+    // 获取inode后, 初始化inode信息
+    struct Inode *new_dir_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[new_dir_inode_number];
+    new_dir_inode-&gt;file_type = 0; // 文件夹类型为0
+    new_dir_inode-&gt;parent_inode_number = dir_now-&gt;inode;
+    new_dir_inode-&gt;brother_inode_number_left = -1;
+    new_dir_inode-&gt;brother_inode_number_right = -1;
+    new_dir_inode-&gt;child_inode_number = -1;
+    if (last_childe_inode_number != -1) { // 如果当前文件夹不为空, 挂在最后一个孩子后
+        new_dir_inode-&gt;brother_inode_number_left = last_childe_inode_number;
+        system_core-&gt;core.inode_array.inode_array.inode_array[last_childe_inode_number].brother_inode_number_right = new_dir_inode_number; // 新文件夹装入当前文件夹(连接在最后一个孩子后面)
+    }
+    else // 当前文件夹为空, 直接挂在当前文件夹的child_inode, 作为第一个孩子
+        system_core-&gt;core.inode_array.inode_array.inode_array[dir_now-&gt;inode].child_inode_number = new_dir_inode_number;
+
+    // 获取可用的FCB
+    int new_dir_fcb_number = searchFirstBit(system_core-&gt;core.FCB_array.fcb_array.FCB_map, FCB_MAP_LENGTH);
+    if (new_dir_fcb_number == -1) {
+        setBit(system_core-&gt;core.inode_array.inode_array.inode_map, new_dir_inode_number, 0);
+        printf("FAIL: All FCB have been used!\n");
+        return;
+    }
+    setBit(system_core-&gt;core.FCB_array.fcb_array.FCB_map, new_dir_fcb_number, 1);
+    new_dir_inode-&gt;FCB_number = new_dir_fcb_number;
+
+    // 初始化FCB
+    struct FCB *new_dir_fcb = &amp;system_core-&gt;core.FCB_array.fcb_array.FCB_array[new_dir_fcb_number];
+    new_dir_fcb-&gt;inode = new_dir_inode_number;
+    strncpy(new_dir_fcb-&gt;FileName, dir_name, 12);
+}
+
+// 删除文件夹
+void remove_dir(struct Inode *inode, union SystemCore_union *system_core) {
+
+    int FCB_number = inode-&gt;FCB_number;
+    struct FCB *fcb = &amp;system_core-&gt;core.FCB_array.fcb_array.FCB_array[FCB_number];
+    int inode_number = fcb-&gt;inode;
+
+    while (inode-&gt;child_inode_number != -1) { // 如果文件夹不为空
+        struct Inode *child_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[inode-&gt;child_inode_number];
+        if (child_inode-&gt;file_type == 1) // 孩子是文件直接删除
+            remove_file(child_inode, system_core);
+        else // 孩子是文件夹, 递归删除
+            remove_dir(child_inode, system_core);
+    }
+    // 文件夹已清空, 下面与普通文件删除过程一样
+    if (inode-&gt;brother_inode_number_left == -1) {
+        int father_inode_number = inode-&gt;parent_inode_number;
+        struct Inode *father_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[father_inode_number];
+        father_inode-&gt;child_inode_number = inode-&gt;brother_inode_number_right;
+
+        int brother_right_inode_number = inode-&gt;brother_inode_number_right;
+        struct Inode *brother_right_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[brother_right_inode_number];
+        brother_right_inode-&gt;brother_inode_number_left = -1;
+    }
+    else {
+        int brother_inode_number = inode-&gt;brother_inode_number_left;
+        struct Inode *brother_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[brother_inode_number];
+        brother_inode-&gt;brother_inode_number_right = inode-&gt;brother_inode_number_right;
+
+        int brother_right_inode_number = inode-&gt;brother_inode_number_right;
+        struct Inode *brother_right_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[brother_right_inode_number];
+        brother_right_inode-&gt;brother_inode_number_left = brother_inode_number;
+    }
+    setBit(system_core-&gt;core.inode_array.inode_array.inode_map, inode_number, 0);
+    setBit(system_core-&gt;core.FCB_array.fcb_array.FCB_map, FCB_number, 0);
+}</code></pre> 
+<h4 id="cd%E5%92%8Cls%E6%8C%87%E4%BB%A4">cd和ls指令</h4> 
+<p>cd这个基础接口只实现了进入子目录，在外面的包装函数实现返回上一层目录。ls指令遍历当前目录下的孩子节点即可。</p> 
+<pre><code class="language-cpp">// cd进入指定的子目录
+struct FCB* cd(struct FCB *dir_now, char file_name[], union SystemCore_union *system_core) {
+    struct Inode *dir_now_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[dir_now-&gt;inode];
+    int child_inode_number = dir_now_inode-&gt;child_inode_number;
+
+    // 遍历当前文件夹的子inode, 查看是否有同名的文件夹，有则返回
+    while (child_inode_number != -1) {
+        struct Inode *child_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[child_inode_number];
+        int child_FCB_number = child_inode-&gt;FCB_number;
+        struct FCB *child_FCB = &amp;system_core-&gt;core.FCB_array.fcb_array.FCB_array[child_FCB_number];
+        if (child_inode-&gt;file_type == 0 &amp;&amp; strncmp(child_FCB-&gt;FileName, file_name, 12) == 0)
+            return child_FCB;
+        child_inode_number = child_inode-&gt;brother_inode_number_right;
+    }
+    return NULL;
+}
+
+// 列出当前文件夹下子目录和文件的信息(文件inode编号, 文件类型, 文件大小, 文件名)
+void ls(struct FCB *dir_now, union SystemCore_union *system_core) {
+    struct Inode *dir_now_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[dir_now-&gt;inode];
+    int child_inode_number = dir_now_inode-&gt;child_inode_number;
+    while (child_inode_number != -1) {
+        struct Inode *child_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[child_inode_number];
+        printf("inode:%d file_type:%d file_size:%d %s\n", child_inode_number, child_inode-&gt;file_type, child_inode-&gt;size, system_core-&gt;core.FCB_array.fcb_array.FCB_array[child_inode-&gt;FCB_number].FileName);
+        child_inode_number = child_inode-&gt;brother_inode_number_right;
+    }
+}</code></pre> 
+<h4 id="%E5%85%B6%E4%BB%96%E8%BE%85%E5%8A%A9%E5%8A%9F%E8%83%BD%E5%87%BD%E6%95%B0">其他辅助功能函数</h4> 
+<p>其实就获取当前FCB所在的完整路径（向上递归到根目录），和根据文件类型和名字在当前目录下查找是否存在。(根据函数名看的出来啦)</p> 
+<pre><code class="language-cpp">// 递归获取当前目录的路径
+void getPath(struct FCB *dir_now, union SystemCore_union *system_core, char res[]) {
+    if (dir_now-&gt;inode != 0) {
+        int father_inode_number = system_core-&gt;core.inode_array.inode_array.inode_array[dir_now-&gt;inode].parent_inode_number;
+        int father_FCB_number = system_core-&gt;core.inode_array.inode_array.inode_array[father_inode_number].FCB_number;
+        struct FCB *father_FCB = &amp;system_core-&gt;core.FCB_array.fcb_array.FCB_array[father_FCB_number];
+        getPath(father_FCB, system_core, res);
+    }
+    strncat(res, dir_now-&gt;FileName, 12);
+    strcat(res, "/");
+}
+
+// 在当前目录下搜索是否有指定名称与文件类型的孩子
+struct Inode* serachInodeByName(struct FCB *dir_now, char name[], int file_type, union SystemCore_union *system_core) {
+    struct Inode *res = NULL;
+    struct Inode *dir_now_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[dir_now-&gt;inode];
+    int child_inode_number = dir_now_inode-&gt;child_inode_number;
+    while (child_inode_number != -1) { // 循环遍历所有孩子
+        struct Inode *child_inode = &amp;system_core-&gt;core.inode_array.inode_array.inode_array[child_inode_number];
+        int child_FCB_number = child_inode-&gt;FCB_number;
+        struct FCB *child_FCB = &amp;system_core-&gt;core.FCB_array.fcb_array.FCB_array[child_FCB_number];
+        if (child_inode-&gt;file_type == file_type &amp;&amp; strncmp(child_FCB-&gt;FileName, name, 12) == 0)
+            return child_inode;
+        child_inode_number = child_inode-&gt;brother_inode_number_right;
+    }
+    return res;
+}</code></pre> 
+<h3 id="%E8%BF%9B%E7%A8%8B%E5%90%8C%E6%AD%A5">进程同步</h3> 
+<p>实现读写文件时进程同步，用的是无名信号量，这里参考了文章（<a href="https://blog.csdn.net/weixin_45715405/article/details/124285041" title="Linux C 信号量_xiaozhu丶的博客-CSDN博客_linuxc 信号量">Linux C 信号量_xiaozhu丶的博客-CSDN博客_linuxc 信号量</a>），只需要在创建信号量集的时候创建数量与inode相同的信号量即可</p> 
+<pre><code class="language-cpp">sem_id = semget(0x8080, BLOCK_NUM, 0660 | IPC_CREAT); // 创建信号量集
+union semun sem_union;
+sem_union.val = 1;
+for (int i = 0; i &lt; BLOCK_NUM; i++) // 初始化信号量
+    semctl(sem_id, i, SETVAL, sem_union);</code></pre> 
+<p>然后封装一下P/V操作的函数</p> 
+<pre><code class="language-cpp">// inode_number即信号量集中该文件对应的信号量的下标, 这里等待信号量为1, 获取到后上锁, 信号量置0
+void wait(int inode_number) {
+    struct sembuf sem_b;
+    sem_b.sem_num = inode_number;
+    sem_b.sem_op = -1;
+    sem_b.sem_flg = SEM_UNDO;
+    semop(sem_id, &amp;sem_b, 1);
+}
+
+// 信号量置1
+void notify(int inode_number) {
+    struct sembuf sem_b;
+    sem_b.sem_num = inode_number;
+    sem_b.sem_op = 1;
+    sem_b.sem_flg = SEM_UNDO;
+    semop(sem_id, &amp;sem_b, 1);
+}</code></pre> 
+<p>sem_buf中的sem_num是信号量集中指定信号量的下标，使用起来非常方便<strong>（不过在服务器上运行时，无法成功创建这个信号量集，可能是信号量集过大？需要进一步求证）</strong></p> 
+<p>为实现题目要求的同步效果，读写操作在不同位置释放信号量即可</p> 
+<blockquote> 
+ <p><img alt="" class="left" height="306" src="https://images2.imgbox.com/07/6d/tHlbFLkW_o.png" width="98">​​​​​​​              <img alt="" height="306" src="https://images2.imgbox.com/86/fc/ypvekrWs_o.png" width="97"> </p> 
+</blockquote> 
+<p>剩下的就是写一个初始化进程用于创建100MB共享内存，初始化数据结构的内容，创建信号量集和根目录。另写一个shell程序，对指令进行处理，包装一下上述基础功能即可。</p> 
+<h3 id="%E6%80%BB%E7%BB%93">总结</h3> 
+<p>虽然写的过程中完全没考虑效率问题，有些地方（特指文件读写）写的很乱，不是翔味巧克力就是巧克力味的翔，但是莫名还是很想记录一下。虽然上了一学期，对OS很感兴趣，但真是深似海啊qaq。（好了写完去赶算法报告，寄）</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4dee2836959de8c8af3e6c933d7898a3/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">FileZilla上传文件出现数据丢失问题的解决</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/991337deb4ed5b1c0f6414d431ba5f60/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">计算机中的单位换算</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

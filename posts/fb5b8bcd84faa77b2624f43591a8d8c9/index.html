@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>【亲测可用】Hadoop分布式集群扩缩容 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="【亲测可用】Hadoop分布式集群扩缩容" />
+<meta property="og:description" content="Hadoop集群动态扩缩容 1 项目需求 随着公司业务的增长，数据量越来越大，原有DataNode节点的容量已经不能满足数据存储的需求，需要在原有集群基础上动态添加新的数据节点，也就是俗称的动态扩容。如果在Hadoop集群运行过程中，某些节点变得反常，例如故障率过高或者性能过低，可能就需要停止这些节点上的Hadoop服务，并从Hadoop集群中移除，也就是俗称的动态缩容。通常情况下，节点需要同时运行DataNode和NodeManager守护进程，所以两者一般同时新增或者移除。
+2 动态扩容原理 增加一个新节点非常简单：首先配置hdfs-site.xml文件指向NameNode，然后配置yarn-site.xml文件指向ResourceManager，最后启动DataNode和NodeManager守护进程即可。
+然而随便允许一台机器以DataNode的身份连接到NameNode是非常不安全的，因为该机器很可能会访问未授权的数据。此外，这台机器可能并非真正的DataNode，不在集群的控制之内，随时可能停止从而导致潜在的数据丢失。另外由于错误配置的可能性，即使这台机器都在本机房的防火墙之内，这种做法的风险也比较高。因此所有工作集群上的DataNode（或者NodeManager）都应该被明确管理。
+我们将允许连接到NameNode的所有DataNode都放在一个文件中，文件名称由dfs.hosts属性指定，该文件的每一行对应一个DataNode的网络地址。类似的，可能连接到ResourceManager的各个NodeManager也是在一个文件中指定，该文件的名称由yarn.resourcemanager.nodes.include-path属性指定。
+在通常情况下，由于集群中的节点同时运行DataNode和NodeManager守护进程，dfs.hosts和yarn.resourcemanager.nodes.include-path会同时指向一个文件，即取名为include文件。include文件不同于slaves文件，前者提供NameNode和ResourceManager使用，用于决定可以连接到哪些工作节点。Hadoop控制脚本使用slaves文件执行面向整个集群范围的操作，比如启停Hadoop集群等，而Hadoop守护进程从来不会使用slaves文件。
+3 动态缩容原理 HDFS集群能够容忍DataNode故障，这并不意味着我们可以随意终止DataNode。HDFS集群默认配置为3个副本，如果同时关闭不同机架上的3个DataNode，则数据丢失的概率非常高。正确的操作方法是，我们将准备移除的DataNode告知NameNode，那么HDFS集群会在DataNode停机之前，将数据块复制到其他DataNode，从而实现数据容错。
+有了NodeManager的支持，YARN集群对故障的容忍度更高。如果关闭一个正在运行MapReduce作业的NodeManager，ApplicationMaster会检测到故障，并在其他NodeManager节点上重新调度失败的任务。
+需要移除的节点是由exclude文件控制。对于HDFS集群来说，exclude文件路径是由dfs.hosts.exclude属性设置。对于YARN集群来说，exclude文件路径是由yarn.resourcemanager.nodes.exclude-path属性设置。通常情况下，准备移除的节点同时运行着DataNode和Nodemanager守护进程，这两个属性指向同一个文件。
+4 原Hadoop集群配置与启动 在Hadoop集群进行动态扩缩容之前，首先需要修改原有集群的配置文件，具体操作步骤如下所示。
+1.配置include文件路径 在NameNode节点(hadoop1)上，修改hdfs-site.xml配置文件添加dfs.hosts属性，具体操作如下所示。
+[hadoop@hadoop1 hadoop]$ vi hdfs-site.xml
+&lt;property&gt;
+&lt;name&gt;dfs.hosts&lt;/name&gt;
+&lt;value&gt;/home/hadoop/app/hadoop/etc/hadoop/include&lt;/value&gt;
+&lt;/property&gt;
+在ResourceManager节点(hadoop1)上，修改yarn-site.xml配置文件添加
+yarn.resourcemanager.nodes.include-path属性，具体操作如下所示。
+[hadoop@hadoop1 hadoop]$ vi yarn-site.xml
+&lt;property&gt;
+&lt;name&gt;yarn.resourcemanager.nodes.include-path&lt;/name&gt;
+&lt;value&gt;/home/hadoop/app/hadoop/etc/hadoop/include&lt;/value&gt;
+&lt;/property&gt;
+2.创建include文件 在NameNode和ResourceManager节点(hadoop1)上，创建include文件，并将集群节点的hostname信息添加到include文件中，具体操作如下所示。
+[hadoop@hadoop1 hadoop]$ vi include
+hadoop1
+hadoop2
+hadoop3
+3.配置exclude文件路径 在NameNode(hadoop1)节点上，修改hdfs-site.xml配置文件添加dfs.hosts.exclude属性，具体配置如下所示。
+[hadoop@hadoop1 hadoop]$ vi hdfs-site.xml
+&lt;property&gt;
+&lt;name&gt;dfs.hosts.exclude&lt;/name&gt;
+&lt;value&gt;/home/hadoop/app/hadoop/etc/hadoop/exclude&lt;/value&gt;
+&lt;/property&gt;
+在ResourceManager(hadoop1)节点上，修改yarn-site.xml配置文件添加yarn.resourcemanager.nodes.exclude-path属性，具体配置如下所示。
+[hadoop@hadoop1 hadoop]$ vi yarn-site.xml
+&lt;property&gt;
+&lt;name&gt;yarn.resourcemanager.nodes.exclude-path&lt;/name&gt;
+&lt;value&gt;/home/hadoop/app/hadoop/etc/hadoop/exclude&lt;/value&gt;
+&lt;/property&gt;
+4.创建exclude文件 在NameNode节点和ResourceManager节点(hadoop1)上，创建一个空的exclude文件即可，具体配置如下所示。
+[hadoop@hadoop1 hadoop]$ touch exclude" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/fb5b8bcd84faa77b2624f43591a8d8c9/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-03-25T13:59:40+08:00" />
+<meta property="article:modified_time" content="2022-03-25T13:59:40+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">【亲测可用】Hadoop分布式集群扩缩容</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h3 style="text-align:center;">Hadoop集群动态扩缩容</h3> 
+<h3 style="text-align:justify;"><span style="color:#b95514;">1 项目需求</span></h3> 
+<p style="margin-left:.0001pt;text-align:justify;">随着公司业务的增长，数据量越来越大，原有DataNode节点的容量已经不能满足数据存储的需求，需要在原有集群基础上动态添加新的数据节点，也就是俗称的动态扩容。如果在Hadoop集群运行过程中，某些节点变得反常，例如故障率过高或者性能过低，可能就需要停止这些节点上的Hadoop服务，并从Hadoop集群中移除，也就是俗称的动态缩容。通常情况下，节点需要同时运行DataNode和NodeManager守护进程，所以两者一般同时新增或者移除。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"></p> 
+<h3 style="text-align:justify;"><span style="color:#b95514;">2 动态扩容原理</span></h3> 
+<p style="margin-left:.0001pt;text-align:justify;">增加一个新节点非常简单：首先配置hdfs-site.xml文件指向NameNode，然后配置yarn-site.xml文件指向ResourceManager，最后启动DataNode和NodeManager守护进程即可。</p> 
+<p style="margin-left:.0001pt;text-align:justify;">然而随便允许一台机器以DataNode的身份连接到NameNode是非常不安全的，因为该机器很可能会访问未授权的数据。此外，这台机器可能并非真正的DataNode，不在集群的控制之内，随时可能停止从而导致潜在的数据丢失。另外由于错误配置的可能性，即使这台机器都在本机房的防火墙之内，这种做法的风险也比较高。因此所有工作集群上的DataNode（或者NodeManager）都应该被明确管理。</p> 
+<p style="margin-left:.0001pt;text-align:justify;">我们将允许连接到NameNode的所有DataNode都放在一个文件中，文件名称由dfs.hosts属性指定，该文件的每一行对应一个DataNode的网络地址。类似的，可能连接到ResourceManager的各个NodeManager也是在一个文件中指定，该文件的名称由yarn.resourcemanager.nodes.include-path属性指定。</p> 
+<p style="margin-left:.0001pt;text-align:justify;">在通常情况下，由于集群中的节点同时运行DataNode和NodeManager守护进程，dfs.hosts和yarn.resourcemanager.nodes.include-path会同时指向一个文件，即取名为include文件。include文件不同于slaves文件，前者提供NameNode和ResourceManager使用，用于决定可以连接到哪些工作节点。Hadoop控制脚本使用slaves文件执行面向整个集群范围的操作，比如启停Hadoop集群等，而Hadoop守护进程从来不会使用slaves文件。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"></p> 
+<h3 style="text-align:justify;"><span style="color:#b95514;">3 动态缩容原理</span></h3> 
+<p style="margin-left:.0001pt;text-align:justify;">HDFS集群能够容忍DataNode故障，这并不意味着我们可以随意终止DataNode。HDFS集群默认配置为3个副本，如果同时关闭不同机架上的3个DataNode，则数据丢失的概率非常高。正确的操作方法是，我们将准备移除的DataNode告知NameNode，那么HDFS集群会在DataNode停机之前，将数据块复制到其他DataNode，从而实现数据容错。</p> 
+<p style="margin-left:.0001pt;text-align:justify;">有了NodeManager的支持，YARN集群对故障的容忍度更高。如果关闭一个正在运行MapReduce作业的NodeManager，ApplicationMaster会检测到故障，并在其他NodeManager节点上重新调度失败的任务。</p> 
+<p style="margin-left:.0001pt;text-align:justify;">需要移除的节点是由exclude文件控制。对于HDFS集群来说，exclude文件路径是由dfs.hosts.exclude属性设置。对于YARN集群来说，exclude文件路径是由yarn.resourcemanager.nodes.exclude-path属性设置。通常情况下，准备移除的节点同时运行着DataNode和Nodemanager守护进程，这两个属性指向同一个文件。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"></p> 
+<h3 style="text-align:justify;"><span style="color:#b95514;">4 原Hadoop集群配置与启动</span></h3> 
+<p style="margin-left:.0001pt;text-align:justify;">在Hadoop集群进行动态扩缩容之前，首先需要修改原有集群的配置文件，具体操作步骤如下所示。</p> 
+<h4 style="margin-left:.0001pt;text-align:justify;"><span style="color:#1a439c;">1.配置include文件路径</span></h4> 
+<p style="margin-left:.0001pt;text-align:justify;">在NameNode节点(hadoop1)上，修改hdfs-site.xml配置文件添加dfs.hosts属性，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ vi hdfs-site.xml</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">&lt;property&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">    &lt;name&gt;dfs.hosts&lt;/name&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">    &lt;value&gt;/home/hadoop/app/hadoop/etc/hadoop/include&lt;/value&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">&lt;/property&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;">在ResourceManager节点(hadoop1)上，修改yarn-site.xml配置文件添加</p> 
+<p style="margin-left:.0001pt;text-align:justify;">yarn.resourcemanager.nodes.include-path属性，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ vi yarn-site.xml</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">&lt;property&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">   &lt;name&gt;yarn.resourcemanager.nodes.include-path&lt;/name&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">   &lt;value&gt;/home/hadoop/app/hadoop/etc/hadoop/include&lt;/value&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">&lt;/property&gt;</span></p> 
+<h4 style="margin-left:.0001pt;text-align:justify;"><span style="color:#1a439c;">2.创建include文件</span></h4> 
+<p style="margin-left:.0001pt;text-align:justify;">在NameNode和ResourceManager节点(hadoop1)上，创建include文件，并将集群节点的hostname信息添加到include文件中，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ vi include</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">hadoop1</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">hadoop2</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">hadoop3</span></p> 
+<h4 style="margin-left:.0001pt;text-align:justify;"><span style="color:#1a439c;">3.配置exclude文件路径</span></h4> 
+<p style="margin-left:.0001pt;text-align:justify;">在NameNode(hadoop1)节点上，修改hdfs-site.xml配置文件添加dfs.hosts.exclude属性，具体配置如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ vi hdfs-site.xml</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">&lt;property&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">&lt;name&gt;dfs.hosts.exclude&lt;/name&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">&lt;value&gt;/home/hadoop/app/hadoop/etc/hadoop/exclude&lt;/value&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">&lt;/property&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">在ResourceManager(hadoop1)节点上，修改yarn-site.xml配置文件添加yarn.resourcemanager.nodes.exclude-path属性，具体配置如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ vi yarn-site.xml</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">&lt;property&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">&lt;name&gt;yarn.resourcemanager.nodes.exclude-path&lt;/name&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">&lt;value&gt;/home/hadoop/app/hadoop/etc/hadoop/exclude&lt;/value&gt;</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">&lt;/property&gt;</span></p> 
+<h4 style="margin-left:.0001pt;text-align:left;"><span style="color:#1a439c;">4.创建exclude文件</span></h4> 
+<p style="margin-left:.0001pt;text-align:left;">在NameNode节点和ResourceManager节点(hadoop1)上，创建一个空的exclude文件即可，具体配置如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ touch exclude</span></p> 
+<h4 style="margin-left:.0001pt;text-align:left;"><span style="color:#1a439c;">5.同步修改的配置文件</span></h4> 
+<p style="margin-left:.0001pt;text-align:left;">将hadoop1节点中修改的配置文件远程拷贝到集群其他节点，这里以hadoop2节点为例，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ scp hdfs-site.xml  hadoop@hadoop2:/home/hadoop/app/hadoop/etc/hadoop/</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ scp yarn-site.xml  hadoop@hadoop2:/home/hadoop/app/hadoop/etc/hadoop/</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ scp include  hadoop@hadoop2:/home/hadoop/app/hadoop/etc/hadoop/</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ scp exclude  hadoop@hadoop2:/home/hadoop/app/hadoop/etc/hadoop/</span></p> 
+<h4 style="margin-left:.0001pt;text-align:left;"><span style="color:#1a439c;">6.启动Hadoop集群</span></h4> 
+<p style="margin-left:.0001pt;text-align:justify;">（1）启动Zookeeper集群</p> 
+<p style="margin-left:.0001pt;text-align:justify;">在集群所有节点分别启动Zookeeper服务，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 zookeeper]$</span> <span style="background-color:#d9d9d9;">bin/zkServer.sh start</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop2 zookeeper]$ bin/zkServer.sh start</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop3 zookeeper]$ bin/zkServer.sh start</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;">（2）启动HDFS集群</p> 
+<p style="margin-left:.0001pt;text-align:left;">在hadoop1节点上，使用脚本一键启动HDFS集群，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ sbin/start-dfs.sh</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">（3）启动YARN集群</p> 
+<p style="margin-left:.0001pt;text-align:left;">在hadoop1节点上，使用脚本一键启动YARN集群，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ sbin/start-yarn.sh</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"></p> 
+<h3 style="text-align:justify;"><span style="color:#b95514;">5 Hadoop集群动态扩容</span></h3> 
+<p style="margin-left:.0001pt;text-align:justify;">向Hadoop集群添加新节点的操作步骤如下所示。</p> 
+<h4 style="margin-left:.0001pt;text-align:justify;"><span style="color:#1a439c;">1.基础准备</span></h4> 
+<p style="margin-left:.0001pt;text-align:justify;">（1）准备新节点</p> 
+<p style="margin-left:.0001pt;text-align:justify;">首先准备好一个新的虚拟机节点，创建hadoop用户和用户组，然后将静态IP设置为192.168.0.114,、主机名设置为hadoop4，最后完成免密登录、关闭防火墙、JDK和时钟同步等配置操作。</p> 
+<p style="margin-left:.0001pt;text-align:justify;">（2）配置hosts文件</p> 
+<p style="margin-left:.0001pt;text-align:justify;">在hadoop1节点上修改hosts文件，将集群所有节点(包含新增节点)的hostname与IP地址映射配置进去，同时集群所有节点保持hosts文件统一。hosts文件具体内容如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[root@hadoop1 ~]# vi /etc/hosts</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">::1         localhost localhost.localdomain localhost6 localhost6.localdomain6</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">192.168.0.111 hadoop1</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">192.168.0.112 hadoop2</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">192.168.0.113 hadoop3</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">192.168.0.114 hadoop4</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;">（3）SSH免密登录</p> 
+<p style="margin-left:.0001pt;text-align:justify;">为了设置NameNode节点(hadoop1)到新增DataNode节点(hadoop4)的免密登录，我们需要将hadoop4节点的公钥id_ras.pub复制到hadoop1节点中的authorized_keys文件中，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop4 ~]$cat ~/.ssh/id_rsa.pub | ssh hadoop@hadoop1 'cat &gt;&gt; ~/.ssh/authorized_keys'</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;">然后将hadoop1节点中的authorized_keys文件分发到hadoop4节点，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 .ssh]$scp -r authorized_keys </span><a href="mailto:hadoop@hadoop4:~/.ssh/" rel="nofollow"><span style="background-color:#d9d9d9;"><span style="color:#000000;">hadoop@hadoop4:~/.ssh/</span></span></a></p> 
+<p style="margin-left:.0001pt;text-align:justify;">然后在hadoop1节点的hadoop用户下，使用如下命令即可免密登录hadoop4节点。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 .ssh]$ ssh hadoop4</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;">（4）新增节点安装Hadoop</p> 
+<p style="margin-left:.0001pt;text-align:justify;">在NameNode节点(hadoop1)上，将Hadoop安装目录拷贝到hadoop4节点，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 app]$scp -r  hadoop-2.9.2  hadoop@hadoop4:/home/hadoop/app/</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;">然后在hadoop4节点上创建软连接，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop4 app]$ ln -s hadoop-2.9.2 hadoop</span></p> 
+<h4 style="margin-left:.0001pt;text-align:justify;"><span style="color:#1a439c;">2.添加新增节点</span></h4> 
+<p style="margin-left:.0001pt;text-align:justify;">（1）修改include文件</p> 
+<p style="margin-left:.0001pt;text-align:justify;">在NameNode和ResourceManager节点(hadoop1)上，修改include文件，并将新增节点的hostname信息添加到include文件中，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ vi include</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">hadoop1</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">hadoop2</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">hadoop3</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">hadoop4</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;">然后将修改后的include文件同步集群其他节点(包括新增节点)，这里以hadoop2节点为例，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ scp include  hadoop@hadoop2:/home/hadoop/app/hadoop/etc/hadoop/</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">（2）刷新NameNode</p> 
+<p style="margin-left:.0001pt;text-align:left;">将一系列审核过的DataNode来更新NameNode设置，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ bin/hdfs dfsadmin -refreshNodes</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">（3）刷新ResourceManager</p> 
+<p style="margin-left:.0001pt;text-align:left;">将一系列审核过的NodeManager来更新ResourceManager设置，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ bin/yarn rmadmin -refreshNodes</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">（4）修改slaves文件</p> 
+<p style="margin-left:.0001pt;text-align:left;">在NameNode节点(hadoop1)上，修改slaves文件添加新增节点的hostname信息，以便Hadoop控制脚本启停集群时将新增节点纳入操作范围，具体配置如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ vi slaves </span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">hadoop1</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">hadoop2</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">hadoop3</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">hadoop4</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="color:#fe2c24;">备注：使用一键启动脚本启动Hadoop集群时，会根据slaves文件中的hostname信息启动从节点的DataNode和NodeManager守护进程。</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;">然后将修改后的slaves文件同步到集群其他节点(包括新增节点)，这里以hadoop2节点为例，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ scp slaves  hadoop@hadoop2:/home/hadoop/app/hadoop/etc/hadoop/</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;">（5）启动新增节点</p> 
+<p style="margin-left:.0001pt;text-align:justify;">在新增的hadoop4节点中，使用如下命令启动DataNode和NodeManager守护进程。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop4 hadoop]$ sbin/hadoop-daemon.sh start datanode</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop4 hadoop]$sbin/yarn-daemon.sh start nodemanager</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">（6）检查新增节点</p> 
+<p style="margin-left:.0001pt;text-align:left;">分别通过HDFS(地址:http://hadoop1:50070/)和YARN(地址:http://hadoop1:8088/)的Web界面，查看新增节点hadoop4是否添加成功。如果能检查到新的DataNode和NodeManager，则说明Hadoop集群扩容成功了。</p> 
+<p style="margin-left:.0001pt;text-align:left;">（7）启动负载均衡</p> 
+<p style="margin-left:.0001pt;text-align:left;">当Hadoop集群扩容成功之后，HDFS集群不会自动将数据块从旧的DataNode迁移到新的DataNode以保持集群数据负载均衡，而是需要用户手动执行脚本来实现负载均衡，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ sbin/start-balancer.sh</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"></p> 
+<h3 style="text-align:justify;"><span style="color:#b95514;">6 集群动态缩容</span></h3> 
+<p style="margin-left:.0001pt;text-align:justify;">从Hadoop集群移除节点的操作步骤如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;">（1）修改exclude文件</p> 
+<p style="margin-left:.0001pt;text-align:justify;">在NameNode和ResourceManager节点(hadoop1)上，修改exclude文件，并将需要移除节点的hostname信息添加到exclude文件中，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ vi </span><span style="background-color:#d9d9d9;">exclude</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;"><span style="background-color:#d9d9d9;">hadoop4</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;">然后将修改后的exclude文件同步集群其他节点(包括新增节点)，这里以hadoop2节点为例，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ scp </span><span style="background-color:#d9d9d9;">exclude</span><span style="background-color:#d9d9d9;">  hadoop@hadoop2:/home/hadoop/app/hadoop/etc/hadoop/</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">（2）刷新NameNode</p> 
+<p style="margin-left:.0001pt;text-align:left;">在NameNode(hadoop1)节点上，使用一组新的审核过的DataNode来更新NameNode设置，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ bin/hdfs dfsadmin -refreshNodes</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">（3）刷新ResourceManager</p> 
+<p style="margin-left:.0001pt;text-align:left;">在ResourceManager(hadoop1)节点上，使用一组新的审核过的NodeManager来更新ResourceManager设置，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ bin/yarn rmadmin -refreshNodes</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">（4）开始解除节点</p> 
+<p style="margin-left:.0001pt;text-align:left;">通过Web界面(地址:http://hadoop1:50070/)查看待解除DataNode的管理状态是否已经变为正在解除(Decommission In Progress)，因为此时相关的DataNode正在被解除过程中，这些DataNode会把它们的数据块复制到其他DataNode中。当所有DataNode的状态变为解除完毕(Decommissioned)时，表明所有数据块已经复制完毕，此时会关闭已经解除的节点。</p> 
+<p style="margin-left:.0001pt;text-align:left;">（5）停止退役节点进程</p> 
+<p style="margin-left:.0001pt;text-align:left;">等待退役节点hadoop4的状态为decommissioned时，说明所有块已经复制成功，然后使用如下命令关闭DataNode和NodeManager进程。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop4 hadoop]$ sbin/hadoop-daemon.sh stop datanode</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">#操作之前，NodeManager进程其实已经关闭</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop4 hadoop]$ sbin/yarn-daemon.sh stop nodemanager</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">（6）修改include文件</p> 
+<p style="margin-left:.0001pt;text-align:left;">在NameNode和ResourceManager节点(hadoop1)中，从include文件中删除退役节点hadoop4的hostname信息，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ vi include</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">hadoop1</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">hadoop2</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">hadoop3</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;">然后将修改后的include文件同步集群其他节点(包括退役节点)，这里以hadoop2节点为例，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ scp include  hadoop@hadoop2:/home/hadoop/app/hadoop/etc/hadoop/</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">（7）刷新NameNode和ResourceManager</p> 
+<p style="margin-left:.0001pt;text-align:left;">在NameNode和ResourceManager节点(hadoop1)中，刷新NameNode和ResourceManager的设置，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ bin/hdfs dfsadmin -refreshNodes</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ bin/yarn rmadmin -refreshNodes</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">（8）修改slaves文件</p> 
+<p style="margin-left:.0001pt;text-align:left;">在NameNode(hadoop1)节点上，从slaves文件中删除退役节点hadoop4的hostname信息，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ vi slaves </span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">hadoop1</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">hadoop2</span></p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">hadoop3</span></p> 
+<p style="margin-left:.0001pt;text-align:justify;">然后将修改后的slaves文件同步集群其他节点(包括退役节点)，这里以hadoop2节点为例，具体操作如下所示。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ scp </span><span style="background-color:#d9d9d9;">slaves</span><span style="background-color:#d9d9d9;">  hadoop@hadoop2:/home/hadoop/app/hadoop/etc/hadoop/</span></p> 
+<p style="margin-left:.0001pt;text-align:left;">（9）启动负载均衡</p> 
+<p style="margin-left:.0001pt;text-align:left;">若Hadoop集群中数据分布不均匀，可以使用如下命令启动负载均衡。</p> 
+<p style="margin-left:.0001pt;text-align:left;"><span style="background-color:#d9d9d9;">[hadoop@hadoop1 hadoop]$ sbin/start-balancer.sh</span></p> 
+<blockquote> 
+ <h4 style="margin-left:.0001pt;text-align:justify;"><span style="color:#fe2c24;"><strong>想了解更多大数据技术，如大数据运维、大数据开发、大数据架构、湖仓一体化、流批一体、离线+实时数仓等等，可以扫描添加下面微信。</strong></span></h4> 
+</blockquote>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/26b07b85826e1f68184a63adfd6a96a4/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">第十四章：二叉搜索树</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/eeed319c779242b7865b1327a1a71233/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">考研复试(控制工程专硕)及大学本科(物联网工程)知识点回顾(一)——C语言/单片机</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Hadoop授权令牌解释(原标题 Hadoop Delegation Tokens Explained) - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Hadoop授权令牌解释(原标题 Hadoop Delegation Tokens Explained)" />
+<meta property="og:description" content="转载：https://blog.cloudera.com/hadoop-delegation-tokens-explained/ 很好的文章，但是要翻墙转载给国内的伙伴，有问题请联系删除
+第一部分谷歌翻译版；下边有英语版
+Apache Hadoop的安全性是在2009年左右设计和实施的，此后一直保持稳定。但是，由于缺少有关此领域的文档，因此出现问题时很难理解或调试。设计了委托令牌，并将其作为身份验证方法在Hadoop生态系统中广泛使用。这篇博客文章介绍了Hadoop分布式文件系统（HDFS）和Hadoop密钥管理服务器（KMS）上下文中的Hadoop委托令牌的概念，并提供了一些基本代码和故障排除示例。值得注意的是，Hadoop生态系统中还有许多其他服务也使用委托令牌，但为简洁起见，我们仅讨论HDFS和KMS。
+此博客假设读者了解的基本概念验证，Kerberos的，为了理解认证流程的目的; 以及HDFS体系结构和HDFS透明加密，以了解什么是HDFS和KMS。对于对HDFS透明加密不感兴趣的读者，可以忽略此博客文章中的KMS部分。可以在此处找到有关Hadoop中的一般授权和身份验证的先前博客文章。
+Hadoop安全性快速入门 Hadoop最初是在没有真实身份验证的情况下实施的，这意味着存储在Hadoop中的数据很容易遭到破坏。此安全功能后来于2010年通过HADOOP-4487添加，其主要目的有以下两个：
+防止未经授权访问HDFS中存储的数据在实现目标1的同时不增加大量成本。 为了实现第一个目标，我们需要确保
+任何访问群集的客户端都经过身份验证，以确保它们是他们声称的身份。集群中的所有服务器都经过身份验证，可以成为集群的一部分。 为了这个目标，选择Kerberos作为基础身份验证服务。添加了其他机制，例如委托令牌，块访问令牌，信任等，以补充Kerberos。特别是，引入了代币令牌以实现第二个目标（有关方法，请参阅下一节）。以下是简化图，说明了在HDFS上下文中使用Kerberos和委派令牌的位置（其他服务类似）：
+图1：HDFS身份验证机制的简化图
+在上面的简单HDFS示例中，有几种身份验证机制在起作用：
+最终用户（乔）可以使用Kerberos与HDFS NameNode对话最终用户（joe）提交的分布式任务可以使用joe的委派令牌访问HDFS NameNode。这将是本博客文章其余部分的重点HDFS数据节点使用Kerberos与HDFS NameNode对话最终用户和分布式任务可以使用“块访问令牌”访问HDFS DataNode。 我们将在本博文结尾的“ 其他使用令牌的方式 ”部分中简要介绍上述机制。要了解Hadoop的安全设计的详细信息，请参阅设计文档在HADOOP-4487和Hadoop的安全架构演示。
+什么是授权令牌？ 从理论上讲，可以完全使用Kerberos进行身份验证，但是在像Hadoop这样的分布式系统中使用时，它就有其自身的问题。想象一下，对于每个MapReduce作业，如果所有工作任务都必须使用委派的TGT（票证授予票证）通过Kerberos进行身份验证，则Kerberos密钥分发中心（KDC）将很快成为瓶颈。下图中的红线说明了这个问题：一个工作可能有成千上万的节点到节点通信，导致相同数量的KDC流量。实际上，它会在非常大的集群中无意中对KDC 进行分布式拒绝服务攻击。
+图2：显示Hadoop中身份验证扩展问题的简化图
+因此，引入了委托令牌作为一种轻量级身份验证方法，以补充Kerberos身份验证。Kerberos是一种三方协议。相反，委托令牌身份验证是一种两方身份验证协议。
+授权令牌的工作方式是：
+客户端最初通过Kerberos向每台服务器进行身份验证，然后从该服务器获取委托令牌。客户端使用委派令牌来与服务器进行后续身份验证，而不是使用Kerberos。 客户端可以并且经常确实将委托令牌传递给其他服务（例如YARN），以便其他服务（例如映射器和化简器）可以作为客户端进行身份验证并代表客户端运行作业。换句话说，客户端可以将凭据“委派”给那些服务。授权令牌有一个到期时间，需要定期更新以保持其有效性。但是，它们不能无限期地更新–使用寿命最长。在过期之前，也可以取消委托令牌。
+委托令牌消除了分发Kerberos TGT或密钥表的需求，如果这些密钥或密钥表受到破坏，将授予对所有服务的访问权限。另一方面，委派令牌严格与其相关的服务绑定在一起，并最终到期，如果暴露，则造成的损害较小。此外，委派令牌使凭证更新更加轻便。这是因为更新的设计方式使得更新过程仅涉及更新程序和服务。令牌本身保持不变，因此不必更新已经使用令牌的所有参与者。
+出于可用性的原因，委派令牌由服务器保留。HDFS NameNode将委托令牌保留到其元数据（也称为fsimage和编辑日志）。KMS以ZNodes的形式将委派令牌保持在Apache ZooKeeper中。即使服务器重新启动或故障转移，这也可使委托令牌可用。
+服务器和客户端在处理委托令牌方面有不同的职责。以下两个部分提供了一些详细信息。
+服务器端的委托令牌 该服务器（即图2中的HDFS NN和KMS）负责：
+发行委托令牌，并存储它们以进行验证。根据请求续订委派令牌。在客户端取消委派令牌或它们到期时删除委派令牌。通过对照存储的委托令牌验证提供的委托令牌来验证客户端。 Hadoop中的委托令牌是根据HMAC机制生成和验证的。委托令牌中有两部分信息：公共部分和私有部分。委托令牌以哈希图的形式存储在服务器端，公共信息作为键，私有信息作为值。
+公共信息以标识符对象的形式用于令牌标识。它包括：
+类 令牌的种类（HDFS_DELEGATION_TOKEN或kms-dt）。令牌还包含种类，与标识符的种类匹配。 所有者 拥有令牌的用户。 续订 可以续签令牌的用户。 真实用户 仅在所有者被假冒时相关。如果令牌是由模拟用户创建的，则这将标识模拟用户。
+例如，当oozie冒充用户joe时，所有者将为joe，而实际用户将为oozie。 发行日期 令牌发行的时代时间。 最长日期 令牌可以更新到的时期。 序列 号 UUID以标识令牌。 主密钥ID 用于创建和验证令牌的主密钥的ID。 表1：令牌标识符（委托令牌的公共部分）
+私有信息由AbstractDelegationTokenSecretManager中的类DealerTokenInformation表示，它对安全性至关重要，并且包含以下字段：
+更新日期 令牌预计将更新的时期。
+如果小于当前时间，则表示令牌已过期。 密码 使用主密钥作为HMAC密钥计算为令牌标识符的HMAC的密码。
+它用于验证客户端提供给服务器的委派令牌。 跟踪号码 跟踪标识符，可用于在多个客户端会话之间关联令牌的用法。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/9bdc22cb8678727b1252674da4f9a5e7/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-06-09T14:55:26+08:00" />
+<meta property="article:modified_time" content="2020-06-09T14:55:26+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Hadoop授权令牌解释(原标题 Hadoop Delegation Tokens Explained)</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p><strong>转载</strong>：<a href="https://blog.cloudera.com/hadoop-delegation-tokens-explained/" rel="nofollow">https://blog.cloudera.com/hadoop-delegation-tokens-explained/</a> </p> 
+<p>很好的文章，但是要翻墙转载给国内的伙伴，有问题请联系删除</p> 
+<p><strong>第一部分谷歌翻译版；下边有英语版</strong></p> 
+<p> </p> 
+<p> </p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">Apache Hadoop的安全性是在2009年左右设计和实施的，此后一直保持稳定。但是，由于缺少有关此领域的文档，因此出现问题时很难理解或调试。设计了委托令牌，并将其作为身份验证方法在Hadoop生态系统中广泛使用。这篇博客文章介绍了Hadoop分布式文件系统（<a href="https://archive.cloudera.com/cdh5/cdh/5/hadoop/hadoop-project-dist/hadoop-hdfs/HdfsDesign.html" rel="nofollow">HDFS</a>）和Hadoop密钥管理服务器（<a href="https://archive.cloudera.com/cdh5/cdh/5/hadoop/hadoop-kms/index.html" rel="nofollow">KMS</a>）上下文中的Hadoop委托令牌的概念，并提供了一些基本代码和故障排除示例。值得注意的是，Hadoop生态系统中还有许多其他服务也使用委托令牌，但为简洁起见，我们仅讨论HDFS和KMS。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">此博客假设读者了解的基本概念<a href="https://en.wikipedia.org/wiki/Authentication" rel="nofollow">验证</a>，<a href="https://en.wikipedia.org/wiki/Kerberos_%28protocol%29" rel="nofollow">Kerberos的</a>，为了理解认证流程的目的; 以及<a href="https://archive.cloudera.com/cdh5/cdh/5/hadoop/hadoop-project-dist/hadoop-hdfs/HdfsDesign.html" rel="nofollow">HDFS体系结构</a>和<a href="https://blog.cloudera.com/blog/2015/01/new-in-cdh-5-3-transparent-encryption-in-hdfs/" rel="nofollow">HDFS透明加密</a>，以了解什么是HDFS和KMS。对于对HDFS透明加密不感兴趣的读者，可以忽略此博客文章中的KMS部分。可以在<a href="https://blog.cloudera.com/blog/2012/03/authorization-and-authentication-in-hadoop/" rel="nofollow">此处</a>找到有关Hadoop中的一般授权和身份验证的先前博客文章。</span></p> 
+<h3 style="margin-left:50px;"><span style="color:#305868;">Hadoop安全性快速入门</span></h3> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">Hadoop最初是在没有真实身份验证的情况下实施的，这意味着存储在Hadoop中的数据很容易遭到破坏。此安全功能后来于2010年通过<a href="https://issues.apache.org/jira/browse/HADOOP-4487" rel="nofollow">HADOOP-4487</a>添加，其主要目的有以下两个：</span></p> 
+<ol style="margin-left:50px;"><li>防止未经授权访问HDFS中存储的数据</li><li>在实现目标1的同时不增加大量成本。</li></ol> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">为了实现第一个目标，我们需要确保</span></p> 
+<ul style="margin-left:50px;"><li>任何访问群集的客户端都经过身份验证，以确保它们是他们声称的身份。</li><li>集群中的所有服务器都经过身份验证，可以成为集群的一部分。</li></ul> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">为了这个目标，选择Kerberos作为基础身份验证服务。添加了其他机制，例如委托令牌，块访问令牌，信任等，以补充Kerberos。特别是，引入了代币令牌以实现第二个目标（有关方法，请参阅下一节）。以下是简化图，说明了在HDFS上下文中使用Kerberos和委派令牌的位置（其他服务类似）：</span></p> 
+<div id="attachment_34503" style="margin-left:5px;"> 
+ <span style="color:#3c3c3c;"><a href="https://ndu0e1pobsf1dobtvj5nls3q-wpengine.netdna-ssl.com/wp-content/uploads/2019/08/Figure-1-Simplified-Diagram-of-HDFS-Authentication-Mechanisms.png" rel="nofollow"><img alt="图1：HDFS身份验证机制的简化图" class="size-full wp-image-34503" height="293" src="https://images2.imgbox.com/da/2d/BziiZajZ_o.png" width="609"></a></span> 
+ <p id="caption-attachment-34503" style="margin-left:0px;"><span style="color:#3c3c3c;">图1：HDFS身份验证机制的简化图</span></p> 
+</div> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">在上面的简单HDFS示例中，有几种身份验证机制在起作用：</span></p> 
+<ul style="margin-left:50px;"><li>最终用户（乔）可以使用Kerberos与HDFS NameNode对话</li><li>最终用户（joe）提交的分布式任务可以使用joe的委派令牌访问HDFS NameNode。这将是本博客文章其余部分的重点</li><li>HDFS数据节点使用Kerberos与HDFS NameNode对话</li><li>最终用户和分布式任务可以使用“块访问令牌”访问HDFS DataNode。</li></ul> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">我们将在本博文结尾的“ <a href="https://blog.cloudera.com/hadoop-delegation-tokens-explained/#1" rel="nofollow">其他使用令牌</a>的<a href="https://blog.cloudera.com/hadoop-delegation-tokens-explained/#1" rel="nofollow">方式</a> ”部分中简要介绍上述机制。要了解Hadoop的安全设计的详细信息，请参阅<a href="https://issues.apache.org/jira/secure/attachment/12428537/security-design.pdf" rel="nofollow">设计文档</a>在<a href="https://issues.apache.org/jira/browse/HADOOP-4487" rel="nofollow">HADOOP-4487</a>和<a href="https://www.slideshare.net/oom65/hadoop-security-architecture" rel="nofollow">Hadoop的安全架构演示</a>。</span></p> 
+<h3 style="margin-left:50px;"><span style="color:#305868;">什么是授权令牌？</span></h3> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">从理论上讲，可以完全使用Kerberos进行身份验证，但是在像Hadoop这样的分布式系统中使用时，它就有其自身的问题。想象一下，对于每个MapReduce作业，如果所有工作任务都必须使用委派的TGT（票证授予票证）通过Kerberos进行身份验证，则<a href="http://www.zeroshell.org/kerberos/Kerberos-operation/" rel="nofollow">Kerberos密钥分发中心</a>（KDC）将很快成为瓶颈。下图中的红线说明了这个问题：一个工作可能有成千上万的节点到节点通信，导致相同数量的KDC流量。实际上，它会在非常大的集群中无意中对KDC 进行<a href="https://en.wikipedia.org/wiki/Denial-of-service_attack" rel="nofollow">分布式拒绝服务攻击</a>。</span></p> 
+<div id="attachment_34504" style="margin-left:5px;"> 
+ <span style="color:#3c3c3c;"><a href="https://ndu0e1pobsf1dobtvj5nls3q-wpengine.netdna-ssl.com/wp-content/uploads/2019/08/Figure-2-Simplified-Diagram-Showing-The-Authentication-Scaling-Problem-in-Hadoop.png" rel="nofollow"><img alt="图2：显示Hadoop中身份验证扩展问题的简化图" class="size-full wp-image-34504" height="303" src="https://images2.imgbox.com/ad/18/iRC4tdg7_o.png" width="577"></a></span> 
+ <p id="caption-attachment-34504" style="margin-left:0px;"><span style="color:#3c3c3c;">图2：显示Hadoop中身份验证扩展问题的简化图</span></p> 
+</div> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">因此，引入了委托令牌作为一种轻量级身份验证方法，以补充Kerberos身份验证。Kerberos是一种三方协议。相反，委托令牌身份验证是一种两方身份验证协议。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">授权令牌的工作方式是：</span></p> 
+<ol style="margin-left:50px;"><li>客户端最初通过Kerberos向每台服务器进行身份验证，然后从该服务器获取委托令牌。</li><li>客户端使用委派令牌来与服务器进行后续身份验证，而不是使用Kerberos。</li></ol> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">客户端可以并且经常确实将委托令牌传递给其他服务（例如YARN），以便其他服务（例如映射器和化简器）可以作为客户端进行身份验证并代表客户端运行作业。换句话说，客户端可以将凭据“委派”给那些服务。授权令牌有一个到期时间，需要定期更新以保持其有效性。但是，它们不能无限期地更新–使用寿命最长。在过期之前，也可以取消委托令牌。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">委托令牌消除了分发Kerberos TGT或密钥表的需求，如果这些密钥或密钥表受到破坏，将授予对所有服务的访问权限。另一方面，委派令牌严格与其相关的服务绑定在一起，并最终到期，如果暴露，则造成的损害较小。此外，委派令牌使凭证更新更加轻便。这是因为更新的设计方式使得更新过程仅涉及更新程序和服务。令牌本身保持不变，因此不必更新已经使用令牌的所有参与者。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">出于可用性的原因，委派令牌由服务器保留。HDFS NameNode将委托令牌保留到其元数据（也称为fsimage和编辑日志）。KMS以ZNodes的形式将委派令牌保持在Apache ZooKeeper中。即使服务器重新启动或故障转移，这也可使委托令牌可用。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">服务器和客户端在处理委托令牌方面有不同的职责。以下两个部分提供了一些详细信息。</span></p> 
+<h4 style="margin-left:50px;"><strong><span style="color:#305868;"><a id="4"></a>服务器端的委托令牌</span></strong></h4> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">该服务器（即图2中的HDFS NN和KMS）负责：</span></p> 
+<ul style="margin-left:50px;"><li>发行委托令牌，并存储它们以进行验证。</li><li>根据请求续订委派令牌。</li><li>在客户端取消委派令牌或它们到期时删除委派令牌。</li><li>通过对照存储的委托令牌验证提供的委托令牌来验证客户端。</li></ul> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">Hadoop中的委托令牌是根据<a href="https://en.wikipedia.org/wiki/Hash-based_message_authentication_code" rel="nofollow">HMAC</a>机制生成和验证的。委托令牌中有两部分信息：公共部分和私有部分。委托令牌以哈希图的形式存储在服务器端，公共信息作为键，私有信息作为值。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">公共信息<a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/token/delegation/AbstractDelegationTokenIdentifier.java">以标识符对象</a>的形式用于令牌标识。它包括：</span></p> 
+<table cellspacing="0" style="margin-left:50px;"><caption> 
+ </caption><tbody><tr><td> 类</td><td> 令牌的种类（HDFS_DELEGATION_TOKEN或kms-dt）。令牌还包含种类，与标识符的种类匹配。</td></tr><tr><td> 所有者</td><td> 拥有令牌的用户。</td></tr><tr><td> 续订</td><td> 可以续签令牌的用户。</td></tr><tr><td> 真实用户</td><td> 仅在所有者被假冒时相关。如果令牌是由模拟用户创建的，则这将标识模拟用户。<br>  例如，当oozie冒充用户joe时，所有者将为joe，而实际用户将为oozie。</td></tr><tr><td> 发行日期</td><td> 令牌发行的时代时间。</td></tr><tr><td> 最长日期</td><td> 令牌可以更新到的时期。</td></tr><tr><td> 序列  号</td><td> UUID以标识令牌。</td></tr><tr><td> 主密钥ID</td><td> 用于创建和验证令牌的主密钥的ID。</td></tr></tbody></table> 
+<p>表1：令牌标识符（委托令牌的公共部分）</p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">私有信息由<a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/token/delegation/AbstractDelegationTokenSecretManager.java">AbstractDelegationTokenSecretManager中</a>的类DealerTokenInformation表示，它对安全性至关重要，并且包含以下字段：</span></p> 
+<table cellspacing="0" style="margin-left:50px;"><caption> 
+ </caption><tbody><tr><td> 更新日期</td><td> 令牌预计将更新的时期。<br>  如果小于当前时间，则表示令牌已过期。</td></tr><tr><td> 密码</td><td> 使用主密钥作为HMAC密钥计算为令牌标识符的HMAC的密码。<br>  它用于验证客户端提供给服务器的委派令牌。</td></tr><tr><td> 跟踪号码</td><td> 跟踪标识符，可用于在多个客户端会话之间关联令牌的用法。<br>  它被计算为令牌标识符的MD5。</td></tr></tbody></table> 
+<p>表2：委托令牌信息（委托令牌的私有部分）</p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">请注意表1中的主密钥ID，这是服务器上存在的主密钥的ID。主密钥用于生成每个委派令牌。它以配置的时间间隔滚动，并且永不离开服务器。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">服务器还具有指定更新间隔的配置（默认为24小时），这也是委托令牌的到期时间。过期的委托令牌不能用于身份验证，并且服务器具有后台线程，可以从服务器的令牌存储中删除过期的委托令牌。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">在过期之前，只有授权令牌的续订者才能续签。成功的续订将授权令牌的有效期延长了另一个续订间隔，直到达到其最大生命周期（默认为7天）。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;"><a href="https://blog.cloudera.com/hadoop-delegation-tokens-explained/#2" rel="nofollow">附录A中</a>的表提供了HDFS和KMS的配置名称及其默认值。</span></p> 
+<h4 style="margin-left:50px;"><strong><span style="color:#305868;">客户端的委托令牌</span></strong></h4> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">客户负责</span></p> 
+<ul style="margin-left:50px;"><li>从服务器请求新的委派令牌。请求令牌时可以指定续订。</li><li>续订委派令牌（如果客户将自己指定为“续订者”），或要求另一方（指定的“续订者”）续订委派令牌。</li><li>请求服务器取消委派令牌。</li><li>出示委派令牌以与服务器进行身份验证。</li></ul> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">客户端可见的Token类<a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/token/Token.java">在此处</a>定义。下表描述了令牌中包含的内容。</span></p> 
+<table cellspacing="0" style="margin-left:50px;"><caption> 
+ </caption><tbody><tr><td> 识别码</td><td> 与服务器端的公共信息部分匹配的令牌标识符。</td></tr><tr><td> 密码</td><td> 与服务器端密码匹配的密码。</td></tr><tr><td> 类</td><td> 令牌的种类（例如HDFS_DELEGATION_TOKEN或kms-dt），它与标识符的种类匹配。</td></tr><tr><td> 服务</td><td> 服务的名称（例如，对于HDFS为ha-hdfs：&lt;nameservice-name&gt;，对于KMS为&lt;ip_address&gt;：&lt;port&gt;）。</td></tr><tr><td> 更新</td><td> 可以续签令牌（例如纱线）的用户。</td></tr></tbody></table> 
+<p>表3：客户端的委托令牌</p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">下一部分将说明使用委派令牌进行身份验证的方式。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">以下是作业提交时的示例日志摘录。INFO日志打印有来自所有服务的令牌。在下面的示例中，我们看到一个HDFS委托令牌和一个KMS委托令牌。</span></p> 
+<table cellspacing="0" style="margin-left:50px;"><tbody><tr><td><br> $ hadoop jar /opt/cloudera/parcels/CDH/jars/hadoop-mapreduce-examples-2.6.0-cdh5.13.0.jar pi 2 3<br> Number of Maps  = 2<br> Samples per Map = 3<br> Wrote input for Map #0<br> Wrote input for Map #1<br> Starting Job<br> 17/10/22 20:50:03 INFO client.RMProxy: Connecting to ResourceManager at example.cloudera.com/172.31.113.88:8032<br> 17/10/22 20:50:03 INFO hdfs.DFSClient: Created token for xiao: HDFS_DELEGATION_TOKEN owner=xiao@GCE.CLOUDERA.COM, renewer=yarn, realUser=, issueDate=1508730603423, maxDate=1509335403423, sequenceNumber=4, masterKeyId=39 on ha-hdfs:ns1<br> 17/10/22 20:50:03 INFO security.TokenCache: Got dt for hdfs://ns1; Kind: <strong>HDFS_DELEGATION_TOKEN</strong>, Service: ha-hdfs:ns1, Ident: (token for xiao: HDFS_DELEGATION_TOKEN owner=xiao@GCE.CLOUDERA.COM, renewer=yarn, realUser=, issueDate=1508730603423, maxDate=1509335403423, sequenceNumber=4, masterKeyId=39)<br> 17/10/22 20:50:03 INFO security.TokenCache: Got dt for hdfs://ns1; Kind: <strong>kms-dt</strong>, Service: 172.31.113.88:16000, Ident: (kms-dt owner=xiao, renewer=yarn, realUser=, issueDate=1508730603474, maxDate=1509335403474, sequenceNumber=7, masterKeyId=69)<br> …</td></tr></tbody></table> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">对于想要编写Java代码进行身份验证的读者，<a href="https://blog.cloudera.com/hadoop-delegation-tokens-explained/#3" rel="nofollow">附录B</a>提供了示例代码。</span></p> 
+<h3 style="margin-left:50px;"><span style="color:#305868;">示例：委托令牌的生命周期</span></h3> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">现在我们了解了委托令牌是什么，让我们看一下它在实践中的用法。下图显示了用于运行典型应用程序的身份验证示例流程，其中该作业是通过YARN提交的，然后被分发到集群中的多个工作程序节点以执行。</span></p> 
+<div id="attachment_34505" style="margin-left:5px;"> 
+ <span style="color:#3c3c3c;"><a href="https://ndu0e1pobsf1dobtvj5nls3q-wpengine.netdna-ssl.com/wp-content/uploads/2019/08/Figure-3-How-Delegation-Token-is-Used-for-Authentication-In-A-Typical-Job.png" rel="nofollow"><img alt="图3：在典型作业中如何使用委托令牌进行身份验证" class="size-full wp-image-34505" height="376" src="https://images2.imgbox.com/03/a2/tR9qCGaF_o.png" width="577"></a></span> 
+ <p id="caption-attachment-34505" style="margin-left:0px;"><span style="color:#3c3c3c;">图3：在典型作业中如何使用委托令牌进行身份验证</span></p> 
+</div> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">为简便起见，省略了Kerberos身份验证的步骤以及有关任务分发的详细信息。图中一般有5个步骤：</span></p> 
+<ol style="margin-left:50px;"><li>客户端要在集群中运行作业。它从HDFS NameNode获取一个HDFS委托令牌，并从KMS获得一个KMS委托令牌。</li><li>客户端将作业提交给YARN资源管理器（RM），并传递刚获取的委派令牌以及<a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-api/src/main/java/org/apache/hadoop/yarn/api/records/ApplicationSubmissionContext.java#L38">ApplicationSubmissionContext</a>。</li><li>YARN RM通过立即续签来验证委托令牌是否有效。然后，它将启动作业，该作业（与委托令牌一起）分发到集群中的工作节点。</li><li>每个工作节点在访问HDFS数据时都使用HDFS委派令牌向HDFS进行身份验证，并在解密加密区域中的HDFS文件时使用KMS委派令牌向KMS进行身份验证。</li><li>作业完成后，RM取消该作业的委派令牌。</li></ol> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">注意：上图中未绘制的步骤是，RM还将跟踪每个委托令牌的到期时间，并在到期时间的90％时更新委托令牌。请注意，在RM中会单独跟踪委派令牌，而不是基于令牌种类。这样，具有不同更新间隔的令牌都可以正确更新。令牌更新类是使用Java ServiceLoader实现的，因此RM不必知道令牌的种类。对于非常感兴趣的读者，相关代码在<a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/security/DelegationTokenRenewer.java#L564">RM的PrincipledTokenRenewer类中</a>。</span></p> 
+<h3 style="margin-left:50px;"><span style="color:#305868;">这是什么InvalidToken错误？</span></h3> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">现在我们知道什么是委托令牌，以及在执行典型任务时如何使用它们。但是不要在这里停下来！让我们从应用程序日志中查看一些典型的与委托令牌相关的错误消息，并弄清它们的含义。</span></p> 
+<h4 style="margin-left:50px;"><strong><span style="color:#305868;">令牌已过期</span></strong></h4> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">有时，应用程序会因AuthenticationException而失败，并在其中封装了InvalidToken异常。异常消息指示“令牌已过期”。猜猜为什么会发生这种情况？</span></p> 
+<table cellspacing="0" style="margin-left:50px;"><tbody><tr><td> <p>…</p> <p>17/10/22 20:50:12 INFO mapreduce.Job: Job job_1508730362330_0002 failed with state FAILED due to: Application application_1508730362330_0002 failed 2 times due to AM Container for appattempt_1508730362330_0002_000002 exited with  exitCode: -1000<br> For more detailed output, check application tracking page:https://example.cloudera.com:8090/proxy/application_1508730362330_0002/Then, click on links to logs of each attempt.<br> Diagnostics: org.apache.hadoop.security.authentication.client.AuthenticationException: org.apache.hadoop.security.token.SecretManager$InvalidToken: token (kms-dt owner=xiao, renewer=yarn, realUser=, issueDate=1508730603474, maxDate=1509335403474, sequenceNumber=7, masterKeyId=69) <strong>is expired</strong>, current time: 2017-10-22 20:50:12,166-0700 expected renewal time: 2017-10-22 20:50:05,518-0700<br> ….<br> Caused by: org.apache.hadoop.security.authentication.client.AuthenticationException: org.apache.hadoop.security.token.SecretManager$InvalidToken: token (kms-dt owner=xiao, renewer=yarn, realUser=, issueDate=1508730603474, maxDate=1509335403474, sequenceNumber=7, masterKeyId=69) <strong>is expired</strong>, current time: 2017-10-22 20:50:12,166-0700 expected renewal time: 2017-10-22 20:50:05,518-0700<br> at sun.reflect.NativeConstructorAccessorImpl.newInstance0(Native Method)<br> …<br> at org.apache.hadoop.crypto.key.kms.KMSClientProvider.call(KMSClientProvider.java:535)<br> ...</p> </td></tr></tbody></table> 
+<h4 style="margin-left:50px;"><strong><span style="color:#305868;">在缓存中找不到令牌</span></strong></h4> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">有时，应用程序会因AuthenticationException而失败，并在其中封装了InvalidToken异常。异常消息指示“在缓存中找不到令牌”。猜猜为什么会发生这种情况，与“令牌已过期”错误有什么区别？</span></p> 
+<table cellspacing="0" style="margin-left:50px;"><tbody><tr><td>…。<br> 17/10/22 20:55:47 INFO mapreduce.Job: Job job_1508730362330_0003 failed with state FAILED due to: Application application_1508730362330_0003 failed 2 times due to AM Container for appattempt_1508730362330_0003_000002 exited with  exitCode: -1000<br> For more detailed output, check application tracking page:https://example.cloudera.com:8090/proxy/application_1508730362330_0003/Then, click on links to logs of each attempt.<br> Diagnostics: org.apache.hadoop.security.authentication.client.AuthenticationException: org.apache.hadoop.security.token.SecretManager$InvalidToken: token (kms-dt owner=xiao, renewer=yarn, realUser=, issueDate=1508730937041, maxDate=1509335737041, sequenceNumber=8, masterKeyId=73)<strong> can’t be found in cache</strong><br> java.io.IOException: org.apache.hadoop.security.authentication.client.AuthenticationException: org.apache.hadoop.security.token.SecretManager$InvalidToken: token (kms-dt owner=xiao, renewer=yarn, realUser=, issueDate=1508730937041, maxDate=1509335737041, sequenceNumber=8, masterKeyId=73) <strong>can’t be found in cache</strong><br> at org.apache.hadoop.crypto.key.kms.LoadBalancingKMSClientProvider.decryptEncryptedKey(LoadBalancingKMSClientProvider.java:294)<br> at org.apache.hadoop.crypto.key.KeyProviderCryptoExtension.decryptEncryptedKey(KeyProviderCryptoExtension.java:528)<br> at org.apache.hadoop.hdfs.DFSClient.decryptEncryptedDataEncryptionKey(DFSClient.java:1448)<br> …<br> at org.apache.hadoop.fs.FileSystem.open(FileSystem.java:784)<br> at org.apache.hadoop.fs.FileUtil.copy(FileUtil.java:367)<br> at org.apache.hadoop.yarn.util.FSDownload.copy(FSDownload.java:265)<br> at org.apache.hadoop.yarn.util.FSDownload.access$000(FSDownload.java:61)<br> at org.apache.hadoop.yarn.util.FSDownload$2.run(FSDownload.java:359)<br> at org.apache.hadoop.yarn.util.FSDownload$2.run(FSDownload.java:357)<br> …<br> at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1149)<br> at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)<br> at java.lang.Thread.run(Thread.java:748)<br> Caused by: org.apache.hadoop.security.authentication.client.AuthenticationException: org.apache.hadoop.security.token.SecretManager$InvalidToken: token (kms-dt owner=xiao, renewer=yarn, realUser=, issueDate=1508730937041, maxDate=1509335737041, sequenceNumber=8, masterKeyId=73) <strong>can’t be found in cache</strong><br> …<br> at org.apache.hadoop.crypto.key.kms.KMSClientProvider.call(KMSClientProvider.java:535)<br> …<br> …</td></tr></tbody></table> 
+<h4 style="margin-left:50px;"><strong><span style="color:#305868;">说明：</span></strong></h4> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">上面的2个错误具有相同的原因：用于身份验证的令牌已过期，不能再用于身份验证。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">第一条消息能够明确告知令牌已过期，因为该令牌仍存储在服务器中。因此，当服务器验证令牌时，对到期时间的验证将失败，并引发“令牌已过期”异常。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">现在您可以猜测何时会发生第二个错误吗？请记住，在“服务器端的委托令牌”部分中，我们解释了服务器具有后台线程来删除过期的令牌。因此，如果在服务器的后台线程删除令牌后将令牌用于身份验证，则服务器上的验证逻辑将找不到该令牌。这导致抛出异常，说“找不到令牌”。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">下图显示了这些事件的顺序。</span></p> 
+<div id="attachment_34524" style="margin-left:5px;"> 
+ <span style="color:#3c3c3c;"><a href="https://ndu0e1pobsf1dobtvj5nls3q-wpengine.netdna-ssl.com/wp-content/uploads/2019/08/Figure-4-Life-Cycle-of-Delegation-Token.png" rel="nofollow"><img alt="图4：委托令牌的生命周期" class="size-full wp-image-34524" height="283" src="https://images2.imgbox.com/cf/57/DdyCPyjx_o.png" width="578"></a></span> 
+ <p id="caption-attachment-34524" style="margin-left:0px;"><span style="color:#3c3c3c;">图4：委托令牌的生命周期</span></p> 
+</div> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">请注意，当令牌被明确取消后，它将立即从商店中删除。因此，对于已取消的令牌，错误将始终是“找不到令牌”。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">为了进一步调试这些错误，有必要在客户端日志和服务器日志中添加特定令牌序列号（在上述示例中为“ sequenceNumber = 7”或“ sequenceNumber = 8”）。您应该能够在服务器日志中看到与令牌创建，续订（如果有），取消（如果有）有关的事件。</span></p> 
+<h3 style="margin-left:50px;"><span style="color:#305868;">长期运行的应用程序</span></h3> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">至此，您已经了解了有关Hadoop授权令牌的所有基础知识。但除此之外，还有一个缺失的环节：我们知道，授权令牌无法在其最大生存期之后进行更新，那么对于需要运行超过最大生存期的应用程序，会发生什么呢？</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">坏消息是，Hadoop没有为所有应用程序提供统一的方法来执行此操作，因此不存在任何应用程序都可以打开以使其“正常运行”的魔术配置。但这仍然是可能的。对于Spark提交的应用程序来说，好消息是，<a href="https://www.cloudera.com/documentation/enterprise/5-12-x/topics/cm_sg_yarn_long_jobs.html#xd_583c10bfdbd326ba-590cb1d1-149e9ca9886--7a82" rel="nofollow">Spark已经实现了这些神奇的参数</a>。Spark获取委托令牌并将其用于身份验证，类似于我们在前面的部分中所述。但是，Spark不会续签令牌，而只是在即将过期时获取新令牌。这使应用程序可以永远运行。相关代码在<a href="https://github.com/cloudera/spark/blob/cdh5-1.6.0_5.13.0/yarn/src/main/scala/org/apache/spark/deploy/yarn/AMDelegationTokenRenewer.scala">这里</a>。请注意，这需要为您的Spark应用程序提供Kerberos密钥表。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">但是，如果您要实现一个长期运行的服务应用程序，并希望该应用程序显式处理令牌，该怎么办？这将涉及两个部分：更新令牌，直到达到最大生存期；在最大使用寿命后处理令牌替换。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">请注意，这不是通常的做法，只有在实现服务时才建议这样做。</span></p> 
+<h4 style="margin-left:50px;"><strong><span style="color:#305868;">实施令牌续订</span></strong></h4> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">让我们首先研究应该如何进行令牌更新。最好的方法是研究YARN RM的<a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/security/DelegationTokenRenewer.java">PrincipledTokenRenewer代码</a>。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">该类的一些关键点是：</span></p> 
+<ol style="margin-left:50px;"><li>它是管理所有令牌的单一类。在内部，它有一个续订令牌的线程池，另一个有取消令牌的线程。更新在到期时间的90％发生。取消会有一个小的延迟（30秒），以防止比赛。</li><li>每个令牌的到期时间是分开管理的。通过调用令牌的<a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/token/Token.java#L412">renew（）API</a>以编程方式检索令牌的到期时间。该API的返回值是到期时间。</li></ol> 
+<pre class="has" style="margin-left:50px;"><code class="language-decode:true language-java">dttr.expirationDate =
+          UserGroupInformation.getLoginUser().doAs(
+            new PrivilegedExceptionAction&lt;Long&gt;() {
+              @Override
+              public Long run() throws Exception {
+                return dttr.token.renew(dttr.conf);
+              }
+            });</code></pre> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">这是YARN RM收到令牌后立即更新令牌的另一个原因-知道令牌何时到期。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">   3.通过解码令牌的标识符并调用其<a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/token/delegation/AbstractDelegationTokenIdentifier.java#L142">getMaxDate（）API</a>来检索每个令牌的最大生存期                                  。标识符中的其他字段也可以通过调用类似的API获得。     </span></p> 
+<pre class="has" style="margin-left:50px;"><code class="language-decode:true">  if (token.getKind().equals(HDFS_DELEGATION_KIND)) {
+        try {
+          AbstractDelegationTokenIdentifier identifier =
+              (AbstractDelegationTokenIdentifier) token.decodeIdentifier();
+          maxDate = identifier.getMaxDate();
+        } catch (IOException e) {
+          throw new YarnRuntimeException(e);
+        }
+      }</code></pre> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">   4.由于2和3，无需读取配置即可确定更新间隔和最大寿命。服务器的配置可能会不时更改。客户不应该依赖它，也没有办法知道它。</span></p> 
+<h4 style="margin-left:50px;"><strong><span style="color:#305868;">Max Lifetime之后处理令牌</span></strong></h4> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">令牌续签将仅续签令牌，直至其最大使用寿命。最长寿命后，该作业将失败。如果您的应用程序是长期运行的，则应考虑使用<a href="https://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/YarnApplicationSecurity.html#Securing_Long-lived_YARN_Services" rel="nofollow">YARN文档中</a>描述的<a href="https://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/YarnApplicationSecurity.html#Securing_Long-lived_YARN_Services" rel="nofollow">有关长期服务的机制</a>，或者在自己的委托令牌更新类中添加逻辑，以便在现有委托令牌即将达到最大值时检索新的委托令牌。一生。</span></p> 
+<h3 style="margin-left:50px;"><span style="color:#305868;"><a id="1"></a>其他使用令牌的方式</span></h3> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">恭喜你！现在，您已经阅读完有关委托令牌的概念和详细信息。本博客文章中未涉及一些相关方面。以下是它们的简要介绍。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">其他服务中的委托令牌：Apache Oozie，Apache Hive和Apache Hadoop的YARN RM等服务也利用委托令牌进行身份验证。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">块访问令牌：HDFS客户端通过首先联系NameNode来获取文件的块位置，然后直接在DataNode上访问这些块来访问文件。文件权限检查在NameNode中进行。但是，对于随后在DataNodes上进行的数据块访问，也需要进行授权检查。块访问令牌用于此目的。它们由HDFS NameNode发布给客户端，然后由客户端传递给DataNode。阻止访问令牌的寿命很短（默认情况下为10小时），无法更新。如果“阻止访问令牌”到期，则客户端必须请求一个新令牌。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">身份验证令牌：我们仅介绍了授权令牌。Hadoop还具有身份验证令牌的概念，该令牌被设计为更便宜且可扩展的身份验证机制。它就像服务器和客户端之间的cookie。身份验证令牌是由服务器授予的，不能被更新或用于模拟其他人。并且与委托令牌不同，不需要由服务器单独存储。您不需要针对身份验证令牌显式编码。</span></p> 
+<h3 style="margin-left:50px;"><span style="color:#305868;">结论</span></h3> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">委托令牌在Hadoop生态系统中扮演重要角色。现在，您应该了解委托令牌的用途，如何使用它们以及为什么以这种方式使用它们。在编写和调试应用程序时，此知识必不可少。</span></p> 
+<h3 style="margin-left:50px;"><span style="color:#305868;">附录</span></h3> 
+<h4 style="margin-left:50px;"><strong><span style="color:#305868;"><a id="2"></a>附录A.服务器端的配置。</span></strong></h4> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">下表是与委托令牌相关的配置表。请参阅<a href="https://blog.cloudera.com/hadoop-delegation-tokens-explained/#4" rel="nofollow">服务器端的委托令牌以</a>获取这些属性的说明。</span></p> 
+<table cellspacing="0" style="margin-left:50px;"><caption> 
+ </caption><tbody><tr><td> 属性</td><td> HDFS中的 配置名称</td><td> HDFS中的 默认  值</td><td> KMS中的 配置名称</td><td> KMS中的 默认  值 </td></tr><tr><td> 更新  间隔</td><td> dfs.namenode.delegation.token.renew-<br>  间隔</td><td> 86400000<br>  （1天）</td><td> hadoop.kms.authentication.delegation-token.renew-<br>  interval.sec</td><td> 86400<br>  （1天）</td></tr><tr><td> 最长寿命</td><td> dfs.namenode.delegation.token.max-<br>  生存期</td><td> 604800000<br>  （7天）</td><td> hadoop.kms.authentication.delegation-token.max-<br>  lifetime.sec</td><td> 604800<br>  （7天）</td></tr><tr><td>后台 <br>  删除 过期令牌的 间隔 </td><td> 不可配置</td><td> 3600000<br>  （1小时）</td><td> hadoop.kms.authentication.delegation-token.removal<br>  -scan-interval.sec</td><td> 3600<br>  （1小时）</td></tr><tr><td> 主密钥滚动间隔</td><td> dfs.namenode.delegation.key.update-<br>  间隔</td><td> 86400000<br>  （1天）</td><td> hadoop.kms.authentication.delegation-token.update-<br>  interval.sec</td><td> 86400<br>  （1天）</td></tr></tbody></table> 
+<p>表4：HDFS和KMS的配置属性和默认值</p> 
+<h4 style="margin-left:50px;"><strong><span style="color:#305868;"><a id="3"></a>附录B.使用委托令牌进行身份验证的示例代码。</span></strong></h4> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">在查看下面的代码之前，需要理解的一个概念是<a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/UserGroupInformation.java">UserGroupInformation</a>（UGI）类。UGI是Hadoop的公共API，用于针对身份验证进行编码。它在下面的代码示例中使用，并且还早些时候出现在某些异常堆栈跟踪中。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">GetFileStatus用作使用UGI访问HDFS的示例。有关详细信息，请参见<a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/fs/FileSystem.java#L518">FileSystem类javadoc</a>。</span></p> 
+<pre class="has" style="margin-left:50px;"><code class="language-decode:true language-java">UserGroupInformation tokenUGI = UserGroupInformation.createRemoteUser("user_name");
+UserGroupInformation kerberosUGI = UserGroupInformation.loginUserFromKeytabAndReturnUGI("principal_in_keytab", "path_to_keytab_file");
+Credentials creds = new Credentials();
+kerberosUGI.doAs((PrivilegedExceptionAction&lt;Void&gt;) () -&gt; {
+  Configuration conf = new Configuration();
+  FileSystem fs = FileSystem.get(conf);
+  fs.getFileStatus(filePath); // ← kerberosUGI can authenticate via Kerberos
+
+  // get delegation tokens, add them to the provided credentials. set renewer to ‘yarn’
+  Token&lt;?&gt;[] newTokens = fs.addDelegationTokens("yarn", creds);
+  // Add all the credentials to the UGI object
+  tokenUGI.addCredentials(creds);
+
+  // Alternatively, you can add the tokens to UGI one by one.
+  // This is functionally the same as the above, but you have the option to log each token acquired.
+  for (Token&lt;?&gt; token : newTokens) {
+    tokenUGI.addToken(token);
+  }
+  return null;
+});</code></pre> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">请注意，使用Kerberos身份验证调用addDelegationTokens RPC调用。否则，将导致抛出IOException，文字为“只能使用kerberos或Web身份验证才能发布委托令牌”。</span></p> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">现在，我们可以使用获取的委托令牌来访问HDFS。</span></p> 
+<pre class="has" style="margin-left:50px;"><code class="language-decode:true language-java">tokenUGI.doAs((PrivilegedExceptionAction&lt;Void&gt;) () -&gt; {
+ Configuration conf = new Configuration();
+ FileSystem fs = FileSystem.get(conf);
+ fs.getFileStatus(filePath); // ← tokenUGI can authenticate via Delegation Token
+ return null;
+});</code></pre> 
+<p style="margin-left:50px;"><span style="color:#3c3c3c;">---------------------------------------------------------下面是英文版------------------------------------------------------------------</span></p> 
+<p style="margin-left:50px;"> </p> 
+<p>Apache Hadoop’s security was designed and implemented around 2009, and has been stabilizing since then. However, due to a lack of documentation around this area, it’s hard to understand or debug when problems arise. Delegation tokens were designed and are widely used in the Hadoop ecosystem as an authentication method. This blog post introduces the concept of Hadoop Delegation Tokens in the context of Hadoop Distributed File System (<a href="https://archive.cloudera.com/cdh5/cdh/5/hadoop/hadoop-project-dist/hadoop-hdfs/HdfsDesign.html" rel="nofollow">HDFS</a>) and Hadoop Key Management Server (<a href="https://archive.cloudera.com/cdh5/cdh/5/hadoop/hadoop-kms/index.html" rel="nofollow">KMS</a>), and provides some basic code and troubleshooting examples. It is noteworthy that there are a lot of other services in the Hadoop ecosystem that also utilize delegation tokens, but for brevity we will only discuss about HDFS and KMS.</p> 
+<p>This blog assumes the readers understand the basic concept of <a href="https://en.wikipedia.org/wiki/Authentication" rel="nofollow">authentication</a>, <a href="https://en.wikipedia.org/wiki/Kerberos_%28protocol%29" rel="nofollow">Kerberos</a>, for the purpose of understanding the authentication flow; as well as <a href="https://archive.cloudera.com/cdh5/cdh/5/hadoop/hadoop-project-dist/hadoop-hdfs/HdfsDesign.html" rel="nofollow">HDFS Architecture</a> and <a href="https://blog.cloudera.com/blog/2015/01/new-in-cdh-5-3-transparent-encryption-in-hdfs/" rel="nofollow">HDFS Transparent Encryption</a>, for the purpose of understanding what HDFS and KMS are. For readers who are not interested in HDFS transparent encryption, the KMS portions in this blog post can be ignored. A previous blog post about general Authorization and Authentication in Hadoop can be found <a href="https://blog.cloudera.com/blog/2012/03/authorization-and-authentication-in-hadoop/" rel="nofollow">here</a>.</p> 
+<h3>Quick Introduction to Hadoop Security</h3> 
+<p>Hadoop was initially implemented without real authentication, which means data stored in Hadoop could be easily compromised. The security feature was added on later via <a href="https://issues.apache.org/jira/browse/HADOOP-4487" rel="nofollow">HADOOP-4487</a> in 2010 with the following two fundamental goals:</p> 
+<ol><li>Preventing the data stored in HDFS from unauthorized access</li><li>Not adding significant cost while achieving goal #1.</li></ol> 
+<p>In order to achieve the first goal, we need to ensure</p> 
+<ul><li>Any clients accessing the cluster are authenticated to ensure they are who they claimed to be.</li><li>Any servers of the cluster are authenticated to be part of the cluster.</li></ul> 
+<p>For this goal, Kerberos was chosen as the underlying authentication service. Other mechanisms such as Delegation Token, Block Access Token, Trust etc. are added to complement Kerberos. Especially, Delegation Token is introduced to achieve the second goal (see next section for how). Below is a simplified diagram that illustrates where Kerberos and Delegation Tokens are used in the context of HDFS (other services are similar):</p> 
+<p><a href="https://ndu0e1pobsf1dobtvj5nls3q-wpengine.netdna-ssl.com/wp-content/uploads/2019/08/Figure-1-Simplified-Diagram-of-HDFS-Authentication-Mechanisms.png" rel="nofollow"><img alt="Figure 1: Simplified Diagram of HDFS Authentication Mechanisms" height="293" src="https://images2.imgbox.com/ae/b9/ypFW84AU_o.png" width="609"></a></p> 
+<p>Figure 1: Simplified Diagram of HDFS Authentication Mechanisms</p> 
+<p>In a simple HDFS example above, there are several authentication mechanisms in play:</p> 
+<ul><li>The end user (joe) can talk to the HDFS NameNode using Kerberos</li><li>The distributed tasks the end user (joe) submits can access the HDFS NameNode using joe’s Delegation Tokens. This will be the focus for the rest of this blog post</li><li>The HDFS DataNodes talk to the HDFS NameNode using Kerberos</li><li>The end user and the distributed tasks can access HDFS DataNodes using Block Access Tokens.</li></ul> 
+<p>We will give a brief introduction of some of the above mechanisms in the <a href="https://blog.cloudera.com/hadoop-delegation-tokens-explained/#1" rel="nofollow">Other Ways Tokens Are Used</a> section at the end of this blog post. To read about more details of Hadoop security design, please refer to the <a href="https://issues.apache.org/jira/secure/attachment/12428537/security-design.pdf" rel="nofollow">design doc</a> in <a href="https://issues.apache.org/jira/browse/HADOOP-4487" rel="nofollow">HADOOP-4487</a> and the <a href="https://www.slideshare.net/oom65/hadoop-security-architecture" rel="nofollow">Hadoop Security Architecture Presentation</a>.</p> 
+<h3>What is a Delegation Token?</h3> 
+<p>While it’s theoretically possible to solely use Kerberos for authentication, it has its own problem when being used in a distributed system like Hadoop. Imagine for each MapReduce job, if all the worker tasks have to authenticate via Kerberos using a delegated TGT (Ticket Granting Ticket), the <a href="http://www.zeroshell.org/kerberos/Kerberos-operation/" rel="nofollow">Kerberos Key Distribution Center</a> (KDC) would quickly become the bottleneck. The red lines in the graph below demonstrates the issue: there could be thousands of node-to-node communications for a job, resulting in the same magnitude of KDC traffic.  In fact, it would inadvertently be performing a <a href="https://en.wikipedia.org/wiki/Denial-of-service_attack" rel="nofollow">distributed denial of service attack</a> on the KDC in very large clusters.</p> 
+<p><a href="https://ndu0e1pobsf1dobtvj5nls3q-wpengine.netdna-ssl.com/wp-content/uploads/2019/08/Figure-2-Simplified-Diagram-Showing-The-Authentication-Scaling-Problem-in-Hadoop.png" rel="nofollow"><img alt="Figure 2: Simplified Diagram Showing The Authentication Scaling Problem in Hadoop" height="303" src="https://images2.imgbox.com/f7/cd/fszmVsRJ_o.png" width="577"></a></p> 
+<p>Figure 2: Simplified Diagram Showing The Authentication Scaling Problem in Hadoop</p> 
+<p>Thus Delegation Tokens were introduced as a lightweight authentication method to complement Kerberos authentication. Kerberos is a three-party protocol; in contrast, Delegation Token authentication is a two-party authentication protocol.</p> 
+<p>The way Delegation Tokens works is:</p> 
+<ol><li>The client initially authenticates with each server via Kerberos, and obtains a Delegation Token from that server.</li><li>The client uses the Delegation Tokens for subsequent authentications with the servers instead of using Kerberos.</li></ol> 
+<p>The client can and very often does pass Delegation Tokens to other services (such as YARN) so that the other services (such as the mappers and reducers) can authenticate as, and run jobs on behalf of, the client. In other words, the client can ‘delegate’ credentials to those services. Delegation Tokens have an expiration time and require periodic renewals to keep their validity. However, they can’t be renewed indefinitely – there is a max lifetime. Before it expires, the Delegation Token can be cancelled too.</p> 
+<p>Delegation Tokens eliminate the need to distribute a Kerberos TGT or keytab, which, if compromised, would grant access to all services. On the other hand, a Delegation Token is strictly tied to its associated service and eventually expires, causing less damage if exposed. Moreover, Delegation Tokens make credential renewal more lightweight. This is because the renewal is designed in such a way that only the renewer and the service are involved in the renewal process. The token itself remains the same, so all parties already using the token do not have to be updated.</p> 
+<p>For availability reasons, the Delegation Tokens are persisted by the servers. HDFS NameNode persists the Delegation Tokens to its metadata (aka. fsimage and edit logs). KMS persists the Delegation Tokens into Apache ZooKeeper, in the form of ZNodes. This allows the Delegation Tokens to be usable even if the servers restart or failover.</p> 
+<p>The server and the client have different responsibilities for handling Delegation Tokens. The two sections below provide some details.</p> 
+<h4>Delegation Tokens at the Server-side</h4> 
+<p>The server (that is, HDFS NN and KMS in Figure 2.) is responsible for:</p> 
+<ul><li>Issuing Delegation Tokens, and storing them for verification.</li><li>Renewing Delegation Tokens upon request.</li><li>Removing the Delegation Tokens either when they are canceled by the client, or when they expire.</li><li>Authenticating clients by verifying the provided Delegation Tokens against the stored Delegation Tokens.</li></ul> 
+<p>Delegation Tokens in Hadoop are generated and verified following the <a href="https://en.wikipedia.org/wiki/Hash-based_message_authentication_code" rel="nofollow">HMAC</a> mechanism. There are two parts of information in a Delegation Token: a public part and a private part. Delegation Tokens are stored at the server side as a hashmap with the public information as the key and the private information as the value.</p> 
+<p>The public information is used for token identification in the form of <a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/token/delegation/AbstractDelegationTokenIdentifier.java">an identifier object</a>. It consists of:</p> 
+<table border="1"><caption> 
+ </caption><tbody><tr><td> Kind</td><td> The kind of token (HDFS_DELEGATION_TOKEN, or kms-dt). The token also contains the kind, matching the identifier’s kind.</td></tr><tr><td> Owner</td><td> The user who owns the token.</td></tr><tr><td> Renewer</td><td> The user who can renew the token.</td></tr><tr><td> Real User</td><td> Only relevant if the owner is impersonated. If the token is created by an impersonating user, this will identify the impersonating user.<br>  For example, when oozie impersonates user joe, Owner will be joe and Real User will be oozie.</td></tr><tr><td> Issue Date</td><td> Epoch time when the token was issued.</td></tr><tr><td> Max Date</td><td> Epoch time when the token can be renewed until.</td></tr><tr><td> Sequence Number</td><td> UUID to identify the token.</td></tr><tr><td> Master Key ID</td><td> ID of the master key used to create and verify the token.</td></tr></tbody></table> 
+<p>Table 1: Token Identifier (public part of a Delegation Token)</p> 
+<p>The private information is represented by class DelegationTokenInformation in <a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/token/delegation/AbstractDelegationTokenSecretManager.java">AbstractDelegationTokenSecretManager</a>, it is critical for security and contains the following fields:</p> 
+<table border="1"><caption> 
+ </caption><tbody><tr><td> renewDate</td><td> Epoch time when the token is expected to be renewed.<br>  If it’s smaller than the current time, it means the token has expired.</td></tr><tr><td> password</td><td> The password calculated as HMAC of Token Identifier using master key as the HMAC key.<br>  It’s used to validate the Delegation Token provided by the client to the server.</td></tr><tr><td> trackingId</td><td> A tracking identifier that can be used to associate usages of a token across multiple client sessions.<br>  It is computed as the MD5 of the token identifier.</td></tr></tbody></table> 
+<p>Table 2: Delegation Token Information (private part of a Delegation Token)</p> 
+<p>Notice the master key ID in Table 1, which is the ID of the master key living on the server. The master key is used to generate every Delegation Token. It is rolled at a configured interval, and never leaves the server.</p> 
+<p>The server also has a configuration to specify a renew-interval (default is 24 hours), which is also the expiration time of the Delegation Token. Expired Delegation Tokens cannot be used to authenticate, and the server has a background thread to remove expired Delegation Tokens from the server’s token store.</p> 
+<p>Only the renewer of the Delegation Token can renew it, before it expires. A successful renewal extends the Delegation Token’s expiration time for another renew-interval, until it reaches its max lifetime (default is 7 days).</p> 
+<p>The table in <a href="https://blog.cloudera.com/hadoop-delegation-tokens-explained/#2" rel="nofollow">Appendix A</a> gives the configuration names and their default values for HDFS and KMS.</p> 
+<h4>Delegation tokens at the client-side</h4> 
+<p>The client is responsible for</p> 
+<ul><li>Requesting new Delegation Tokens from the server. A renewer can be specified when requesting the token.</li><li>Renewing Delegation Tokens (if the client specifies itself as the ‘renewer’), or ask another party (the specified ‘renewer’) to renew Delegation Tokens.</li><li>Requesting the server to cancel Delegation Tokens.</li><li>Present a Delegation Token to authenticate with the server.</li></ul> 
+<p>The client-side-visible Token class is defined <a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/token/Token.java">here</a>. The following table describes what’s contained in the Token.</p> 
+<table border="1"><caption> 
+ </caption><tbody><tr><td> identifier</td><td> The token identifier matching the public information part at the server side.</td></tr><tr><td> password</td><td> The password matching the password at the server side.</td></tr><tr><td> kind</td><td> The kind of token (e.g. HDFS_DELEGATION_TOKEN, or kms-dt), it matches the identifier’s kind.</td></tr><tr><td> service</td><td> The name of the service (e.g. ha-hdfs:&lt;nameservice-name&gt; for HDFS, &lt;ip_address&gt;:&lt;port&gt; for KMS).</td></tr><tr><td> renewer</td><td> The user who can renew the token (e.g. yarn).</td></tr></tbody></table> 
+<p>Table 3: Delegation Token at Client Side</p> 
+<p>How authentication with Delegation Tokens works is explained in the next section.</p> 
+<p>Below is an example log excerpt at job submission time. The INFO logs are printed with tokens from all services. In the example below, we see an HDFS Delegation Token, and a KMS Delegation Token.</p> 
+<table><tbody><tr><td>$ hadoop jar /opt/cloudera/parcels/CDH/jars/hadoop-mapreduce-examples-2.6.0-cdh5.13.0.jar pi 2 3<br> Number of Maps  = 2<br> Samples per Map = 3<br> Wrote input for Map #0<br> Wrote input for Map #1<br> Starting Job<br> 17/10/22 20:50:03 INFO client.RMProxy: Connecting to ResourceManager at example.cloudera.com/172.31.113.88:8032<br> 17/10/22 20:50:03 INFO hdfs.DFSClient: Created token for xiao: HDFS_DELEGATION_TOKEN owner=xiao@GCE.CLOUDERA.COM, renewer=yarn, realUser=, issueDate=1508730603423, maxDate=1509335403423, sequenceNumber=4, masterKeyId=39 on ha-hdfs:ns1<br> 17/10/22 20:50:03 INFO security.TokenCache: Got dt for hdfs://ns1; Kind: <strong>HDFS_DELEGATION_TOKEN</strong>, Service: ha-hdfs:ns1, Ident: (token for xiao: HDFS_DELEGATION_TOKEN owner=xiao@GCE.CLOUDERA.COM, renewer=yarn, realUser=, issueDate=1508730603423, maxDate=1509335403423, sequenceNumber=4, masterKeyId=39)<br> 17/10/22 20:50:03 INFO security.TokenCache: Got dt for hdfs://ns1; Kind: <strong>kms-dt</strong>, Service: 172.31.113.88:16000, Ident: (kms-dt owner=xiao, renewer=yarn, realUser=, issueDate=1508730603474, maxDate=1509335403474, sequenceNumber=7, masterKeyId=69)<br> …</td></tr></tbody></table> 
+<p>For readers who want to write Java code to authenticate, a sample code is provided at <a href="https://blog.cloudera.com/hadoop-delegation-tokens-explained/#3" rel="nofollow">Appendix B</a>.</p> 
+<h3>Example: Delegation Tokens’ Lifecycle</h3> 
+<p>Now that we understand what a Delegation Token is, let’s take a look at how it’s used in practice. The graph below shows an example flow of authentications for running a typical application, where the job is submitted through YARN, then is distributed to multiple worker nodes in the cluster to execute.</p> 
+<p><a href="https://ndu0e1pobsf1dobtvj5nls3q-wpengine.netdna-ssl.com/wp-content/uploads/2019/08/Figure-3-How-Delegation-Token-is-Used-for-Authentication-In-A-Typical-Job.png" rel="nofollow"><img alt="Figure 3: How Delegation Token is Used for Authentication In A Typical Job" height="376" src="https://images2.imgbox.com/e8/92/iA3ErACV_o.png" width="577"></a></p> 
+<p>Figure 3: How Delegation Token is Used for Authentication In A Typical Job</p> 
+<p>For brevity, the steps of Kerberos authentication and the details about the task distribution are omitted. There are 5 steps in general in the graph:</p> 
+<ol><li>The client wants to run a job in the cluster. It gets an HDFS Delegation Token from HDFS NameNode, and a KMS Delegation Token from the KMS.</li><li>The client submits the job to the YARN Resource Manager (RM), passing the Delegation Tokens it just acquired, as well as the <a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-api/src/main/java/org/apache/hadoop/yarn/api/records/ApplicationSubmissionContext.java#L38">ApplicationSubmissionContext</a>.</li><li>YARN RM verifies the Delegation Tokens are valid by immediately renewing them. Then it launches the job, which is distributed (together with the Delegation Tokens) to the worker nodes in the cluster.</li><li>Each worker node authenticates with HDFS using the HDFS Delegation Token as they access HDFS data, and authenticates with KMS using the KMS Delegation Token as they decrypt the HDFS files in encryption zones.</li><li>After the job is finished, the RM cancels the Delegation Tokens for the job.</li></ol> 
+<p>Note: A step not drawn in the above diagram is, RM also tracks each Delegation Token’s expiration time, and renews the Delegation Token when it’s at 90% of the expiration time. Note that Delegation Tokens are tracked in the RM on an individual basis, not Token-Kind basis. This way, tokens with different renewal intervals can all be renewed correctly. The token renewer classes are implemented using Java ServiceLoader, so RM doesn’t have to be aware of the token kinds. For extremely interested readers, the relevant code is in <a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/security/DelegationTokenRenewer.java#L564">RM’s DelegationTokenRenewer class</a>.</p> 
+<h3>What is this InvalidToken error?</h3> 
+<p>Now we know what Delegation Tokens are and how they are used when running a typical job. But don’t stop here! Let’s look at some typical Delegation Token related error messages from application logs, and figure out what they mean.</p> 
+<h4>Token is expired</h4> 
+<p>Sometimes, the application fails with AuthenticationException, with an InvalidToken exception wrapped inside. The exception message indicates that “token is expired”. Guess why this could happen?</p> 
+<table><tbody><tr><td>….<br> 17/10/22 20:50:12 INFO mapreduce.Job: Job job_1508730362330_0002 failed with state FAILED due to: Application application_1508730362330_0002 failed 2 times due to AM Container for appattempt_1508730362330_0002_000002 exited with  exitCode: -1000<br> For more detailed output, check application tracking page:https://example.cloudera.com:8090/proxy/application_1508730362330_0002/Then, click on links to logs of each attempt.<br> Diagnostics: org.apache.hadoop.security.authentication.client.AuthenticationException: org.apache.hadoop.security.token.SecretManager$InvalidToken: token (kms-dt owner=xiao, renewer=yarn, realUser=, issueDate=1508730603474, maxDate=1509335403474, sequenceNumber=7, masterKeyId=69) <strong>is expired</strong>, current time: 2017-10-22 20:50:12,166-0700 expected renewal time: 2017-10-22 20:50:05,518-0700<br> ….<br> Caused by: org.apache.hadoop.security.authentication.client.AuthenticationException: org.apache.hadoop.security.token.SecretManager$InvalidToken: token (kms-dt owner=xiao, renewer=yarn, realUser=, issueDate=1508730603474, maxDate=1509335403474, sequenceNumber=7, masterKeyId=69) <strong>is expired</strong>, current time: 2017-10-22 20:50:12,166-0700 expected renewal time: 2017-10-22 20:50:05,518-0700<br> at sun.reflect.NativeConstructorAccessorImpl.newInstance0(Native Method)<br> …<br> at org.apache.hadoop.crypto.key.kms.KMSClientProvider.call(KMSClientProvider.java:535)<br> …</td></tr></tbody></table> 
+<h4>Token can’t be found in cache</h4> 
+<p>Sometimes, the application fails with AuthenticationException, with an InvalidToken exception wrapped inside. The exception message indicates that “token can’t be found in cache”. Guess why this could happen, and what’s the difference with the “token is expired” error?</p> 
+<table><tbody><tr><td>….<br> 17/10/22 20:55:47 INFO mapreduce.Job: Job job_1508730362330_0003 failed with state FAILED due to: Application application_1508730362330_0003 failed 2 times due to AM Container for appattempt_1508730362330_0003_000002 exited with  exitCode: -1000<br> For more detailed output, check application tracking page:https://example.cloudera.com:8090/proxy/application_1508730362330_0003/Then, click on links to logs of each attempt.<br> Diagnostics: org.apache.hadoop.security.authentication.client.AuthenticationException: org.apache.hadoop.security.token.SecretManager$InvalidToken: token (kms-dt owner=xiao, renewer=yarn, realUser=, issueDate=1508730937041, maxDate=1509335737041, sequenceNumber=8, masterKeyId=73)<strong> can’t be found in cache</strong><br> java.io.IOException: org.apache.hadoop.security.authentication.client.AuthenticationException: org.apache.hadoop.security.token.SecretManager$InvalidToken: token (kms-dt owner=xiao, renewer=yarn, realUser=, issueDate=1508730937041, maxDate=1509335737041, sequenceNumber=8, masterKeyId=73) <strong>can’t be found in cache</strong><br> at org.apache.hadoop.crypto.key.kms.LoadBalancingKMSClientProvider.decryptEncryptedKey(LoadBalancingKMSClientProvider.java:294)<br> at org.apache.hadoop.crypto.key.KeyProviderCryptoExtension.decryptEncryptedKey(KeyProviderCryptoExtension.java:528)<br> at org.apache.hadoop.hdfs.DFSClient.decryptEncryptedDataEncryptionKey(DFSClient.java:1448)<br> …<br> at org.apache.hadoop.fs.FileSystem.open(FileSystem.java:784)<br> at org.apache.hadoop.fs.FileUtil.copy(FileUtil.java:367)<br> at org.apache.hadoop.yarn.util.FSDownload.copy(FSDownload.java:265)<br> at org.apache.hadoop.yarn.util.FSDownload.access$000(FSDownload.java:61)<br> at org.apache.hadoop.yarn.util.FSDownload$2.run(FSDownload.java:359)<br> at org.apache.hadoop.yarn.util.FSDownload$2.run(FSDownload.java:357)<br> …<br> at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1149)<br> at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)<br> at java.lang.Thread.run(Thread.java:748)<br> Caused by: org.apache.hadoop.security.authentication.client.AuthenticationException: org.apache.hadoop.security.token.SecretManager$InvalidToken: token (kms-dt owner=xiao, renewer=yarn, realUser=, issueDate=1508730937041, maxDate=1509335737041, sequenceNumber=8, masterKeyId=73) <strong>can’t be found in cache</strong><br> …<br> at org.apache.hadoop.crypto.key.kms.KMSClientProvider.call(KMSClientProvider.java:535)<br> …</td></tr></tbody></table> 
+<h4>Explanation:</h4> 
+<p>The 2 errors above share the same cause: the token that was used to authenticate has expired, and can no longer be used to authenticate.</p> 
+<p>The first message was able to tell explicitly that the token has expired, because that token is still stored in the server. Therefore when the server verifies the token, the verification on expiration time fails, throwing the “token is expired” exception.</p> 
+<p>Now can you guess when the second error could happen? Remember in the ‘Delegation Tokens at the Server-side’ section, we explained the server has a background thread to remove expired tokens. So if the token is being used for authentication after the server’s background thread has removed it, the verification logic on the server cannot find this token. This results in an exception being thrown, saying “token can’t be found”.</p> 
+<p>The graph below shows the sequence of these events.</p> 
+<p><a href="https://ndu0e1pobsf1dobtvj5nls3q-wpengine.netdna-ssl.com/wp-content/uploads/2019/08/Figure-4-Life-Cycle-of-Delegation-Token.png" rel="nofollow"><img alt="Figure 4: Life Cycle of Delegation Token" height="283" src="https://images2.imgbox.com/f2/3d/pmKI80f8_o.png" width="578"></a></p> 
+<p>Figure 4: Life Cycle of Delegation Token</p> 
+<p>Note that when a token is explicitly canceled, it will be immediately removed from the store. So for canceled tokens, the error will always be “token can’t be found”.</p> 
+<p>To further debug these errors, grepping the client logs as well as the server logs for the specific token sequence number (“sequenceNumber=7” or “sequenceNumber=8” in the above examples) is necessary. You should be able to see events related to token creations, renewals (if any), cancelations (if any) in the server logs.</p> 
+<h3>Long-running Applications</h3> 
+<p>At this point, you know all the basics about Hadoop Delegation Tokens. But there is one missing piece beyond it: we know that Delegations Tokens cannot be renewed beyond their max lifetimes, so what happens to applications that do need to run longer than the max lifetime?</p> 
+<p>The bad news is that Hadoop does not have a unified way for all applications to do this, so there does not exist a magic configuration which any application can turn on to let it ‘just work’. But this is still possible. Good news for Spark-submitted applications is, <a href="https://www.cloudera.com/documentation/enterprise/5-12-x/topics/cm_sg_yarn_long_jobs.html#xd_583c10bfdbd326ba-590cb1d1-149e9ca9886--7a82" rel="nofollow">Spark has implemented these magical parameters</a>. Spark get the Delegation Tokens and uses them for authentication, similar to what we described in the earlier sections. However, Spark does not renew the tokens, and instead just gets a new token when it’s about to expire. This allows the application to run forever. The relevant code is <a href="https://github.com/cloudera/spark/blob/cdh5-1.6.0_5.13.0/yarn/src/main/scala/org/apache/spark/deploy/yarn/AMDelegationTokenRenewer.scala">here</a>.  Note that this requires giving a Kerberos keytab to your Spark application.</p> 
+<p>But what if you are implementing a long-running service application, and want the tokens handled explicitly by the application? This would involve two parts: renew the tokens until the max lifetime; handle the token replacement after max lifetime.</p> 
+<p>Note that this is not a usual practice, and is only recommended if you’re implementing a service.</p> 
+<h4>Implementing a Token Renewer</h4> 
+<p>Let’s first study how token renewal should be done. The best way is to study YARN RM’s <a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/security/DelegationTokenRenewer.java">DelegationTokenRenewer code</a>.</p> 
+<p>Some key points from that class are:</p> 
+<ol><li>It is a single class to manage all the tokens. Internally it has a thread pool to renew tokens, and another thread to cancel tokens. Renew happens at 90% of the expiration time. Cancel has a small delay (30 seconds) to prevent races.</li><li>Expiration time for each token is managed separately. The token’s expiration time is programmatically retrieved by calling the token’s <a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/token/Token.java#L412">renew() API</a>. The return value of that API is the expiration time.</li></ol> 
+<pre>     dttr.expirationDate =
+          UserGroupInformation.getLoginUser().doAs(
+            new PrivilegedExceptionAction&lt;Long&gt;() {
+              @Override
+              public Long run() throws Exception {
+                return dttr.token.renew(dttr.conf);
+              }
+            });</pre> 
+<p>This is another reason why YARN RM renews a token immediately after receiving it – to know when it will expire.</p> 
+<p>   3. The max lifetime of each token is retrieved by decoding the token’s identifier, and calling its                                 <a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/token/delegation/AbstractDelegationTokenIdentifier.java#L142">getMaxDate() API</a>. Other fields in the identifier can also be obtained by calling similar APIs.     </p> 
+<pre>  if (token.getKind().equals(HDFS_DELEGATION_KIND)) {
+        try {
+          AbstractDelegationTokenIdentifier identifier =
+              (AbstractDelegationTokenIdentifier) token.decodeIdentifier();
+          maxDate = identifier.getMaxDate();
+        } catch (IOException e) {
+          throw new YarnRuntimeException(e);
+        }
+      }</pre> 
+<p>   4. Because of 2 and 3, no configuration needs to be read to determine the renew interval and                                   max lifetime. The server’s configuration may change from time to time. The client should not depend                 on it, and do not have a way to know it.</p> 
+<h4>Handling Tokens after Max Lifetime</h4> 
+<p>The token renewer will only renew the token until its max lifetime. After max lifetime, the job will fail. If your application is long-running, you should consider either utilizing the mechanisms described in <a href="https://hadoop.apache.org/docs/current/hadoop-yarn/hadoop-yarn-site/YarnApplicationSecurity.html#Securing_Long-lived_YARN_Services" rel="nofollow">YARN documentation about long-lived services</a>, or add logic to your own delegation token renewer class, to retrieve new delegation tokens when the existing ones are about to reach max lifetime.</p> 
+<h3>Other Ways Tokens Are Used</h3> 
+<p>Congratulations! You have now finished reading the concepts and details about Delegation Tokens. There are a few related aspects not covered by this blog post. Below is a brief introduction of them.</p> 
+<p>Delegation Tokens in other services: Services such as Apache Oozie, Apache Hive, and Apache Hadoop’s YARN RM also utilize Delegation Tokens for authentication.</p> 
+<p>Block Access Token: HDFS clients access a file by first contacting the NameNode, to get the block locations of a specific file, then access the blocks directly on the DataNode. File permission checking takes place in the NameNode. But for the subsequent data block accesses on DataNodes, authorization checks are required as well. Block Access Tokens are used for this purpose. They are issued by HDFS NameNode to the client, and then passed to DataNode by the client. Block Access Token has a short lifetime (10 hours by default) and can not be renewed. If Block Access Token expires, the client has to request a new one.</p> 
+<p>Authentication Token: We have covered exclusively Delegation Tokens. Hadoop also has the concept of an Authentication Token, which is designed to be an even cheaper and more scalable authentication mechanism. It acts like a cookie between the server and the client. Authentication Tokens are granted by the server, cannot be renewed or used to impersonate others. And unlike Delegation Tokens, don’t need to be individually stored by the server.  You should not need to explicitly code against Authentication Token.</p> 
+<h3>Conclusion</h3> 
+<p>Delegation Tokens play an important role in the Hadoop ecosystem. You should now understand the purpose of Delegation Tokens, how they are used, and why they are used this way. This knowledge is essential when writing and debugging applications.</p> 
+<h3>Appendices</h3> 
+<h4>Appendix A. Configurations at the server-side.</h4> 
+<p>Below is the table of configurations related to Delegation Tokens. Please see <a href="https://blog.cloudera.com/hadoop-delegation-tokens-explained/#4" rel="nofollow">Delegation Tokens at the Server-side</a> for explanations of these properties.</p> 
+<table border="1"><caption> 
+ </caption><tbody><tr><td> Property</td><td> Configuration Name<br>  in HDFS</td><td> Default Value<br>  in HDFS</td><td> Configuration Name<br>  in KMS</td><td> Default Value <br>  in KMS</td></tr><tr><td> Renew Interval</td><td> dfs.namenode.delegation.token.renew-<br>  interval</td><td> 86400000<br>  (1 day)</td><td> hadoop.kms.authentication.delegation-token.renew-<br>  interval.sec</td><td> 86400<br>  (1 day)</td></tr><tr><td> Max Lifetime</td><td> dfs.namenode.delegation.token.max-<br>  lifetime</td><td> 604800000<br>  (7 days)</td><td> hadoop.kms.authentication.delegation-token.max-<br>  lifetime.sec</td><td> 604800<br>  (7 days)</td></tr><tr><td> Interval of background <br>  removal of expired Tokens</td><td> Not configurable</td><td> 3600000<br>  (1 hour)</td><td> hadoop.kms.authentication.delegation-token.removal-<br>  scan-interval.sec</td><td> 3600<br>  (1 hour)</td></tr><tr><td> Master Key Rolling Interval</td><td> dfs.namenode.delegation.key.update-<br>  interval</td><td> 86400000<br>  (1 day)</td><td> hadoop.kms.authentication.delegation-token.update-<br>  interval.sec</td><td> 86400<br>  (1 day)</td></tr></tbody></table> 
+<p>Table 4: Configuration Properties and Default Values for HDFS and KMS</p> 
+<h4>Appendix B. Example Code of Authenticating with Delegation Tokens.</h4> 
+<p>One concept to understand before looking at the code below is the <a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/security/UserGroupInformation.java">UserGroupInformation</a> (UGI) class. UGI is Hadoop’s public API about coding against authentication. It is used in the code examples below, and also appeared in some of the exception stack traces earlier.</p> 
+<p>GetFileStatus is used as an example of using UGIs to access HDFS. For details, see <a href="https://github.com/cloudera/hadoop-common/blob/cdh5-2.6.0_5.13.0/hadoop-common-project/hadoop-common/src/main/java/org/apache/hadoop/fs/FileSystem.java#L518">FileSystem class javadoc</a>.</p> 
+<pre>UserGroupInformation tokenUGI = UserGroupInformation.createRemoteUser("user_name");
+UserGroupInformation kerberosUGI = UserGroupInformation.loginUserFromKeytabAndReturnUGI("principal_in_keytab", "path_to_keytab_file");
+Credentials creds = new Credentials();
+kerberosUGI.doAs((PrivilegedExceptionAction&lt;Void&gt;) () -&gt; {
+  Configuration conf = new Configuration();
+  FileSystem fs = FileSystem.get(conf);
+  fs.getFileStatus(filePath); // ← kerberosUGI can authenticate via Kerberos
+
+  // get delegation tokens, add them to the provided credentials. set renewer to ‘yarn’
+  Token&lt;?&gt;[] newTokens = fs.addDelegationTokens("yarn", creds);
+  // Add all the credentials to the UGI object
+  tokenUGI.addCredentials(creds);
+
+  // Alternatively, you can add the tokens to UGI one by one.
+  // This is functionally the same as the above, but you have the option to log each token acquired.
+  for (Token&lt;?&gt; token : newTokens) {
+    tokenUGI.addToken(token);
+  }
+  return null;
+});</pre> 
+<p>Note that the addDelegationTokens RPC call is invoked with Kerberos authentication. Otherwise, it would result in an IOException thrown, with text saying “Delegation Token can be issued only with kerberos or web authentication”.</p> 
+<p>Now, we can use the acquired delegation token to access HDFS.</p> 
+<pre>tokenUGI.doAs((PrivilegedExceptionAction&lt;Void&gt;) () -&gt; {
+ Configuration conf = new Configuration();
+ FileSystem fs = FileSystem.get(conf);
+ fs.getFileStatus(filePath); // ← tokenUGI can authenticate via Delegation Token
+ return null;
+});
+</pre> 
+<p> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/0237487793a3e26507c00fb97b22a764/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">HTTP代理怎样使用</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/769572d318e7f60f3259e76cc9233a9e/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">MySQL 应用高可用部署方案（shell&#43;router&#43;mgr）</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

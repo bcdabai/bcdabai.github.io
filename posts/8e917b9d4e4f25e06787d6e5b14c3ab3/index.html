@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>JVM-详解G1垃圾收集器 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="JVM-详解G1垃圾收集器" />
+<meta property="og:description" content="写这篇文章的原因是我看很多人提到G1的Full GC时都说是使用单线程回收，这个就很迷惑，虽然Full GC是在内存很紧张的时候才发生，但是既然都内存分块，为什么不能开多线程去并行回收，这样明显效率高很多，这点内存都不预留出来那设计G1回收的大佬是怎么考虑的？
+G1垃圾回收在发生Full GC的时候由于全程单线程完全失去了内存分块意义，反而由于内存分块甚至比不分块还慢，这个问题已经在JDK10中改进了，感兴趣的可以看下官网的描述Parallel Full GC for G1，也就是说现在G1的Full GC其实是多线程处理的。可以灵活的设定Full GC时的工作线程数
+由于上面问题的困扰，导致本人看了不少G1原理的文章，总感觉都讲的很复杂，很多很多概念性的东西，所以准备自己画一些图，对G1一些关键的机制做一个简单的说明。错误之处希望大家能够勘正，感谢🙏。
+1.内存结构-为什么要将Java堆划分为多个Region？
+基于分代收集理论实现的垃圾收集器，将Java堆分为两个区域，新生代和老年代。G1同样如此，G1将Java堆划分为多个Region区，每个Region有三个状态：未分配，新生代，老年代。
+因为新生代收集是基于复制算法实现的所以又分为Eden区，Survivor区 老年代包括新生代中熬过多次回收后被复制到Old区的对象以及超过单个Region设定容量Humongous区
+G1的创新之处在于每个区域可以灵活的根据当前状态去执行不同策略，同时做了很好的内存隔离，举个极端的例子，在不考虑跨区引用，且一块没有内存隔离的区域只能用一个线程去进行垃圾回收的情况下：
+对于G1之前的垃圾回收器假如使用1G的内存作新生代，那么其实在进行清理回收的时候只能是开1个线程去处理的，顶多可以开其他线程去处理别的请求，但是不能参与垃圾回收，这本质就是并发。 而G1则是1G的内存作为新生代，同时又把这1G内存分为10个Region的话，那就可以开10个线程去并行处理，这样的回收速度远超单线程回收，当然了代价就是需要额外的内存去记录这些Region的信息。
+上图是CMS(老年代)和G1（新生代&#43;老年代）垃圾回收的主要过程，可以看出G1是并发标记&#43;并行回收，而CMS则是并发标记&#43;并发回收。并行回收看着简单其实实现难度还是很高的，要考虑很多因素,比如如何做到各个区域间的内存隔离，信息管理等，从提出理论到初步实现就花费了将近10年。
+因为G1实现了模块化的内存管理模式，所以可以根据每个模块的状态以及内存利用率这些信息，提前计算出进行一次垃圾回收需要的时间等，从而去选择回收价值最高的先去回收。而CMS这种提前就把内存区域划分为两大块的做法就显得很笨重，同时也没有办法去控制回收的对象比例（主要还是在没有内存隔离的情况下实现这个需求太难了）。
+问题结论：只有将Java堆划分为多个独立Region模块才能做到多线程并行回收
+2.回收目标-什么是卡表CardTable，记忆集Remembered Set和写屏障Write Barrier？如何利用这些来定位需要回收的对象？
+先提一下卡表的作用：卡表中存放着能够快速找到存在跨代引用的对象的索引，在进行非全局的GC时，可以凭借这种索引结构快速定位需要保留的对象。
+G1是根据可达性算法来确定需要回收的目标，通过从GC Root Set包含的对象向下寻找引用链，来标记不能被回收的对象，在一个回收中，如果一个Region参与垃圾收集，那么在回收阶段，没有标记的对象将被全部清除。GC Roots由固定对象和临时对象构成。
+固定对象： 虚拟机栈中引用的对象：线程中正在使用的对象方法区中类静态属性引用的对象：类中static声明的引用类型字段方法区中常量引用的对象：类中final声明的引用类型字段本地方法栈中引用的对象：native本地方法引用的对象 临时对象：记忆集Remembered Set中保存的对象，可以理解为一个集合结构，里面放了一些同新生代有引用关系的老年代对象的地址，跟集合中对象有引用关系的对象就不会被回收，而卡表Card Table就是这个集合实现的一种方式 重点看下临时对象是怎么确定的，首先我们可以知道一个对象在哪个区域，这个区域是什么状态（新生代/老年代），当新生代中的对象引用了老年代对象时，就会把老年代的这个对象放入Remembered Set中，当作一个临时对象。
+写屏障Write Barrier在其中的作用则类似Spring的AOP，当对象的赋值发生时，判断是不是老年代，如果是则通过统一的切面处理将引用对象的地址加入Remembered Set。（实际过程跟这个有出入，但我觉得如果不深究源码的话，这么理解是没有问题的）
+下面画图来解释下CardTable的实现，可以理解为内存中建立的稀疏索引
+G1的每个Region都是连续内存，Card Table第一行表示 Card Table的key为与当前Eden Reign存在引用关系的Old Region的内存起始位置，value是一个集合存储这临时对象所在的内存数组索引,，这就构成了一个稀疏索引。
+比如1MB的内存，如果我们把其分为10个内存块，那么想确定这个Region中的一个临时对象最多只需要扫描100Kb即可，当对象的引用关系发生变化时，通过写屏障将key和value加入Card Table即可，代价也很明显就是为一个Region建立Card Table需要额外的空间，这个空间大小取决于索引段的大小，所以相同的Java堆内存，G1的内存使用率要低于CMS。
+这种通过空间换时间的索引结构运用也很广泛，在Kafka，MySQL，Redis等中间件和数据库中都能见到。
+3.回收过程-三种GC有哪些共同点和不同点？
+先简单说明细不同的GC的目标类型，G1涉及 Young GC/Mixed GC/Full GC三种垃圾收集
+部分收集（Partial GC）：目标不是完整收集整个Java堆的垃圾收集
+Minor GC/Young GC：新生代的垃圾收集Major GC/Old GC：老年代的垃圾收集Mixed GC：整个新生代及部分老年代的垃圾收集 整堆收集（Full GC）：整个Java堆和方法区的垃圾收集。
+Young GC" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/8e917b9d4e4f25e06787d6e5b14c3ab3/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-12-14T10:24:04+08:00" />
+<meta property="article:modified_time" content="2022-12-14T10:24:04+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">JVM-详解G1垃圾收集器</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>写这篇文章的原因是我看很多人提到G1的Full GC时都说是使用单线程回收，这个就很迷惑，虽然Full GC是在内存很紧张的时候才发生，但是既然都内存分块，为什么不能开多线程去并行回收，这样明显效率高很多，这点内存都不预留出来那设计G1回收的大佬是怎么考虑的？</p> 
+<p>G1垃圾回收在发生Full GC的时候由于全程单线程完全失去了内存分块意义，反而由于内存分块甚至比不分块还慢，这个问题已经在JDK10中改进了，感兴趣的可以看下官网的描述<a href="https://openjdk.org/jeps/307" rel="nofollow" title="Parallel Full GC for G1">Parallel Full GC for G1</a>，也就是说现在<strong>G1的Full GC其实是多线程处理的</strong>。可以灵活的设定Full GC时的工作线程数</p> 
+<p>由于上面问题的困扰，导致本人看了不少G1原理的文章，总感觉都讲的很复杂，很多很多概念性的东西，所以准备自己画一些图，对G1一些关键的机制做一个简单的说明。错误之处希望大家能够勘正，感谢🙏。</p> 
+<p>1.内存结构-为什么要将Java堆划分为多个Region？</p> 
+<p>基于分代收集理论实现的垃圾收集器，将Java堆分为两个区域，新生代和老年代。G1同样如此，G1将Java堆划分为多个Region区，每个Region有三个状态：未分配，新生代，老年代。</p> 
+<ul><li>因为新生代收集是基于复制算法实现的所以又分为Eden区，Survivor区</li><li> <p>老年代包括新生代中熬过多次回收后被复制到Old区的对象以及超过单个Region设定容量Humongous区</p>   <p class="img-center"><img alt="" src="https://images2.imgbox.com/c2/50/q3tLZEHX_o.png"></p> </li></ul> 
+<p>G1的创新之处在于每个区域可以灵活的根据当前状态去执行不同策略，同时做了很好的内存隔离，举个极端的例子，在<strong>不考虑跨区引用</strong>，且一块没有内存隔离的区域只能用一个线程去进行垃圾回收的情况下：</p> 
+<ul><li>对于G1之前的垃圾回收器假如使用1G的内存作新生代，那么其实在进行清理回收的时候只能是开1个线程去处理的，顶多可以开其他线程去处理别的请求，但是不能参与垃圾回收，这本质就是并发。</li><li> <p>而G1则是1G的内存作为新生代，同时又把这1G内存分为10个Region的话，那就可以开10个线程去并行处理，这样的回收速度远超单线程回收，当然了代价就是需要额外的内存去记录这些Region的信息。</p>   <p class="img-center"><img alt="" src="https://images2.imgbox.com/15/37/nHtKlwtH_o.png"></p> </li></ul> 
+<p>上图是CMS(老年代)和G1（新生代+老年代）垃圾回收的主要过程，可以看出<strong>G1是并发标记+并行回收，而CMS则是并发标记+并发回收</strong>。并行回收看着简单其实实现难度还是很高的，要考虑很多因素,比如如何做到各个区域间的内存隔离，信息管理等，从提出理论到初步实现就花费了将近10年。</p> 
+<p>因为<strong>G1实现了模块化的内存管理模式</strong>，所以可以根据每个模块的状态以及内存利用率这些信息，提前计算出进行一次垃圾回收需要的时间等，从而去选择回收价值最高的先去回收。而CMS这种提前就把内存区域划分为两大块的做法就显得很笨重，同时也没有办法去控制回收的对象比例（主要还是在没有内存隔离的情况下实现这个需求太难了）。</p> 
+<p>问题结论：<strong>只有将Java堆划分为多个独立Region模块才能做到多线程并行回收</strong></p> 
+<p>2.回收目标-什么是卡表CardTable，记忆集Remembered Set和写屏障Write Barrier？如何利用这些来定位需要回收的对象？</p> 
+<p>先提一下卡表的作用：卡表中存放着能够快速找到<strong>存在跨代引用的对象</strong>的索引，在进行非全局的GC时，可以凭借这种索引结构快速定位需要保留的对象。</p> 
+<p>G1是根据可达性算法来确定需要回收的目标，通过从GC Root Set包含的对象向下寻找引用链，来标记不能被回收的对象，在一个回收中，如果一个Region参与垃圾收集，那么在回收阶段，没有标记的对象将被全部清除。<strong>GC Roots由固定对象和临时对象构成。</strong></p> 
+<ul><li>固定对象： 
+  <ul><li>虚拟机栈中引用的对象：线程中正在使用的对象</li><li>方法区中类静态属性引用的对象：类中static声明的引用类型字段</li><li>方法区中常量引用的对象：类中final声明的引用类型字段</li><li>本地方法栈中引用的对象：native本地方法引用的对象</li></ul></li><li> <p></p> <p></p> 临时对象：记忆集Remembered Set中保存的对象，可以理解为一个集合结构，里面放了一些同新生代有引用关系的老年代对象的地址，跟集合中对象有引用关系的对象就不会被回收，而卡表Card Table就是这个集合实现的一种方式 <p class="img-center"><img alt="" src="https://images2.imgbox.com/e0/47/yTmbY4dn_o.png"></p> </li></ul> 
+<p>重点看下临时对象是怎么确定的，首先我们可以知道一个对象在哪个区域，这个区域是什么状态（新生代/老年代），当新生代中的对象引用了老年代对象时，就会把老年代的这个对象放入Remembered Set中，当作一个临时对象。</p> 
+<p><strong>写屏障Write Barrier在其中的作用则类似Spring的AOP</strong>，当对象的赋值发生时，判断是不是老年代，如果是则通过统一的切面处理将引用对象的地址加入Remembered Set。（实际过程跟这个有出入，但我觉得如果不深究源码的话，这么理解是没有问题的）</p> 
+<p></p> 
+<p></p> 
+<p>下面画图来解释下CardTable的实现，可以理解为内存中建立的稀疏索引</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/23/7f/NHZdyTQq_o.png"></p> 
+<p>G1的每个Region都是连续内存，Card Table第一行表示 Card Table的key为与当前Eden Reign存在引用关系的Old Region的内存起始位置，value是一个集合存储这临时对象所在的内存数组索引,，这就构成了一个<strong>稀疏索引</strong>。</p> 
+<p>比如1MB的内存，如果我们把其分为10个内存块，那么想确定这个Region中的一个临时对象最多只需要扫描100Kb即可，<strong>当对象的引用关系发生变化时，通过写屏障将key和value加入Card Table即可</strong>，代价也很明显就是为一个Region建立Card Table需要额外的空间，这个空间大小取决于索引段的大小，所以相同的Java堆内存，G1的内存使用率要低于CMS。</p> 
+<p>这种通过空间换时间的索引结构运用也很广泛，在Kafka，MySQL，Redis等中间件和数据库中都能见到。</p> 
+<p>3.回收过程-三种GC有哪些共同点和不同点？</p> 
+<p>先简单说明细不同的GC的目标类型，G1涉及 Young GC/Mixed GC/Full GC三种垃圾收集</p> 
+<ol><li> <p>部分收集（Partial GC）：目标不是完整收集整个Java堆的垃圾收集</p> 
+  <ul><li>Minor GC/Young GC：新生代的垃圾收集</li><li>Major GC/Old GC：老年代的垃圾收集</li><li>Mixed GC：整个新生代及部分老年代的垃圾收集</li></ul></li><li> <p>整堆收集（Full GC）：整个Java堆和方法区的垃圾收集。</p> </li></ol> 
+<p>Young GC</p> 
+<ol><li> <p>触发条件<br> 申请新的内存空间，在Eden区占据整个堆比例在允许范围内时，G1会计算现在Eden区回收大概要多久时间，如果回收时间远小于参数-XX:MaxGCPauseMills设定的值（默认200ms），那么增加新生代的Region，继续给新对象存放，不会马上做YoungGC。如果回收时间接近设定参数或者Eden空间不足则会发生进行一次Young GC</p> </li><li> <p>简图</p>   <p class="img-center"><img alt="" src="https://images2.imgbox.com/4c/a0/JPQXRupI_o.png"></p> <p>如何确定哪些对象需要回收，哪些需要保留前面已经提到过了就不多说了，保留的对象一部分复制到Survivor区，一部分达到晋升条件的移动到Old区，然后清除回收对象释放空间。<br> Young GC全程暂停用户线程，进入STW，采用多线程并行的方式进行垃圾回收，每个线程负责部分Region。Young GC后如何还是无法获取足够Eden区空间，在进行一定次数的重试后会直接进行Full GC</p> </li></ol> 
+<p>Mied GC</p> 
+<ol><li>触发条件<br> 在触发一次Young GC后，如果Old区占用的堆内存大小超过了InitiatingHeapOccupancyPercent参数设定的比例就会开始顺着Young GC已经调整标记的GC ROOTS进行并发标记-&gt;最终标记-&gt;清理的生命周期。</li><li>简图</li></ol> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/d8/88/RUgbq8mH_o.png"></p> 
+<p>Mixed GC并不会去回收全部的Old区对象，而是根据当前系统信息计算每个Region的回收价值，在设定的最大暂停内优先回收价值高的老年代Region。但是如果一次Mixed GC后空间还是不足，那么还会马上再次发起一次Mixed GC，超过最大设定的连续次数后就会进行Full GC</p> 
+<p>Full GC</p> 
+<p>在JDK9中，G1会直接采用原来的Serial Old来对整个堆垃圾收集，基于标记-清除-压缩算法来进行单线程回收，JDK10开始已经支持并行的Full GC，可以通过XX:ParallelGCThreads来设置并行的线程数</p> 
+<p>小结</p> 
+<p>上面是总结了部分作者对于G1垃圾收集器的看法，总的来说G1相比于之前的垃圾回收器最大的进步就是对于堆内存进行了更加精细的模块化管理，使其能够实现并行回收，能够更加自由的选定回收对象，设定回收时间，代价的话就是需要更多的空间来记录这些模块化的信息。如何选择还是要看实际的业务场景。<br> 上面第三部分只是简单提了回收过程，涉及到过程中用到的SATB，TAMS，BitMap都没有详细去写</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/4383a0d5ae11bda1a07931bc6153c7d7/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">数据结构-红黑树插入结点示例</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/ba704e57d2b257e0717bc5f4d8936cac/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">银河麒麟桌面系统启用 rc.local 设置开机启动方法</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

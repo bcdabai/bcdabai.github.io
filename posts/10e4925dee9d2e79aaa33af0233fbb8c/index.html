@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>YOLO v5目标检测模型 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="YOLO v5目标检测模型" />
+<meta property="og:description" content="目录
+1 YOLO v5模型结构
+2 YOLO v5训练相关设置
+3 目标检测模型评估指标
+1 YOLO v5模型结构 YOLO v5模型根据其深度、宽度的差异可以分为四个不同规模的模型，分别为YOLO v5nano、YOLO v5samll、YOLO v5middle以及YOLO v5large，鉴于本文后续研究主要在YOLO v5nano以及YOLO v5small（后续简写为YOLO v5n与YOLO v5s）上开展，现将YOLO v5s的模型结构绘制如图2.3中所示。
+图2.3 YOLO v5small结构示意图
+结合图2.3可以看到，YOLO v5主要由三个大的结构组成，即骨干网络Backbone，Neck以及检测头Head部分。在Backbone中，主要是由CBR模块、CSP1模块以及SPPF模块组成。Backbone作为输入图片在检测网络中首先经过的阶段，其主要作用即提取图片中不同尺度下的特征，并作为输出提供给Neck部分。输入图片在预处理阶段被调整为像素大小为640×640的RGB三通道图像，在原YOLO v5网络中第一层为Focus层，即对输入为640×640×3的图片进行切片处理，输出为320×320×12的特征图，随后再进行后续模块的处理，在本研究中，为提升模型在GPU等硬件平台上的效率并便于后续部署，将该层替换为该模型中常见的CBR模块。CBR模块由卷积层、BN层以及ReLU激活函数层组成，为YOLO v5模型中最基础的模块。同样是为了便于在终端硬件上行的部署，已经原模型中SiLU激活函数全部替换为图2.3中的ReLU激活。CSP1模块的结构如图2.3右下角所示，其中包含了两个分支，即输入经过两个分支的处理后经Concat算子拼接后再经CBR模块处理。需要注意到，CSP1模块后缀的数值即表示在该模型的分支中出现残差块的数量，例如在YOLO v5s的Backbone中，CSP1模块中残差块的重复次数分别为1、2、3、1；残差块的结构如图2.3右上角所示，由两个CBR模块以及一个带有Shortcut的ADD操作构成，此处的带有Shortcut的ADD操作也被称为Skip-Connection操作，即完成残差模块中两个分支的相加运算。Backbone中还有一个SPPF模块，如图2.3右部所示，其由CBR模块以及三个串行的Maxpool最大池化组成，四路输出经Concat拼接，主要作用在于通过多次池化，完成对高层次语义特征的提取与融合。
+观察图2.3中的Neck部分，可以显著地看到一个自上而下的通路与一个自下而上的通路，此即一个FPN&#43;PAN的组合结构。其中FPN即特征金字塔网络(Feature Pyramid Network)[27]，用来处理来自Backbone中多个尺度的输出，进而构建出高级语义特征信息，而PAN即通道聚合网络(Path Aggregation Network)[149]，在FPN中传递的底层位置信息已经较为模糊的情况下，通过PAN的自底向上的结构，弥补并融合强定位信息，最终将输出用于Head的检测中。此外，在Neck阶段，还进行了两次上采样操作，在YOLO v5中均通过最简单的最近邻插值法来完成上采样，即均通过复制左上角的像素值来填充一个2×2窗口中的另外三个值，最终得到高、宽均扩展一倍的特征图。不同于Backbone中的CSP1模块，Neck阶段采用的是CSP2模块，如图2.3右下角所示，CSP2中将原CSP1中的残差块替换为两个连续的CBR模块，即没有了Skip-Connection操作。
+在检测头Head中，其网络结构较为简单，仅含有三个并行的卷积层，当输入图片的大小被调整为640×640×3时，三个卷积层的输出分别为80×80×255、40×40×255以及20×20×255；其中80、40以及20均根据输入图片的像素大小而确定，分别下降8倍、16倍以及32倍；而其中的255则主要由四类信息决定，分别为锚框数量、数据集类目数目（所采用的MS-COCO数据集中共包含80个类别）、置信度以及边界框位置信息（边界框的中心点坐标以及宽、高值）。需要注意到，三个卷积层输出的特征图需要划分为与该特征图等尺寸的网格，例如20×20的特征图即划分为20×20个网格，每个网格对应到原输入图片中一个32×32的像素块。每个网格中会包含该尺度网格下对应的三个锚框的预测信息，综上可得等式255=3×(80&#43;1&#43;4) ，即每个预测框均含有85个相关信息。关于锚框的确定以及对检测头输出网格信息的处理将在下一节介绍。
+2 YOLO v5训练相关设置 YOLO v5模型作为一种Anchor-based检测算法，其Anchor即锚框的尺寸设置对网络精度的提升极为关键。如上一节中所述，共有三个尺度的输出特征图，其中80×80的特征图中每个网格对应原图的像素块大小为8×8，包含的多为低层次信息，用于检测小目标，因此该尺度特征图对应的三个Anchor尺度均较小；而对于20×20的特征图，其对应到原图的像素块大小为32×32，可能包含了如结构、轮廓等高层次信息，适用于检测大目标；同理，40×40的特征图适用于检测中等大小的目标。基于上述原理，YOLO v5中利用聚类算法，在每次训练时都将根据所选数据集聚类得到9个不同的原始锚框比例，随后按照大小分别对应到三个尺度的输出特征图中。
+训练时，将对输入网络的图片数据进行增强处理，主要包括三种，即缩放、色彩空间调整以及Mosaic（马赛克）增强。其中Mosaic增强主要是通过利用4张图片，进行随机裁剪与缩放，最终得到随机拼接而成的图片。Mosaic增强主要用来提高小目标的检测效果，在中，定义的小目标大小为低于32×32像素值的，中目标大小为低于96×96，高于32×32的，大目标为高于96×96的；通过利用Mosaic增强，随机增加了训练时的小目标数量，极大地缓解了MS-COCO数据集中小目标分布不均进而导致对小目标检测效果较差的问题。
+YOLO v5在训练阶段的损失函数主要由三部分组成，分别为分类损失、回归损失以及置信度损失。其中分类损失与置信度损失均通过二元交叉熵函数计算(BCE With Logits Loss)；回归损失则通过CIOU计算得到。IOU即交并比，是预测框与真实框交集与并集的比值，传统的IOU作损失函数主要存在两个问题，即当预测框与真实框完全无交集是，比值为0，但无法知道此时两框之间的距离，而当预测框完全位于真实框之中时，比值为固定值，此时同样无法知道预测框的具体位置，这两点都严重降低了目标检测的精度。鉴于此，此处采用了CIOU来计算回归损失，其计算式如式2.3中所示。
+在CIOU中，不仅考了IOU与两框之间的中心点距离，还考虑了两框的相对比例。如式2.3中所示，b 与bgt 分别为预测框与真实框的中心点坐标，ρ 为两框之间的欧氏距离，c 则为两框并集所形成区域的对角线距离。
+按照上一节所述，在检测头Head部分得到三个输出，其中共包含了80×80×3、40×40×3以及20×20×3个预测框的信息，即共25200个预测框，显然，其中绝大多数预测框中都没有包含目标，在YOLO v5模型中将通过NMS(Non-Maximum Suppression)，即非极大值抑制来筛选预测框，最终留下包含有目标的预测框，如此即完成了一次对输入图片的目标检测过程。
+3 目标检测模型评估指标 鉴于在目标检测任务中，检测的每张图片中都可能包含了不同数量、不同类别的目标，所以此时再沿用图像分类任务中的评估指标precision已经不合适，而需要一个指标可同时评估模型的分类与定位性能，如此即用到了mAP评估指标，本节将详解介绍mAP的计算过程。
+首先需要计算precision（精确率/查准率）、recall（召回率/查全率）以及AP（Average Precision，平均精度），前两个评估指标的计算则涉及到TP、FP等指标的计算，如表2.1中所示。
+表2.1 TP/FP/FN/TN指标分类简述 类别
+与置信度阈值Pthre的关系
+与交并比阈值IOUthre的关系" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/10e4925dee9d2e79aaa33af0233fbb8c/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-07-10T17:57:05+08:00" />
+<meta property="article:modified_time" content="2023-07-10T17:57:05+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">YOLO v5目标检测模型</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="-toc" style="margin-left:80px;"></p> 
+<p id="1%C2%A0%20YOLO%20v5%E6%A8%A1%E5%9E%8B%E7%BB%93%E6%9E%84-toc" style="margin-left:80px;"><a href="#1%C2%A0%20YOLO%20v5%E6%A8%A1%E5%9E%8B%E7%BB%93%E6%9E%84" rel="nofollow">1  YOLO v5模型结构</a></p> 
+<p id="2%C2%A0%20YOLO%20v5%E8%AE%AD%E7%BB%83%E7%9B%B8%E5%85%B3%E8%AE%BE%E7%BD%AE-toc" style="margin-left:80px;"><a href="#2%C2%A0%20YOLO%20v5%E8%AE%AD%E7%BB%83%E7%9B%B8%E5%85%B3%E8%AE%BE%E7%BD%AE" rel="nofollow">2  YOLO v5训练相关设置</a></p> 
+<p id="3%C2%A0%20%E7%9B%AE%E6%A0%87%E6%A3%80%E6%B5%8B%E6%A8%A1%E5%9E%8B%E8%AF%84%E4%BC%B0%E6%8C%87%E6%A0%87-toc" style="margin-left:80px;"><a href="#3%C2%A0%20%E7%9B%AE%E6%A0%87%E6%A3%80%E6%B5%8B%E6%A8%A1%E5%9E%8B%E8%AF%84%E4%BC%B0%E6%8C%87%E6%A0%87" rel="nofollow">3  目标检测模型评估指标</a></p> 
+<hr id="hr-toc"> 
+<p></p> 
+<h4 id="1%C2%A0%20YOLO%20v5%E6%A8%A1%E5%9E%8B%E7%BB%93%E6%9E%84">1  YOLO v5模型结构</h4> 
+<p></p> 
+<p style="text-align:justify;">YOLO v5模型根据其深度、宽度的差异可以分为四个不同规模的模型，分别为YOLO v5nano、YOLO v5samll、YOLO v5middle以及YOLO v5large，鉴于本文后续研究主要在YOLO v5nano以及YOLO v5small（后续简写为YOLO v5n与YOLO v5s）上开展，现将YOLO v5s的模型结构绘制如图2.3中所示。</p> 
+<p style="text-align:center;"><img alt="" src="https://images2.imgbox.com/3c/5a/jC8t1se5_o.png"></p> 
+<p style="margin-left:0cm;text-align:center;"><strong>图</strong><strong>2.3  YOLO v5small</strong><strong>结构示意图</strong></p> 
+<p style="text-align:justify;">结合图2.3可以看到，YOLO v5主要由三个大的结构组成，即骨干网络Backbone，Neck以及检测头Head部分。在Backbone中，主要是由CBR模块、CSP1模块以及SPPF模块组成。Backbone作为输入图片在检测网络中首先经过的阶段，其主要作用即提取图片中不同尺度下的特征，并作为输出提供给Neck部分。输入图片在预处理阶段被调整为像素大小为640×640的RGB三通道图像，在原YOLO v5网络中第一层为Focus层，即对输入为640×640×3的图片进行切片处理，输出为320×320×12的特征图，随后再进行后续模块的处理，在本研究中，为提升模型在GPU等硬件平台上的效率并便于后续部署，将该层替换为该模型中常见的CBR模块。CBR模块由卷积层、BN层以及ReLU激活函数层组成，为YOLO v5模型中最基础的模块。同样是为了便于在终端硬件上行的部署，已经原模型中SiLU激活函数全部替换为图2.3中的ReLU激活。CSP1模块的结构如图2.3右下角所示，其中包含了两个分支，即输入经过两个分支的处理后经Concat算子拼接后再经CBR模块处理。需要注意到，CSP1模块后缀的数值即表示在该模型的分支中出现残差块的数量，例如在YOLO v5s的Backbone中，CSP1模块中残差块的重复次数分别为1、2、3、1；残差块的结构如图2.3右上角所示，由两个CBR模块以及一个带有Shortcut的ADD操作构成，此处的带有Shortcut的ADD操作也被称为Skip-Connection操作，即完成残差模块中两个分支的相加运算。Backbone中还有一个SPPF模块，如图2.3右部所示，其由CBR模块以及三个串行的Maxpool最大池化组成，四路输出经Concat拼接，主要作用在于通过多次池化，完成对高层次语义特征的提取与融合。</p> 
+<p style="text-align:justify;">观察图2.3中的Neck部分，可以显著地看到一个自上而下的通路与一个自下而上的通路，此即一个FPN+PAN的组合结构。其中FPN即特征金字塔网络(Feature Pyramid Network)[27]，用来处理来自Backbone中多个尺度的输出，进而构建出高级语义特征信息，而PAN即通道聚合网络(Path Aggregation Network)[149]，在FPN中传递的底层位置信息已经较为模糊的情况下，通过PAN的自底向上的结构，弥补并融合强定位信息，最终将输出用于Head的检测中。此外，在Neck阶段，还进行了两次上采样操作，在YOLO v5中均通过最简单的最近邻插值法来完成上采样，即均通过复制左上角的像素值来填充一个2×2窗口中的另外三个值，最终得到高、宽均扩展一倍的特征图。不同于Backbone中的CSP1模块，Neck阶段采用的是CSP2模块，如图2.3右下角所示，CSP2中将原CSP1中的残差块替换为两个连续的CBR模块，即没有了Skip-Connection操作。</p> 
+<p style="text-align:justify;">在检测头Head中，其网络结构较为简单，仅含有三个并行的卷积层，当输入图片的大小被调整为640×640×3时，三个卷积层的输出分别为80×80×255、40×40×255以及20×20×255；其中80、40以及20均根据输入图片的像素大小而确定，分别下降8倍、16倍以及32倍；而其中的255则主要由四类信息决定，分别为锚框数量、数据集类目数目（所采用的MS-COCO数据集中共包含80个类别）、置信度以及边界框位置信息（边界框的中心点坐标以及宽、高值）。需要注意到，三个卷积层输出的特征图需要划分为与该特征图等尺寸的网格，例如20×20的特征图即划分为20×20个网格，每个网格对应到原输入图片中一个32×32的像素块。每个网格中会包含该尺度网格下对应的三个锚框的预测信息，综上可得等式<em>255=3</em><em>×</em><em>(80+1+4)</em> ，即每个预测框均含有85个相关信息。关于锚框的确定以及对检测头输出网格信息的处理将在下一节介绍。</p> 
+<h4 id="2%C2%A0%20YOLO%20v5%E8%AE%AD%E7%BB%83%E7%9B%B8%E5%85%B3%E8%AE%BE%E7%BD%AE" style="margin-left:0px;text-align:justify;">2  YOLO v5训练相关设置</h4> 
+<p style="text-align:justify;">YOLO v5模型作为一种Anchor-based检测算法，其Anchor即锚框的尺寸设置对网络精度的提升极为关键。如上一节中所述，共有三个尺度的输出特征图，其中80×80的特征图中每个网格对应原图的像素块大小为8×8，包含的多为低层次信息，用于检测小目标，因此该尺度特征图对应的三个Anchor尺度均较小；而对于20×20的特征图，其对应到原图的像素块大小为32×32，可能包含了如结构、轮廓等高层次信息，适用于检测大目标；同理，40×40的特征图适用于检测中等大小的目标。基于上述原理，YOLO v5中利用聚类算法，在每次训练时都将根据所选数据集聚类得到9个不同的原始锚框比例，随后按照大小分别对应到三个尺度的输出特征图中。</p> 
+<p style="text-align:justify;">训练时，将对输入网络的图片数据进行增强处理，主要包括三种，即缩放、色彩空间调整以及Mosaic（马赛克）增强。其中Mosaic增强主要是通过利用4张图片，进行随机裁剪与缩放，最终得到随机拼接而成的图片。Mosaic增强主要用来提高小目标的检测效果，在中，定义的小目标大小为低于32×32像素值的，中目标大小为低于96×96，高于32×32的，大目标为高于96×96的；通过利用Mosaic增强，随机增加了训练时的小目标数量，极大地缓解了MS-COCO数据集中小目标分布不均进而导致对小目标检测效果较差的问题。</p> 
+<p style="text-align:justify;">YOLO v5在训练阶段的损失函数主要由三部分组成，分别为分类损失、回归损失以及置信度损失。其中分类损失与置信度损失均通过二元交叉熵函数计算(BCE With Logits Loss)；回归损失则通过CIOU计算得到。IOU即交并比，是预测框与真实框交集与并集的比值，传统的IOU作损失函数主要存在两个问题，即当预测框与真实框完全无交集是，比值为0，但无法知道此时两框之间的距离，而当预测框完全位于真实框之中时，比值为固定值，此时同样无法知道预测框的具体位置，这两点都严重降低了目标检测的精度。鉴于此，此处采用了CIOU来计算回归损失，其计算式如式2.3中所示。</p> 
+<p class="img-center"><img alt="" height="155" src="https://images2.imgbox.com/77/16/RdfwzdxS_o.png" width="616"></p> 
+<p style="text-align:justify;">在CIOU中，不仅考了IOU与两框之间的中心点距离，还考虑了两框的相对比例。如式2.3中所示，<em>b</em> 与<em>b</em><em>gt</em> 分别为预测框与真实框的中心点坐标，<em>ρ</em> 为两框之间的欧氏距离，<em>c</em> 则为两框并集所形成区域的对角线距离。</p> 
+<p style="text-align:justify;">按照上一节所述，在检测头Head部分得到三个输出，其中共包含了80×80×3、40×40×3以及20×20×3个预测框的信息，即共25200个预测框，显然，其中绝大多数预测框中都没有包含目标，在YOLO v5模型中将通过NMS(Non-Maximum Suppression)，即非极大值抑制来筛选预测框，最终留下包含有目标的预测框，如此即完成了一次对输入图片的目标检测过程。</p> 
+<h4 id="3%C2%A0%20%E7%9B%AE%E6%A0%87%E6%A3%80%E6%B5%8B%E6%A8%A1%E5%9E%8B%E8%AF%84%E4%BC%B0%E6%8C%87%E6%A0%87" style="margin-left:0;text-align:justify;">3  目标检测模型评估指标</h4> 
+<p style="text-align:justify;">鉴于在目标检测任务中，检测的每张图片中都可能包含了不同数量、不同类别的目标，所以此时再沿用图像分类任务中的评估指标precision已经不合适，而需要一个指标可同时评估模型的分类与定位性能，如此即用到了mAP评估指标，本节将详解介绍mAP的计算过程。</p> 
+<p style="text-align:justify;">首先需要计算precision（精确率/查准率）、recall（召回率/查全率）以及AP（Average Precision，平均精度），前两个评估指标的计算则涉及到TP、FP等指标的计算，如表2.1中所示。</p> 
+<p style="text-align:center;"><strong>表2.1  TP/FP/FN/TN指标分类简述</strong> </p> 
+<table align="center" cellspacing="0" style="width:389.85pt;"><tbody><tr><td style="width:78pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">类别</span></p> </td><td style="width:148.85pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">与置信度阈值</span><span style="color:#000000;">Pthre</span><span style="color:#000000;">的关系</span></p> </td><td style="width:163pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">与交并比阈值</span><span style="color:#000000;">IOUthre</span><span style="color:#000000;">的关系</span></p> </td></tr><tr><td style="width:78pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">TP</span></p> </td><td style="width:148.85pt;"> <p style="margin-left:0;text-align:center;"><a name="_Hlk127562738"><span style="color:#000000;">Conf</span></a><span style="color:#000000;">&gt;Pthre</span></p> </td><td style="width:163pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">IOU&gt;IOUthre</span></p> </td></tr><tr><td style="width:78pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">FP</span></p> </td><td style="width:148.85pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">Conf &gt;Pthre</span></p> </td><td style="width:163pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">IOU&lt;IOUthre</span></p> </td></tr><tr><td style="width:78pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">FN</span></p> </td><td style="width:148.85pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">Conf &lt;Pthre</span></p> </td><td style="width:163pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">IOU&gt;IOUthre</span></p> </td></tr><tr><td style="width:78pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">TN</span></p> </td><td style="width:148.85pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">Conf &lt;Pthre</span></p> </td><td style="width:163pt;"> <p style="margin-left:0;text-align:center;"><span style="color:#000000;">IOU&lt;IOUthre</span></p> </td></tr></tbody></table> 
+<p style="margin-left:12pt;">注：TP = True Positive（真阳性）、FP = False Positive（假阳性）、FN = False Negative（假阴性）、TN = True Negative（真阴性）；</p> 
+<p>表2.1中的Conf即表示计算所得的置信度，通过与设置的置信度阈值以及交并比阈值的比较可得预测结果所属类别，基于这些统计，可得到precision与recall的计算如式2.4中所示。</p> 
+<p class="img-center"><img alt="" height="102" src="https://images2.imgbox.com/24/13/f7jXYYnB_o.png" width="532"></p> 
+<p style="text-align:justify;"> 式2.4中的精确率反映的是所有预测框中正确预测的比率，召回率则反映的是数据集上的标注框被正确预测的比率；而AP平均精度的计算，则是某个类别的预测结果在置信度阈值从0变化到1的情况下，计算对应的精确率与召回率，并据此绘出PR曲线，该曲线与坐标轴合围的面积即为该类别在该数据集上的平均精度[150]。mAP的计算则是在某个设置的交并比阈值下，该数据集上所有类别的平均精度AP的平均值，例如常见的mAP50表示的是在交并比阈值设置为0.5时，所有类别平均精度的均值，而mAP50:95则表示的是交并比阈值从初值0.5开始，以0.05为步长增长到0.95的情况下，得到的10个mAP的均值。AP、mAP50以及mAP50:95的计算式如式2.5中所示。</p> 
+<p class="img-center"><img alt="" height="141" src="https://images2.imgbox.com/c7/4c/o8cBUbyC_o.png" width="642"></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/50fcb7e5e4d5e4948b5a135059b2eaa9/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">flink sql primary key</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/7c13b02970f363c0657b0489ec44d839/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">[BUG解决]MMCV CUDA Compiler : not available与RuntimeError: nms is not compiled with GPU support</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

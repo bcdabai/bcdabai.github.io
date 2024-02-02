@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>stm32输出音频总结（规划一定要先进，代码一定要漂亮！） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="stm32输出音频总结（规划一定要先进，代码一定要漂亮！）" />
+<meta property="og:description" content="最近做了一个项目，XXX降低成本，原来使用的LPC2294这样老古董芯片，更换为STM32F4XX， 项目重点要播放语音！
+stm32输出音频，有2种方法，第一种比较常规， 使用I2S接口的音频codec芯片， 常用的有wm8978等; 另一种使用STM32内部的DAC来输出音频，这个其实也很成熟了，在音质要求不高的场合可以使用。我之前用过wm8978，调试耗费了很长时间，最后完美的实现了通过wm8978录音与播放功能，并且实现了MP3的压缩与解码功能，全部使用软编解码。
+先说说STM32通过DAC来播放声音的实现方式：
+1 DAC设置 首先选择TIM6触发DAC转换，为什么选择TIM6， 这也是有讲究的，首先TIM6、TIM7非常简单，也是可以说是简陋；ST文档中称作基本定时器，仅仅有一个16位自动重载功能，即使系统需要使用定时器也不会用这2位。 其次，TIM6\TIM7天生就与DAC绑定在一定，甚至连中断接口也是一个，TIM6_DAC_IRQHandler()；（当然本项目不需要DAC\TIM6中断）。综上所述使用TIM6是明智的明智的选择。
+设置TIM6记数周期，使TIM6向DAC申请中断的频率与WAV文件的采样频率保持一致，一般为8K或者16K，（试验证明16b量化8K采样的声音，没有8bit量化16K采样的声音音质好，虽然它们占用的存储空间一样！），使能TIM6更新请求 update event。
+设置DAC，使能DAC1 通道DMA模式，12B左对齐， 选择定时器 6 TRGO 事件，等操作。
+一切设置好之后，启动TIM6记数就可以启动DAC转换了。
+2. DMA传输 为了尽可能降低MCU的占用， 为将来增加复杂的解码方式留足CPU频率资源，所以采用DMA传输（如果采用中断方式，如果播放16K采样频率的声音时会频繁的进出中断导致效率下降）；同时为了降低DAC转换时的总线占用，DMA传输时使用的RAM也经过了特殊安排，为尽可能避免总线冲突，DAC使用SRAM2空间作为DMA传输的源地址，在DMA传输期间，MCU内核照样可以访问主SRAM1，且互不干扰。 这样就实现了DMA传输即不占用CPU资源，也不占用CPU总线资源。效率提高到极致！如下图所示：(注：红线为DMA传输路径，绿线为MCU内核访问路径)(其实这种总线并行复用的思路可以应用到很多外设上)
+3. 双缓冲或者循环缓冲 要保证音频输出的连续性，必须使用双缓冲或者循环缓冲， 试验证明这2种方法都可以满足音频输出的要求，我认为DMA循环缓冲区只是DMA双缓冲区的一个特殊形式而已。（当双缓冲区2块数据相邻且大小一样时）
+比如我在MDK中定义一个双缓冲区，在xxx.map文件中可以看到编译器给这2个数组分配的空间，
+PCMDA_BUF0 : 0x2001c000 PCMDA_BUF1 : 0x2001d000
+双缓冲区 循环缓冲区
+其实我完全可以定义一个大的缓冲区，来设计为循环缓冲区，比如
+uint8_t PCMDA_BUF[I2S_DMA_RAMBUF_SIZE*2] __attribute__((section(&#34;SRAM2&#34;)));
+其实编译器给这个数组分配的空间还是上面的空间，0x2001c000~ 0x2001dFFF; (8KB)
+为了实时的更新缓冲区中的音频数据，根据缓冲区形式的不同，操作也不不一样，如果是双缓冲区时，做如下操作：当缓冲区1 DMA传输完成中断时，更新缓冲区1中的数据，当缓冲区2 DMA传输完成中断时，更新缓冲区2中的数据，这样就形成了一个乒乓缓冲操作，数据永远不会中断，音频会流畅的放出来。
+如果是循环缓冲区，STM32也提供有合适的操作，STM32提供的有DMA半传输完成中断，这个就非常有用了，当DMA半传输完成时，更新缓冲区前半部分的数据，当DMA全部传输完成发生中断时，更新缓冲区后一半的数据，这样也能实现双缓冲区的效果。
+其实仔细的分析上面2种方式， 其本质是一样，都能实现 DAC-OUTPUT的连续输出。
+TIM6生成16K时钟触发DAC转换，这时候要使能DMA， 同时DAC会向DMA申请一次传输， DMA要设置为循环传输， 同时要你使能DMA中断，半传输中断与全传输中断， 每次中断都把解码的声音拷贝到循环缓冲区中，这样就能连续的播放声音了。程序的精华是 在HAL库上实现DMA双缓冲播放声音， 原生的HAL库I2S不支持双缓冲" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/4676af056c22ad6dc881c49ca601efe6/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-03-09T13:47:49+08:00" />
+<meta property="article:modified_time" content="2023-03-09T13:47:49+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">stm32输出音频总结（规划一定要先进，代码一定要漂亮！）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>    最近做了一个项目，XXX降低成本，原来使用的LPC2294这样老古董芯片，更换为STM32F4XX， 项目重点要播放语音！</p> 
+<p>    stm32输出音频，有2种方法，第一种比较常规， 使用I2S接口的音频codec芯片， 常用的有wm8978等; 另一种使用STM32内部的DAC来输出音频，这个其实也很成熟了，在音质要求不高的场合可以使用。我之前用过wm8978，调试耗费了很长时间，最后完美的实现了通过wm8978录音与播放功能，并且实现了MP3的压缩与解码功能，全部使用软编解码。</p> 
+<p>先说说STM32<span style="color:#86ca5e;">通过DAC来播放声音的实现方式</span>：</p> 
+<h2>1 DAC设置</h2> 
+<p>     首先选择TIM6触发DAC转换，为什么选择TIM6， 这也是有讲究的，首先TIM6、TIM7非常简单，也是可以说是简陋；ST文档中称作基本定时器，仅仅有一个16位自动重载功能，即使系统需要使用定时器也不会用这2位。 其次，TIM6\TIM7天生就与DAC绑定在一定，甚至连中断接口也是一个，TIM6_DAC_IRQHandler()；（当然本项目不需要DAC\TIM6中断）。综上所述使用TIM6是明智的明智的选择。</p> 
+<p>   设置TIM6记数周期，使TIM6向DAC申请中断的频率与WAV文件的采样频率保持一致，一般为8K或者16K，（试验证明16b量化8K采样的声音，没有8bit量化16K采样的声音音质好，虽然它们占用的存储空间一样！），使能TIM6更新请求 update event。</p> 
+<p>   设置DAC，使能DAC1 通道DMA模式，12B左对齐， 选择定时器 6 TRGO 事件，等操作。</p> 
+<p>一切设置好之后，启动TIM6记数就可以启动DAC转换了。</p> 
+<p><img alt="" height="490" src="https://images2.imgbox.com/0f/d3/vcO915V1_o.png" width="739"></p> 
+<h2>2. DMA传输</h2> 
+<p>    为了尽可能降低MCU的占用， 为将来增加复杂的解码方式留足CPU频率资源，所以采用DMA传输（如果采用中断方式，如果播放16K采样频率的声音时会<span style="color:#86ca5e;">频繁的进出中断</span>导致效率下降）；同时为了降低DAC转换时的总线占用，DMA传输时使用的RAM也经过了特殊安排，为尽可能避免总线冲突，DAC使用SRAM2空间作为DMA传输的源地址，在DMA传输期间，MCU内核照样可以访问主SRAM1，且互不干扰。  这样就实现了<span style="color:#86ca5e;">DMA传输即不占用CPU资源，也不占用CPU总线资源</span>。效率提高到极致！如下图所示：(注：红线为DMA传输路径，绿线为MCU内核访问路径)(其实这种<span style="color:#86ca5e;">总线并行复用</span>的思路可以应用到很多外设上)</p> 
+<p><img alt="" height="416" src="https://images2.imgbox.com/5f/a2/5bqNUvCx_o.png" width="712"></p> 
+<h2>3. 双缓冲或者循环缓冲</h2> 
+<p>    要保证音频输出的连续性，必须使用双缓冲或者循环缓冲， 试验证明这2种方法都可以满足音频输出的要求，我认为<span style="color:#86ca5e;">DMA循环缓冲区只是DMA双缓冲区</span>的一个特殊形式而已。（当双缓冲区2块数据相邻且大小一样时）</p> 
+<p>比如我在MDK中定义一个<span style="color:#86ca5e;">双缓冲区</span>，在xxx.map文件中可以看到编译器给这2个数组分配的空间，</p> 
+<p>PCMDA_BUF0 : 0x2001c000        PCMDA_BUF1 : 0x2001d000</p> 
+<p><img alt="" height="50" src="https://images2.imgbox.com/56/9b/Za14aN9U_o.png" width="730"></p> 
+<p><img alt="" height="259" src="https://images2.imgbox.com/63/cf/GXXsoOwC_o.png" width="400">           <img alt="" height="243" src="https://images2.imgbox.com/f8/15/TUhZwmJv_o.png" width="390"></p> 
+<p>               双缓冲区                                                                                             循环缓冲区</p> 
+<p>其实我完全可以定义一个大的缓冲区，来设计为<span style="color:#86ca5e;">循环缓冲区</span>，比如</p> 
+<p><span style="color:#86ca5e;">uint8_t PCMDA_BUF[I2S_DMA_RAMBUF_SIZE*2] __attribute__((section("SRAM2")));</span></p> 
+<p>其实编译器给这个数组分配的空间还是上面的空间，0x2001c000~ 0x2001dFFF;  (8KB)</p> 
+<p>    为了实时的更新缓冲区中的音频数据，根据缓冲区形式的不同，操作也不不一样，如果是双缓冲区时，做如下操作：当缓冲区1 DMA传输完成中断时，更新缓冲区1中的数据，当缓冲区2 DMA传输完成中断时，更新缓冲区2中的数据，这样就形成了一个乒乓缓冲操作，数据永远不会中断，音频会流畅的放出来。</p> 
+<p>    如果是循环缓冲区，STM32也提供有合适的操作，STM32提供的有DMA半传输完成中断，这个就非常有用了，当DMA半传输完成时，更新缓冲区前半部分的数据，当DMA全部传输完成发生中断时，更新缓冲区后一半的数据，这样也能实现双缓冲区的效果。</p> 
+<p>    其实仔细的分析上面2种方式， 其本质是一样，都能实现<span style="color:#86ca5e;"> DAC-OUTPUT的连续输出</span>。</p> 
+<h2></h2> 
+<p>TIM6生成16K时钟触发DAC转换，这时候要使能DMA， 同时DAC会向DMA申请一次传输， DMA要设置为循环传输， 同时要你使能DMA中断，半传输中断与全传输中断， 每次中断都把解码的声音拷贝到循环缓冲区中，这样就能连续的播放声音了。程序的精华是  在HAL库上实现DMA双缓冲播放声音，  原生的HAL库I2S不支持双缓冲</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/61ce45759a528dd10522f4f434d3e3d9/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Layer-1 公链 Injective 全球线上黑客马拉松启动，奖金与种子基金共高达百万美元</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/0a6051d307d92fa834eaec65ac3c92c9/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">python报错 AttributeError: module ‘collections‘ has no attribute ‘Callable‘</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>图文并茂！推荐算法架构——粗排 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="图文并茂！推荐算法架构——粗排" />
+<meta property="og:description" content="导语 | 粗排是介于召回和精排之间的一个模块，是典型的精度与性能之间trade-off的产物。理解粗排各技术细节，一定要时刻把精度和性能放在心中。
+在上篇《详细解读！推荐算法架构——召回》中我们结合算法架构召回进行解读分析，本篇将深入重排这个模块进行阐述。
+一、总体架构
+粗排是介于召回和精排之间的一个模块。它从召回获取上万的候选item，输出几百上千的item给精排，是典型的精度与性能之间trade-off的产物。对于推荐池不大的场景，粗排是非必选的。粗排整体架构如下：
+二、粗排基本框架：样本、特征、模型
+目前粗排一般模型化了，基本框架也是包括数据样本、特征工程、深度模型三部分。
+（一）数据样本 目前粗排一般也都模型化了，其训练样本类似于精排，选取曝光点击为正样本，曝光未点击为负样本。但由于粗排一般面向上万的候选集，而精排只有几百上千，其解空间大很多。只使用曝光样本作为训练，但却要对曝光和非曝光同时预测，存在严重的样本选择偏差（SSB问题），导致训练与预测不一致。相比精排，显然粗排的SSB问题更严重。
+（二）特征工程 粗排的特征也可以类似于精排，由于其计算延迟要求高，只有10ms~20ms，故一般可以粗分为两类：
+普通特征：类似精排，user、context、item三部分。有哪些特征，以及特征如何处理，可以参看精排的特征工程部分。
+交叉特征：user和item之间的交叉特征，对提升模型精度很有帮助。但由于交叉特征枚举过多，难以离线计算和存储。实时打分时又不像user特征只用计算一次，延迟较高。故对于交叉特征要谨慎使用。
+（三）深度模型 粗排目前已经基本模型化，其发展历程主要分为四个阶段：
+第一代：人工规则策略，可以基于后验统计，构建一个人工规则。比如融合item的历史CTR、CVR、类目价格档、销量等比较核心的因子。人工规则准确率低，也没有个性化，也不可能实时更新。
+第二代：LR线性模型，有一定的个性化和实时性能力，但模型过于简单，表达能力偏弱。
+第三代：DSSM双塔内积深度模型。它将user和item进行解耦合，分别通过两个Tower独立构建。从而可以实现item向量离线存储，降低线上predict延迟。主要有两种范式：
+item和user均离线存储。这个方案只需要计算user和item的内积即可，计算延迟低。由于user是离线存储的，故可以使用复杂的模型，提升表达能力。但user侧的实时性较差，对于用户行为不能实时捕捉。
+item离线，user实时。item相对user，实时性要求没那么高。由于一次打分是针对同一个用户的，故user侧只需要实时计算一次即可，速度也很快。目前这个方案使用较多。
+第四代：item和user隔离，导致二者没有特征交叉能力，模型表达能力弱。故又提出了以COLD为代表的第四代模型，轻量级MLP粗排模型。它通过SE block实现特征裁剪，并配合网络剪枝和工程优化，可以实现精度和性能之间的trade-off。
+三、粗排优化
+粗排的几个主要问题：
+精度和特征交叉问题：经典的DSSM模型优点很多，目前在粗排上广泛应用，其最核心的缺点就是缺乏特征交叉能力。正所谓成也萧何败萧何，正是由于user和item分离，使得DSSM性能很高。但反过来也是由于二者缺乏交叉，导致模型表达能力不足，精度下降。典型的精度和性能之间的trade-off。
+低延迟要求：粗排延迟要求高，一般只有10ms~20ms，远低于精排的要求。
+SSB问题：粗排解空间比精排大很多，和精排一样只使用曝光样本，导致严重的样本选择偏差问题。
+（一）精度提升 精度提升的方案主要有精排蒸馏和特征交叉，主要还是要优化特征交叉问题。
+精排蒸馏 精排模型作为teacher，对粗排模型进行蒸馏学习，从而提升粗排效果，这已经成为了目前粗排训练基本范式
+特征交叉 特征交叉可以在特征层面，也可以在模型层面实现。特征层面就是手工构造交叉特征，作为模型底层输入，仍然可以在独立的Tower中。模型层面则使用FM或者MLP等实现自动交叉。主要方法有：
+特征蒸馏：teacher和student使用相同的网络结构，teacher模型使用普通特征和交叉特征，student则只使用普通特征。student从teacher中可以学到交叉特征的高阶信息。
+加入交叉特征：特征层面构建手工交叉特征，独立的Tower中使用。由于交叉特征难以离线存储，实时计算空间也很大，故这个独立的Tower不能过于复杂。那我们第一时间就想到了wide&amp;deep模型。deep部分仍然使用DSSM双塔，wide部分则为交叉特征。
+轻量级MLP：模型层面实现特征交叉，不进行独立分塔。比如COLD，通过特征裁剪、网络剪枝、工程优化等方式降低时延，而不是靠独立分塔。
+（二）延迟降低 精度和性能一直以来都是一个trade-off，很多方案都是在二者之间寻找平衡。粗排的性能要求更高，其延迟必须控制在10ms~20ms以内。性能优化有很多常见方法。
+主要有以下方法：
+特征裁剪：如COLD，不重要的特征先滤掉，自然就降低了整体延迟。这一层可以做在模型内，从而可以个性化和实时更新。
+量化和定点化：比如32bit降低为8bit，可以提升计算和存储性能。
+网络剪枝：network pruning，包括突触剪枝、神经元剪枝、权重矩阵剪枝等方法，不展开了。
+模型蒸馏：model distillation，上文已经提到了，不展开了。
+网络结构搜索NAS：使用更轻量级，效果更好的模型。可以尝试网络结构搜索NAS。
+（三）SSB问题 粗排解空间比精排大很多，和精排一样只使用曝光样本，导致严重的样本选择偏差问题。可以把未曝光样本的精排打分给利用起来，缓解SSB问题。
+作者简介
+谢杨易
+腾讯应用算法研究员
+腾讯应用算法研究员，毕业于中国科学院，目前在腾讯负责视频推荐算法工作，有丰富的自然语言处理和搜索推荐算法经验。
+推荐阅读
+详细解读！推荐算法架构——召回
+超强指南！推荐算法架构——重排
+图文解读：推荐算法架构——精排！
+第四届 Techo TVP 开发者峰会回来了！这次我们线上见
+来了！Go的2个黑魔法技巧" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/02573edb19de45403b8613a60f092972/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-04-20T17:51:37+08:00" />
+<meta property="article:modified_time" content="2022-04-20T17:51:37+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">图文并茂！推荐算法架构——粗排</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <div id="js_content"> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/5b/96/QNihmsWa_o.png" alt="f73603e687f6d9fe54f4ef219c4f5789.png"></p> 
+ <p>导语 | 粗排是介于召回和精排之间的一个模块，是典型的精度与性能之间trade-off的产物。理解粗排各技术细节，一定要时刻把精度和性能放在心中。</p> 
+ <p>在上篇<em>《</em><a href="" rel="nofollow"><em>详细解读！推荐算法架构——召回</em></a><em>》</em>中我们结合算法架构召回进行解读分析，本篇将深入重排这个模块进行阐述。</p> 
+ <p><strong>一、总体架构</strong></p> 
+ <h2></h2> 
+ <p>粗排是介于召回和精排之间的一个模块。它从召回获取上万的候选item，输出几百上千的item给精排，是典型的精度与性能之间trade-off的产物。对于推荐池不大的场景，粗排是非必选的。粗排整体架构如下：</p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/18/df/DxvAbsu6_o.png" alt="556bfa71f659644e9dffd96926cf59b3.png"></p> 
+ <p><strong>二、粗排基本框架：样本、特征、模型</strong></p> 
+ <h2></h2> 
+ <p>目前粗排一般模型化了，基本框架也是包括数据样本、特征工程、深度模型三部分。</p> 
+ <h3>（一）数据样本</h3> 
+ <p>目前粗排一般也都模型化了，其训练样本类似于精排，选取曝光点击为正样本，曝光未点击为负样本。但由于粗排一般面向上万的候选集，而精排只有几百上千，其解空间大很多。只使用曝光样本作为训练，但却要对曝光和非曝光同时预测，存在严重的样本选择偏差（SSB问题），导致训练与预测不一致。相比精排，显然粗排的SSB问题更严重。</p> 
+ <h3>（二）特征工程</h3> 
+ <p>粗排的特征也可以类似于精排，由于其计算延迟要求高，只有10ms~20ms，故一般可以粗分为两类：</p> 
+ <ul><li><p>普通特征：类似精排，user、context、item三部分。有哪些特征，以及特征如何处理，可以参看精排的特征工程部分。</p></li></ul> 
+ <ul><li><p>交叉特征：user和item之间的交叉特征，对提升模型精度很有帮助。但由于交叉特征枚举过多，难以离线计算和存储。实时打分时又不像user特征只用计算一次，延迟较高。故对于交叉特征要谨慎使用。</p></li></ul> 
+ <h3>（三）深度模型</h3> 
+ <p>粗排目前已经基本模型化，其发展历程主要分为四个阶段：</p> 
+ <p>第一代：人工规则策略，可以基于后验统计，构建一个人工规则。比如融合item的历史CTR、CVR、类目价格档、销量等比较核心的因子。人工规则准确率低，也没有个性化，也不可能实时更新。</p> 
+ <p>第二代：LR线性模型，有一定的个性化和实时性能力，但模型过于简单，表达能力偏弱。</p> 
+ <p>第三代：DSSM双塔内积深度模型。它将user和item进行解耦合，分别通过两个Tower独立构建。从而可以实现item向量离线存储，降低线上predict延迟。主要有两种范式：</p> 
+ <ul><li><p>item和user均离线存储。这个方案只需要计算user和item的内积即可，计算延迟低。由于user是离线存储的，故可以使用复杂的模型，提升表达能力。但user侧的实时性较差，对于用户行为不能实时捕捉。</p></li></ul> 
+ <ul><li><p>item离线，user实时。item相对user，实时性要求没那么高。由于一次打分是针对同一个用户的，故user侧只需要实时计算一次即可，速度也很快。目前这个方案使用较多。</p></li></ul> 
+ <p>第四代：item和user隔离，导致二者没有特征交叉能力，模型表达能力弱。故又提出了以COLD为代表的第四代模型，轻量级MLP粗排模型。它通过SE block实现特征裁剪，并配合网络剪枝和工程优化，可以实现精度和性能之间的trade-off。</p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/a9/eb/Ld2bbydG_o.png" alt="f862a708504d8a69ad9830d39d93fb74.png"></p> 
+ <p><strong>三、粗排优化</strong></p> 
+ <h2></h2> 
+ <p>粗排的几个主要问题：</p> 
+ <ul><li><p>精度和特征交叉问题：经典的DSSM模型优点很多，目前在粗排上广泛应用，其最核心的缺点就是缺乏特征交叉能力。正所谓成也萧何败萧何，正是由于user和item分离，使得DSSM性能很高。但反过来也是由于二者缺乏交叉，导致模型表达能力不足，精度下降。典型的精度和性能之间的trade-off。</p></li></ul> 
+ <ul><li><p>低延迟要求：粗排延迟要求高，一般只有10ms~20ms，远低于精排的要求。</p></li></ul> 
+ <ul><li><p>SSB问题：粗排解空间比精排大很多，和精排一样只使用曝光样本，导致严重的样本选择偏差问题。</p></li></ul> 
+ <h3>（一）精度提升</h3> 
+ <p>精度提升的方案主要有精排蒸馏和特征交叉，主要还是要优化特征交叉问题。</p> 
+ <h4><br></h4> 
+ <ul><li><h4>精排蒸馏</h4></li></ul> 
+ <p>精排模型作为teacher，对粗排模型进行蒸馏学习，从而提升粗排效果，这已经成为了目前粗排训练基本范式</p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/02/e6/4vggzJ8H_o.png" alt="0c184f0ac7a645bc9b23afe9f164279d.png"></p> 
+ <ul><li><h4>特征交叉</h4></li></ul> 
+ <p>特征交叉可以在特征层面，也可以在模型层面实现。特征层面就是手工构造交叉特征，作为模型底层输入，仍然可以在独立的Tower中。模型层面则使用FM或者MLP等实现自动交叉。主要方法有：</p> 
+ <p>特征蒸馏：teacher和student使用相同的网络结构，teacher模型使用普通特征和交叉特征，student则只使用普通特征。student从teacher中可以学到交叉特征的高阶信息。</p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/41/a0/e8M0Xy9L_o.png" alt="7879671a0ce63f7a3b6e549e58860ee3.png"></p> 
+ <p>加入交叉特征：特征层面构建手工交叉特征，独立的Tower中使用。由于交叉特征难以离线存储，实时计算空间也很大，故这个独立的Tower不能过于复杂。那我们第一时间就想到了wide&amp;deep模型。deep部分仍然使用DSSM双塔，wide部分则为交叉特征。</p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/3f/17/TDikqVuV_o.png" alt="e6fe8d2d5b7a9a8e84ea13b42dffd2ac.png"></p> 
+ <p>轻量级MLP：模型层面实现特征交叉，不进行独立分塔。比如COLD，通过特征裁剪、网络剪枝、工程优化等方式降低时延，而不是靠独立分塔。</p> 
+ <p style="text-align:center;"><img src="https://images2.imgbox.com/84/1d/nGS56SLQ_o.png" alt="bdede1ec24c23fbdbcfce6a60eaff6f3.png"></p> 
+ <h3>（二）延迟降低</h3> 
+ <p>精度和性能一直以来都是一个trade-off，很多方案都是在二者之间寻找平衡。粗排的性能要求更高，其延迟必须控制在10ms~20ms以内。性能优化有很多常见方法。</p> 
+ <p>主要有以下方法：</p> 
+ <ul><li><p>特征裁剪：如COLD，不重要的特征先滤掉，自然就降低了整体延迟。这一层可以做在模型内，从而可以个性化和实时更新。</p></li></ul> 
+ <ul><li><p>量化和定点化：比如32bit降低为8bit，可以提升计算和存储性能。</p></li></ul> 
+ <ul><li><p>网络剪枝：network pruning，包括突触剪枝、神经元剪枝、权重矩阵剪枝等方法，不展开了。</p></li></ul> 
+ <ul><li><p>模型蒸馏：model distillation，上文已经提到了，不展开了。</p></li></ul> 
+ <p>网络结构搜索NAS：使用更轻量级，效果更好的模型。可以尝试网络结构搜索NAS。</p> 
+ <h3>（三）SSB问题</h3> 
+ <p>粗排解空间比精排大很多，和精排一样只使用曝光样本，导致严重的样本选择偏差问题。可以把未曝光样本的精排打分给利用起来，缓解SSB问题。</p> 
+ <p><strong> 作者简介</strong></p> 
+ <p><img src="https://images2.imgbox.com/58/ce/NnzwpCRV_o.png" alt="25eaf6b1ed786a33f4d0ba42311699d6.png"></p> 
+ <p><strong>谢杨易</strong></p> 
+ <p>腾讯应用算法研究员</p> 
+ <p style="text-align:justify;">腾讯应用算法研究员，毕业于中国科学院，目前在腾讯负责视频推荐算法工作，有丰富的自然语言处理和搜索推荐算法经验。</p> 
+ <p><strong> 推荐阅读</strong></p> 
+ <p><a href="" rel="nofollow">详细解读！推荐算法架构——召回</a><br></p> 
+ <p><a href="" rel="nofollow">超强指南！推荐算法架构——重排</a><br></p> 
+ <p><a href="" rel="nofollow">图文解读：推荐算法架构——精排！</a><br></p> 
+ <p><a href="" rel="nofollow">第四届 Techo TVP 开发者峰会回来了！这次我们线上见</a><br></p> 
+ <p><a href="" rel="nofollow">来了！Go的2个黑魔法技巧</a><br></p> 
+ <p><img src="https://images2.imgbox.com/f3/83/RaFLP2Zq_o.gif" alt="155c806ead74aa5e69e6891c9a1565e4.gif"><br></p> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/6a494c6213ca9caf8380b441c99182d8/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Weblogic 常见漏洞汇总</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/9123743664134d511547c5e6cdd72288/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">ssh 执行远程命令卡住问题解决</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>在IDEA中 基于内核的Flink任务提交 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="在IDEA中 基于内核的Flink任务提交" />
+<meta property="og:description" content="内部实现Flink任务的提交，本文尽量以通俗易懂的方式去解释如果在内部去提交一个flink任务，目前已经实现了standalone、yarn-perjob、yarn-session、yarn-application模式的任务的部署提交
+1. 什么是内部提交 想想我们以前部署Flink任务的方式，就是在命令行界面，调用flink run然后指定参数提交到对应的集群中去。
+什么是内部提交呢？想想一个场景，现在我们需要做一个计算平台，在计算平台上去写sql管理任务等等，然后提交到集群中去。网上有一种解决方案是在计算平台的程序端，利用Runtime.exec(cmd)去构建flink命令然后执行该命令进行提交，实际上这有点套娃了，为什么这么说呢？
+本质上flink run命令也是调用java程序解析客户端命令，然后部署到集群中的，所以我们完全可以绕开构建命令的这个环节。
+2.了解Flink部署流程 关于flink部署流程，我推荐去看一下尚硅谷的视频解析（针对1.12版本的），看了之后再仔细捉摸一下就能对flink的任务提交流程有一个很好的理解了。视频链接我放在了文章最后的参考资料上
+2.1 几个概念 StreamGraph
+JobGraph
+如果你对flink的相关运行概念不是很了解，那么就可以参考这篇文章：Flink 作业执行深度解析
+2.2 部署相关的类 我们知道flink程序最终都会去执行StreamExecutionEnvironment#execute()方法，内部通过跟踪可以看到最核心的就是在
+/** * Triggers the program execution asynchronously. The environment will execute all parts of the * program that have resulted in a &#34;sink&#34; operation. Sink operations are for example printing * results or forwarding them to a message queue. * * @param streamGraph the stream graph representing the transformations * @return A {@link JobClient} that can be used to communicate with the submitted job, completed * on submission succeeded." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/39cb311c4546882000d2392ef6e707f2/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-12-23T13:21:57+08:00" />
+<meta property="article:modified_time" content="2022-12-23T13:21:57+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">在IDEA中 基于内核的Flink任务提交</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <blockquote> 
+ <p>内部实现Flink任务的提交，本文尽量以通俗易懂的方式去解释如果在内部去提交一个flink任务，目前已经实现了standalone、yarn-perjob、yarn-session、yarn-application模式的任务的部署提交</p> 
+</blockquote> 
+<h2><a id="1__2"></a>1. 什么是内部提交</h2> 
+<p>想想我们以前部署Flink任务的方式，就是在命令行界面，调用<code>flink run</code>然后指定参数提交到对应的集群中去。</p> 
+<p>什么是内部提交呢？想想一个场景，现在我们需要做一个计算平台，在计算平台上去写sql管理任务等等，然后提交到集群中去。网上有一种解决方案是在计算平台的程序端，利用<code>Runtime.exec(cmd)</code>去构建flink命令然后执行该命令进行提交，实际上这有点套娃了，为什么这么说呢？</p> 
+<p>本质上<code>flink run</code>命令也是调用java程序解析客户端命令，然后部署到集群中的，所以我们完全可以绕开构建命令的这个环节。</p> 
+<h2><a id="2Flink_12"></a>2.了解Flink部署流程</h2> 
+<p>关于flink部署流程，我推荐去看一下尚硅谷的视频解析（针对1.12版本的），看了之后再仔细捉摸一下就能对flink的任务提交流程有一个很好的理解了。视频链接我放在了文章最后的参考资料上</p> 
+<h3><a id="21__18"></a>2.1 几个概念</h3> 
+<p>StreamGraph</p> 
+<p>JobGraph</p> 
+<p>如果你对flink的相关运行概念不是很了解，那么就可以参考这篇文章：<a href="https://flink-learning.org.cn/article/detail/9f2c9b5e18fab1d5eb172b712e559edd?tab=%E6%8A%80%E6%9C%AF%E6%8E%A2%E7%B4%A2&amp;page=5" rel="nofollow">Flink 作业执行深度解析</a></p> 
+<h3><a id="22__28"></a>2.2 部署相关的类</h3> 
+<p>我们知道flink程序最终都会去执行<code>StreamExecutionEnvironment#execute()</code>方法，内部通过跟踪可以看到最核心的就是在</p> 
+<pre><code class="prism language-java">    <span class="token comment">/**
+     * Triggers the program execution asynchronously. The environment will execute all parts of the
+     * program that have resulted in a "sink" operation. Sink operations are for example printing
+     * results or forwarding them to a message queue.
+     *
+     * @param streamGraph the stream graph representing the transformations
+     * @return A {@link JobClient} that can be used to communicate with the submitted job, completed
+     *     on submission succeeded.
+     * @throws Exception which occurs during job execution.
+     */</span>
+<span class="token annotation punctuation">@Internal</span>
+    <span class="token keyword">public</span> <span class="token class-name">JobClient</span> <span class="token function">executeAsync</span><span class="token punctuation">(</span><span class="token class-name">StreamGraph</span> streamGraph<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token function">checkNotNull</span><span class="token punctuation">(</span>streamGraph<span class="token punctuation">,</span> <span class="token string">"StreamGraph cannot be null."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token function">checkNotNull</span><span class="token punctuation">(</span>
+                configuration<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token class-name">DeploymentOptions</span><span class="token punctuation">.</span><span class="token constant">TARGET</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                <span class="token string">"No execution.target specified in your configuration file."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">final</span> <span class="token class-name">PipelineExecutorFactory</span> executorFactory <span class="token operator">=</span>
+                executorServiceLoader<span class="token punctuation">.</span><span class="token function">getExecutorFactory</span><span class="token punctuation">(</span>configuration<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token function">checkNotNull</span><span class="token punctuation">(</span>
+                executorFactory<span class="token punctuation">,</span>
+                <span class="token string">"Cannot find compatible factory for specified execution.target (=%s)"</span><span class="token punctuation">,</span>
+                configuration<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token class-name">DeploymentOptions</span><span class="token punctuation">.</span><span class="token constant">TARGET</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">CompletableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">JobClient</span><span class="token punctuation">&gt;</span></span> jobClientFuture <span class="token operator">=</span>
+                executorFactory
+                        <span class="token punctuation">.</span><span class="token function">getExecutor</span><span class="token punctuation">(</span>configuration<span class="token punctuation">)</span>
+                        <span class="token punctuation">.</span><span class="token function">execute</span><span class="token punctuation">(</span>streamGraph<span class="token punctuation">,</span> configuration<span class="token punctuation">,</span> userClassloader<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token class-name">JobClient</span> jobClient <span class="token operator">=</span> jobClientFuture<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            jobListeners<span class="token punctuation">.</span><span class="token function">forEach</span><span class="token punctuation">(</span>jobListener <span class="token operator">-&gt;</span> jobListener<span class="token punctuation">.</span><span class="token function">onJobSubmitted</span><span class="token punctuation">(</span>jobClient<span class="token punctuation">,</span> <span class="token keyword">null</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token keyword">return</span> jobClient<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">ExecutionException</span> executionException<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">final</span> <span class="token class-name">Throwable</span> strippedException <span class="token operator">=</span>
+                    <span class="token class-name">ExceptionUtils</span><span class="token punctuation">.</span><span class="token function">stripExecutionException</span><span class="token punctuation">(</span>executionException<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            jobListeners<span class="token punctuation">.</span><span class="token function">forEach</span><span class="token punctuation">(</span>
+                    jobListener <span class="token operator">-&gt;</span> jobListener<span class="token punctuation">.</span><span class="token function">onJobSubmitted</span><span class="token punctuation">(</span><span class="token keyword">null</span><span class="token punctuation">,</span> strippedException<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">FlinkException</span><span class="token punctuation">(</span>
+                    <span class="token class-name">String</span><span class="token punctuation">.</span><span class="token function">format</span><span class="token punctuation">(</span><span class="token string">"Failed to execute job '%s'."</span><span class="token punctuation">,</span> streamGraph<span class="token punctuation">.</span><span class="token function">getJobName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                    strippedException<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+</code></pre> 
+<h2><a id="3__82"></a>3 提交部署程序实现</h2> 
+<p>首先说一下我们的思路：</p> 
+<p>flink内部都是将我们的算子去转换成StreamGraph，然后将StreamGraph转换为JobGraph，再将JobGraph提交到集群的。</p> 
+<p>所以我们就是要想办法将我们的程序jar包转换为JobGraph，然后利用<code>ClusterDescriptor</code>的实现类去完成JobGraph的提交</p> 
+<pre><code class="prism language-java"><span class="token class-name">ClusterDescriptor</span>
+    <span class="token operator">-</span> <span class="token class-name">StandaloneClusterDescriptor</span>
+    <span class="token operator">-</span> <span class="token class-name">YarnClusterDescriptor</span>
+</code></pre> 
+<h3><a id="31__100"></a>3.1 项目创建</h3> 
+<p>项目模块目前只需要两个，<code>flink-deployer-common</code>和<code>flink-deployer-1.13</code></p> 
+<h4><a id="311__104"></a>3.1.1 模块解释</h4> 
+<p>common模块包含一些公共类</p> 
+<p>deployer模块是真正的针对不同部署模式的提交程序</p> 
+<h4><a id="312_common_110"></a>3.1.2 common模块引入的依赖</h4> 
+<pre><code class="prism language-xml"><span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>dependency</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>groupId</span><span class="token punctuation">&gt;</span></span>org.projectlombok<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>groupId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>artifactId</span><span class="token punctuation">&gt;</span></span>lombok<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>artifactId</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>dependency</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<h4><a id="313_deployer_121"></a>3.1.3 deployer模块引入的依赖</h4> 
+<pre><code class="prism language-xml"><span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>properties</span><span class="token punctuation">&gt;</span></span>
+	<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>scala.binary.version</span><span class="token punctuation">&gt;</span></span>2.12<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>scala.binary.version</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>flink.version</span><span class="token punctuation">&gt;</span></span>1.13.0<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>flink.version</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>properties</span><span class="token punctuation">&gt;</span></span>
+
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>dependency</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>groupId</span><span class="token punctuation">&gt;</span></span>org.apache.flink<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>groupId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>artifactId</span><span class="token punctuation">&gt;</span></span>flink-table-planner-blink_${scala.binary.version}<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>artifactId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>version</span><span class="token punctuation">&gt;</span></span>${flink.version}<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>version</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>dependency</span><span class="token punctuation">&gt;</span></span>
+
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>dependency</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>groupId</span><span class="token punctuation">&gt;</span></span>org.apache.flink<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>groupId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>artifactId</span><span class="token punctuation">&gt;</span></span>flink-clients_${scala.binary.version}<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>artifactId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>version</span><span class="token punctuation">&gt;</span></span>${flink.version}<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>version</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>dependency</span><span class="token punctuation">&gt;</span></span>
+<span class="token comment">&lt;!--引入flink-yarn--&gt;</span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>dependency</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>groupId</span><span class="token punctuation">&gt;</span></span>org.apache.flink<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>groupId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>artifactId</span><span class="token punctuation">&gt;</span></span>flink-yarn_${scala.binary.version}<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>artifactId</span><span class="token punctuation">&gt;</span></span>
+    <span class="token tag"><span class="token tag"><span class="token punctuation">&lt;</span>version</span><span class="token punctuation">&gt;</span></span>${flink.version}<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>version</span><span class="token punctuation">&gt;</span></span>
+<span class="token tag"><span class="token tag"><span class="token punctuation">&lt;/</span>dependency</span><span class="token punctuation">&gt;</span></span>
+</code></pre> 
+<h3><a id="32__152"></a>3.2 代码编写</h3> 
+<p>下面以模块名加类名来进行表示</p> 
+<h4><a id="321_commonFlinkDeployer_156"></a>3.2.1 common#FlinkDeployer</h4> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">interface</span> <span class="token class-name">FlinkDeployer</span> <span class="token punctuation">{<!-- --></span>
+    <span class="token comment">/**
+     * 提交Flink作业
+     * @return
+     */</span>
+    <span class="token class-name">DeployResponse</span> <span class="token function">deployJob</span><span class="token punctuation">(</span><span class="token class-name">DeployParam</span> deployParam<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span><span class="token punctuation">;</span>
+
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="322_commonDeployParam_172"></a>3.2.2 common#DeployParam</h4> 
+<blockquote> 
+ <p>部署参数</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Data</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">DeployJobParam</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> sql<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> jobType<span class="token punctuation">;</span>
+
+    <span class="token comment">/** 集群的地址 */</span>
+    <span class="token keyword">private</span> <span class="token class-name">String</span> clusterAddress<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> mainAppJar<span class="token punctuation">;</span>
+
+    <span class="token comment">/** 对于yarn-session模式有用 */</span>
+    <span class="token keyword">private</span> <span class="token class-name">String</span> yarnApplicationId<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> mainClassName<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> mainClassArgs<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> parameters<span class="token punctuation">;</span>
+
+    <span class="token comment">/** 作业的第三方依赖，例如连接器，udf等，例如：/home/xcchen/bdcp/udf/flink-sql-udf-test.jar */</span>
+    <span class="token keyword">private</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> dependencies<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> deployMode<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> flinkHome<span class="token punctuation">;</span>
+
+    <span class="token comment">/** used by application mode */</span>
+    <span class="token keyword">private</span> <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">String</span><span class="token punctuation">&gt;</span></span> providedLibDirs<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="323_commonDeployResponse_210"></a>3.2.3 common#DeployResponse</h4> 
+<blockquote> 
+ <p>部署的响应结果</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token comment">/** the response for deploy job */</span>
+<span class="token annotation punctuation">@Data</span>
+<span class="token annotation punctuation">@AllArgsConstructor</span>
+<span class="token annotation punctuation">@NoArgsConstructor</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">DeployJobResponse</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> clusterId<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> jobId<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> clusterWebInterfaceUrl<span class="token punctuation">;</span>
+
+    <span class="token keyword">private</span> <span class="token class-name">String</span> jobStatus<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="324_commonAbstractFlinkDeployer_233"></a>3.2.4 common#AbstractFlinkDeployer</h4> 
+<blockquote> 
+ <p>抽象父类，目的是隔离类加载器，实现多版本支持</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">abstract</span> <span class="token keyword">class</span> <span class="token class-name">AbstractFlinkDeployer</span> <span class="token keyword">implements</span> <span class="token class-name">FlinkDeployer</span><span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">protected</span> <span class="token keyword">abstract</span> <span class="token keyword">class</span> <span class="token class-name">FlinkDeployeHandler</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">public</span> <span class="token class-name">Object</span> <span class="token function">call</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span><span class="token punctuation">{<!-- --></span>
+
+            <span class="token class-name">Object</span> result<span class="token punctuation">;</span>
+
+            <span class="token class-name">ClassLoader</span> oldClassLoader <span class="token operator">=</span> <span class="token class-name">Thread</span><span class="token punctuation">.</span><span class="token function">currentThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getContextClassLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 临时更改 ClassLoader</span>
+            <span class="token class-name">Thread</span><span class="token punctuation">.</span><span class="token function">currentThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">setContextClassLoader</span><span class="token punctuation">(</span><span class="token class-name">AbstractFlinkDeployer</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">.</span><span class="token function">getClassLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            result <span class="token operator">=</span> <span class="token function">handle</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token comment">// 还原为之前的 ClassLoader</span>
+            <span class="token class-name">Thread</span><span class="token punctuation">.</span><span class="token function">currentThread</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">setContextClassLoader</span><span class="token punctuation">(</span>oldClassLoader<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+            <span class="token keyword">return</span> result<span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token keyword">public</span> <span class="token keyword">abstract</span> <span class="token class-name">Object</span> <span class="token function">handle</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">protected</span> <span class="token class-name">Object</span> <span class="token function">handle</span><span class="token punctuation">(</span><span class="token class-name">FlinkDeployeHandler</span> flinkDeployeHandler<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span><span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">return</span> flinkDeployeHandler<span class="token punctuation">.</span><span class="token function">call</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="325_deployerFlinkDeployerBase13_265"></a>3.2.5 deployer#FlinkDeployerBase13</h4> 
+<blockquote> 
+ <p>这是flink1.13部署程序的基础类，后续出现的类都继承自该类，该类封装了一些通用的方法和属性</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">abstract</span> <span class="token keyword">class</span> <span class="token class-name">FlinkDeployerBase13</span> <span class="token keyword">extends</span> <span class="token class-name">AbstractFlinkDeployer</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">private</span> <span class="token keyword">static</span> <span class="token keyword">final</span> <span class="token class-name">Logger</span> logger <span class="token operator">=</span> <span class="token class-name">LoggerFactory</span><span class="token punctuation">.</span><span class="token function">getLogger</span><span class="token punctuation">(</span><span class="token class-name">FlinkDeployerBase13</span><span class="token punctuation">.</span><span class="token keyword">class</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">protected</span> <span class="token class-name">Configuration</span> configuration<span class="token punctuation">;</span>
+
+    <span class="token comment">/** FLINK根目录 */</span>
+    <span class="token keyword">protected</span> <span class="token class-name">String</span> <span class="token constant">FLINK_HOME</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/** FLINK配置目录 */</span>
+    <span class="token keyword">protected</span> <span class="token class-name">String</span> <span class="token constant">FLINK_CONF_DIR</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/** FLINK根目录下的lib目录 */</span>
+    <span class="token keyword">protected</span> <span class="token class-name">String</span> <span class="token constant">FLINK_LIB_DIR</span><span class="token punctuation">;</span>
+
+    <span class="token comment">/** FLINK根目录下的plugins目录 */</span>
+    <span class="token keyword">protected</span> <span class="token class-name">String</span> <span class="token constant">FLINK_PLUGINS_DIR</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">protected</span> <span class="token class-name">PackagedProgram</span> program<span class="token punctuation">;</span>
+
+    <span class="token keyword">protected</span> <span class="token class-name">JobGraph</span> jobGraph<span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> <span class="token class-name">FlinkDeployerBase13</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token class-name">FlinkDeployerBase13</span><span class="token punctuation">(</span><span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token constant">FLINK_HOME</span> <span class="token operator">=</span> <span class="token class-name">FlinkUtils</span><span class="token punctuation">.</span><span class="token function">getFlinkHome</span><span class="token punctuation">(</span>deployJobParam<span class="token punctuation">.</span><span class="token function">getFlinkHome</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token constant">FLINK_CONF_DIR</span> <span class="token operator">=</span> <span class="token constant">FLINK_HOME</span> <span class="token operator">+</span> <span class="token string">"/conf"</span><span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span>configuration <span class="token operator">=</span> <span class="token class-name">GlobalConfiguration</span><span class="token punctuation">.</span><span class="token function">loadConfiguration</span><span class="token punctuation">(</span><span class="token constant">FLINK_CONF_DIR</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token constant">FLINK_LIB_DIR</span> <span class="token operator">=</span> <span class="token constant">FLINK_HOME</span> <span class="token operator">+</span> <span class="token string">"/lib"</span><span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token constant">FLINK_PLUGINS_DIR</span> <span class="token operator">=</span> <span class="token constant">FLINK_HOME</span> <span class="token operator">+</span> <span class="token string">"/plugins"</span><span class="token punctuation">;</span>
+        <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">initConfiguration</span><span class="token punctuation">(</span>deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token class-name">DeployModeEnum</span><span class="token punctuation">.</span><span class="token constant">FLINK_YARN_APPLICATION</span>
+                <span class="token punctuation">.</span><span class="token function">getName</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+                <span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span>deployJobParam<span class="token punctuation">.</span><span class="token function">getDeployMode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span> <span class="token comment">// application模式不需要去构建包</span>
+            <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span>program <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">buildProgram</span><span class="token punctuation">(</span>deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span>jobGraph <span class="token operator">=</span>
+                        <span class="token class-name">PackagedProgramUtils</span><span class="token punctuation">.</span><span class="token function">createJobGraph</span><span class="token punctuation">(</span>
+                                program<span class="token punctuation">,</span>
+                                configuration<span class="token punctuation">,</span>
+                                configuration<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token class-name">CoreOptions</span><span class="token punctuation">.</span><span class="token constant">DEFAULT_PARALLELISM</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                                <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">RuntimeException</span><span class="token punctuation">(</span><span class="token string">"build program and job graph fail"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token punctuation">}</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/**
+     * init configuration for perjob,session and application
+     *
+     * @param deployJobParam
+     */</span>
+    <span class="token keyword">private</span> <span class="token keyword">void</span> <span class="token function">initConfiguration</span><span class="token punctuation">(</span><span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">DeployModeEnum</span> deployMode <span class="token operator">=</span> <span class="token class-name">DeployModeEnum</span><span class="token punctuation">.</span><span class="token function">getByName</span><span class="token punctuation">(</span>deployJobParam<span class="token punctuation">.</span><span class="token function">getDeployMode</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">switch</span> <span class="token punctuation">(</span>deployMode<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">case</span> <span class="token constant">FLINK_STANDALONE</span><span class="token operator">:</span>
+                <span class="token class-name">DeployUtils</span><span class="token punctuation">.</span><span class="token function">getStandaloneConfiguration</span><span class="token punctuation">(</span>configuration<span class="token punctuation">,</span> deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> <span class="token constant">FLINK_YARN_SESSION</span><span class="token operator">:</span>
+                <span class="token class-name">DeployUtils</span><span class="token punctuation">.</span><span class="token function">getYarnSessionConfiguration</span><span class="token punctuation">(</span>configuration<span class="token punctuation">,</span> deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> <span class="token constant">FLINK_YARN_PERJOB</span><span class="token operator">:</span>
+                <span class="token class-name">DeployUtils</span><span class="token punctuation">.</span><span class="token function">getYarnPerjobConfiguration</span><span class="token punctuation">(</span>
+                        configuration<span class="token punctuation">,</span>
+                        deployJobParam<span class="token punctuation">,</span>
+                        <span class="token constant">FLINK_CONF_DIR</span><span class="token punctuation">,</span>
+                        <span class="token constant">FLINK_HOME</span><span class="token punctuation">,</span>
+                        <span class="token constant">FLINK_LIB_DIR</span><span class="token punctuation">,</span>
+                        <span class="token constant">FLINK_PLUGINS_DIR</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">case</span> <span class="token constant">FLINK_YARN_APPLICATION</span><span class="token operator">:</span>
+                <span class="token class-name">DeployUtils</span><span class="token punctuation">.</span><span class="token function">getApplicationConfiguration</span><span class="token punctuation">(</span>
+                        configuration<span class="token punctuation">,</span> deployJobParam<span class="token punctuation">,</span> <span class="token constant">FLINK_CONF_DIR</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                <span class="token keyword">break</span><span class="token punctuation">;</span>
+            <span class="token keyword">default</span><span class="token operator">:</span>
+                <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">IllegalArgumentException</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/**
+     * @param deployJobParam
+     * @return
+     * @throws ProgramInvocationException
+     */</span>
+    <span class="token keyword">private</span> <span class="token class-name">PackagedProgram</span> <span class="token function">buildProgram</span><span class="token punctuation">(</span><span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token class-name">String</span> jobType <span class="token operator">=</span> deployJobParam<span class="token punctuation">.</span><span class="token function">getJobType</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> programArgs <span class="token operator">=</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>deployJobParam<span class="token punctuation">.</span><span class="token function">getMainClassArgs</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token keyword">null</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            programArgs <span class="token operator">=</span> deployJobParam<span class="token punctuation">.</span><span class="token function">getMainClassArgs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">split</span><span class="token punctuation">(</span><span class="token string">"\\s+"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token class-name">String</span> jarFilePath <span class="token operator">=</span>
+                jobType<span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span><span class="token class-name">JobTypeEnum</span><span class="token punctuation">.</span><span class="token constant">FLINK_SQL</span><span class="token punctuation">.</span><span class="token function">name</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                        <span class="token operator">?</span> <span class="token class-name">ConstantUtils</span><span class="token punctuation">.</span><span class="token constant">EP_FLINK_SQL_CLIENT</span>
+                        <span class="token operator">:</span> deployJobParam<span class="token punctuation">.</span><span class="token function">getMainAppJar</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// TODO 针对不同的作业，入口类是不同的</span>
+        <span class="token class-name">String</span> entryPointClass <span class="token operator">=</span>
+                jobType<span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span><span class="token class-name">JobTypeEnum</span><span class="token punctuation">.</span><span class="token constant">FLINK_SQL</span><span class="token punctuation">.</span><span class="token function">name</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                        <span class="token operator">?</span> <span class="token class-name">ConstantUtils</span><span class="token punctuation">.</span><span class="token constant">EP_FLINK_SQL_CLIENT_ENTRYPOINT_CLASS</span>
+                        <span class="token operator">:</span> deployJobParam<span class="token punctuation">.</span><span class="token function">getMainClassName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">PackagedProgram<span class="token punctuation">.</span>Builder</span> builder <span class="token operator">=</span>
+                <span class="token class-name">PackagedProgram</span><span class="token punctuation">.</span><span class="token function">newBuilder</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+                        <span class="token punctuation">.</span><span class="token function">setJarFile</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">File</span><span class="token punctuation">(</span>jarFilePath<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                        <span class="token punctuation">.</span><span class="token function">setEntryPointClassName</span><span class="token punctuation">(</span>entryPointClass<span class="token punctuation">)</span>
+                        <span class="token punctuation">.</span><span class="token function">setArguments</span><span class="token punctuation">(</span>programArgs<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>deployJobParam<span class="token punctuation">.</span><span class="token function">getDependencies</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">!=</span> <span class="token keyword">null</span>
+                <span class="token operator">&amp;&amp;</span> deployJobParam<span class="token punctuation">.</span><span class="token function">getDependencies</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">size</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">&gt;</span> <span class="token number">0</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+
+            builder<span class="token punctuation">.</span><span class="token function">setUserClassPaths</span><span class="token punctuation">(</span>
+                    deployJobParam<span class="token punctuation">.</span><span class="token function">getDependencies</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">stream</span><span class="token punctuation">(</span><span class="token punctuation">)</span>
+                            <span class="token punctuation">.</span><span class="token function">map</span><span class="token punctuation">(</span>
+                                    ele <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span>
+                                        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+                                            <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">URL</span><span class="token punctuation">(</span><span class="token string">"file://"</span> <span class="token operator">+</span> ele<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                                            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">IllegalArgumentException</span><span class="token punctuation">(</span>
+                                                    <span class="token string">"cant cast dependencies to user classpath"</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                        <span class="token punctuation">}</span>
+                                    <span class="token punctuation">}</span><span class="token punctuation">)</span>
+                            <span class="token punctuation">.</span><span class="token function">collect</span><span class="token punctuation">(</span><span class="token class-name">Collectors</span><span class="token punctuation">.</span><span class="token function">toList</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        logger<span class="token punctuation">.</span><span class="token function">info</span><span class="token punctuation">(</span><span class="token string">"build package program success..."</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> builder<span class="token punctuation">.</span><span class="token function">build</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/**
+     * deploy job graph for flink sql client,in this case deployParam only support some needed
+     * config info
+     *
+     * @param jobGraph
+     * @param deployJobParam
+     * @return
+     */</span>
+    <span class="token keyword">public</span> <span class="token keyword">abstract</span> <span class="token class-name">JobClient</span> <span class="token function">deployJobGraph</span><span class="token punctuation">(</span><span class="token class-name">JobGraph</span> jobGraph<span class="token punctuation">,</span> <span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span>
+            <span class="token keyword">throws</span> <span class="token class-name">Exception</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">protected</span> <span class="token keyword">abstract</span> <span class="token class-name">Tuple2</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">JobClient</span><span class="token punctuation">,</span> <span class="token class-name">ClusterClient</span><span class="token punctuation">&gt;</span></span> <span class="token function">deployJobGraphInternal</span><span class="token punctuation">(</span>
+            <span class="token class-name">JobGraph</span> jobGraph<span class="token punctuation">,</span> <span class="token class-name">ClassLoader</span> userCodeClassLoader<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span><span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<h4><a id="326_deployerStandaloneDeployer13_420"></a>3.2.6 deployer#StandaloneDeployer13</h4> 
+<blockquote> 
+ <p>提交到standalone集群的类</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">StandaloneDeployer13</span> <span class="token keyword">extends</span> <span class="token class-name">FlinkDeployerBase13</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">public</span> <span class="token class-name">StandaloneDeployer13</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token class-name">StandaloneDeployer13</span><span class="token punctuation">(</span><span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">super</span><span class="token punctuation">(</span>deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token class-name">DeployJobResponse</span> <span class="token function">deployJob</span><span class="token punctuation">(</span><span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token class-name">Object</span> jobClientObject <span class="token operator">=</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handle</span><span class="token punctuation">(</span>
+                        <span class="token keyword">new</span> <span class="token class-name">FlinkDeployeHandler</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token annotation punctuation">@Override</span>
+                            <span class="token keyword">public</span> <span class="token class-name">Object</span> <span class="token function">handle</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+                                <span class="token keyword">return</span> <span class="token function">deployJobGraphInternal</span><span class="token punctuation">(</span>
+                                        jobGraph<span class="token punctuation">,</span> program<span class="token punctuation">.</span><span class="token function">getUserCodeClassLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token punctuation">}</span>
+                        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> <span class="token class-name">DeployUtils</span><span class="token punctuation">.</span><span class="token function">tuple2ObjectToResponse</span><span class="token punctuation">(</span>jobClientObject<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token class-name">JobClient</span> <span class="token function">deployJobGraph</span><span class="token punctuation">(</span><span class="token class-name">JobGraph</span> jobGraph<span class="token punctuation">,</span> <span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span>
+            <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token class-name">Object</span> jobClientObject <span class="token operator">=</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handle</span><span class="token punctuation">(</span>
+                        <span class="token keyword">new</span> <span class="token class-name">FlinkDeployeHandler</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token annotation punctuation">@Override</span>
+                            <span class="token keyword">public</span> <span class="token class-name">Object</span> <span class="token function">handle</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+                                <span class="token keyword">return</span> <span class="token function">deployJobGraphInternal</span><span class="token punctuation">(</span>
+                                        jobGraph<span class="token punctuation">,</span> <span class="token function">getClass</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getClassLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token punctuation">}</span>
+                        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token class-name">JobClient</span><span class="token punctuation">)</span> jobClientObject<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">protected</span> <span class="token class-name">Tuple2</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">JobClient</span><span class="token punctuation">,</span> <span class="token class-name">ClusterClient</span><span class="token punctuation">&gt;</span></span> <span class="token function">deployJobGraphInternal</span><span class="token punctuation">(</span>
+            <span class="token class-name">JobGraph</span> jobGraph<span class="token punctuation">,</span> <span class="token class-name">ClassLoader</span> userCodeClassLoader<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">StandaloneClientFactory</span> clusterClientFactory <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">StandaloneClientFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">final</span> <span class="token class-name">StandaloneClusterDescriptor</span> clusterDescriptor <span class="token operator">=</span>
+                clusterClientFactory<span class="token punctuation">.</span><span class="token function">createClusterDescriptor</span><span class="token punctuation">(</span>configuration<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">final</span> <span class="token class-name">StandaloneClusterId</span> clusterId <span class="token operator">=</span> clusterClientFactory<span class="token punctuation">.</span><span class="token function">getClusterId</span><span class="token punctuation">(</span>configuration<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">final</span> <span class="token class-name">ClusterClientProvider</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">StandaloneClusterId</span><span class="token punctuation">&gt;</span></span> clusterClientProvider <span class="token operator">=</span>
+                clusterDescriptor<span class="token punctuation">.</span><span class="token function">retrieve</span><span class="token punctuation">(</span>clusterId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">final</span> <span class="token class-name">ClusterClient</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">StandaloneClusterId</span><span class="token punctuation">&gt;</span></span> clusterClient <span class="token operator">=</span>
+                clusterClientProvider<span class="token punctuation">.</span><span class="token function">getClusterClient</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">final</span> <span class="token class-name">CompletableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">JobClient</span><span class="token punctuation">&gt;</span></span> jobClientFuture <span class="token operator">=</span>
+                clusterClient
+                        <span class="token punctuation">.</span><span class="token function">submitJob</span><span class="token punctuation">(</span>jobGraph<span class="token punctuation">)</span>
+                        <span class="token punctuation">.</span><span class="token function">thenApplyAsync</span><span class="token punctuation">(</span>
+                                <span class="token class-name">FunctionUtils</span><span class="token punctuation">.</span><span class="token function">uncheckedFunction</span><span class="token punctuation">(</span>
+                                        jobId <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span>
+                                            <span class="token class-name">ClientUtils</span><span class="token punctuation">.</span><span class="token function">waitUntilJobInitializationFinished</span><span class="token punctuation">(</span>
+                                                    <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-&gt;</span> clusterClient<span class="token punctuation">.</span><span class="token function">getJobStatus</span><span class="token punctuation">(</span>jobId<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                                                    <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-&gt;</span>
+                                                            clusterClient
+                                                                    <span class="token punctuation">.</span><span class="token function">requestJobResult</span><span class="token punctuation">(</span>jobId<span class="token punctuation">)</span>
+                                                                    <span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                                                    userCodeClassLoader<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                            <span class="token keyword">return</span> jobId<span class="token punctuation">;</span>
+                                        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                        <span class="token punctuation">.</span><span class="token function">thenApplyAsync</span><span class="token punctuation">(</span>
+                                jobID <span class="token operator">-&gt;</span>
+                                        <span class="token punctuation">(</span><span class="token class-name">JobClient</span><span class="token punctuation">)</span>
+                                                <span class="token keyword">new</span> <span class="token class-name">ClusterClientJobClientAdapter</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>
+                                                        clusterClientProvider<span class="token punctuation">,</span>
+                                                        jobID<span class="token punctuation">,</span>
+                                                        userCodeClassLoader<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                        <span class="token punctuation">.</span><span class="token function">whenCompleteAsync</span><span class="token punctuation">(</span><span class="token punctuation">(</span>ignored1<span class="token punctuation">,</span> ignored2<span class="token punctuation">)</span> <span class="token operator">-&gt;</span> clusterClient<span class="token punctuation">.</span><span class="token function">close</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">JobClient</span> jobClient <span class="token operator">=</span> jobClientFuture<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">Tuple2</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>jobClient<span class="token punctuation">,</span> clusterClient<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="327_deployerYarnDeployer13_515"></a>3.2.7 deployer#YarnDeployer13</h4> 
+<pre><code class="prism language-java"><span class="token comment">/** 用于存储Yarn部署相关的一些公共变量 */</span>
+<span class="token keyword">public</span> <span class="token keyword">abstract</span> <span class="token keyword">class</span> <span class="token class-name">YarnDeployer13</span> <span class="token keyword">extends</span> <span class="token class-name">FlinkDeployerBase13</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">protected</span> <span class="token class-name">YarnClusterClientFactory</span> clusterClientFactory <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">YarnClusterClientFactory</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token keyword">protected</span> <span class="token class-name">ClusterSpecification</span> clusterSpecification<span class="token punctuation">;</span>
+
+    <span class="token keyword">protected</span> <span class="token class-name">YarnClusterDescriptor</span> clusterDescriptor<span class="token punctuation">;</span>
+
+    <span class="token keyword">public</span> <span class="token class-name">YarnDeployer13</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token class-name">YarnDeployer13</span><span class="token punctuation">(</span><span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">super</span><span class="token punctuation">(</span>deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handle</span><span class="token punctuation">(</span>
+                    <span class="token keyword">new</span> <span class="token class-name">FlinkDeployeHandler</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                        <span class="token annotation punctuation">@Override</span>
+                        <span class="token keyword">public</span> <span class="token class-name">Object</span> <span class="token function">handle</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+                            clusterSpecification <span class="token operator">=</span>
+                                    clusterClientFactory<span class="token punctuation">.</span><span class="token function">getClusterSpecification</span><span class="token punctuation">(</span>configuration<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            clusterDescriptor <span class="token operator">=</span>
+                                    clusterClientFactory<span class="token punctuation">.</span><span class="token function">createClusterDescriptor</span><span class="token punctuation">(</span>configuration<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token keyword">return</span> <span class="token keyword">null</span><span class="token punctuation">;</span>
+                        <span class="token punctuation">}</span>
+                    <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            e<span class="token punctuation">.</span><span class="token function">printStackTrace</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="328_deployerYarnApplicationDeployer13_555"></a>3.2.8 deployer#YarnApplicationDeployer13</h4> 
+<blockquote> 
+ <p>提交yarn-application模式的类</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">YarnApplicationDeployer13</span> <span class="token keyword">extends</span> <span class="token class-name">YarnDeployer13</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">public</span> <span class="token class-name">YarnApplicationDeployer13</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token class-name">YarnApplicationDeployer13</span><span class="token punctuation">(</span><span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">super</span><span class="token punctuation">(</span>deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token class-name">DeployJobResponse</span> <span class="token function">deployJob</span><span class="token punctuation">(</span><span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token class-name">Object</span> clusterClientObj <span class="token operator">=</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handle</span><span class="token punctuation">(</span>
+                        <span class="token keyword">new</span> <span class="token class-name">FlinkDeployeHandler</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token annotation punctuation">@Override</span>
+                            <span class="token keyword">public</span> <span class="token class-name">Object</span> <span class="token function">handle</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+                                <span class="token comment">// 设置应用程序的主类名称和主类参数</span>
+                                <span class="token keyword">final</span> <span class="token class-name">ApplicationConfiguration</span> applicationConfiguration <span class="token operator">=</span>
+                                        <span class="token keyword">new</span> <span class="token class-name">ApplicationConfiguration</span><span class="token punctuation">(</span>
+                                                deployJobParam<span class="token punctuation">.</span><span class="token function">getMainClassArgs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">split</span><span class="token punctuation">(</span><span class="token string">"\\s+"</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                                                deployJobParam<span class="token punctuation">.</span><span class="token function">getMainClassName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                                <span class="token keyword">final</span> <span class="token class-name">ClusterClientProvider</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ApplicationId</span><span class="token punctuation">&gt;</span></span> clusterClientProvider <span class="token operator">=</span>
+                                        clusterDescriptor<span class="token punctuation">.</span><span class="token function">deployApplicationCluster</span><span class="token punctuation">(</span>
+                                                clusterSpecification<span class="token punctuation">,</span> applicationConfiguration<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+                                <span class="token keyword">return</span> clusterClientProvider<span class="token punctuation">.</span><span class="token function">getClusterClient</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token punctuation">}</span>
+                        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">ClusterClient</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ApplicationId</span><span class="token punctuation">&gt;</span></span> clusterClient <span class="token operator">=</span>
+                <span class="token punctuation">(</span><span class="token class-name">ClusterClient</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ApplicationId</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">)</span> clusterClientObj<span class="token punctuation">;</span>
+
+        <span class="token comment">// 这里有异步问题</span>
+        <span class="token class-name">List</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">JobStatusMessage</span><span class="token punctuation">&gt;</span></span> collect <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ArrayList</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>clusterClient<span class="token punctuation">.</span><span class="token function">listJobs</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">DeployJobResponse</span><span class="token punctuation">(</span>
+                clusterClient<span class="token punctuation">.</span><span class="token function">getClusterId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                collect<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getJobId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">toHexString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                clusterClient<span class="token punctuation">.</span><span class="token function">getWebInterfaceURL</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                collect<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getJobState</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token class-name">JobClient</span> <span class="token function">deployJobGraph</span><span class="token punctuation">(</span><span class="token class-name">JobGraph</span> jobGraph<span class="token punctuation">,</span> <span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span>
+            <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">UnsupportedOperationException</span><span class="token punctuation">(</span>
+                <span class="token string">"yarn application mode can't deploy jobGraph,please use deployJob(DeployParam deployParam) to deploy job"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">protected</span> <span class="token class-name">Tuple2</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">JobClient</span><span class="token punctuation">,</span> <span class="token class-name">ClusterClient</span><span class="token punctuation">&gt;</span></span> <span class="token function">deployJobGraphInternal</span><span class="token punctuation">(</span>
+            <span class="token class-name">JobGraph</span> jobGraph<span class="token punctuation">,</span> <span class="token class-name">ClassLoader</span> userCodeClassLoader<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">UnsupportedOperationException</span><span class="token punctuation">(</span>
+                <span class="token string">"yarn application mode can't deploy jobGraph,please use deployJob(DeployParam deployParam) to deploy job"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="329_deployerYarnSessionDeployer13_621"></a>3.2.9 deployer#YarnSessionDeployer13</h4> 
+<blockquote> 
+ <p>提交yarn-session模式的类</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">YarnSessionDeployer13</span> <span class="token keyword">extends</span> <span class="token class-name">YarnDeployer13</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">public</span> <span class="token class-name">YarnSessionDeployer13</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token class-name">YarnSessionDeployer13</span><span class="token punctuation">(</span><span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">super</span><span class="token punctuation">(</span>deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token class-name">DeployJobResponse</span> <span class="token function">deployJob</span><span class="token punctuation">(</span><span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token class-name">Object</span> tuple2Object <span class="token operator">=</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handle</span><span class="token punctuation">(</span>
+                        <span class="token keyword">new</span> <span class="token class-name">FlinkDeployeHandler</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token annotation punctuation">@Override</span>
+                            <span class="token keyword">public</span> <span class="token class-name">Object</span> <span class="token function">handle</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+                                <span class="token keyword">return</span> <span class="token function">deployJobGraphInternal</span><span class="token punctuation">(</span>
+                                        jobGraph<span class="token punctuation">,</span> program<span class="token punctuation">.</span><span class="token function">getUserCodeClassLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token punctuation">}</span>
+                        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> <span class="token class-name">DeployUtils</span><span class="token punctuation">.</span><span class="token function">tuple2ObjectToResponse</span><span class="token punctuation">(</span>tuple2Object<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token class-name">JobClient</span> <span class="token function">deployJobGraph</span><span class="token punctuation">(</span><span class="token class-name">JobGraph</span> jobGraph<span class="token punctuation">,</span> <span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span>
+            <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token class-name">Object</span> jobClientObject <span class="token operator">=</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handle</span><span class="token punctuation">(</span>
+                        <span class="token keyword">new</span> <span class="token class-name">FlinkDeployeHandler</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token annotation punctuation">@Override</span>
+                            <span class="token keyword">public</span> <span class="token class-name">Object</span> <span class="token function">handle</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+                                <span class="token keyword">return</span> <span class="token function">deployJobGraphInternal</span><span class="token punctuation">(</span>
+                                        jobGraph<span class="token punctuation">,</span> <span class="token function">getClass</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getClassLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token punctuation">}</span>
+                        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token class-name">JobClient</span><span class="token punctuation">)</span> jobClientObject<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">protected</span> <span class="token class-name">Tuple2</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">JobClient</span><span class="token punctuation">,</span> <span class="token class-name">ClusterClient</span><span class="token punctuation">&gt;</span></span> <span class="token function">deployJobGraphInternal</span><span class="token punctuation">(</span>
+            <span class="token class-name">JobGraph</span> jobGraph<span class="token punctuation">,</span> <span class="token class-name">ClassLoader</span> userCodeClassLoader<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token keyword">final</span> <span class="token class-name">ApplicationId</span> clusterId <span class="token operator">=</span> clusterClientFactory<span class="token punctuation">.</span><span class="token function">getClusterId</span><span class="token punctuation">(</span>configuration<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">final</span> <span class="token class-name">ClusterClientProvider</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ApplicationId</span><span class="token punctuation">&gt;</span></span> clusterClientProvider <span class="token operator">=</span>
+                clusterDescriptor<span class="token punctuation">.</span><span class="token function">retrieve</span><span class="token punctuation">(</span>clusterId<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">final</span> <span class="token class-name">ClusterClient</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ApplicationId</span><span class="token punctuation">&gt;</span></span> clusterClient <span class="token operator">=</span> clusterClientProvider<span class="token punctuation">.</span><span class="token function">getClusterClient</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">final</span> <span class="token class-name">CompletableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">JobClient</span><span class="token punctuation">&gt;</span></span> jobClientFuture <span class="token operator">=</span>
+                clusterClient
+                        <span class="token punctuation">.</span><span class="token function">submitJob</span><span class="token punctuation">(</span>jobGraph<span class="token punctuation">)</span>
+                        <span class="token punctuation">.</span><span class="token function">thenApplyAsync</span><span class="token punctuation">(</span>
+                                <span class="token class-name">FunctionUtils</span><span class="token punctuation">.</span><span class="token function">uncheckedFunction</span><span class="token punctuation">(</span>
+                                        jobId <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span>
+                                            <span class="token class-name">ClientUtils</span><span class="token punctuation">.</span><span class="token function">waitUntilJobInitializationFinished</span><span class="token punctuation">(</span>
+                                                    <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-&gt;</span> clusterClient<span class="token punctuation">.</span><span class="token function">getJobStatus</span><span class="token punctuation">(</span>jobId<span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                                                    <span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token operator">-&gt;</span>
+                                                            clusterClient
+                                                                    <span class="token punctuation">.</span><span class="token function">requestJobResult</span><span class="token punctuation">(</span>jobId<span class="token punctuation">)</span>
+                                                                    <span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                                                    userCodeClassLoader<span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                            <span class="token keyword">return</span> jobId<span class="token punctuation">;</span>
+                                        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                        <span class="token punctuation">.</span><span class="token function">thenApplyAsync</span><span class="token punctuation">(</span>
+                                jobID <span class="token operator">-&gt;</span>
+                                        <span class="token punctuation">(</span><span class="token class-name">JobClient</span><span class="token punctuation">)</span>
+                                                <span class="token keyword">new</span> <span class="token class-name">ClusterClientJobClientAdapter</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>
+                                                        clusterClientProvider<span class="token punctuation">,</span>
+                                                        jobID<span class="token punctuation">,</span>
+                                                        userCodeClassLoader<span class="token punctuation">)</span><span class="token punctuation">)</span>
+                        <span class="token punctuation">.</span><span class="token function">whenCompleteAsync</span><span class="token punctuation">(</span><span class="token punctuation">(</span>ignored1<span class="token punctuation">,</span> ignored2<span class="token punctuation">)</span> <span class="token operator">-&gt;</span> clusterClient<span class="token punctuation">.</span><span class="token function">close</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token class-name">JobClient</span> jobClient <span class="token operator">=</span> jobClientFuture<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">Tuple2</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>jobClient<span class="token punctuation">,</span> clusterClient<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="3210_deployerYarnPerjobDeployer13_710"></a>3.2.10 deployer#YarnPerjobDeployer13</h4> 
+<blockquote> 
+ <p>提交yarn perjob模式的类</p> 
+</blockquote> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">YarnPerjobDeployer13</span> <span class="token keyword">extends</span> <span class="token class-name">YarnDeployer13</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token keyword">public</span> <span class="token class-name">YarnPerjobDeployer13</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span><span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token class-name">YarnPerjobDeployer13</span><span class="token punctuation">(</span><span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">super</span><span class="token punctuation">(</span>deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token class-name">DeployJobResponse</span> <span class="token function">deployJob</span><span class="token punctuation">(</span><span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token class-name">Object</span> tuple2Object <span class="token operator">=</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handle</span><span class="token punctuation">(</span>
+                        <span class="token keyword">new</span> <span class="token class-name">FlinkDeployeHandler</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token annotation punctuation">@Override</span>
+                            <span class="token keyword">public</span> <span class="token class-name">Object</span> <span class="token function">handle</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+                                <span class="token keyword">return</span> <span class="token function">deployJobGraphInternal</span><span class="token punctuation">(</span>
+                                        jobGraph<span class="token punctuation">,</span> program<span class="token punctuation">.</span><span class="token function">getUserCodeClassLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token punctuation">}</span>
+                        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> <span class="token class-name">DeployUtils</span><span class="token punctuation">.</span><span class="token function">tuple2ObjectToResponse</span><span class="token punctuation">(</span>tuple2Object<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">public</span> <span class="token class-name">JobClient</span> <span class="token function">deployJobGraph</span><span class="token punctuation">(</span><span class="token class-name">JobGraph</span> jobGraph<span class="token punctuation">,</span> <span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span>
+            <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">Object</span> jobClientObject <span class="token operator">=</span>
+                <span class="token keyword">this</span><span class="token punctuation">.</span><span class="token function">handle</span><span class="token punctuation">(</span>
+                        <span class="token keyword">new</span> <span class="token class-name">FlinkDeployeHandler</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                            <span class="token annotation punctuation">@Override</span>
+                            <span class="token keyword">public</span> <span class="token class-name">Object</span> <span class="token function">handle</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+                                <span class="token keyword">return</span> <span class="token function">deployJobGraphInternal</span><span class="token punctuation">(</span>
+                                        jobGraph<span class="token punctuation">,</span> <span class="token function">getClass</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">getClassLoader</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token punctuation">}</span>
+                        <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token punctuation">(</span><span class="token class-name">JobClient</span><span class="token punctuation">)</span> jobClientObject<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token annotation punctuation">@Override</span>
+    <span class="token keyword">protected</span> <span class="token class-name">Tuple2</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">JobClient</span><span class="token punctuation">,</span> <span class="token class-name">ClusterClient</span><span class="token punctuation">&gt;</span></span> <span class="token function">deployJobGraphInternal</span><span class="token punctuation">(</span>
+            <span class="token class-name">JobGraph</span> jobGraph<span class="token punctuation">,</span> <span class="token class-name">ClassLoader</span> userCodeClassLoader<span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span> <span class="token punctuation">{<!-- --></span>
+
+        <span class="token keyword">final</span> <span class="token class-name">ClusterClientProvider</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ApplicationId</span><span class="token punctuation">&gt;</span></span> clusterClientProvider <span class="token operator">=</span>
+                clusterDescriptor<span class="token punctuation">.</span><span class="token function">deployJobCluster</span><span class="token punctuation">(</span>clusterSpecification<span class="token punctuation">,</span> jobGraph<span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">final</span> <span class="token class-name">CompletableFuture</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ClusterClientJobClientAdapter</span><span class="token punctuation">&lt;</span><span class="token class-name">ApplicationId</span><span class="token punctuation">&gt;</span><span class="token punctuation">&gt;</span></span>
+                jobClientAdapterCompletableFuture <span class="token operator">=</span>
+                        <span class="token class-name">CompletableFuture</span><span class="token punctuation">.</span><span class="token function">completedFuture</span><span class="token punctuation">(</span>
+                                <span class="token keyword">new</span> <span class="token class-name">ClusterClientJobClientAdapter</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>
+                                        clusterClientProvider<span class="token punctuation">,</span>
+                                        jobGraph<span class="token punctuation">.</span><span class="token function">getJobID</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                                        userCodeClassLoader<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">final</span> <span class="token class-name">ClusterClientJobClientAdapter</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">ApplicationId</span><span class="token punctuation">&gt;</span></span> jobClientProvider <span class="token operator">=</span>
+                jobClientAdapterCompletableFuture<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">Tuple2</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">(</span>jobClientProvider<span class="token punctuation">,</span> clusterClientProvider<span class="token punctuation">.</span><span class="token function">getClusterClient</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="3211_deployerDeployUtils_777"></a>3.2.11 deployer#DeployUtils</h4> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">DeployUtils</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token comment">/**
+     * 用户配置覆盖默认配置
+     *
+     * @param configuration
+     * @param deployJobParam
+     * @return
+     */</span>
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token class-name">Configuration</span> <span class="token function">covertDefaultConfiguration</span><span class="token punctuation">(</span>
+            <span class="token class-name">Configuration</span> configuration<span class="token punctuation">,</span> <span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span><span class="token class-name">CoreOptions</span><span class="token punctuation">.</span><span class="token constant">DEFAULT_PARALLELISM</span><span class="token punctuation">,</span> <span class="token number">1</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// 用户配置覆盖默认配置</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token class-name">StringUtils</span><span class="token punctuation">.</span><span class="token function">isNullOrWhitespaceOnly</span><span class="token punctuation">(</span>deployJobParam<span class="token punctuation">.</span><span class="token function">getParameters</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">final</span> <span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> parameters <span class="token operator">=</span>
+                    deployJobParam<span class="token punctuation">.</span><span class="token function">getParameters</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">replaceAll</span><span class="token punctuation">(</span><span class="token string">"\n"</span><span class="token punctuation">,</span> <span class="token string">""</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">split</span><span class="token punctuation">(</span><span class="token string">"\\s+"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            <span class="token class-name">Arrays</span><span class="token punctuation">.</span><span class="token function">stream</span><span class="token punctuation">(</span>parameters<span class="token punctuation">)</span>
+                    <span class="token punctuation">.</span><span class="token function">map</span><span class="token punctuation">(</span>ele <span class="token operator">-&gt;</span> ele<span class="token punctuation">.</span><span class="token function">replaceAll</span><span class="token punctuation">(</span><span class="token string">"-D"</span><span class="token punctuation">,</span> <span class="token string">""</span><span class="token punctuation">)</span><span class="token punctuation">)</span>
+                    <span class="token punctuation">.</span><span class="token function">forEach</span><span class="token punctuation">(</span>
+                            ele <span class="token operator">-&gt;</span> <span class="token punctuation">{<!-- --></span>
+                                <span class="token keyword">final</span> <span class="token class-name">String</span><span class="token punctuation">[</span><span class="token punctuation">]</span> split <span class="token operator">=</span> ele<span class="token punctuation">.</span><span class="token function">split</span><span class="token punctuation">(</span><span class="token string">"="</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                                configuration<span class="token punctuation">.</span><span class="token function">setString</span><span class="token punctuation">(</span>split<span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">,</span> split<span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+                            <span class="token punctuation">}</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> configuration<span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token class-name">Configuration</span> <span class="token function">getYarnPerjobConfiguration</span><span class="token punctuation">(</span>
+            <span class="token class-name">Configuration</span> configuration<span class="token punctuation">,</span>
+            <span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">,</span>
+            <span class="token class-name">String</span> configurationDirectory<span class="token punctuation">,</span>
+            <span class="token class-name">String</span> flinkHome<span class="token punctuation">,</span>
+            <span class="token class-name">String</span> flinkLibDir<span class="token punctuation">,</span>
+            <span class="token class-name">String</span> flinkPluginsDir<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span><span class="token class-name">DeploymentOptions</span><span class="token punctuation">.</span><span class="token constant">TARGET</span><span class="token punctuation">,</span> <span class="token class-name">YarnDeploymentTarget</span><span class="token punctuation">.</span><span class="token constant">PER_JOB</span><span class="token punctuation">.</span><span class="token function">getName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span><span class="token class-name">DeploymentOptions</span><span class="token punctuation">.</span><span class="token constant">SHUTDOWN_IF_ATTACHED</span><span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span><span class="token class-name">DeploymentOptionsInternal</span><span class="token punctuation">.</span><span class="token constant">CONF_DIR</span><span class="token punctuation">,</span> configurationDirectory<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>
+                <span class="token class-name">YarnConfigOptions</span><span class="token punctuation">.</span><span class="token constant">FLINK_DIST_JAR</span><span class="token punctuation">,</span>
+                <span class="token class-name">FlinkUtils</span><span class="token punctuation">.</span><span class="token function">getFlinkDistPathByFlinkHome</span><span class="token punctuation">(</span>flinkHome<span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>
+                <span class="token class-name">YarnConfigOptions</span><span class="token punctuation">.</span><span class="token constant">SHIP_FILES</span><span class="token punctuation">,</span>
+                <span class="token class-name">Arrays</span><span class="token punctuation">.</span><span class="token function">asList</span><span class="token punctuation">(</span>
+                        flinkLibDir<span class="token punctuation">,</span> flinkPluginsDir<span class="token punctuation">,</span> deployJobParam<span class="token punctuation">.</span><span class="token function">getDependencies</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token number">0</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// 默认配置</span>
+        configuration<span class="token punctuation">.</span><span class="token function">setString</span><span class="token punctuation">(</span><span class="token class-name">TaskManagerOptions</span><span class="token punctuation">.</span><span class="token constant">NUM_TASK_SLOTS</span><span class="token punctuation">.</span><span class="token function">key</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">"1"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> <span class="token function">covertDefaultConfiguration</span><span class="token punctuation">(</span>configuration<span class="token punctuation">,</span> deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token class-name">Configuration</span> <span class="token function">getYarnSessionConfiguration</span><span class="token punctuation">(</span>
+            <span class="token class-name">Configuration</span> configuration<span class="token punctuation">,</span> <span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span><span class="token class-name">YarnConfigOptions</span><span class="token punctuation">.</span><span class="token constant">APPLICATION_ID</span><span class="token punctuation">,</span> deployJobParam<span class="token punctuation">.</span><span class="token function">getYarnApplicationId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token function">covertDefaultConfiguration</span><span class="token punctuation">(</span>configuration<span class="token punctuation">,</span> deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token class-name">Configuration</span> <span class="token function">getStandaloneConfiguration</span><span class="token punctuation">(</span>
+            <span class="token class-name">Configuration</span> configuration<span class="token punctuation">,</span> <span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">final</span> <span class="token class-name">String</span> clusterAddress <span class="token operator">=</span> deployJobParam<span class="token punctuation">.</span><span class="token function">getClusterAddress</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span>clusterAddress <span class="token operator">!=</span> <span class="token keyword">null</span>
+                <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span><span class="token string">""</span><span class="token punctuation">.</span><span class="token function">equals</span><span class="token punctuation">(</span>clusterAddress<span class="token punctuation">)</span>
+                <span class="token operator">&amp;&amp;</span> clusterAddress<span class="token punctuation">.</span><span class="token function">matches</span><span class="token punctuation">(</span><span class="token string">"(\\d+\\.){3}\\d+:\\d+"</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span><span class="token class-name">JobManagerOptions</span><span class="token punctuation">.</span><span class="token constant">ADDRESS</span><span class="token punctuation">,</span> clusterAddress<span class="token punctuation">.</span><span class="token function">split</span><span class="token punctuation">(</span><span class="token string">":"</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">0</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+            configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>
+                    <span class="token class-name">JobManagerOptions</span><span class="token punctuation">.</span><span class="token constant">PORT</span><span class="token punctuation">,</span> <span class="token class-name">Integer</span><span class="token punctuation">.</span><span class="token function">parseInt</span><span class="token punctuation">(</span>clusterAddress<span class="token punctuation">.</span><span class="token function">split</span><span class="token punctuation">(</span><span class="token string">":"</span><span class="token punctuation">)</span><span class="token punctuation">[</span><span class="token number">1</span><span class="token punctuation">]</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+        <span class="token keyword">return</span> <span class="token function">covertDefaultConfiguration</span><span class="token punctuation">(</span>configuration<span class="token punctuation">,</span> deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token comment">/**
+     * get application configuration
+     *
+     * @param configuration
+     * @param deployJobParam
+     * @return
+     */</span>
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token class-name">Configuration</span> <span class="token function">getApplicationConfiguration</span><span class="token punctuation">(</span>
+            <span class="token class-name">Configuration</span> configuration<span class="token punctuation">,</span> <span class="token class-name">DeployJobParam</span> deployJobParam<span class="token punctuation">,</span> <span class="token class-name">String</span> flinkConfDir<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span><span class="token class-name">DeploymentOptions</span><span class="token punctuation">.</span><span class="token constant">TARGET</span><span class="token punctuation">,</span> <span class="token class-name">YarnDeploymentTarget</span><span class="token punctuation">.</span><span class="token constant">APPLICATION</span><span class="token punctuation">.</span><span class="token function">getName</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span><span class="token class-name">DeploymentOptions</span><span class="token punctuation">.</span><span class="token constant">SHUTDOWN_IF_ATTACHED</span><span class="token punctuation">,</span> <span class="token boolean">true</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span><span class="token class-name">DeploymentOptionsInternal</span><span class="token punctuation">.</span><span class="token constant">CONF_DIR</span><span class="token punctuation">,</span> flinkConfDir<span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// 用户应用程序jar不提前上传到hdfs上，而是随着任务的生命周期进行删除</span>
+        <span class="token comment">// TODO 对于SQL作业应该提前上传ep-flink-sql-client到远程hdfs上，所以这里需要判断是否为SQL作业</span>
+        configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>
+                <span class="token class-name">PipelineOptions</span><span class="token punctuation">.</span><span class="token constant">JARS</span><span class="token punctuation">,</span> <span class="token class-name">Collections</span><span class="token punctuation">.</span><span class="token function">singletonList</span><span class="token punctuation">(</span>deployJobParam<span class="token punctuation">.</span><span class="token function">getMainAppJar</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">// 配置lib目录和plugin目录到provided.lib.dir下,perjob模式不能设置</span>
+        <span class="token comment">// TODO 这里的目录不应该写死</span>
+        configuration<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>
+                <span class="token class-name">YarnConfigOptions</span><span class="token punctuation">.</span><span class="token constant">PROVIDED_LIB_DIRS</span><span class="token punctuation">,</span>
+                <span class="token class-name">Arrays</span><span class="token punctuation">.</span><span class="token function">asList</span><span class="token punctuation">(</span>
+                        <span class="token string">"hdfs://localhost:9820/flink/dist/1.13.0/lib"</span><span class="token punctuation">,</span>
+                        <span class="token string">"hdfs://localhost:9820/flink/dist/1.13.0/plugins"</span><span class="token punctuation">,</span>
+                        <span class="token string">"hdfs://localhost:9820/flink/dist/1.13.0/udf"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token comment">// 默认配置</span>
+        configuration<span class="token punctuation">.</span><span class="token function">setString</span><span class="token punctuation">(</span><span class="token class-name">TaskManagerOptions</span><span class="token punctuation">.</span><span class="token constant">NUM_TASK_SLOTS</span><span class="token punctuation">.</span><span class="token function">key</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span> <span class="token string">"1"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token keyword">return</span> <span class="token class-name">DeployUtils</span><span class="token punctuation">.</span><span class="token function">covertDefaultConfiguration</span><span class="token punctuation">(</span>configuration<span class="token punctuation">,</span> deployJobParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token class-name">DeployJobResponse</span> <span class="token function">tuple2ToResponse</span><span class="token punctuation">(</span><span class="token class-name">Tuple2</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">JobClient</span><span class="token punctuation">,</span> <span class="token class-name">ClusterClient</span><span class="token punctuation">&gt;</span></span> tuple2<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">return</span> <span class="token keyword">new</span> <span class="token class-name">DeployJobResponse</span><span class="token punctuation">(</span>
+                    tuple2<span class="token punctuation">.</span>f1<span class="token punctuation">.</span><span class="token function">getClusterId</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                    tuple2<span class="token punctuation">.</span>f0<span class="token punctuation">.</span><span class="token function">getJobID</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                    tuple2<span class="token punctuation">.</span>f1<span class="token punctuation">.</span><span class="token function">getWebInterfaceURL</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">,</span>
+                    tuple2<span class="token punctuation">.</span>f0<span class="token punctuation">.</span><span class="token function">getJobStatus</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">.</span><span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span> <span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">Exception</span> e<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">RuntimeException</span><span class="token punctuation">(</span><span class="token string">"tuple to deployResponse fail."</span><span class="token punctuation">,</span> e<span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+    <span class="token punctuation">}</span>
+
+    <span class="token keyword">public</span> <span class="token keyword">static</span> <span class="token class-name">DeployJobResponse</span> <span class="token function">tuple2ObjectToResponse</span><span class="token punctuation">(</span><span class="token class-name">Object</span> tupleObject<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+        <span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token punctuation">(</span>tupleObject <span class="token keyword">instanceof</span> <span class="token class-name">Tuple2</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+            <span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">RuntimeException</span><span class="token punctuation">(</span>
+                    <span class="token string">"the input only used for method:deployJobGraphInternal's return value"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token punctuation">}</span>
+
+        <span class="token class-name">Tuple2</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">JobClient</span><span class="token punctuation">,</span> <span class="token class-name">ClusterClient</span><span class="token punctuation">&gt;</span></span> tuple2 <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token class-name">Tuple2</span><span class="token generics"><span class="token punctuation">&lt;</span><span class="token class-name">JobClient</span><span class="token punctuation">,</span> <span class="token class-name">ClusterClient</span><span class="token punctuation">&gt;</span></span><span class="token punctuation">)</span> tupleObject<span class="token punctuation">;</span>
+
+        <span class="token keyword">return</span> <span class="token function">tuple2ToResponse</span><span class="token punctuation">(</span>tuple2<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="33__911"></a>3.3 测试样例</h3> 
+<h4><a id="331__913"></a>3.3.1 环境准备</h4> 
+<ul><li>需要一个flink1.13版本的客户端，如果是standalone模式请先启动集群</li><li>用户的应用程序jar包</li><li>如果有相关的依赖，例如udf，请使用<code>setDependencies()</code>方法设置</li><li>在idea中为测试程序设置环境变量(或者通过<code>setFlinkHome()</code>方法设置)：例如<code>FLINK_HOME=/home/xcchen/software/flink/flink-1.13.0</code></li><li>如果要提交到yarn，不要忘了设置<code>HADOOP_HOME</code>和<code>HADOOP_CONF_DIR</code>哦</li><li>也可以通过-Dflink.hadoop 高级参数去指定hdfs地址和yarn地址，从而不配置<code>HADOOP_HOME</code></li></ul> 
+<h4><a id="332_standalone_924"></a>3.3.2 standalone模式提交测试</h4> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">StandaloneDeployer13Test</span> <span class="token punctuation">{<!-- --></span>
+
+    <span class="token annotation punctuation">@Test</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">deploy</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span><span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">FlinkDeployer</span> flinkDeployer <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">StandaloneDeployer13</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">DeployParam</span> deployParam <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">DeployParam</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        deployParam<span class="token punctuation">.</span><span class="token function">setJobType</span><span class="token punctuation">(</span><span class="token class-name">JobTypeEnum</span><span class="token punctuation">.</span><span class="token constant">FLINK_JAR</span><span class="token punctuation">.</span><span class="token function">name</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        deployParam<span class="token punctuation">.</span><span class="token function">setMainClassName</span><span class="token punctuation">(</span><span class="token string">"top.yangc.flink.sql.connector.DataGenTest"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        deployParam<span class="token punctuation">.</span><span class="token function">setMainClassArgs</span><span class="token punctuation">(</span><span class="token string">""</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        deployParam<span class="token punctuation">.</span><span class="token function">setClusterAddress</span><span class="token punctuation">(</span><span class="token string">"192.168.58.11:8081"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        deployParam<span class="token punctuation">.</span><span class="token function">setMainAppJar</span><span class="token punctuation">(</span><span class="token string">"/home/xcchen/software/flink/flink-1.13.0/examples/flink-sql-example-1.0.0.jar"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        deployParam<span class="token punctuation">.</span><span class="token function">setParameters</span><span class="token punctuation">(</span><span class="token string">"-Dtaskmanager.numberOfTaskSlots=2 -Dparallelism.default=1"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+<span class="token comment">//        deployParam.setDependencies(Collections.singletonList("file:///home/xcchen/software/flink/flink-1.13.0/examples/flink-udf-example-1.0.0.jar"));</span>
+        flinkDeployer<span class="token punctuation">.</span><span class="token function">deployJob</span><span class="token punctuation">(</span>deployParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<h4><a id="333_perjob_948"></a>3.3.3 perjob模式提交测试</h4> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">YarnPerjobDeployer13Test</span> <span class="token punctuation">{<!-- --></span>
+
+
+    <span class="token annotation punctuation">@Test</span>
+    <span class="token keyword">public</span> <span class="token keyword">void</span> <span class="token function">deploy</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token keyword">throws</span> <span class="token class-name">Exception</span><span class="token punctuation">{<!-- --></span>
+        <span class="token class-name">FlinkDeployer</span> flinkDeployer <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">YarnPerjobDeployer13</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        <span class="token class-name">DeployParam</span> deployParam <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">DeployParam</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        deployParam<span class="token punctuation">.</span><span class="token function">setJobType</span><span class="token punctuation">(</span><span class="token class-name">JobTypeEnum</span><span class="token punctuation">.</span><span class="token constant">FLINK_JAR</span><span class="token punctuation">.</span><span class="token function">name</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        deployParam<span class="token punctuation">.</span><span class="token function">setMainClassName</span><span class="token punctuation">(</span><span class="token string">"top.yangc.flink.sql.connector.UdfDependencyTest"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        deployParam<span class="token punctuation">.</span><span class="token function">setMainClassArgs</span><span class="token punctuation">(</span><span class="token string">""</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+        deployParam<span class="token punctuation">.</span><span class="token function">setMainAppJar</span><span class="token punctuation">(</span><span class="token string">"/home/xcchen/software/flink/flink-1.13.0/examples/flink-sql-example-1.0.0.jar"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        deployParam<span class="token punctuation">.</span><span class="token function">setParameters</span><span class="token punctuation">(</span><span class="token string">"-Dtaskmanager.numberOfTaskSlots=2 -Dparallelism.default=2"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        <span class="token comment">//连接远程hdfs集群</span>
+<span class="token comment">//        System.setProperty("HADOOP_USER_NAME","root");</span>
+<span class="token comment">//        deployParam.setParameters("-Dtaskmanager.numberOfTaskSlots=2 -Dparallelism.default=2 -Dflink.hadoop.fs.defaultFS=hdfs://192.168.58.11:9820 -Dflink.yarn.resourcemanager.hostname=192.168.58.11");</span>
+
+        deployParam<span class="token punctuation">.</span><span class="token function">setDependencies</span><span class="token punctuation">(</span><span class="token class-name">Collections</span><span class="token punctuation">.</span><span class="token function">singletonList</span><span class="token punctuation">(</span><span class="token string">"file:///home/xcchen/software/flink/flink-1.13.0/examples/flink-udf-example-1.0.0.jar"</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+        flinkDeployer<span class="token punctuation">.</span><span class="token function">deployJob</span><span class="token punctuation">(</span>deployParam<span class="token punctuation">)</span><span class="token punctuation">;</span>
+    <span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+</code></pre> 
+<h2><a id="3__983"></a>3 思考</h2> 
+<p>如何让提交程序去兼容多版本呢？例如计算平台不应该仅仅考虑支持flink 1.13版本的程序，还需要考虑支持其他的版本？</p> 
+<p>如何将sql转换为JobGraph同时对接我们的部署程序，实现一个类sql-client的功能呢？</p> 
+<p>这些我们下次再聊，有问题的也可以私信我~</p> 
+<h2><a id="_993"></a>参考资料</h2> 
+<p><a href="https://www.bilibili.com/video/BV1rh411C77P" rel="nofollow">尚硅谷flink内核视频链接</a></p> 
+<p>streamx开源项目的提交模块，项目链接：http://www.streamxhub.com/</p> 
+<p>感谢上述项目的参考</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/f6f195343b43990edebf1fca8d690a33/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">js 金钱数字添加千分位分隔符号</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/5aa1b131e8c6ae1317a7e471b662c983/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">请求报错No route to host (Host unreachable)</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Redis核心技术-高可靠-集群方案（客户端分片、代理分片、Redis Cluster） - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Redis核心技术-高可靠-集群方案（客户端分片、代理分片、Redis Cluster）" />
+<meta property="og:description" content="Redis在3.0版本前只支持单实例模式，虽然Redis的开发者Antirez早在博客上就提出在Redis 3.0版本中加入集群的功能，但3.0版本等到2015年才发布正式版。
+各大企业等不急了，在3.0版本还没发布前为了解决Redis的存储瓶颈，纷纷推出了各自的Redis集群方案。这些方案的核心思想是把数据分片（sharding）存储在多个Redis实例中，每一片就是一个Redis实例。
+包括：客户端分片、代理分片、Redis Cluster
+客户端分片 客户端分片是把分片的逻辑放在Redis客户端实现，（比如：jedis已支持Redis Sharding功能，即ShardedJedis），通过Redis客户端预先定义好的路由规则(使用一致性哈希)，把对Key的访问转发到不同的Redis实例中，查询数据时把返回结果汇集。这种方案的模式如图所示。
+一致性哈希算法（consistent hashing） 一致性哈希算法分布式系统中常用的算法。
+什么是一致性 hash 算法:
+一致性哈希算法也是使用取模的方法，普通哈希算法取模算法是对服务器的数量进行取模，而一致性哈希算法是对 2^32 取模，具体步骤如下：
+1.一致性哈希算法将整个哈希值空间按照顺时针方向组织成一个虚拟的圆环，称为 Hash 环；
+2.接着将各个服务器使用 Hash 函数进行哈希，具体可以选择服务器的IP或主机名作为关键字进行哈希，从而确定每台机器在哈希环上的位置
+3.最后使用算法定位数据访问到相应服务器：将数据key使用相同的函数Hash计算出哈希值，并确定此数据在环上的位置，从此位置沿环顺时针寻找，第一台遇到的服务器就是其应该定位到的服务器
+一致性哈希算法问题：hash 环的倾斜
+一致性哈希算法在服务节点太少的情况下，容易因为节点分部不均匀而造成数据倾斜问题，也就是被缓存的对象大部分集中缓存在某一台服务器上，从而出现数据分布不均匀的情况，这种情况就称为 hash 环的倾斜。
+hash 环的倾斜在极端情况下，仍然有可能引起系统的崩溃，为了解决这种数据倾斜问题，一致性哈希算法引入了虚拟节点机制，即对每一个服务节点计算多个哈希，每个计算结果位置都放置一个此服务节点，称为虚拟节点，一个实际物理节点可以对应多个虚拟节点，虚拟节点越多，hash环上的节点就越多，缓存被均匀分布的概率就越大，hash环倾斜所带来的影响就越小，同时数据定位算法不变，只是多了一步虚拟节点到实际节点的映射。
+比如，一个分布式的存储系统，要将数据存储到具体的节点上，如果采用普通的hash方法，将数据映射到具体的节点上，如mod(key,d)，key是数据的key，d是机器节点数，如果有一个机器加入或退出这个集群，则所有的数据映射都无效了。
+一致性哈希算法解决了普通余数Hash算法伸缩性差的问题，可以保证在上线、下线服务器的情况下尽量有多的请求命中原来路由到的服务器。
+如Jedis的Redis Sharding实现，采用一致性哈希算法(consistent hashing)，将key和节点name同时hashing，然后进行映射匹配，采用的算法是MURMUR_HASH。
+采用一致性哈希而不是采用简单类似哈希求模映射的主要原因是当增加或减少节点时，不会产生由于重新匹配造成的rehashing。一致性哈希只影响相邻节点key分配，影响量小。
+客户端分片的优缺点 优点:
+客户端sharding技术使用hash一致性算法分片的好处是所有的逻辑都是可控的，不依赖于第三方分布式中间件。服务端的Redis实例彼此独立，相互无关联，每个Redis实例像单服务器一样运行，非常容易线性扩展，系统的灵活性很强。开发人员清楚怎么实现分片、路由的规则，不用担心踩坑。 不足:
+这是一种静态的分片方案，需要增加或者减少Redis实例的数量，需要手工调整分片的程序。运维成本比较高，集群的数据出了任何问题都需要运维人员和开发人员一起合作，减缓了解决问题的速度，增加了跨部门沟通的成本。在不同的客户端程序中，维护相同的路由分片逻辑成本巨大。比如：java项目、PHP项目里共用一套Redis集群，路由分片逻辑分别需要写两套一样的逻辑，以后维护也是两套。 客户端分片有一个最大的问题就是，服务端Redis实例群拓扑结构有变化时，每个客户端都需要更新调整。如果能把客户端分片模块单独拎出来，形成一个单独的模块(中间件)，作为客户端 和 服务端连接的桥梁就能解决这个问题了，此时代理分片就出现了。
+代理分片 代理基本原理是：通过中间件的形式，Redis客户端把请求发送到代理，代理根据路由规则发送到正确的Redis实例，最后代理把结果汇集返回给客户端。
+代理分片有：Twemproxy、predixy、codis 。
+Twemproxy Twemproxy由Twitter开源的Redis代理，其基本原理是：通过中间件的形式，Redis客户端把请求发送到Twemproxy，Twemproxy根据路由规则发送到正确的Redis实例，最后Twemproxy把结果汇集返回给客户端。
+Twemproxy github地址：https://github.com/twitter/twemproxy
+Twemproxy通过引入一个代理层，将多个Redis实例进行统一管理，使Redis客户端只需要在Twemproxy上进行操作，而不需要关心后面有多少个Redis实例，从而实现了Redis集群。
+predixy Predixy 是一款高性能全特征redis代理，支持redis-sentinel和redis-cluster。
+Predixy github地址：https://github.com/joyieldInc/predixy
+predixy完美的实现了对redis单例模式及集群模式的支持，几乎完整的实现了redis原生的所有用于客户端的命令。多key命令、列表阻塞操作、发布订阅、脚本、扫描等高级功能全支持，在使用redis单例模式下也支持事务。
+codis Codis 是 Wandoujia Infrastructure Team 开发的一个分布式 Redis 服务, 用户可以看成是一个无限内存的 Redis 服务, 有动态扩/缩容的能力." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/bae06397ba8ac339fa88097b1b26406a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-02-05T20:48:53+08:00" />
+<meta property="article:modified_time" content="2023-02-05T20:48:53+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Redis核心技术-高可靠-集群方案（客户端分片、代理分片、Redis Cluster）</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>Redis在3.0版本前只支持单实例模式，虽然Redis的开发者Antirez早在博客上就提出在Redis 3.0版本中加入集群的功能，但3.0版本等到2015年才发布正式版。</p> 
+<p>各大企业等不急了，在3.0版本还没发布前为了解决Redis的存储瓶颈，纷纷推出了各自的Redis集群方案。这些方案的核心思想是把数据分片（sharding）存储在多个Redis实例中，每一片就是一个Redis实例。</p> 
+<p>包括：客户端分片、代理分片、Redis Cluster</p> 
+<h3><a id="_5"></a>客户端分片</h3> 
+<p>客户端分片是把分片的逻辑放在Redis客户端实现，（比如：jedis已支持Redis Sharding功能，即ShardedJedis），通过Redis客户端预先定义好的路由规则(使用一致性哈希)，把对Key的访问转发到不同的Redis实例中，查询数据时把返回结果汇集。这种方案的模式如图所示。<img src="https://images2.imgbox.com/18/26/b9ZEYD0C_o.jpg" alt="客户端分片"></p> 
+<h4><a id="consistent_hashing_7"></a>一致性哈希算法（consistent hashing）</h4> 
+<p>一致性哈希算法分布式系统中常用的算法。</p> 
+<blockquote> 
+ <p>什么是一致性 hash 算法:<br> 一致性哈希算法也是使用取模的方法，普通哈希算法取模算法是对服务器的数量进行取模，而一致性哈希算法是对 2^32 取模，具体步骤如下：<br> 1.一致性哈希算法将整个哈希值空间按照顺时针方向组织成一个虚拟的圆环，称为 Hash 环；<br> 2.接着将各个服务器使用 Hash 函数进行哈希，具体可以选择服务器的IP或主机名作为关键字进行哈希，从而确定每台机器在哈希环上的位置<br> 3.最后使用算法定位数据访问到相应服务器：将数据key使用相同的函数Hash计算出哈希值，并确定此数据在环上的位置，从此位置沿环顺时针寻找，第一台遇到的服务器就是其应该定位到的服务器</p> 
+</blockquote> 
+<blockquote> 
+ <p>一致性哈希算法问题：hash 环的倾斜<br> 一致性哈希算法在服务节点太少的情况下，容易因为节点分部不均匀而造成数据倾斜问题，也就是被缓存的对象大部分集中缓存在某一台服务器上，从而出现数据分布不均匀的情况，这种情况就称为 hash 环的倾斜。<br> hash 环的倾斜在极端情况下，仍然有可能引起系统的崩溃，为了解决这种数据倾斜问题，一致性哈希算法引入了<strong>虚拟节点机制</strong>，即对每一个服务节点计算多个哈希，每个计算结果位置都放置一个此服务节点，称为虚拟节点，一个实际物理节点可以对应多个虚拟节点，虚拟节点越多，hash环上的节点就越多，缓存被均匀分布的概率就越大，hash环倾斜所带来的影响就越小，同时数据定位算法不变，只是多了一步虚拟节点到实际节点的映射。</p> 
+</blockquote> 
+<p>比如，一个分布式的存储系统，要将数据存储到具体的节点上，如果采用普通的hash方法，将数据映射到具体的节点上，如mod(key,d)，key是数据的key，d是机器节点数，如果有一个机器加入或退出这个集群，则所有的数据映射都无效了。</p> 
+<p>一致性哈希算法解决了普通余数Hash算法伸缩性差的问题，可以保证在上线、下线服务器的情况下尽量有多的请求命中原来路由到的服务器。</p> 
+<p>如Jedis的Redis Sharding实现，采用一致性哈希算法(consistent hashing)，将key和节点name同时hashing，然后进行映射匹配，采用的算法是MURMUR_HASH。</p> 
+<p>采用一致性哈希而不是采用简单类似哈希求模映射的主要原因是当增加或减少节点时，不会产生由于重新匹配造成的rehashing。一致性哈希只影响相邻节点key分配，影响量小。</p> 
+<h4><a id="_28"></a>客户端分片的优缺点</h4> 
+<p>优点:</p> 
+<ol><li>客户端sharding技术使用hash一致性算法分片的好处是所有的逻辑都是可控的，不依赖于第三方分布式中间件。</li><li>服务端的Redis实例彼此独立，相互无关联，每个Redis实例像单服务器一样运行，非常容易线性扩展，系统的灵活性很强。</li><li>开发人员清楚怎么实现分片、路由的规则，不用担心踩坑。</li></ol> 
+<p>不足:</p> 
+<ol><li>这是一种静态的分片方案，需要增加或者减少Redis实例的数量，需要手工调整分片的程序。</li><li>运维成本比较高，集群的数据出了任何问题都需要运维人员和开发人员一起合作，减缓了解决问题的速度，增加了跨部门沟通的成本。</li><li>在不同的客户端程序中，维护相同的路由分片逻辑成本巨大。比如：java项目、PHP项目里共用一套Redis集群，路由分片逻辑分别需要写两套一样的逻辑，以后维护也是两套。</li></ol> 
+<p>客户端分片有一个最大的问题就是，服务端Redis实例群拓扑结构有变化时，每个客户端都需要更新调整。如果能把客户端分片模块单独拎出来，形成一个单独的模块(中间件)，作为客户端 和 服务端连接的桥梁就能解决这个问题了，此时代理分片就出现了。</p> 
+<h3><a id="_42"></a>代理分片</h3> 
+<p>代理基本原理是：通过中间件的形式，Redis客户端把请求发送到代理，代理根据路由规则发送到正确的Redis实例，最后代理把结果汇集返回给客户端。</p> 
+<p>代理分片有：Twemproxy、predixy、codis 。</p> 
+<h4><a id="Twemproxy_47"></a>Twemproxy</h4> 
+<p>Twemproxy由Twitter开源的Redis代理，其基本原理是：通过中间件的形式，Redis客户端把请求发送到Twemproxy，Twemproxy根据路由规则发送到正确的Redis实例，最后Twemproxy把结果汇集返回给客户端。</p> 
+<blockquote> 
+ <p>Twemproxy github地址：https://github.com/twitter/twemproxy</p> 
+</blockquote> 
+<p>Twemproxy通过引入一个代理层，将多个Redis实例进行统一管理，使Redis客户端只需要在Twemproxy上进行操作，而不需要关心后面有多少个Redis实例，从而实现了Redis集群。<img src="https://images2.imgbox.com/14/ac/pXPgehPt_o.jpg" alt="在这里插入图片描述"></p> 
+<h4><a id="predixy_54"></a>predixy</h4> 
+<p>Predixy 是一款高性能全特征redis代理，支持redis-sentinel和redis-cluster。</p> 
+<blockquote> 
+ <p>Predixy github地址：https://github.com/joyieldInc/predixy</p> 
+</blockquote> 
+<p>predixy完美的实现了对redis单例模式及集群模式的支持，几乎完整的实现了redis原生的所有用于客户端的命令。多key命令、列表阻塞操作、发布订阅、脚本、扫描等高级功能全支持，在使用redis单例模式下也支持事务。</p> 
+<h4><a id="codis_60"></a>codis</h4> 
+<p>Codis 是 Wandoujia Infrastructure Team 开发的一个分布式 Redis 服务, 用户可以看成是一个无限内存的 Redis 服务, 有动态扩/缩容的能力. 对偏存储型的业务更实用, 如果你需要 SUBPUB 之类的指令, Codis 是不支持的. 时刻记住 Codis 是一个分布式存储的项目. 对于海量的 key, value不太大( &lt;= 1M ), 随着业务扩展缓存也要随之扩展的业务场景有特效.</p> 
+<p>Codis是由豌豆荚自主研发，支持平滑增加Redis实例的Redis代理软件，其基于Go和C语言开发，并于2014年11月在GitHub上开源。</p> 
+<blockquote> 
+ <p>codis github地址：https://github.com/CodisLabs/codis/</p> 
+</blockquote> 
+<p>Codis是如何分片的？<br> Codis 采用 Pre-sharding 的技术来实现数据的分片, 默认分成 1024 个 slots (0-1023), 对于每个key来说, 通过以下公式确定所属的 Slot Id : SlotId = crc32(key) % 1024。<br> 每一个 slot 都会有一个且必须有一个特定的 server group id 来表示这个 slot 的数据由哪个 server group 来提供。数据的迁移也是以slot为单位的。</p> 
+<p>Redis获得动态扩容/缩容的能力，增减redis实例对client完全透明、不需要重启服务，不需要业务方担心 Redis 内存爆掉的问题. 也不用担心申请太大, 造成浪费. 业务方也不需要自己维护 Redis.</p> 
+<p>Codis支持水平扩容/缩容，扩容可以直接界面的 “Auto Rebalance” 按钮，缩容只需要将要下线的实例拥有的slot迁移到其它实例，然后在界面上删除下线的group即可。</p> 
+<p>相对于twemproxy的优劣？<br> codis和twemproxy最大的区别有两个：</p> 
+<ul><li>一个是codis支持<strong>动态水平扩展</strong>，对client完全透明不影响服务的情况下可以完成增减redis实例的操作；</li><li>一个是codis是用go语言写的并<strong>支持多线程</strong>而twemproxy用C并只用单线程。 后者又意味着：codis在多核机器上的性能会好于twemproxy；codis的最坏响应时间可能会因为GC的STW而变大，不过go1.5发布后会显著降低STW的时间；如果只用一个CPU的话go语言的性能不如C，因此在一些短连接而非长连接的场景中，整个系统的瓶颈可能变成accept新tcp连接的速度，这时codis的性能可能会差于twemproxy。</li></ul> 
+<p>相对于redis cluster的优劣？<br> redis cluster基于smart client和无中心的设计，client必须按key的哈希将请求直接发送到对应的节点。<br> 这意味着：使用官方cluster必须要等对应语言的redis driver对cluster支持的开发和不断成熟；client不能直接像单机一样使用pipeline来提高效率，想同时执行多个请求来提速必须在client端自行实现异步逻辑。 而codis因其有中心节点、基于proxy的设计，对client来说可以像对单机redis一样去操作proxy（除了一些命令不支持），还可以继续使用pipeline并且如果后台redis有多个的话速度会显著快于单redis的pipeline。同时codis使用zookeeper来作为辅助，这意味着单纯对于redis集群来说需要额外的机器搭zk，不过对于很多已经在其他服务上用了zk的公司来说这不是问题：）</p> 
+<h4><a id="_84"></a>各个代理对比</h4> 
+<table><thead><tr><th>特性</th><th>predixy</th><th>twemproxy</th><th>codis</th></tr></thead><tbody><tr><td>高可用</td><td>Redis Sentinel或Redis Cluster</td><td>一致性哈希</td><td>Redis Sentinel</td></tr><tr><td>可扩展</td><td>Key哈希分布或Redis Cluster</td><td>Key哈希分布</td><td>Key哈希分布</td></tr><tr><td>开发语言</td><td>C++</td><td>C</td><td>GO</td></tr><tr><td>多线程</td><td>是</td><td>否</td><td>是</td></tr><tr><td>事务</td><td>Redis Sentinel模式单Redis组下支持</td><td>不支持</td><td>不支持</td></tr><tr><td>BLPOP/BRPOP/BLPOPRPUSH</td><td>支持</td><td>不支持</td><td>不支持</td></tr><tr><td>Pub/Sub</td><td>支持</td><td>不支持</td><td>不支持</td></tr><tr><td>Script</td><td>支持load</td><td>不支持</td><td>不支持</td></tr><tr><td>Scan</td><td>支持</td><td>不支持</td><td>不支持</td></tr><tr><td>Select DB</td><td>支持</td><td>不支持</td><td>支持</td></tr><tr><td>Auth</td><td>支持定义多个密码，给予不同读写及管理权限和Key访问空间</td><td>不支持</td><td>同redis</td></tr><tr><td>读从节点</td><td>支持，可定义丰富规则读指定的从节点</td><td>不支持</td><td>支持，简单规则</td></tr><tr><td>多机房支持</td><td>支持，可定义丰富规则调度流量</td><td>不支持</td><td>有限支持</td></tr><tr><td>统计信息</td><td>丰富</td><td>丰富</td><td>丰富</td></tr></tbody></table> 
+<p>结论：<br> 在功能的对比上，predixy相比另外两款代理更为全面，基本可以完全适用原生redis的使用场景。在性能上，predixy在各轮测试中都以较大优势领先。对各代理的总结如下：</p> 
+<ol><li>predixy：功能全面，既可以使用单个主从redis，也可使用Redis Cluster；性能优异。</li><li>twemproxy：高可用依赖一致性哈希，仅在缓存场景下适用，不适用存储使用；性能中等。</li><li>codis：适用redis集群使用；性能一般。</li></ol> 
+<h3><a id="Redis_Cluster_108"></a>Redis Cluster</h3> 
+<p>可以查看另外一篇文章：<a href="https://blog.csdn.net/NF_ALONG/article/details/122197257">Redis核心技术-高可靠-集群（cluster）</a></p> 
+<h3><a id="redis_112"></a>理解并从头搭建redis集群</h3> 
+<p>可以查看其它文章：<a href="https://zhuanlan.zhihu.com/p/586100070" rel="nofollow">理解并从头搭建redis集群</a></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/ec64ad974017445807015e2de1e6a867/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">linux 压缩命令</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/d13740e337c5cce1b554e8d7e3adc865/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">华清远见学习—“进制之间的转换”</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

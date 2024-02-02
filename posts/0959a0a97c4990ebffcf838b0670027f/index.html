@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>spring源码系列8——最详细的循环依赖解读 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="spring源码系列8——最详细的循环依赖解读" />
+<meta property="og:description" content="前面系列3到系列7总共5篇文章分析了spring容器启动的整个过程，但未对部分重要细节进行深入分析，比如spring循环依赖，因此本节对spring循环依赖进行深入分析。先思考以下四个问题：
+A、 spring能解决所有的循环依赖吗？
+B、 spring如何解决循环依赖？
+C、 一级缓存以及二级缓存能否解决循环依赖？
+D、为什么需要三级缓存？
+相信看完本文，上面问题豁然开朗。
+1、预备知识 1.1、预备知识1——bean生命周期 回顾一下系列7中总结的bean生命周期，如下所示：
+可以大致分成两个主要阶段：实例化和初始化，进而可以细分成：实例化前、实例化、实例化后、初始化前、初始化、初始化后。
+1.2、预备知识2——依赖注入 依赖注入根据配置的不同，可以分成xml和注解两种，如下：
+xml
+构造注入、setter注入、静态工厂方法、实例工厂方法
+注解
+构造注入、filed注入
+构造注入——通过构造参数注入依赖
+filed注入——@Autowired、@Resource
+2、循环依赖 2.1、什么是循环依赖？ 如上所示，InstantA依赖InstantB，InstantB依赖InstantC，依次往下传递到最终依赖InstantZ，InstantZ依赖InstantA，形成依赖闭环，即循环依赖。
+2.2、构造注入 为了简化分析难度，此处只分析A依赖B，B依赖A的情况，同时现在注解用得更广泛，因此下面以注解作为demo进行分析。
+@Component public class InstantA { private InstantB instantB; public InstantA(InstantB instantB) { this.instantB = instantB; } } @Component public class InstantB { private InstantA instantA; public InstantB(InstantA instantA) { this.instantA = instantA; } } 可以看到InstantA中的属性依赖InstantB，InstantB依赖InstantA，相互依赖，因此形成循环依赖。
+启动spring容器时，报错如下：
+从启动结果可以看出spring无法解决构造注入时产生的循环依赖；
+2.3、filed注入 @Component public class InstantA { @Autowired private InstantB instantB; } @Component public class InstantB { @Autowired private InstantA instantA; } 容器能正常启动并成功注入依赖，表明Spring能成功解决filed注入时产生的循环依赖。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/0959a0a97c4990ebffcf838b0670027f/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2021-09-12T16:04:01+08:00" />
+<meta property="article:modified_time" content="2021-09-12T16:04:01+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">spring源码系列8——最详细的循环依赖解读</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>        前面系列3到系列7总共5篇文章分析了spring容器启动的整个过程，但未对部分重要细节进行深入分析，比如spring循环依赖，因此本节对spring循环依赖进行深入分析。先思考以下四个问题：</p> 
+<p>A、 spring能解决所有的循环依赖吗？</p> 
+<p>B、 spring如何解决循环依赖？</p> 
+<p>C、 一级缓存以及二级缓存能否解决循环依赖？</p> 
+<p>D、为什么需要三级缓存？</p> 
+<p>相信看完本文，上面问题豁然开朗。</p> 
+<h2><a id="1_12"></a>1、预备知识</h2> 
+<h3><a id="111bean_13"></a>1.1、预备知识1——bean生命周期</h3> 
+<p>回顾一下系列7中总结的bean生命周期，如下所示：<br> <img src="https://images2.imgbox.com/74/c7/tb50hOsg_o.png" alt="在这里插入图片描述"><br> 可以大致分成两个主要阶段：实例化和初始化，进而可以细分成：实例化前、实例化、实例化后、初始化前、初始化、初始化后。</p> 
+<h3><a id="122_18"></a>1.2、预备知识2——依赖注入</h3> 
+<p>依赖注入根据配置的不同，可以分成xml和注解两种，如下：</p> 
+<ul><li> <p>xml<br> 构造注入、setter注入、静态工厂方法、实例工厂方法</p> </li><li> <p>注解<br> 构造注入、filed注入</p> <p>构造注入——通过构造参数注入依赖<br> filed注入——@Autowired、@Resource</p> </li></ul> 
+<h2><a id="2_32"></a>2、循环依赖</h2> 
+<h3><a id="21_36"></a>2.1、什么是循环依赖？</h3> 
+<p><img src="https://images2.imgbox.com/3d/b5/6yYliEVj_o.png" alt="在这里插入图片描述"><br> 如上所示，InstantA依赖InstantB，InstantB依赖InstantC，依次往下传递到最终依赖InstantZ，InstantZ依赖InstantA，形成依赖闭环，即循环依赖。</p> 
+<h3><a id="22_41"></a>2.2、构造注入</h3> 
+<p>为了简化分析难度，此处只分析A依赖B，B依赖A的情况，同时现在注解用得更广泛，因此下面以注解作为demo进行分析。</p> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Component</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">InstantA</span> <span class="token punctuation">{<!-- --></span>
+
+	<span class="token keyword">private</span> InstantB instantB<span class="token punctuation">;</span>
+
+	<span class="token keyword">public</span> <span class="token function">InstantA</span><span class="token punctuation">(</span>InstantB instantB<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">this</span><span class="token punctuation">.</span>instantB <span class="token operator">=</span> instantB<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+
+<span class="token annotation punctuation">@Component</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">InstantB</span> <span class="token punctuation">{<!-- --></span>
+
+	<span class="token keyword">private</span> InstantA instantA<span class="token punctuation">;</span>
+
+	<span class="token keyword">public</span> <span class="token function">InstantB</span><span class="token punctuation">(</span>InstantA instantA<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">this</span><span class="token punctuation">.</span>instantA <span class="token operator">=</span> instantA<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        可以看到InstantA中的属性依赖InstantB，InstantB依赖InstantA，相互依赖，因此形成循环依赖。<br>         启动spring容器时，报错如下：<br> <img src="https://images2.imgbox.com/38/84/oxf0aNrc_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>从启动结果可以看出spring无法解决构造注入时产生的循环依赖；</strong></p> 
+<h3><a id="23filed_72"></a>2.3、filed注入</h3> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Component</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">InstantA</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token annotation punctuation">@Autowired</span>
+	<span class="token keyword">private</span> InstantB instantB<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token annotation punctuation">@Component</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">InstantB</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token annotation punctuation">@Autowired</span>
+	<span class="token keyword">private</span> InstantA instantA<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<p>        容器能正常启动并成功注入依赖，表明<strong>Spring能成功解决filed注入时产生的循环依赖。</strong></p> 
+<p>        接下来，深入源码探究为什么不能解决构造注入时产生的循环依赖，而可以解决filed注入时产生的循环依赖？发车！</p> 
+<h2><a id="3_91"></a>3、构造注入循环依赖</h2> 
+<h3><a id="31_93"></a>3.1、源码分析</h3> 
+<p><strong>1. 从容器获取insantA并将beanName加入singletonsCurrentlyInCreation集合</strong></p> 
+<pre><code class="prism language-java">	<span class="token comment">//正在创建的bean集合</span>
+	<span class="token comment">/** Names of beans that are currently in creation. */</span>
+	<span class="token keyword">private</span> <span class="token keyword">final</span> Set<span class="token generics function"><span class="token punctuation">&lt;</span>String<span class="token punctuation">&gt;</span></span> singletonsCurrentlyInCreation <span class="token operator">=</span>
+			Collections<span class="token punctuation">.</span><span class="token function">newSetFromMap</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ConcurrentHashMap</span><span class="token operator">&lt;</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token number">16</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<p>singletonsCurrentlyInCreation记录当前正在创建bean的名字集合。</p> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> Object <span class="token function">getSingleton</span><span class="token punctuation">(</span>String beanName<span class="token punctuation">,</span> ObjectFactory<span class="token operator">&lt;</span><span class="token operator">?</span><span class="token operator">&gt;</span> singletonFactory<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		Assert<span class="token punctuation">.</span><span class="token function">notNull</span><span class="token punctuation">(</span>beanName<span class="token punctuation">,</span> <span class="token string">"Bean name must not be null"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">synchronized</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>singletonObjects<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			Object singletonObject <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>singletonObjects<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span>singletonObject <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token comment">//创建和销毁冲突</span>
+				<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>singletonsCurrentlyInDestruction<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			    <span class="token comment">//省略非关键代码</span>
+				<span class="token punctuation">}</span>
+				<span class="token keyword">if</span> <span class="token punctuation">(</span>logger<span class="token punctuation">.</span><span class="token function">isDebugEnabled</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+					logger<span class="token punctuation">.</span><span class="token function">debug</span><span class="token punctuation">(</span><span class="token string">"Creating shared instance of singleton bean '"</span> <span class="token operator">+</span> beanName <span class="token operator">+</span> <span class="token string">"'"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span>
+				<span class="token comment">//回调前：将当前beanName加入singletonsCurrentlyInCreation，如果已在创建过程中则抛出异常</span>
+				<span class="token function">beforeSingletonCreation</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">boolean</span> newSingleton <span class="token operator">=</span> <span class="token boolean">false</span><span class="token punctuation">;</span>
+				<span class="token keyword">boolean</span> recordSuppressedExceptions <span class="token operator">=</span> <span class="token punctuation">(</span><span class="token keyword">this</span><span class="token punctuation">.</span>suppressedExceptions <span class="token operator">==</span> null<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">if</span> <span class="token punctuation">(</span>recordSuppressedExceptions<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+					<span class="token keyword">this</span><span class="token punctuation">.</span>suppressedExceptions <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">LinkedHashSet</span><span class="token operator">&lt;</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span>
+				<span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+					<span class="token comment">//执行回调函数</span>
+					singletonObject <span class="token operator">=</span> singletonFactory<span class="token punctuation">.</span><span class="token function">getObject</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+					newSingleton <span class="token operator">=</span> <span class="token boolean">true</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span>
+				<span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">IllegalStateException</span> ex<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+                 <span class="token comment">//省略非关键代码</span>
+				<span class="token punctuation">}</span>
+				<span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">BeanCreationException</span> ex<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				 <span class="token comment">//省略非关键代码</span>
+				<span class="token punctuation">}</span>
+				<span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+					<span class="token keyword">if</span> <span class="token punctuation">(</span>recordSuppressedExceptions<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+						<span class="token keyword">this</span><span class="token punctuation">.</span>suppressedExceptions <span class="token operator">=</span> null<span class="token punctuation">;</span>
+					<span class="token punctuation">}</span>
+					<span class="token comment">//回调后：从singletonsCurrentlyInCreation移除beanName</span>
+					<span class="token function">afterSingletonCreation</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span>
+				<span class="token keyword">if</span> <span class="token punctuation">(</span>newSingleton<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+					<span class="token comment">//从二级、三级缓存移除，并将当前实例加入单例池中</span>
+					<span class="token function">addSingleton</span><span class="token punctuation">(</span>beanName<span class="token punctuation">,</span> singletonObject<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span>
+			<span class="token punctuation">}</span>
+			<span class="token keyword">return</span> singletonObject<span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+</code></pre> 
+<p>beforeSingletonCreation和afterSingletonCreation两个方法分别将beanName从集合中加入或者移除，重点看beforeSingletonCreation</p> 
+<pre><code class="prism language-java">	<span class="token keyword">protected</span> <span class="token keyword">void</span> <span class="token function">beforeSingletonCreation</span><span class="token punctuation">(</span>String beanName<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span><span class="token keyword">this</span><span class="token punctuation">.</span>inCreationCheckExclusions<span class="token punctuation">.</span><span class="token function">contains</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span> <span class="token operator">&amp;&amp;</span> <span class="token operator">!</span><span class="token keyword">this</span><span class="token punctuation">.</span>singletonsCurrentlyInCreation<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token comment">//当多次加入同一个beanName，则抛出异常   构造注入出现循环依赖时  此处会抛出异常</span>
+			<span class="token keyword">throw</span> <span class="token keyword">new</span> <span class="token class-name">BeanCurrentlyInCreationException</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>2. 推断instantA的构造函数并从容器获取依赖instantB</strong></p> 
+<p><img src="https://images2.imgbox.com/29/63/8CCChcAl_o.png" alt="在这里插入图片描述"></p> 
+<p>因InstantA仅有一个带参的构造函数，因此只能用它，但发现需要InstantB作为构造参数，因此从容器中获取InstantB；<br> <img src="https://images2.imgbox.com/ed/d2/2hvnBVzm_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>3. 从容器获取instantB将beanName加入singletonsCurrentlyInCreation</strong><br> <img src="https://images2.imgbox.com/a1/9b/bjTJ0ZBS_o.png" alt="在这里插入图片描述"><br> 此时singletonsCurrentlyInCreation集合中有两个beanName：instantA和instantB。</p> 
+<p><strong>4.推断实例化InstantB的构造函数并从容器获取依赖instantA</strong><br> <img src="https://images2.imgbox.com/66/8e/Q0JKtzuS_o.png" alt="在这里插入图片描述"></p> 
+<p><img src="https://images2.imgbox.com/1b/42/0W9pSGru_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>5. 再次从容器获取instantA并将beanName加入singletonsCurrentlyInCreation抛出异常</strong></p> 
+<p><img src="https://images2.imgbox.com/5b/94/y4bWmQCU_o.png" alt="在这里插入图片描述"><br>       当再次将instantA加入singletonsCurrentlyInCreation set集合时，此时集合中已经存在instantA，则抛出BeanCurrentlyInCreationException异常。InstantA和InstantB实例化时，都彼此需要对方作为参数，形成死循环，将以上流程梳理总结如下。</p> 
+<h3><a id="32_191"></a>3.2、流程总结</h3> 
+<p><img src="https://images2.imgbox.com/00/f2/NyYRm75t_o.png" alt="在这里插入图片描述"><br> 对上面流程简短说明：<br> A、当实例InstantA前，将beanName instantA加入集合;<br> B、实例化InstantA时，发现依赖InstantB；<br> C、实例InstantB前，将beanName instantB加入集合;<br> D、实例化InstantB时，发现依赖InstantA；<br> E、从容器获取InstantA，发现没有，则再次执行创建流程，将beanName instantA加入集合，此时集合中已经存在beanName instantA，抛出异常；</p> 
+<p>因此，<strong>spring无法解决构造注入时产生的循环依赖；</strong></p> 
+<h2><a id="4filed_208"></a>4、filed注入循环依赖</h2> 
+<h3><a id="41__210"></a>4.1、 三级缓存</h3> 
+<p><img src="https://images2.imgbox.com/d1/1a/xmDRuBlP_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/cd/90/CFDfSpOK_o.png" alt="在这里插入图片描述"></p> 
+<h3><a id="42_215"></a>4.2、源码分析</h3> 
+<p><strong>1. 从容器获取instantA并将beanName instantA 加入singletonsCurrentlyInCreation</strong><br> <img src="https://images2.imgbox.com/bf/ad/poV96qaD_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>2. 推断实例化instantA的构造函数</strong><br> <img src="https://images2.imgbox.com/4e/e8/pmhGYqcC_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>3.将instanA加入三级缓存</strong><br> <img src="https://images2.imgbox.com/fb/2b/OudfPMVA_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>4. populateBean——填充instantA的属性</strong><br> <img src="https://images2.imgbox.com/c2/9e/4zm5xCFR_o.png" alt="在这里插入图片描述"><br> 为InstantA填充属性instanB</p> 
+<p><strong>5. 从容器获取instantB并将beanName instantB加入singletonsCurrentlyInCreation</strong><br> <img src="https://images2.imgbox.com/2b/0b/mERgAJsI_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>6. 推断InstantB的构造函数并生成实例</strong><br> <img src="https://images2.imgbox.com/8e/eb/FFU4lGxr_o.png" alt="在这里插入图片描述"><br> <strong>7. 将instantB加入三级缓存</strong><br> <img src="https://images2.imgbox.com/07/1c/omYcedTR_o.png" alt="在这里插入图片描述"><br> 此时instantA和instantB都在三级缓存中。</p> 
+<p><strong>8. populateBean—填充instantB的属性</strong><br> <img src="https://images2.imgbox.com/0d/df/nBtuA0He_o.png" alt="在这里插入图片描述"><br> 经过解析@Autowired注解，发现instantB依赖InstantA，因此从容器中获取InstantA.。<br> <img src="https://images2.imgbox.com/b8/48/LmtQ32pj_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>9. 再次从容器中获取instantA——从三级缓存中获取instantA并加入二级缓存</strong><br> <img src="https://images2.imgbox.com/ac/ae/cmu8h8ir_o.png" alt="在这里插入图片描述"><br>     此时beanName instantA在singletonsCurrentlyInCreation集合中，因此193行方法isSingletonCurrentlyInCreation返回true，此时继续从二级三级缓存查找。<br>     此时三级缓存中有instantA的回调函数，执行回调函数得到早期曝光bean并放入二级缓存，同时将回调函数从三级缓存中移除。下面看如何执行三级回调函数？</p> 
+<p><strong>10. 执行instantA的三级缓存回调函数</strong></p> 
+<p><img src="https://images2.imgbox.com/10/28/hxgm6pr0_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/db/f5/8ADpra7c_o.png" alt="在这里插入图片描述"><br> 生成cacheKey并放入earlyProxyReferences缓存中；下面继续看wrapIfNecessary方法：<br> <img src="https://images2.imgbox.com/da/c8/dYjDpT6w_o.png" alt="在这里插入图片描述"><br> 此处instantA没aop增强，所以上图363行返回的specificInterceptors为空，因此未创建代理对象，将原有的bean直接返回。</p> 
+<p><strong>11. 常规aop逻辑</strong><br> <img src="https://images2.imgbox.com/50/f9/ZSsaJNuw_o.png" alt="在这里插入图片描述"><br> 常规创建aop代理对象是通过执行BeanPostProcessor的实现类AspectJAwareAdvisorAutoProxyCreator的postProcessAfterInitialization方法。</p> 
+<p><strong>12. 填充instantB的属性</strong><br> <img src="https://images2.imgbox.com/e0/3f/HMQcysT6_o.png" alt="在这里插入图片描述"></p> 
+<p>将容器中获取的instantA(此时位于二级缓存)填充到instantB的属性中。</p> 
+<p><strong>13. 从singletonsCurrentlyInCreation移除instantB</strong><br> <img src="https://images2.imgbox.com/59/a9/iusjuOsO_o.png" alt="在这里插入图片描述"><br> 移除后集合仅剩instantA。</p> 
+<p><strong>14. 更新instantB的缓存</strong><br> <img src="https://images2.imgbox.com/16/68/BfHZrU5w_o.png" alt="15."></p> 
+<p>当前instantB位于三级缓存中，因此从三级缓存中移除并将生成的bean放到一级缓存单例池中；</p> 
+<p><strong>15. 继续回到创建instantA的populateBean过程中</strong><br> <img src="https://images2.imgbox.com/38/dc/rtUeULSk_o.png" alt="在这里插入图片描述"><br> 将容器获取的instantB填充到instantA实例中。</p> 
+<p><strong>16. 更新instantA的缓存</strong></p> 
+<p>当instantA属性填充完后，instantA生成完毕，此时进行缓存更新。<br> <img src="https://images2.imgbox.com/4b/bf/4LKTmxA8_o.png" alt="在这里插入图片描述"></p> 
+<p>当instantA属性填充完后，再进行初始化。初始化后，instantA生成完毕并进行缓存更新，此时instantA位于二级缓存，将它从二级缓存中移除并加入一级缓存单例池。</p> 
+<h3><a id="43_301"></a>4.3、流程总结</h3> 
+<p><img src="https://images2.imgbox.com/ed/f2/eNp8KMLp_o.png" alt="在这里插入图片描述"><br> 结合以上分析，可以看出spring可以解决filed注入产生的循环依赖，主要借助以下四个集合（三级缓存外加正在创建的bean集合）：</p> 
+<pre><code class="prism language-java">	<span class="token comment">//单例池</span>
+	<span class="token comment">/** Cache of singleton objects: bean name to bean instance. */</span>
+	<span class="token keyword">private</span> <span class="token keyword">final</span> Map<span class="token generics function"><span class="token punctuation">&lt;</span>String<span class="token punctuation">,</span> Object<span class="token punctuation">&gt;</span></span> singletonObjects <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">ConcurrentHashMap</span><span class="token operator">&lt;</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token number">256</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+	
+	<span class="token comment">//三级缓存——存放刚实例化的bean</span>
+	<span class="token comment">/** Cache of singleton factories: bean name to ObjectFactory. */</span>
+	<span class="token keyword">private</span> <span class="token keyword">final</span> Map<span class="token operator">&lt;</span>String<span class="token punctuation">,</span> ObjectFactory<span class="token operator">&lt;</span><span class="token operator">?</span><span class="token operator">&gt;&gt;</span> singletonFactories <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashMap</span><span class="token operator">&lt;</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token number">16</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+    <span class="token comment">//二级缓存——存放早期曝光bean</span>
+	<span class="token comment">/** Cache of singleton factories: bean name to ObjectFactory. */</span>
+	<span class="token keyword">private</span> <span class="token keyword">final</span> Map<span class="token operator">&lt;</span>String<span class="token punctuation">,</span> ObjectFactory<span class="token operator">&lt;</span><span class="token operator">?</span><span class="token operator">&gt;&gt;</span> singletonFactories <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashMap</span><span class="token operator">&lt;</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token number">16</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+
+
+	<span class="token comment">//正在创建的bean集合</span>
+	<span class="token comment">/** Names of beans that are currently in creation. */</span>
+	<span class="token keyword">private</span> <span class="token keyword">final</span> Set<span class="token generics function"><span class="token punctuation">&lt;</span>String<span class="token punctuation">&gt;</span></span> singletonsCurrentlyInCreation <span class="token operator">=</span>Collections<span class="token punctuation">.</span><span class="token function">newSetFromMap</span><span class="token punctuation">(</span><span class="token keyword">new</span> <span class="token class-name">ConcurrentHashMap</span><span class="token operator">&lt;</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token number">16</span><span class="token punctuation">)</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+</code></pre> 
+<h2><a id="5bean_325"></a>5、原型bean的循环依赖</h2> 
+<p>       前面的循环依赖主要是针对单例bean，接下来看看spring能否解决原型bean的循环依赖？还是以注解手动注入为例，Go！</p> 
+<h3><a id="51demo_329"></a>5.1、demo示例</h3> 
+<pre><code class="prism language-java"><span class="token annotation punctuation">@Component</span>
+<span class="token annotation punctuation">@Scope</span><span class="token punctuation">(</span><span class="token string">"prototype"</span><span class="token punctuation">)</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">InstantA</span> <span class="token punctuation">{<!-- --></span>
+	
+	<span class="token annotation punctuation">@Autowired</span>
+	<span class="token keyword">private</span> InstantB instantB<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+
+<span class="token annotation punctuation">@Component</span>
+<span class="token annotation punctuation">@Scope</span><span class="token punctuation">(</span><span class="token string">"prototype"</span><span class="token punctuation">)</span>
+<span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">InstantB</span> <span class="token punctuation">{<!-- --></span>
+	<span class="token annotation punctuation">@Autowired</span>
+	<span class="token keyword">private</span> InstantA instantA<span class="token punctuation">;</span>
+<span class="token punctuation">}</span>
+</code></pre> 
+<h3><a id="52_347"></a>5.2、源码分析</h3> 
+<pre><code class="prism language-java"><span class="token keyword">protected</span> <span class="token generics function"><span class="token punctuation">&lt;</span>T<span class="token punctuation">&gt;</span></span> T <span class="token function">doGetBean</span><span class="token punctuation">(</span>
+			String name<span class="token punctuation">,</span> <span class="token annotation punctuation">@Nullable</span> Class<span class="token generics function"><span class="token punctuation">&lt;</span>T<span class="token punctuation">&gt;</span></span> requiredType<span class="token punctuation">,</span> <span class="token annotation punctuation">@Nullable</span> Object<span class="token punctuation">[</span><span class="token punctuation">]</span> args<span class="token punctuation">,</span> <span class="token keyword">boolean</span> typeCheckOnly<span class="token punctuation">)</span>
+			<span class="token keyword">throws</span> BeansException <span class="token punctuation">{<!-- --></span>
+      
+		<span class="token comment">// Eagerly check singleton cache for manually registered singletons.</span>
+		Object sharedInstance <span class="token operator">=</span> <span class="token function">getSingleton</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>sharedInstance <span class="token operator">!=</span> null <span class="token operator">&amp;&amp;</span> args <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>           <span class="token comment">//省略非关键代码</span>
+			bean <span class="token operator">=</span> <span class="token function">getObjectForBeanInstance</span><span class="token punctuation">(</span>sharedInstance<span class="token punctuation">,</span> name<span class="token punctuation">,</span> beanName<span class="token punctuation">,</span> null<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+
+		<span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+			
+             <span class="token comment">//省略非关键代码</span>
+			<span class="token keyword">if</span> <span class="token punctuation">(</span><span class="token operator">!</span>typeCheckOnly<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token function">markBeanAsCreated</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+
+			<span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token comment">// Create bean instance.</span>
+				<span class="token keyword">if</span> <span class="token punctuation">(</span>mbd<span class="token punctuation">.</span><span class="token function">isSingleton</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+					  <span class="token comment">//省略非关键代码</span>
+				<span class="token punctuation">}</span>
+
+				<span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>mbd<span class="token punctuation">.</span><span class="token function">isPrototype</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+					<span class="token comment">// It's a prototype -&gt; create a new instance.</span>
+					Object prototypeInstance <span class="token operator">=</span> null<span class="token punctuation">;</span>
+					<span class="token keyword">try</span> <span class="token punctuation">{<!-- --></span>
+					    <span class="token comment">//创建之前将beanName设置到线程中或者加入集合中</span>
+						<span class="token function">beforePrototypeCreation</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">;</span><span class="token comment">//说明1</span>
+						prototypeInstance <span class="token operator">=</span> <span class="token function">createBean</span><span class="token punctuation">(</span>beanName<span class="token punctuation">,</span> mbd<span class="token punctuation">,</span> args<span class="token punctuation">)</span><span class="token punctuation">;</span>
+					<span class="token punctuation">}</span>
+					<span class="token keyword">finally</span> <span class="token punctuation">{<!-- --></span>
+						<span class="token function">afterPrototypeCreation</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+					<span class="token punctuation">}</span>
+					bean <span class="token operator">=</span> <span class="token function">getObjectForBeanInstance</span><span class="token punctuation">(</span>prototypeInstance<span class="token punctuation">,</span> name<span class="token punctuation">,</span> beanName<span class="token punctuation">,</span> mbd<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token punctuation">}</span>
+
+				<span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+		
+				<span class="token punctuation">}</span>
+			<span class="token punctuation">}</span>
+			<span class="token keyword">catch</span> <span class="token punctuation">(</span><span class="token class-name">BeansException</span> ex<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+				<span class="token function">cleanupAfterBeanCreationFailure</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+				<span class="token keyword">throw</span> ex<span class="token punctuation">;</span>
+			<span class="token punctuation">}</span>
+		<span class="token punctuation">}</span>
+</code></pre> 
+<pre><code class="prism language-java"><span class="token keyword">public</span> <span class="token keyword">class</span> <span class="token class-name">NamedThreadLocal</span><span class="token generics function"><span class="token punctuation">&lt;</span>T<span class="token punctuation">&gt;</span></span> <span class="token keyword">extends</span> <span class="token class-name">ThreadLocal</span><span class="token generics function"><span class="token punctuation">&lt;</span>T<span class="token punctuation">&gt;</span></span> <span class="token punctuation">{<!-- --></span>
+
+	<span class="token keyword">private</span> <span class="token keyword">final</span> String name<span class="token punctuation">;</span>
+
+
+	<span class="token comment">/**
+	 * Create a new NamedThreadLocal with the given name.
+	 * @param name a descriptive name for this ThreadLocal
+	 */</span>
+	<span class="token keyword">public</span> <span class="token function">NamedThreadLocal</span><span class="token punctuation">(</span>String name<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		Assert<span class="token punctuation">.</span><span class="token function">hasText</span><span class="token punctuation">(</span>name<span class="token punctuation">,</span> <span class="token string">"Name must not be empty"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">this</span><span class="token punctuation">.</span>name <span class="token operator">=</span> name<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+	<span class="token annotation punctuation">@Override</span>
+	<span class="token keyword">public</span> String <span class="token function">toString</span><span class="token punctuation">(</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token keyword">return</span> <span class="token keyword">this</span><span class="token punctuation">.</span>name<span class="token punctuation">;</span>
+	<span class="token punctuation">}</span>
+
+<span class="token punctuation">}</span>
+
+</code></pre> 
+<ul><li>beforePrototypeCreation</li></ul> 
+<pre><code class="prism language-java">	<span class="token keyword">protected</span> <span class="token keyword">void</span> <span class="token function">beforePrototypeCreation</span><span class="token punctuation">(</span>String beanName<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+		<span class="token comment">//如果ThreadLocal的value为空，则直接将beanName当作value</span>
+		Object curVal <span class="token operator">=</span> <span class="token keyword">this</span><span class="token punctuation">.</span>prototypesCurrentlyInCreation<span class="token punctuation">.</span><span class="token function">get</span><span class="token punctuation">(</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token keyword">if</span> <span class="token punctuation">(</span>curVal <span class="token operator">==</span> null<span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token keyword">this</span><span class="token punctuation">.</span>prototypesCurrentlyInCreation<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token comment">//如果ThreadLocal的value已经是String，则ThreadLocal的value需要保存多个值，则将新建hashSet作新value</span>
+		<span class="token keyword">else</span> <span class="token keyword">if</span> <span class="token punctuation">(</span>curVal <span class="token keyword">instanceof</span> <span class="token class-name">String</span><span class="token punctuation">)</span> <span class="token punctuation">{<!-- --></span>
+			Set<span class="token generics function"><span class="token punctuation">&lt;</span>String<span class="token punctuation">&gt;</span></span> beanNameSet <span class="token operator">=</span> <span class="token keyword">new</span> <span class="token class-name">HashSet</span><span class="token operator">&lt;</span><span class="token operator">&gt;</span><span class="token punctuation">(</span><span class="token number">2</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+			beanNameSet<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span><span class="token punctuation">(</span>String<span class="token punctuation">)</span> curVal<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			beanNameSet<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+			<span class="token keyword">this</span><span class="token punctuation">.</span>prototypesCurrentlyInCreation<span class="token punctuation">.</span><span class="token function">set</span><span class="token punctuation">(</span>beanNameSet<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+		<span class="token keyword">else</span> <span class="token punctuation">{<!-- --></span>
+			<span class="token comment">如果ThreadLocal的value已经是Set，则直接add</span>
+			Set<span class="token generics function"><span class="token punctuation">&lt;</span>String<span class="token punctuation">&gt;</span></span> beanNameSet <span class="token operator">=</span> <span class="token punctuation">(</span>Set<span class="token generics function"><span class="token punctuation">&lt;</span>String<span class="token punctuation">&gt;</span></span><span class="token punctuation">)</span> curVal<span class="token punctuation">;</span>
+			beanNameSet<span class="token punctuation">.</span><span class="token function">add</span><span class="token punctuation">(</span>beanName<span class="token punctuation">)</span><span class="token punctuation">;</span>
+		<span class="token punctuation">}</span>
+	<span class="token punctuation">}</span>
+</code></pre> 
+<p><strong>1. 实例化InstantA之前检查prototypesCurrentlyInCreation是否包含instantA</strong><br> <img src="https://images2.imgbox.com/9d/e2/s16EcLiI_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>2. 将instantA加入当前线程的prototypesCurrentlyInCreation</strong><br> <img src="https://images2.imgbox.com/de/65/ID6yYKWe_o.png" alt="在这里插入图片描述"></p> 
+<p><strong>3. 填充InstantA实例，发现依赖InstantB</strong></p> 
+<p><img src="https://images2.imgbox.com/f6/e5/WTbowsky_o.png" alt="在这里插入图片描述"></p> 
+<p>A、解析InstantA类的注解@Autowired发现依赖InstantB；<br> B、准备实例化InstantB，实例化之前检查prototypesCurrentlyInCreation是否包含instantB；<br> C、此时不包含InstantB，将instantB加入prototypesCurrentlyInCreation；<br> 经过以上步骤，prototypesCurrentlyInCreation集合中则有instantA和instantB两个元素，如上图所示；</p> 
+<p><strong>4. 解析instantB发现需要依赖instantA，则再次从容器获取instantA</strong></p> 
+<p><img src="https://images2.imgbox.com/b0/6e/XdxeJBIX_o.png" alt="在这里插入图片描述"><br> <img src="https://images2.imgbox.com/c2/4e/BZBlZGeC_o.png" alt="在这里插入图片描述"></p> 
+<p>获取instantA之前再次检查prototypesCurrentlyInCreation是否包含instantA，此时已经包含instantA，因此抛出异常。</p> 
+<h3><a id="53_471"></a>5.3、总结</h3> 
+<p>可以看到spring无法解决原型的filed注入循环依赖，当然构造注入的循环依赖也无法解决。</p> 
+<h2><a id="6_474"></a>6、关于三级缓存的思考</h2> 
+<h3><a id="61_476"></a>6.1、一级缓存能否解决循环依赖？</h3> 
+<p>不行。<br> 因为实例化后（未填充属性）的bean以及完成属性填充实例化的bean都放到一级缓存。如果在实例化后与属性填充之间获取bean，则得到非完整bean，可能属性为空；</p> 
+<h3><a id="62_481"></a>6.2、二级缓存能否解决循环依赖？</h3> 
+<p>A、如果没aop，二级缓存能解决；bean生产过程可以分成实例化和初始化两个阶段，实例化后放在二级缓存，初始化完再放到一级缓存。生成bean完成后，后续获取bean只从一级缓存中获取，可以保证bean的完整性；</p> 
+<p>B、如果有aop，二级无法解决循环依赖，会出现二级缓存中相同的beanName在不同阶段（实例化后和初始化后）不是同一个bean（因此执行aop后会返回代理对象，和之前的bean不是同一个对象），导致混乱；</p> 
+<h3><a id="63_488"></a>6.3、三级缓存存在的意义</h3> 
+<p>A、为什么不直接在放入两级缓存之前提前执行aop逻辑？</p> 
+<p>因为循环依赖的相对较少，没必要针对小部分实例执行一遍（wrapIfNecessary）。反正后续的BeanPostProcessor中的postProcessAfterInitialization有对aop的处理；</p> 
+<p>B、三级缓存的目的就是让如果有循环依赖，提前执行可能存在的aop操作（如果存在aop），从而放入二级缓存的bean是生成的代理对象，从而保证二级缓存中相同的beanName是同一个bean;</p> 
+<h2><a id="7_496"></a>7、总结</h2> 
+<p>还记得开始前的四个问题吗？</p> 
+<ol><li> <p>spring能解决所有的循环依赖吗？</p> <p>答：<br> 原型bean：spring不能解决原型bean任何注入方式产生的循环依赖；<br> 单例bean：能解决单例bean在setter、filed注入时产生的循环依赖，不能解决构造注入时产生的循环依赖；</p> </li><li> <p>spring如何解决循环依赖？</p> <p>答：三级缓存+singletonsCurrentlyInCreation（正在创建的bean集合）</p> </li><li> <p>一级缓存以及二级缓存能否解决循环依赖？<br> 答：不能；</p> </li><li> <p>为什么需要三级缓存？<br> 答：相信从三级缓存思考中得到答案；</p> </li></ol>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/0eb9032d7cfa40bc97b7d9d734900b42/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">JS的输入与输出</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/54c2f63a83446b8623f95b4aa20430b3/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">VuePress学习笔记</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

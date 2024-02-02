@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Linux系统编程系列之线程的信号处理 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Linux系统编程系列之线程的信号处理" />
+<meta property="og:description" content="Linux系统编程系列（16篇管饱，吃货都投降了！） 1、Linux系统编程系列之进程基础
+2、Linux系统编程系列之进程间通信(IPC)-信号
+3、Linux系统编程系列之进程间通信(IPC)-管道
+4、Linux系统编程系列之进程间通信-IPC对象
+5、Linux系统编程系列之进程间通信-消息队列
+6、Linux系统编程系列之进程间通信-共享内存
+7、Linux系统编程系列之进程间通信-信号量组
+8、Linux系统编程系列之守护进程
+9、Linux系统编程系列之线程
+10、Linux系统编程系列之线程属性 11、Linux系统编程系列之互斥锁和读写锁
+12、Linux系统编程系列之线程的信号处理
+13、Linux系统编程系列之POSIX信号量
+14、Linux系统编程系列之条件变量
+15、Linux系统编程系列之死锁
+16、 Linux系统编程系列之线程池
+一、为什么要有线程的信号处理 由于多线程程序中线程的执行状态是并发的，因此当一个进程收到一个信号时，那么究竟由进程中的哪条线程响应这个信号就是不确定的，只能取决于哪条线程刚好在信号达到的瞬间被调度，这种不确定性在程序逻辑中一般是不能接受的。
+二、解决办法 1、在多线程进程中选定某条线程去响应信号
+2、其余线程对该信号进行屏蔽
+三、相关函数API接口 1、发送信号给指定线程 // 在进程内部，只允许在线程之间进行发送 int pthread_kill(pthread_t thread, int sig); // 接口说明 返回值：成功返回0，失败返回错误码 参数thread：接收信号的线程号 参数sig：待发送的信号 // 在进程之间进行的信号发送 int kill(pid_t pid, int sig); // 接口说明 返回值：成功返回0，失败返回-1 参数pid：接受信号的进程号 参数sig：待发送的信号 2、发送带参数的信号给指定线程 // 发送带参数的信号给指定线程 // 线程间 int pthread_sigqueue(pthread_t thread, int sig, const union sigval value); // 接口说明 返回值：成功返回0，失败返回-1 参数thread：待接收信号的线程号 参数sig：待发送的信号 参数value：额外携带的参数 // 进程间 int sigqueue(pid_t pid, int sig, const union sigval value); // 接口说明 返回值：成功返回0，失败返回-1 参数pid：待接收信号的进程号 参数sig：待发送的信号 参数value：额外携带的参数 3、屏蔽指定信号 // 屏蔽指定信号 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset); // 接口说明 返回值：成功返回0，失败返回-1 // 参数解析： 1、how：操作命令字，比如阻塞、解除阻塞等 SIG_BLOCK：阻塞set中的信号（原有正在阻塞的信号保持阻塞） SIG_SETMASK：阻塞set中的信号（原有正在阻塞的信号自动解除） SIG_UNBLOCK：解除set中的信号 2、set：当前要操作的信号集 3、oldset：若为非空，则将原有阻塞信号集保留到该oldset中 注意：该函数的操作参数不是单个信号，而是信号集。 // 信号集操作函数组 int sigemptypset(sigset_t *set); // 清空信号集set int sigfillset(sigset_t *set); // 将所有信号加入信号集set中 int sigaddset(sigset_t *set, int signum); // 将信号signum添加到信号集set中 int sigdelset(sigset_t *set, int signum); // 将信号signum从信号集set中剔除 int sigsimember(const sigset_t *set, int signum); // 测试信号signum是否在信号集set中 四、案例 1、使用线程结合信号的方式完成数据的接收和发送，要求一条线程发送数据同时发送信号指定某条线程接收数据，另外有多余线程做伪任务。" />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/6500646233ef16f4d0ea5f92622438fc/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-10-05T21:13:04+08:00" />
+<meta property="article:modified_time" content="2023-10-05T21:13:04+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Linux系统编程系列之线程的信号处理</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <h2> Linux系统编程系列（16篇管饱，吃货都投降了！）</h2> 
+<p>        1、<a href="https://blog.csdn.net/AABond/article/details/132014820" title="Linux系统编程系列之进程基础">Linux系统编程系列之进程基础</a></p> 
+<p>        2、<a href="https://blog.csdn.net/AABond/article/details/132512893" title="Linux系统编程系列之进程间通信(IPC)-信号">Linux系统编程系列之进程间通信(IPC)-信号</a></p> 
+<p>        3、<a href="https://blog.csdn.net/AABond/article/details/132508199" title="Linux系统编程系列之进程间通信(IPC)-管道">Linux系统编程系列之进程间通信(IPC)-管道</a></p> 
+<p>        4、<a href="https://blog.csdn.net/AABond/article/details/133427239" title="Linux系统编程系列之进程间通信-IPC对象">Linux系统编程系列之进程间通信-IPC对象</a></p> 
+<p>        5、<a href="https://blog.csdn.net/AABond/article/details/133418776" title="Linux系统编程系列之进程间通信-消息队列">Linux系统编程系列之进程间通信-消息队列</a></p> 
+<p>        6、<a href="https://blog.csdn.net/AABond/article/details/133418805" title="Linux系统编程系列之进程间通信-共享内存">Linux系统编程系列之进程间通信-共享内存</a></p> 
+<p>        7、<a href="https://blog.csdn.net/AABond/article/details/133418828" title="Linux系统编程系列之进程间通信-信号量组">Linux系统编程系列之进程间通信-信号量组</a></p> 
+<p>        8、<a href="https://blog.csdn.net/AABond/article/details/133418854" title="Linux系统编程系列之守护进程">Linux系统编程系列之守护进程</a></p> 
+<p>        9、<a href="https://blog.csdn.net/AABond/article/details/133418863" title="Linux系统编程系列之线程">Linux系统编程系列之线程</a></p> 
+<p>        10、<a href="https://blog.csdn.net/AABond/article/details/133418899" title="Linux系统编程系列之线程属性">Linux系统编程系列之线程属性</a> </p> 
+<p>        11、<a href="https://blog.csdn.net/AABond/article/details/133418922" title="Linux系统编程系列之互斥锁和读写锁">Linux系统编程系列之互斥锁和读写锁</a></p> 
+<p>        12、<a href="https://blog.csdn.net/AABond/article/details/133418970" title="Linux系统编程系列之线程的信号处理">Linux系统编程系列之线程的信号处理</a></p> 
+<p>        13、<a href="https://blog.csdn.net/AABond/article/details/133418940" title="Linux系统编程系列之POSIX信号量">Linux系统编程系列之POSIX信号量</a></p> 
+<p>        14、<a href="https://blog.csdn.net/AABond/article/details/133418980" title="Linux系统编程系列之条件变量">Linux系统编程系列之条件变量</a></p> 
+<p>        15、<a href="https://blog.csdn.net/AABond/article/details/133419000" title="Linux系统编程系列之死锁">Linux系统编程系列之死锁</a></p> 
+<p>        16、 <a href="https://blog.csdn.net/AABond/article/details/133419014" title="Linux系统编程系列之线程池">Linux系统编程系列之线程池</a></p> 
+<h2>一、为什么要有线程的信号处理</h2> 
+<p>        由于<strong>多线程程序中线程的执行状态是并发的，因此当一个进程收到一个信号时，那么究竟由进程中的哪条线程响应这个信号就是不确定的，只能取决于哪条线程刚好在信号达到的瞬间被调度</strong>，这种不确定性在程序逻辑中一般是不能接受的。</p> 
+<h2>二、解决办法</h2> 
+<p>        1、在多线程进程中选<strong>定某条线程去响应信号</strong></p> 
+<p><strong>       </strong> 2、<strong>其余线程对该信号进行屏蔽</strong></p> 
+<h2>三、相关函数API接口</h2> 
+<h3>        1、发送信号给指定线程</h3> 
+<blockquote> 
+ <p>        </p> 
+ <pre><code class="language-cpp">// 在进程内部，只允许在线程之间进行发送
+int pthread_kill(pthread_t thread, int sig);
+
+// 接口说明
+        返回值：成功返回0，失败返回错误码
+        参数thread：接收信号的线程号
+        参数sig：待发送的信号
+
+
+// 在进程之间进行的信号发送
+int kill(pid_t pid, int sig);
+
+// 接口说明
+        返回值：成功返回0，失败返回-1
+        参数pid：接受信号的进程号
+        参数sig：待发送的信号</code></pre> 
+</blockquote> 
+<h3>         2、发送带参数的信号给指定线程</h3> 
+<blockquote> 
+ <pre><code class="language-cpp">// 发送带参数的信号给指定线程
+// 线程间
+int pthread_sigqueue(pthread_t thread, 
+                     int sig,
+                     const union sigval value);
+
+// 接口说明
+        返回值：成功返回0，失败返回-1
+        参数thread：待接收信号的线程号
+        参数sig：待发送的信号
+        参数value：额外携带的参数
+
+
+// 进程间
+ int sigqueue(pid_t pid, int sig, const union sigval value);
+
+// 接口说明
+        返回值：成功返回0，失败返回-1
+        参数pid：待接收信号的进程号
+        参数sig：待发送的信号
+        参数value：额外携带的参数</code></pre> 
+</blockquote> 
+<h3>         3、屏蔽指定信号 </h3> 
+<blockquote> 
+ <pre><code class="language-cpp">// 屏蔽指定信号
+int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+
+// 接口说明
+        返回值：成功返回0，失败返回-1
+        
+// 参数解析：
+1、how：操作命令字，比如阻塞、解除阻塞等
+    SIG_BLOCK：阻塞set中的信号（原有正在阻塞的信号保持阻塞）
+    SIG_SETMASK：阻塞set中的信号（原有正在阻塞的信号自动解除）
+    SIG_UNBLOCK：解除set中的信号
+ 
+2、set：当前要操作的信号集
+3、oldset：若为非空，则将原有阻塞信号集保留到该oldset中
+注意：该函数的操作参数不是单个信号，而是信号集。
+
+// 信号集操作函数组
+int sigemptypset(sigset_t *set);    // 清空信号集set
+int sigfillset(sigset_t *set);    // 将所有信号加入信号集set中
+int sigaddset(sigset_t *set, int signum); // 将信号signum添加到信号集set中
+int sigdelset(sigset_t *set, int signum); // 将信号signum从信号集set中剔除
+int sigsimember(const sigset_t *set, int signum); // 测试信号signum是否在信号集set中
+</code></pre> 
+</blockquote> 
+<h2>四、案例</h2> 
+<p>        1、使用线程结合信号的方式完成数据的接收和发送，要求一条线程发送数据同时发送信号指定某条线程接收数据，另外有多余线程做伪任务。</p> 
+<blockquote> 
+ <pre><code class="language-cpp">// 多线程信号处理的案例
+
+#include &lt;stdio.h&gt;
+#include &lt;pthread.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;signal.h&gt;
+
+char data[100];
+pthread_t tid1, tid2, tid3;
+
+// 信号响应函数
+void recv_handler(int sig)
+{
+    printf("\nmy tid is %ld\n", pthread_self());
+    printf("read data: %s\b", data);
+    memset(data, 0, sizeof(data));
+}
+
+
+// 线程1的例程函数
+void *routine1(void *arg)
+{
+    printf("I am recv_routine, my tid = %ld\n", tid1);
+
+    // 设置线程分离 
+    pthread_detach(pthread_self()); 
+
+    while(1)
+    {
+        printf("please input data:\n");
+        fgets(data, sizeof(data), stdin);
+
+        pthread_kill(tid2, 34);  // 给线程2发送信号
+        printf("send data success\n");
+    }
+}
+
+// 线程2的例程函数，用来接收数据
+void *routine2(void *arg)
+{
+    // 注册信号响应函数
+    signal(34, recv_handler);
+
+    printf("I am routine2, my tid = %ld\n", tid2);
+
+    // 设置线程分离 
+    pthread_detach(pthread_self());
+    while(1)
+    {
+        pause();
+    }
+}
+
+// 线程3的例程函数
+void *routine3(void *arg)
+{
+    printf("I am routine3, my tid = %ld\n", tid3);
+
+    // 设置线程分离 
+    pthread_detach(pthread_self());
+    while(1)
+    {
+        pause();
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    // 创建线程1，用来发送和接收数据
+    errno = pthread_create(&amp;tid1, NULL, routine1, NULL);
+    if(errno == 0)
+    {
+        printf("pthread create routine1 success, tid = %ld\n", tid1);
+    }
+    else
+    {
+        perror("pthread create routine1 fail\n");
+    }
+
+   
+    // 创建线程2，用来做多余线程
+    errno = pthread_create(&amp;tid2, NULL, routine2, NULL);
+    if(errno == 0)
+    {
+        printf("pthread create routine2 success, tid = %ld\n", tid2);
+    }
+    else
+    {
+        perror("pthread create routine2 fail\n");
+    }
+
+     // 创建线程3，用来做多余线程
+    errno = pthread_create(&amp;tid3, NULL, routine3, NULL);
+    if(errno == 0)
+    {
+        printf("pthread create routine3 success, tid = %ld\n", tid3);
+    }
+    else
+    {
+        perror("pthread create routine3 fail\n");
+    }
+
+    // 一定要加这个，否则主函数直接退出，相当于进程退出，所有线程也退出
+    // 或者加上while(1)等让主函数不退出
+    pthread_exit(0);
+    
+    return 0;
+}</code></pre> 
+ <p><img alt="" height="573" src="https://images2.imgbox.com/0e/85/HQ2YiGBg_o.png" width="1075"></p> 
+</blockquote> 
+<p>          2、使用线程结合信号的方式完成数据的接收和发送，要求一条线程完成数据的发送和接收，另外两个线程屏蔽信号，做伪任务。</p> 
+<blockquote> 
+ <p></p> 
+ <pre><code class="language-cpp">// 多线程信号处理的案例
+
+#include &lt;stdio.h&gt;
+#include &lt;pthread.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;signal.h&gt;
+
+char data[100];
+sigset_t sigs_set; // 信号集
+pid_t pid;
+pthread_t tid1, tid2, tid3;
+
+// 信号响应函数
+void recv_handler(int sig)
+{
+    printf("\nmy tid is %ld\n", pthread_self());
+    printf("read data: %s\b", data);
+    memset(data, 0, sizeof(data));
+}
+
+
+// 线程1的例程函数
+void *routine1(void *arg)
+{
+    printf("I am routine1, my tid = %ld\n", tid1);
+
+    // 设置线程分离 
+    pthread_detach(pthread_self()); 
+
+    while(1)
+    {
+        printf("please input data:\n");
+        fgets(data, sizeof(data), stdin);
+        printf("send data success\n");
+
+        kill(pid, 34);  // 给进程（所有线程）发送信号
+    }
+}
+
+// 线程2的例程函数，用来接收数据
+void *routine2(void *arg)
+{
+    printf("I am routine2, my tid = %ld\n", tid2);
+
+    // 屏蔽（阻塞）信号集中的信号
+    sigprocmask(SIG_BLOCK, &amp;sigs_set, NULL);
+
+    // 设置线程分离 
+    pthread_detach(pthread_self());
+    while(1)
+    {
+        pause();
+    }
+}
+
+// 线程3的例程函数
+void *routine3(void *arg)
+{
+    printf("I am routine3, my tid = %ld\n", tid3);
+
+    // 设置线程分离 
+    pthread_detach(pthread_self());
+
+    // 屏蔽（阻塞）信号集中的信号
+    sigprocmask(SIG_BLOCK, &amp;sigs_set, NULL);
+
+    while(1)
+    {
+        pause();
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    // 注册信号响应函数
+    signal(34, recv_handler);
+
+    sigemptyset(&amp;sigs_set); // 清空信号集
+    sigaddset(&amp;sigs_set, 34);   // 把34信号加到信号集中
+
+    pid = getpid(); // 获取进程号
+
+    // 创建线程1，用来发送和接收数据
+    errno = pthread_create(&amp;tid1, NULL, routine1, NULL);
+    if(errno == 0)
+    {
+        printf("pthread create routine1 success, tid = %ld\n", tid1);
+    }
+    else
+    {
+        perror("pthread create routine1 fail\n");
+    }
+
+    // 创建线程2，用来做多余线程
+    errno = pthread_create(&amp;tid2, NULL, routine2, NULL);
+    if(errno == 0)
+    {
+        printf("pthread create routine2 success, tid = %ld\n", tid2);
+    }
+    else
+    {
+        perror("pthread create routine2 fail\n");
+    }
+
+     // 创建线程3，用来做多余线程
+    errno = pthread_create(&amp;tid3, NULL, routine3, NULL);
+    if(errno == 0)
+    {
+        printf("pthread create routine3 success, tid = %ld\n", tid3);
+    }
+    else
+    {
+        perror("pthread create routine3 fail\n");
+    }
+
+    // 一定要加这个，否则主函数直接退出，相当于进程退出，所有线程也退出
+    // 或者加上while(1)等让主函数不退出
+    pthread_exit(0);
+    
+    return 0;
+}</code></pre> 
+ <p><img alt="" height="568" src="https://images2.imgbox.com/2f/e1/943g7AGd_o.png" width="1132"></p> 
+</blockquote> 
+<h2>五、总结</h2> 
+<p>        多线程进程中的信号处理可以采用选定某一条线程来接收信号，其余线程屏蔽该信号的做法，可以结合案例加深对多线程中信号的处理。</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/73bdcb286342d1ff00053b911e675824/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Vue中如何进行代码编辑器与实时预览</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/35fb556db255d4075b1151823024a1e3/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">第二届全国高校计算机技能竞赛——C&#43;&#43;赛道 题解</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

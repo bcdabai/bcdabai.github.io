@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Android数据库Cursor异常原因和Fd泄露分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Android数据库Cursor异常原因和Fd泄露分析" />
+<meta property="og:description" content="前言 手机应用和Android终端机应用不同的地方是：Android终端机应用长时间运行，必须保证长时间（几周到几个月不等）稳定运行，不崩溃，而手机应用经常进出，很难发现一些问题。线下监控内存泄漏可以使用LeakCanary、Android Studio 的 Android Profiler、eclispe的MAT这些常规手段，但是不支持线上监控。线上监控应用，可以使用腾讯Bugly、友盟。但是有了线上监控就完事了，不一定，有时候出现一些奇怪的问题，明明看似代码规范，却还是crash了。Android终端机应用crash回到桌面（通过守护进程重新拉起应用），这是非常影响用户体验的。下面举例子分析一个常见的线上异常（数据库用的是Room）
+出现异常 CursorWindowAllocationException CursorWindowAllocationException Cursor window allocation of 2048 kb failed. 可能原因1:
+sqlite query完成之后cursor没有关闭。
+解决方法：
+在finally中关闭cursor
+Cursor cursor = null; try { } finally { if (cursor != null) { cursor.close(); } } 可能原因2
+Cursor空间耗尽，比如
+线程A执行到1处创建了一个Cursor，然后dosomething比较耗时…，线程B又来查询数据库，因此到1处又创建一个Cursor，此时如果AB执行完，就会关闭锁，看起来没有问题，但由于是同一个对象，所以AB关闭的cursor都是B创建的,因此
+A创建的Cursor就没有关闭！
+解决方法同上
+进一步分析异常 在你的应用中，Cursor正常关闭，还是时不时报CursorWindowAllocationException，这是你就要注意应用的句柄泄露了（Fd泄露），文件描述符（File descriptor）是计算机科学中的一个术语，是一个用于表述指向文件的引用的抽象化概念。
+在Linux中一个文件、一个串口、一个socket、一个线程都可以是一个文件，而一个文件会占用一个句柄，linux中一个进程默认的句柄最大数值是1024，当超过这个数值，linux就会对当前的进程进行kill，而kill的对象可以是任意对象，所以会造成各种异常原因的崩溃。
+Linux中， 每一个进程在内核中，都对应有一个“打开文件”数组，存放指向文件对象的指针，而 fd 是这个数组的下标。
+我们对文件进行操作时，系统调用，将fd传入内核，内核通过fd找到文件，对文件进行操作。
+既然是数组下标，fd的类型为int， &lt; 0 为非法值， &gt;=0 为合法值。在linux中，一个进程默认可以打开的文件数为1024个，fd的范围为0~1023。可以通过设置，改变最大值。
+在linux中，值为0、1、2的fd，分别代表标准输入、标准输出、标准错误输出。因为 0 1 2已经被linux使用了，通常在程序中打开的fd，是从3开始的。但我们在判断一个fd是否合法时，依然要使用&gt;=0的判断标准。fd的分配原则，是从小到大，找到第一个不用的进行分配。
+句柄泄露可能原因：
+socket socket()/accept()；数据库sqlite游标操作文件流操作，检查后都有close;硬件通讯，如串口，usb这些，是否正常关闭 通过排查，发现串口通讯没有正常关闭，创建太多fd,导致fd耗尽，最终影响数据库sqlite游标操作，出现了上面的异常CursorWindowAllocationException，数据Cursor创建也需要fd。
+但是线上监控只是上报异常，没有指出哪里泄露，这时候需要通过物联网（IoT） MQTT（构建于Tcp/Ip协议的一种应用层协议,它的全称是Message Queuing Telemetry Transport）下发指令（adb）拉取fd信息，然后从终端设备上传到本地，再分析fd信息进行排查是哪里泄露。Java发送adb指令可以通过Runtime." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/b9fea06244c3d80bf59206f29f1ffe7a/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-02-11T10:27:02+08:00" />
+<meta property="article:modified_time" content="2023-02-11T10:27:02+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Android数据库Cursor异常原因和Fd泄露分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-dark">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <h3><a id="_1"></a>前言</h3> 
+<p>手机应用和Android终端机应用不同的地方是：Android终端机应用长时间运行，必须保证长时间（几周到几个月不等）稳定运行，不崩溃，而手机应用经常进出，很难发现一些问题。线下监控内存泄漏可以使用<strong>LeakCanary</strong>、Android Studio 的 <strong>Android Profiler</strong>、eclispe的<strong>MAT</strong>这些常规手段，但是不支持线上监控。线上监控应用，可以使用<a href="https://bugly.qq.com/v2/products/crash-reporting" rel="nofollow">腾讯Bugly</a>、<a href="https://www.umeng.com/apm?spm=a213m0.22488127.0.0.758375efzDDX31&amp;acm=lb-zebra-577134-7502775.1003.4.6889757&amp;scm=1003.4.lb-zebra-577134-7502775.OTHER_16070530975711_6889757&amp;utm_source=n_gw_top_menu" rel="nofollow">友盟</a>。但是有了线上监控就完事了，不一定，有时候出现一些奇怪的问题，明明看似代码规范，却还是crash了。Android终端机应用crash回到桌面（通过守护进程重新拉起应用），这是非常影响用户体验的。下面举例子分析一个常见的线上异常（数据库用的是<strong>Room</strong>）</p> 
+<h3><a id="_CursorWindowAllocationException_5"></a>出现异常 CursorWindowAllocationException</h3> 
+<pre><code>CursorWindowAllocationException Cursor window allocation of 2048 kb failed.
+</code></pre> 
+<p><strong>可能原因1:</strong></p> 
+<p>sqlite query完成之后cursor没有关闭。</p> 
+<p>解决方法：</p> 
+<p>在finally中关闭cursor</p> 
+<pre><code>Cursor cursor = null;
+try {
+	
+} finally {
+	if (cursor != null) {
+		cursor.close();
+	}
+}
+</code></pre> 
+<p><strong>可能原因2</strong></p> 
+<p>Cursor空间耗尽，比如</p> 
+<p>线程A执行到1处创建了一个Cursor，然后dosomething比较耗时…，线程B又来查询数据库，因此到1处又创建一个Cursor，此时如果AB执行完，就会关闭锁，看起来没有问题，但由于是同一个对象，所以AB关闭的cursor都是B创建的,因此<br> A创建的Cursor就没有关闭！</p> 
+<p>解决方法同上</p> 
+<h3><a id="_35"></a>进一步分析异常</h3> 
+<p>在你的应用中，Cursor正常关闭，还是时不时报CursorWindowAllocationException，这是你就要注意应用的<strong>句柄泄露了（Fd泄露）</strong>，文件描述符（File descriptor）是计算机科学中的一个术语，是一个用于表述指向文件的引用的抽象化概念。</p> 
+<p>在Linux中一个文件、一个串口、一个socket、一个线程都可以是一个文件，而一个文件会占用一个句柄，linux中一个进程默认的句柄最大数值是1024，当超过这个数值，linux就会对当前的进程进行kill，而kill的对象可以是任意对象，所以会造成各种异常原因的崩溃。</p> 
+<p>Linux中， 每一个进程在内核中，都对应有一个“打开文件”数组，存放指向文件对象的指针，而 fd 是这个数组的下标。</p> 
+<p>我们对文件进行操作时，系统调用，将fd传入内核，内核通过fd找到文件，对文件进行操作。</p> 
+<p>既然是数组下标，fd的类型为int， &lt; 0 为非法值， &gt;=0 为合法值。在linux中，一个进程默认可以打开的文件数为1024个，fd的范围为0~1023。可以通过设置，改变最大值。</p> 
+<p>在linux中，值为0、1、2的fd，分别代表标准输入、标准输出、标准错误输出。因为 0 1 2已经被linux使用了，通常在程序中打开的fd，是从3开始的。但我们在判断一个fd是否合法时，依然要使用&gt;=0的判断标准。fd的分配原则，是从小到大，找到第一个不用的进行分配。</p> 
+<p>句柄泄露可能原因：</p> 
+<ul><li>socket socket()/accept()；</li><li>数据库sqlite游标操作</li><li>文件流操作，检查后都有close;</li><li>硬件通讯，如串口，usb这些，是否正常关闭</li></ul> 
+<p>通过排查，发现<strong>串口通讯</strong>没有正常关闭，创建太多fd,导致fd耗尽，最终影响数据库sqlite游标操作，出现了上面的异常CursorWindowAllocationException，数据Cursor创建也需要fd。</p> 
+<p>但是线上监控只是上报异常，没有指出哪里泄露，这时候需要通过物联网（IoT） MQTT（构建于Tcp/Ip协议的一种应用层协议,它的全称是Message Queuing Telemetry Transport）下发指令（adb）拉取fd信息，然后从终端设备上传到本地，再分析fd信息进行排查是哪里泄露。Java发送adb指令可以通过Runtime.getRuntime().exec()发送，再读取，需要注意发送的指令是否需要Root权限和结束符</p> 
+<h3><a id="Fd_61"></a>Fd查询</h3> 
+<p>1）Linux系统下，所有进程允许打开的最大fd数量。查询语句：</p> 
+<pre><code>/proc/sys/fs/file-max
+</code></pre> 
+<p>2）Linux系统下，所有进程已经打开的fd数量及允许的最大数量。查询语句：</p> 
+<pre><code>/proc/sys/fs/file-nr
+</code></pre> 
+<p>3）单个进程允许打开的最大fd数量.查询语句：</p> 
+<pre><code>ulimit -n
+</code></pre> 
+<p>4)单个进程（例如进程id为5454）已经打开的fd.查询语句：</p> 
+<pre><code>ls -l /proc/5454/fd
+</code></pre> 
+<p>操作步骤：</p> 
+<pre><code>adb shell
+su
+
+
+查看app包名的pid
+ps | grep com.sjl.test
+
+u0_a280   11218 243   2997124 275288 SyS_epoll_ 7795a0eb80 S com.sjl.test
+
+注意：11218就是pid
+
+查看pid为3617的当前句柄数
+ls -l /proc/3617/fd | wc -l
+列出句柄被占用详细情况
+ls -l /proc/3617/fd
+</code></pre> 
+<p>or 进入目录查看</p> 
+<pre><code>切换到15429进程的FD目录下
+cd /proc/15429/fd
+
+然后在查看当前FD目录下文件描述符数量：
+ls -l | wc -l
+
+94
+</code></pre> 
+<h4><a id="FD_107"></a>通过观察查询文件描述符,如果文件描述符并没有被释放，说明这时候出现了FD泄露</h4> 
+<h4><a id="_110"></a></h4> 
+<h3><a id="_112"></a>小结</h3> 
+<p>Fd泄露并不容易发现，但是规范编码，能减少大部分异常的发生，这是非常重要的。</p> 
+<h3><a id="_117"></a>下面是列出一些常见的优化和性能检测手段</h3> 
+<ul><li>内存泄露检测工具： LeakCanary 、Android Studio 的 Android Profiler 、eclispe的MAT<br> 注意：memory leak会最终会导致out of memory。</li><li>检测在主线程运行的操作时长(卡顿检测)：BlockCanary</li><li>检测方法耗时：Hugo（基于AOP实现）</li><li>检测工具，APP研发助手：dokit</li><li>Native层崩溃的监听工具：BreakPad（不支持线上）</li><li>Native Crash + Java Exception检测工具：Bugly（线上检测工具）、<a href="https://github.com/iqiyi/xCrash/blob/master/README.zh-CN.md">xCrash</a>（不支持线上）</li><li>线上内存监控方案：<a href="https://github.com/KwaiAppTeam/KOOM/blob/master/README.zh-CN.md">KOOM(快手)</a></li><li>性能分析工具：<a href="https://www.jianshu.com/p/7e9ca2c73c97" rel="nofollow">TraceView</a>、SysTrace（SysTrace用于收集可帮助您检查原生系统进程的详细系统级数据，例如CPU调度、磁盘活动、应用线程等，并解决掉帧引起的界面卡顿）</li></ul> 
+<p>TraceView：</p> 
+<pre><code>- 	通过Android studio自带的traceview查看（Android profiler）。
+- 	通过Android SDK自带的Debug。（导出 trace 文件，通过Android Studio的profile打开该文件，可以知道有多少线程、具体方法的耗时）
+- 	通过DDMS中的traceview查看。
+</code></pre> 
+<p>SysTrace：</p> 
+<p>在代码的开始位置加上tag</p> 
+<pre><code> TraceCompat.endSection();
+</code></pre> 
+<p>然后指定位置结束，即可以抓取到整个应用在此过程的相关信息</p> 
+<pre><code>TraceCompat.beginSection("onCreate");
+</code></pre> 
+<ul><li>布局层级和性能分析工具：Hierarchy Viewer（已废弃）、Android Studio 的Layout Inspector（不支持查看布局性能）</li></ul>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/57354076965ff87bd79613cc367ff469/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Qt实战：Qt5.11.1安装与MSVC配置</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/a7a860e947f5f3b843c5bf1d7d8dc359/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">在局域网中禁止内网通软件通信，该怎样操作？</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

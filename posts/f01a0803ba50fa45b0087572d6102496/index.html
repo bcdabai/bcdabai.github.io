@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>分布式事务JTA/XA atomikos -- 基于springboot的Dubbo &#43; 动态数据源 &#43; mybatis-plus - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="分布式事务JTA/XA atomikos -- 基于springboot的Dubbo &#43; 动态数据源 &#43; mybatis-plus" />
+<meta property="og:description" content="目录
+1.前言：
+2.背景介绍：
+3.Dubbo：
+4.动态数据源：
+5.分布式事务：
+6.运行及结果：
+1.前言： 本文code的github地址：GitHub - wdquan1985/dubbo-dynamicDatasource-jtaAtomikos
+分布式现在已经是web开发必须掌握的知识，虽然其有一定的难度，必须掌握的知识点包括以下两部分：
+(1).分布式架构RPC框架：例如Duboo，spring cloud等。本文中使用Dubbo
+(2).分布式事务：遇到分布式系统，就几乎不可避免的遇到分布式事务的问题，分布式事务包括四种模式 -- XA、TCC、AT、Saga。2PC/3PC协议是指两阶段提交和三阶段提交，四种分布式事务模式的实现，基本上都使用了2PC协议，因为3PC太难实现。可以参考这篇文章： 分布式事务的4种模式 - 知乎， 去了解分布式事务的全貌。
+下面两种情况下，需要分布式事务：
+数据库的水平拆分：单业务系统架构
+业务数据库起初是单库单表，但随着业务数据规模的快速发展，数据量越来越大，对数据库表的增删改查将会越来越慢。单库单表逐渐成为瓶颈。所以我们对数据库进行了水平拆分，将原单库单表拆分成数据库分片。如下图所示，分库分表之后，原来在一个数据库上就能完成的写操作，可能就会跨多个数据库，这就产生了跨数据库事务问题。访问不同的数据库，要开启不同的事务
+业务服务化拆分：多个应用服务
+在业务发展初期，“一块大饼”的单业务系统架构，能满足基本的业务需求。但是随着业务的快速发展，系统的访问量和业务复杂程度都在快速增长，单系统架构逐渐成为业务发展瓶颈，代码可维护性差，容错率低，测试难度大，敏捷交付能力差等诸多问题，微服务应运而生。
+如下图所示，按照面向服务架构（SOA）的设计原则，将单业务系统拆分成多个业务系统，降低了各系统之间的耦合度，使不同的业务系统专注于自身业务，更有利于业务的发展和系统容量的伸缩。
+微服务的诞生一方面解决了上述问题，但是另一方面却引入新的问题，业务系统按照服务拆分之后，一个完整的业务往往需要调用多个服务，所以其中主要问题之一就是如何保证微服务间的业务数据一致性，这成为了一个难题，每个服务访问数据库（即使是相同的数据库）都要开启一个新的事务
+(3).分布式事务的实现：
+符合XA 模式的由TM, RM控制的两阶段提交，RM由关系型数据库厂商提供实现(例如mysql，oracle数据库，本身支持分布式事务)，java对XA规范的实现叫做JTA，JTA中TM具体实现包括Atomikos，Narayana，JOTM，BTM等。但是这种XA模式是有局限性的，只能够解决单个应用(单业务系统架构)中跨越多个数据源时（分布式数据库，数据库的水平拆分）数据操作的事务一致性问题，但是遇到分布式系统（例如Dubbo）中多个应用服务之间（ 分布式服务，业务服务化拆分）数据操作的事务一致性问题时，它就不起作用了，也就是说只适用于单业务系统架构，当然了，在分布式系统中，如果没有遇到跨微服务访问数据库的事务问题时，跟这个其实也是类似的。还有其它局限性，例如必须要拿到所有数据源，而且数据源还要支持XA协议；性能比较差，要把所有涉及到的数据都锁定，是强一致性的，会产生长事务。本文是初探分布式事务，所以选择使用Atomikos, 这对分布式事务有一个初步的了解很有帮助。会在以后的文章中选择其它的分布式事务实现，例如TCC的seata。总结：XA模式是分布式强一致性的解决方案，但性能低而使用较少，CAP理论中，很多互联网应用都是选择满足AP的。如何解决 JTA/XA 的局限性呢？阿里的Seata 分别实现了 AT、TCC、SAGA 和 XA （XA尚未实现，请等待）事务模式，为用户打造一站式的分布式解决方案。以后会写文章研究阿里seata的使用。可以学习Seata入门理论介绍文章：分布式事务 Seata 及其三种模式详解Seata官网地址：Seata 2.背景介绍： 我们为什么要使用Dubbo?
+随着Internet的发展，web应用的规模不断扩大，最终，我们发现传统的架构(单片应用，垂直架构等)已经无法满足需求。分布式服务架构和流计算架构是必须的，并且迫切需要一个治理架构来确保架构的有序发展。
+整体架构:
+在流量非常低的情况下，只有一个应用，所有的功能被部署在一起（即一个server上，例如一个tomcat），这样可以减少部署节点，降低成本。此时，数据访问框架(ORM)是简化CRUD工作负载的关键。
+垂直架构:
+当流量较大时，增加单片应用程序的实例（简单的集群，例如用nginx做负载均衡）并不能很好的加速访问，提高效率的一种方法是将单片应用拆分为离散的应用，此时，用于加速前端页面开发的Web框架(MVC)是关键。
+分布式服务架构：
+当垂直应用程序越来越多时，应用程序之间的交互是不可避免的，一些核心业务被提取出来并作为独立的服务来服务，从而逐渐形成一个稳定的服务中心，这样前端应用程序就可以更好地响应不断变化的市场需求。 很快。 此时，用于业务重用和集成的分布式服务框架（RPC）是关键。
+流计算架构：
+当服务越来越多时，容量评估变得困难，而且小规模的服务也经常造成资源浪费。 为解决这些问题，应添加调度中心，以根据流量管理集群容量并提高集群利用率。 目前，用于提高机器利用率的资源调度和治理中心（SOA）是关键。
+3.Dubbo： Dubbo官网：https://dubbo.apache.org/zh/
+Dubbo架构:
+指定节点角色：
+Provider：提供者提供并且暴露远程服务Consumer：调用Provider提供的远程服务Registry：注册中心负责服务注册和发现Monitor：监控中心计算服务的调用次数和耗时Container：远程服务在容器中启动，容器管理服务的生命周期 代码：
+代码分为三部分：
+dubbo-example-common: 通用API（接口定义），以及数据库表对应的model。dubbo-example-consumer: 服务消费者，基于Springboot提供了Controller层，用户可以通过http请求访问。dubbo-example-provider: 服务提供者，基于Springboot集成了Atomikos &#43; mybatis-plus &#43; mysql, 对多数据源提供了分布式事务管理。 父pom." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/f01a0803ba50fa45b0087572d6102496/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-03-03T15:30:19+08:00" />
+<meta property="article:modified_time" content="2022-03-03T15:30:19+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">分布式事务JTA/XA atomikos -- 基于springboot的Dubbo &#43; 动态数据源 &#43; mybatis-plus</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p id="main-toc"><strong>目录</strong></p> 
+<p id="1.%E5%89%8D%E8%A8%80%EF%BC%9A-toc" style="margin-left:0px;"><a href="#1.%E5%89%8D%E8%A8%80%EF%BC%9A" rel="nofollow">1.前言：</a></p> 
+<p id="%232.%E8%83%8C%E6%99%AF%E4%BB%8B%E7%BB%8D%EF%BC%9A-toc" style="margin-left:0px;"><a href="#%232.%E8%83%8C%E6%99%AF%E4%BB%8B%E7%BB%8D%EF%BC%9A" rel="nofollow">2.背景介绍：</a></p> 
+<p id="%233.Dubbo%EF%BC%9A-toc" style="margin-left:0px;"><a href="#%233.Dubbo%EF%BC%9A" rel="nofollow">3.Dubbo：</a></p> 
+<p id="%234.%E5%8A%A8%E6%80%81%E6%95%B0%E6%8D%AE%E6%BA%90%EF%BC%9A-toc" style="margin-left:0px;"><a href="#%234.%E5%8A%A8%E6%80%81%E6%95%B0%E6%8D%AE%E6%BA%90%EF%BC%9A" rel="nofollow">4.动态数据源：</a></p> 
+<p id="%235.%E5%88%86%E5%B8%83%E5%BC%8F%E4%BA%8B%E5%8A%A1%EF%BC%9A-toc" style="margin-left:0px;"><a href="#%235.%E5%88%86%E5%B8%83%E5%BC%8F%E4%BA%8B%E5%8A%A1%EF%BC%9A" rel="nofollow">5.分布式事务：</a></p> 
+<p id="%236.%E8%BF%90%E8%A1%8C%E5%8F%8A%E7%BB%93%E6%9E%9C%EF%BC%9A-toc" style="margin-left:0px;"><a href="#%236.%E8%BF%90%E8%A1%8C%E5%8F%8A%E7%BB%93%E6%9E%9C%EF%BC%9A" rel="nofollow">6.运行及结果：</a></p> 
+<hr id="hr-toc"> 
+<h2 id="1.%E5%89%8D%E8%A8%80%EF%BC%9A">1.前言：</h2> 
+<p>本文code的github地址：<a href="https://github.com/wdquan1985/dubbo-dynamicDatasource-jtaAtomikos" title="GitHub - wdquan1985/dubbo-dynamicDatasource-jtaAtomikos">GitHub - wdquan1985/dubbo-dynamicDatasource-jtaAtomikos</a></p> 
+<p>分布式现在已经是web开发必须掌握的知识，虽然其有一定的难度，必须掌握的知识点包括以下两部分：</p> 
+<p>(1).分布式架构RPC框架：例如Duboo，spring cloud等。本文中使用Dubbo</p> 
+<p>(2).分布式事务：遇到分布式系统，就几乎不可避免的遇到分布式事务的问题，分布式事务包括四种模式 -- XA、TCC、AT、Saga。2PC/3PC协议是指两阶段提交和三阶段提交，四种分布式事务模式的实现，基本上都使用了2PC协议，因为3PC太难实现。可以参考这篇文章： <a href="https://zhuanlan.zhihu.com/p/78599954" rel="nofollow" title="分布式事务的4种模式 - 知乎">分布式事务的4种模式 - 知乎</a>， 去了解分布式事务的全貌。</p> 
+<p>下面两种情况下，需要分布式事务：</p> 
+<p><strong>数据库的水平拆分：单业务系统架构</strong></p> 
+<p>业务数据库起初是单库单表，但随着业务数据规模的快速发展，数据量越来越大，对数据库表的增删改查将会越来越慢。单库单表逐渐成为瓶颈。所以我们对数据库进行了水平拆分，将原单库单表拆分成数据库分片。如下图所示，分库分表之后，原来在一个数据库上就能完成的写操作，可能就会跨多个数据库，这就产生了跨数据库事务问题。<strong>访问不同的数据库，要开启不同的事务</strong></p> 
+<p><img alt="" height="214" src="https://images2.imgbox.com/a6/67/JjwlkppU_o.png" width="325"></p> 
+<p><strong>业务服务化拆分：多个应用服务</strong></p> 
+<p>在业务发展初期，“一块大饼”的单业务系统架构，能满足基本的业务需求。但是随着业务的快速发展，系统的访问量和业务复杂程度都在快速增长，单系统架构逐渐成为业务发展瓶颈，代码可维护性差，容错率低，测试难度大，敏捷交付能力差等诸多问题，微服务应运而生。<br> 如下图所示，按照面向服务架构（SOA）的设计原则，将单业务系统拆分成多个业务系统，降低了各系统之间的耦合度，使不同的业务系统专注于自身业务，更有利于业务的发展和系统容量的伸缩。</p> 
+<p><img alt="" height="277" src="https://images2.imgbox.com/83/da/jyKe1ZgG_o.png" width="557"></p> 
+<p>微服务的诞生一方面解决了上述问题，但是另一方面却引入新的问题，业务系统按照服务拆分之后，一个完整的业务往往需要调用多个服务，所以其中主要问题之一就是如何保证微服务间的业务数据一致性，这成为了一个难题<strong>，每个服务访问数据库（即使是相同的数据库）都要开启一个新的事务</strong></p> 
+<p>(3).分布式事务的实现：</p> 
+<ul><li>符合XA 模式的由TM, RM控制的两阶段提交，RM由<strong>关系型数据库</strong>厂商提供实现(例如mysql，oracle数据库，本身支持分布式事务)，java对XA规范的实现叫做JTA，JTA中TM<strong>具体实现</strong>包括Atomikos，Narayana，JOTM，BTM等。但是这种XA模式是有局限性的，只能够解决单个应用<strong>(单业务系统架构)</strong>中跨越多个数据源时（<strong>分布式数据库，数据库的水平拆分</strong>）数据操作的事务一致性问题，但是遇到分布式系统（例如Dubbo）中<strong>多个应用服务之间</strong>（<strong> 分布式服务，业务服务化拆分</strong>）数据操作的事务一致性问题时，它就不起作用了，也就是说<strong>只适用于单业务系统架构</strong>，当然了，在分布式系统中，如果没有遇到跨微服务访问数据库的事务问题时，跟这个其实也是类似的。还有其它局限性，例如必须要拿到所有数据源，而且数据源还要支持XA协议；<strong>性能比较差</strong>，要把所有涉及到的数据都锁定，是<strong>强一致性</strong>的，会产生长事务。本文是初探分布式事务，所以选择使用Atomikos, 这对分布式事务<strong>有一个初步的了解</strong>很有帮助。会在以后的文章中选择其它的分布式事务实现，例如TCC的seata。总结：XA模式是分布式强一致性的解决方案，但性能低而使用较少，CAP理论中，很多互联网应用都是选择满足AP的。</li><li>如何解决 JTA/XA 的局限性呢？<strong>阿里的Seata</strong> 分别实现了 AT、TCC、SAGA 和 XA （XA尚未实现，请等待）事务模式，为用户打造一站式的分布式解决方案。以后会写文章研究阿里seata的使用。可以学习Seata入门理论介绍文章：<a href="http://seata.io/zh-cn/blog/seata-at-tcc-saga.html" rel="nofollow" title="分布式事务 Seata 及其三种模式详解">分布式事务 Seata 及其三种模式详解</a></li><li>Seata官网地址：<a href="http://seata.io/zh-cn/index.html" rel="nofollow" title="Seata">Seata</a></li></ul> 
+<h2 id="%232.%E8%83%8C%E6%99%AF%E4%BB%8B%E7%BB%8D%EF%BC%9A"><strong>2.背景介绍：</strong></h2> 
+<p>我们为什么要使用Dubbo?</p> 
+<p>随着Internet的发展，web应用的规模不断扩大，最终，我们发现传统的架构(单片应用，垂直架构等)已经无法满足需求。分布式服务架构和流计算架构是必须的，并且迫切需要一个治理架构来确保架构的有序发展。</p> 
+<p><img alt="" height="800" src="https://images2.imgbox.com/03/20/w18gXGUH_o.jpg" width="800"></p> 
+<p><strong>整体架构:</strong></p> 
+<p>在流量非常低的情况下，只有一个应用，所有的功能被部署在一起（即一个server上，例如一个tomcat），这样可以减少部署节点，降低成本。此时，数据访问框架(ORM)是简化CRUD工作负载的关键。</p> 
+<p><strong>垂直架构:</strong></p> 
+<p>当流量较大时，增加单片应用程序的实例（简单的集群，例如用nginx做负载均衡）并不能很好的加速访问，提高效率的一种方法是将单片应用拆分为离散的应用，此时，用于加速前端页面开发的Web框架(MVC)是关键。</p> 
+<p><strong>分布式服务架构：</strong></p> 
+<p>当垂直应用程序越来越多时，应用程序之间的<strong>交互</strong>是不可避免的，一些核心业务被提取出来并作为独立的服务来服务，从而逐渐形成一个稳定的服务中心，这样前端应用程序就可以更好地响应不断变化的市场需求。 很快。 此时，用于业务重用和集成的分布式服务框架（RPC）是关键。</p> 
+<p><strong>流计算架构：</strong><br> 当服务越来越多时，容量评估变得困难，而且小规模的服务也经常造成资源浪费。 为解决这些问题，应添加调度中心，以根据流量<strong>管理集群容量</strong>并提高集群利用率。 目前，用于提高机器利用率的资源调度和治理中心（SOA）是关键。</p> 
+<p></p> 
+<h2 id="%233.Dubbo%EF%BC%9A">3.Dubbo：</h2> 
+<p>Dubbo官网：<a href="http://dubbo.apache.org/" rel="nofollow" title="https://dubbo.apache.org/zh/">https://dubbo.apache.org/zh/</a></p> 
+<p>Dubbo架构:</p> 
+<p><img alt="" height="390" src="https://images2.imgbox.com/49/d6/3gKKY7uG_o.jpg" width="585"></p> 
+<p>指定节点角色：</p> 
+<ul><li><code>Provider：提供者提供并且暴露远程服务</code></li><li><code>Consumer：调用Provider提供的远程服务</code></li><li><code>Registry：注册中心负责服务注册和发现</code></li><li><code>Monitor：监控中心计算服务的调用次数和耗时</code></li><li><code>Container：远程服务在容器中启动，</code>容器管理服务的生命周期</li></ul> 
+<p id="%E4%BB%A3%E7%A0%81%EF%BC%9A"><strong>代码：</strong></p> 
+<p>代码分为三部分：</p> 
+<ol><li>dubbo-example-common: 通用API（接口定义），以及数据库表对应的model。</li><li>dubbo-example-consumer: 服务消费者，基于Springboot提供了Controller层，用户可以通过http请求访问。</li><li>dubbo-example-provider: 服务提供者，基于Springboot集成了Atomikos + mybatis-plus + mysql, 对多数据源提供了分布式事务管理。</li></ol> 
+<p>父pom.xml中包含的主要依赖：其中包含了Zookeeper依赖，本实例使用Zookeeper做为注册中心。</p> 
+<pre><code>    &lt;dependencyManagement&gt;
+        &lt;dependencies&gt;
+            &lt;dependency&gt;
+                &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+                &lt;artifactId&gt;spring-boot-dependencies&lt;/artifactId&gt;
+                &lt;version&gt;${spring-boot.version}&lt;/version&gt;
+                &lt;type&gt;pom&lt;/type&gt;
+                &lt;scope&gt;import&lt;/scope&gt;
+            &lt;/dependency&gt;
+            &lt;dependency&gt;
+                &lt;groupId&gt;org.apache.dubbo&lt;/groupId&gt;
+                &lt;artifactId&gt;dubbo-dependencies-bom&lt;/artifactId&gt;
+                &lt;version&gt;${dubbo.version}&lt;/version&gt;
+                &lt;type&gt;pom&lt;/type&gt;
+                &lt;scope&gt;import&lt;/scope&gt;
+            &lt;/dependency&gt;
+            &lt;dependency&gt;
+                &lt;groupId&gt;org.apache.dubbo&lt;/groupId&gt;
+                &lt;artifactId&gt;dubbo&lt;/artifactId&gt;
+                &lt;version&gt;${dubbo.version}&lt;/version&gt;
+                &lt;exclusions&gt;
+                    &lt;exclusion&gt;
+                        &lt;groupId&gt;org.springframework&lt;/groupId&gt;
+                        &lt;artifactId&gt;spring&lt;/artifactId&gt;
+                    &lt;/exclusion&gt;
+                    &lt;exclusion&gt;
+                        &lt;groupId&gt;javax.servlet&lt;/groupId&gt;
+                        &lt;artifactId&gt;servlet-api&lt;/artifactId&gt;
+                    &lt;/exclusion&gt;
+                    &lt;exclusion&gt;
+                        &lt;groupId&gt;log4j&lt;/groupId&gt;
+                        &lt;artifactId&gt;log4j&lt;/artifactId&gt;
+                    &lt;/exclusion&gt;
+                &lt;/exclusions&gt;
+            &lt;/dependency&gt;
+            &lt;dependency&gt;
+                &lt;groupId&gt;org.apache.dubbo&lt;/groupId&gt;
+                &lt;artifactId&gt;dubbo-dependencies-zookeeper&lt;/artifactId&gt;
+                &lt;version&gt;${dubbo.version}&lt;/version&gt;
+                &lt;type&gt;pom&lt;/type&gt;
+                &lt;exclusions&gt;
+                    &lt;exclusion&gt;
+                        &lt;groupId&gt;org.slf4j&lt;/groupId&gt;
+                        &lt;artifactId&gt;slf4j-log4j12&lt;/artifactId&gt;
+                    &lt;/exclusion&gt;
+                    &lt;exclusion&gt;
+                        &lt;groupId&gt;log4j&lt;/groupId&gt;
+                        &lt;artifactId&gt;log4j&lt;/artifactId&gt;
+                    &lt;/exclusion&gt;
+                &lt;/exclusions&gt;
+            &lt;/dependency&gt;
+        &lt;/dependencies&gt;
+    &lt;/dependencyManagement&gt;</code></pre> 
+<p>dubbo-example-common，dubbo-example-consumer和dubbo-example-provider要继承父pom。</p> 
+<pre><code>    &lt;parent&gt;
+        &lt;artifactId&gt;springboot-dubbo-atomikos-example&lt;/artifactId&gt;
+        &lt;groupId&gt;yiyi.example.dubbo&lt;/groupId&gt;
+        &lt;version&gt;0.0.1&lt;/version&gt;
+    &lt;/parent&gt;</code></pre> 
+<h2 id="%234.%E5%8A%A8%E6%80%81%E6%95%B0%E6%8D%AE%E6%BA%90%EF%BC%9A">4.动态数据源：</h2> 
+<p>Springboot 的动态数据源是把多个数据源存储在一个 Map 中，当需要使用某个数据源时，从 Map 中获取此数据源进行处理。在 Spring 中，已提供了抽象类 AbstractRoutingDataSource 来实现此功能。因此，我们在实现动态数据源的时候，只需要继承AbstractRoutingDataSource ，实现自己的获取数据源的逻辑即可。<strong>本实例使用Springboot的AOP，在service方法层这个级别实现动态数据源切换，没有在service方法内实现AOP动态数据源切换，如果想要在service层方法内实现动态数据源切换，就不要使用AOP的方式了，直接使用代码手动切换。</strong></p> 
+<p>动态数据源流程如下所示：</p> 
+<p><img alt="" height="352" src="https://images2.imgbox.com/ec/11/GAPYV7qo_o.png" width="509"></p> 
+<p id="%E5%8A%A8%E6%80%81%E6%95%B0%E6%8D%AE%E6%BA%90%E9%85%8D%E7%BD%AE%3A"><strong>动态数据源配置:</strong></p> 
+<p><strong>(1).数据源key的上下文：</strong></p> 
+<p>需要在想要切换数据源的时候，立即就可以切换到想要的数据源，因此，需要有一个动态地设置和获取数据源 key 的地方（我们称为上下文），对于 web 应用，访问以线程为单位，所以选择使用 ThreadLocal ，代码如下：</p> 
+<pre><code>public class DynamicDataSourceContextHolder {
+
+    /**
+     * 动态数据源名称上下文
+     */
+    private static final ThreadLocal&lt;String&gt; DATASOURCE_CONTEXT_KEY_HOLDER = new ThreadLocal&lt;&gt;();
+    
+    /**
+     * 也就是所谓的数据库别名
+     * 管理所有的数据源id;
+     * 主要是为了判断数据源是否存在;
+     */
+    public static List&lt;String&gt; dataSourceIds = new ArrayList&lt;String&gt;();
+
+    /**
+     * 设置数据源
+     * @param key
+     */
+    public static void setContextKey(String key){
+        System.out.println("切换数据源"+key);
+        DATASOURCE_CONTEXT_KEY_HOLDER.set(key);
+    }
+
+    /**
+     * 获取数据源名称
+     * @return
+     */
+    public static String getContextKey(){
+        String key = DATASOURCE_CONTEXT_KEY_HOLDER.get();
+        return key == null?DataSourceConstants.DS_KEY_MASTER:key;
+    }
+
+    /**
+     * 删除当前数据源名称
+     */
+    public static void removeContextKey(){
+        DATASOURCE_CONTEXT_KEY_HOLDER.remove();
+    }
+    
+    /**
+     * 是否包含指定的数据源名称
+     */
+    public static boolean containsDataSource(String dataSourceId){
+        return dataSourceIds.contains(dataSourceId);
+    }
+}</code></pre> 
+<p><strong>(2).添加动态数据源类 , 继承AbstractRoutingDataSource。</strong></p> 
+<pre><code>public class DynamicDataSource extends AbstractRoutingDataSource {
+    @Override
+    protected Object determineCurrentLookupKey() {
+        return DynamicDataSourceContextHolder.getContextKey();;
+    }
+}</code></pre> 
+<p>继承抽象类 AbstractRoutingDataSource ，需要实现方法 determineCurrentLookupKey，即路由策略， 根据返回的key值 ，从Map中获取数据源。本例中的key值，是从上面实现的数据源key的上下文中获取的<br><strong>(3).设置动态数据源</strong><br> 在数据源配置文件 DynamicDataSourceConfig 中，就是将数据源添加到动态数据源的Map中，代码如下：</p> 
+<pre><code>    @Bean(name = "dynamicDataSource")
+    @Primary
+    public DataSource dynamicDataSource(
+            @Qualifier(DataSourceConstants.DS_KEY_MASTER) DataSource master,
+            @Qualifier(DataSourceConstants.DS_KEY_SLAVE) DataSource slave
+    		) {
+        Map&lt;Object, Object&gt; dataSourceMap = new HashMap&lt;&gt;(2);
+        dataSourceMap.put(DataSourceConstants.DS_KEY_MASTER, master);
+        dataSourceMap.put(DataSourceConstants.DS_KEY_SLAVE, slave);
+        //设置动态数据源
+        DynamicDataSource dynamicDataSource = new DynamicDataSource();
+        dynamicDataSource.setTargetDataSources(dataSourceMap);
+        dynamicDataSource.setDefaultTargetDataSource(master);
+
+        return dynamicDataSource;
+    }</code></pre> 
+<p><strong>(4).配置AOP，动态切换数据源</strong></p> 
+<p>进行到这一步，其实已经可以切换数据源了，看下面的例子：</p> 
+<pre><code>    /**
+     * 向多个数据源中插入user信息。
+     * @return
+     */
+    @GetMapping("/insertUserInfoToMultiDatasource")
+    public void insertUserInfoToMultiDatasource(@RequestParam(value="username", required=true) String username) {
+    	//往主数据库中插入数据，切换到master数据源。
+    	DynamicDataSourceContextHolder.setContextKey(DataSourceConstants.DS_KEY_MASTER);
+    	multiDataSourceService.insertMasterUser(username);
+        DynamicDataSourceContextHolder.removeContextKey();
+
+        //往从数据库中插入数据， 切换到slave数据源。
+        DynamicDataSourceContextHolder.setContextKey(DataSourceConstants.DS_KEY_SLAVE);
+    	multiDataSourceService.insertSlaveUser(username);
+        DynamicDataSourceContextHolder.removeContextKey();
+    }</code></pre> 
+<p>但是每次都通过DynamicDataSourceContextHolder.setContextKey切换数据源，如果有大量需要切换数据源的地方，就会产生很多重复，如何消除这些重复的代码，就需要用到动态代理。在 Spring 中，AOP 的实现是基于动态代理的，我们希望通过<strong>注解的方式</strong>指定service层方法需要的数据源，从而消除数据源切换时产品的模板代码。<strong>为什么注解不加在Dao层</strong>？因为如果加在Dao层，那么肯定不能切换数据源了，因为Dao层的代码对应于多个数据源，如果在其上加注解，那么就只是对应于一个特定的数据源了。</p> 
+<p><strong>定义数据源注解:</strong></p> 
+<p>在annotation包中，添加数据源注解 DS，此注解可以写在类中，也可以写在方法定义中，如下所示：<br>  </p> 
+<pre><code>@Target({ElementType.METHOD,ElementType.TYPE})
+@Retention(RetentionPolicy.RUNTIME)
+public @interface DS {
+    /**
+     * 数据源名称
+     */
+    String value() default DataSourceConstants.DS_KEY_MASTER;
+}</code></pre> 
+<p><strong>定义数据源切面:</strong><br>  </p> 
+<pre><code>@Component
+public class DynamicDataSourceAspect {
+    @Pointcut("@annotation(me.mason.demo.dynamicdatasource.annotation.DS)")
+    public void dataSourcePointCut(){
+
+    }
+
+    @Around("dataSourcePointCut()") //使用环绕通知处理，使用上下文对使用注解DS的service层方法进行数据源切换，处理完后，恢复数据源
+    public Object around(ProceedingJoinPoint joinPoint) throws Throwable {
+        String dsKey = getDSAnnotation(joinPoint).value();
+        DynamicDataSourceContextHolder.setContextKey(dsKey);
+        try{
+            return joinPoint.proceed();
+        }finally {
+            DynamicDataSourceContextHolder.removeContextKey();
+        }
+    }
+
+    /**
+     * 根据类或方法获取数据源注解
+     */
+    private DS getDSAnnotation(ProceedingJoinPoint joinPoint){
+        Class&lt;?&gt; targetClass = joinPoint.getTarget().getClass();
+        DS dsAnnotation = targetClass.getAnnotation(DS.class);
+        // 先判断类的注解，再判断方法注解
+        if(Objects.nonNull(dsAnnotation)){
+            return dsAnnotation;
+        }else{
+            MethodSignature methodSignature = (MethodSignature)joinPoint.getSignature();
+            return methodSignature.getMethod().getAnnotation(DS.class);
+        }
+    }
+}</code></pre> 
+<p><strong>使用 AOP 进行数据源切换：</strong></p> 
+<pre><code>    //主数据库中插入User信息
+    @Override
+    @DS(value = DataSourceConstants.DS_KEY_MASTER)
+    @Transactional
+    public void insertMasterUser(String name) {
+      TestUser testUser = new TestUser();
+      testUser.setName(name);
+      testUser.setPhone("13674890382");
+      testUser.setRecordVersion(110L);
+      testUser.setEmail("hellworld@163.com");
+      testUser.setTitle("transcation_test");
+      testUserMapper.insert(testUser);
+   }
+
+    //从数据库中插入User信息
+    @Override
+    @DS(value = DataSourceConstants.DS_KEY_SLAVE)
+    @Transactional
+    public void insertSlaveUser(String name) {
+        TestUser testUser = new TestUser();
+        testUser.setName(name);
+        testUser.setPhone("13674890382");
+        testUser.setRecordVersion(110L);
+        testUser.setEmail("hellworld@163.com");
+        testUser.setTitle("transcation_test");
+        testUserMapper.insert(testUser);
+   }</code></pre> 
+<h2 id="%235.%E5%88%86%E5%B8%83%E5%BC%8F%E4%BA%8B%E5%8A%A1%EF%BC%9A">5.分布式事务：</h2> 
+<p>XA规范主要定义了 (全局)事务管理器™ 和 (局部)资源管理器(RM) 之间的接口。RM由主流的数据库提供，主流的关系型数据库产品都是实现了XA接口的。TM主要是一些开源软件，例如Atomikos。JTA是java根据XA规范提供的事务处理标准，也是二阶段提交，JTA这种实现是<strong>强一致性</strong>的体现。按照互联网的实际场景都是最终一致性，柔性事务，其实，<strong>大多数情况下很多公司是使用消息队列的方式实现分布式事务。</strong></p> 
+<p>本文将使用Atomikos做为TM，来实现分布式事务。</p> 
+<p><strong>添加依赖：</strong></p> 
+<pre><code>&lt;!--分布式事务--&gt;
+&lt;dependency&gt;
+  &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+  &lt;artifactId&gt;spring-boot-starter-jta-atomikos&lt;/artifactId&gt;
+&lt;/dependency&gt;</code></pre> 
+<p>里面已经整合好了transactions-jms、transactions-jta、transactions-jdbc、javax.transaction-api</p> 
+<p><strong>分布式事务的数据源相关配置：</strong>以slave数据源为例，master数据源类似。</p> 
+<pre><code>    @Bean(DataSourceConstants.DS_KEY_SLAVE)
+    @ConfigurationProperties(prefix = "spring.datasource.slave")
+    public DataSource slaveDataSource() {
+        //JTA标准(XA规范)中的两个角色中的    参与者(participants): 资源管理器(RM)
+        MysqlXADataSource mysqlXaDataSource = new MysqlXADataSource();
+        mysqlXaDataSource.setUrl(slaveDatabaseProp.getJdbcUrl());
+        try {
+			mysqlXaDataSource.setPinGlobalTxToPhysicalConnection(true);
+		} catch (SQLException e1) {
+			// TODO Auto-generated catch block
+			e1.printStackTrace();
+		}
+        mysqlXaDataSource.setPassword(slaveDatabaseProp.getPassword());
+        mysqlXaDataSource.setUser(slaveDatabaseProp.getUsername());
+        try {
+			mysqlXaDataSource.setPinGlobalTxToPhysicalConnection(true);
+		} catch (SQLException e1) {
+			// TODO Auto-generated catch block
+			e1.printStackTrace();
+		}
+
+        //JTA标准(XA规范)中的两个角色中的   协调者(Coordinater): 事务管理器(TM)
+        AtomikosDataSourceBean xaDataSource = new AtomikosDataSourceBean();
+        // 数据源唯一标识
+        xaDataSource.setUniqueResourceName("slaveDataSourcejta");
+        //Mysql分布式数据源(连接池)实现类 -&gt;  XADataSource实现类，使用com.mysql.cj.jdbc.MysqlXADataSource
+        xaDataSource.setXaDataSourceClassName(slaveDatabaseProp.getType());
+        xaDataSource.setMinPoolSize(slaveDatabaseProp.getMinPoolSize());
+        xaDataSource.setMaxPoolSize(slaveDatabaseProp.getMaxPoolSize());
+        xaDataSource.setMaxLifetime(slaveDatabaseProp.getMaxLifetime());
+        xaDataSource.setBorrowConnectionTimeout(slaveDatabaseProp.getBorrowConnectionTimeout());
+        try {
+			xaDataSource.setLoginTimeout(slaveDatabaseProp.getLoginTimeout());
+		} catch (SQLException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
+		}
+        xaDataSource.setMaintenanceInterval(slaveDatabaseProp.getMaintenanceInterval());
+        xaDataSource.setMaxIdleTime(slaveDatabaseProp.getMaxIdleTime());
+        // 返回连接前用于测试连接的SQL查询
+        xaDataSource.setTestQuery(slaveDatabaseProp.getTestQuery());
+        xaDataSource.setXaDataSource(mysqlXaDataSource);
+        return xaDataSource;
+    }</code></pre> 
+<p>根据Spring官方介绍，要想自己控制事务，则必须实现Transaction接口，所以我们来创建动态数据源事务实现类DynamicDataSourceTransaction</p> 
+<pre><code>/*
+ * 根据Spring官方介绍，要想自己控制事务，则必须实现Transaction接口，所以我们来创建动态数据源事务实现类DynamicDataSourceTransaction
+ */
+/**
+ * &lt;P&gt;多数据源切换，支持事务&lt;/P&gt;
+* &lt;P&gt;多数据源事务管理器是:根据数据源的不同类型，动态获取数据库连接，而不是从原来的缓存中(ThreadLocal ???)获取导致数据源没法切换&lt;/P&gt;
+* @author Bruce 2020/12/19
+ */
+@Slf4j
+public class DynamicDataSourceTransaction implements Transaction{
+    private final DataSource dataSource;
+    private Connection defaultConnection;
+    private String dataBaseName;
+    private ConcurrentMap&lt;String, Connection&gt; dynamicConnectionMap;
+    private boolean isConnectionTransactional;
+    private boolean autoCommit;
+
+    public DynamicDataSourceTransaction(DataSource dataSource) {
+        Assert.notNull(dataSource, "No DataSource specified");
+        this.dataSource = dataSource;
+        this.dynamicConnectionMap = new ConcurrentHashMap&lt;&gt;();
+        this.dataBaseName = DynamicDataSourceContextHolder.getContextKey();
+    }
+    
+    /**
+     * 开启事务处理方法, 事务获取数据源的Connection.
+     */
+    @Override
+    public Connection getConnection() throws SQLException {
+        String dataBase = DynamicDataSourceContextHolder.getContextKey();
+        if (dataBase.equals(dataBaseName)) {
+            if (defaultConnection != null) {
+                return defaultConnection;
+            }
+            openMainConnection();
+            dataBaseName = dataBase;
+            return defaultConnection;
+        } else {
+            if (!dynamicConnectionMap.containsKey(dataBase)) {
+                try {
+                    Connection conn = dataSource.getConnection();
+                    dynamicConnectionMap.put(dataBase, conn);
+                } catch (SQLException ex) {
+                    throw new CannotGetJdbcConnectionException("Could not get JDBC Connection", ex);
+                }
+            }
+            return dynamicConnectionMap.get(dataBase);
+        }
+    }
+    
+    private void openMainConnection() throws SQLException {
+        this.defaultConnection = DataSourceUtils.getConnection(this.dataSource);
+        this.autoCommit = this.defaultConnection.getAutoCommit();
+        this.isConnectionTransactional = DataSourceUtils.isConnectionTransactional(this.defaultConnection, this.dataSource);
+
+        if (log.isDebugEnabled()) {
+            log.debug(
+                    "JDBC Connection ["
+                            + this.defaultConnection
+                            + "] will"
+                            + (this.isConnectionTransactional ? " " : " not ")
+                            + "be managed by Spring");
+        }
+    }
+
+    /**
+     * 提交处理方法
+     */
+    @Override
+    public void commit() throws SQLException {
+        if (this.defaultConnection != null &amp;&amp; !this.isConnectionTransactional &amp;&amp; !this.autoCommit) {
+            if (log.isDebugEnabled()) {
+                log.debug("Committing JDBC Connection [" + this.defaultConnection + "]");
+            }
+            this.defaultConnection.commit();
+            for (Connection connection : dynamicConnectionMap.values()) {
+                connection.commit();
+            }
+        }
+    }
+    
+    /**
+     * 回滚处理方法
+     */
+    @Override
+    public void rollback() throws SQLException {
+        if (this.defaultConnection != null &amp;&amp; !this.isConnectionTransactional &amp;&amp; !this.autoCommit) {
+            if (log.isDebugEnabled()) {
+                log.debug("Rolling back JDBC Connection [" + this.defaultConnection + "]");
+            }
+            this.defaultConnection.rollback();
+            for (Connection connection : dynamicConnectionMap.values()) {
+                connection.rollback();
+            }
+        }
+    }
+
+    /**
+     * 关闭处理方法
+     */
+    @Override
+    public void close() {
+        DataSourceUtils.releaseConnection(this.defaultConnection, this.dataSource);
+        for (Connection connection : dynamicConnectionMap.values()) {
+            DataSourceUtils.releaseConnection(connection, this.dataSource);
+        }
+    }
+
+    @Override
+    public Integer getTimeout() {
+        return null;
+    }
+
+}
+</code></pre> 
+<p>将两个数据源(master和slave)加入到<strong>动态数据源</strong>中，并在配置Mybatis的sqlSessionFactory的时候使用<strong>动态数据源</strong>和自己创建的<strong>动态数据源事务实现类DynamicDataSourceTransaction。</strong></p> 
+<pre><code>    @Bean(name = "dynamicDataSource")
+    @Primary
+    public DataSource dynamicDataSource(
+            @Qualifier(DataSourceConstants.DS_KEY_MASTER) DataSource master,
+            @Qualifier(DataSourceConstants.DS_KEY_SLAVE) DataSource slave
+    		) {
+        Map&lt;Object, Object&gt; dataSourceMap = new HashMap&lt;&gt;(2);
+        dataSourceMap.put(DataSourceConstants.DS_KEY_MASTER, master);
+        dataSourceMap.put(DataSourceConstants.DS_KEY_SLAVE, slave);
+        //设置动态数据源
+        DynamicDataSource dynamicDataSource = new DynamicDataSource();
+        dynamicDataSource.setTargetDataSources(dataSourceMap);
+        dynamicDataSource.setDefaultTargetDataSource(master);
+
+        return dynamicDataSource;
+    }
+    
+    //这是设置mybatis 的 sqlSessionFactory, mybatis也使用session去访问数据库，跟hibernate应该是一样的。
+    //session需要用到Datasource的connection， 所以配置里设置了上面的动态数据源 dynamicDataSource。
+    @Bean(name = "sqlSessionFactory")
+    public SqlSessionFactory sqlSessionFactory(
+    		@Qualifier("dynamicDataSource") DataSource dataSource
+    		) throws Exception {
+        MybatisSqlSessionFactoryBean sqlSessionFactory = new MybatisSqlSessionFactoryBean();
+        //设置动态数据源
+        sqlSessionFactory.setDataSource(dataSource);
+        //设置动态数据源事务管理
+        sqlSessionFactory.setTransactionFactory(new DynamicDataSourceTransactionFactory());
+
+        //配置mybatis-plus相关的配置
+        //非常重要，由于我们在这里配置了Mybatis, 所以在application.propertis文件中的mybatis-plus***配置，失效
+        MybatisConfiguration configuration = new MybatisConfiguration();
+        configuration.setJdbcTypeForNull(JdbcType.NULL);
+        //数据库字段中下划线，转化为model类中属性的驼峰命名,例如 user_order_num 转为 userOrderNum
+        configuration.setMapUnderscoreToCamelCase(true);
+        configuration.setCacheEnabled(false);
+        //非常重要--可以自定义ID生成策略。
+//        GlobalConfig globalConfig = new GlobalConfig();
+//        globalConfig.setIdentifierGenerator(new IdentifierGenerator() {
+//			
+//			@Override
+//			public Number nextId(Object entity) {
+//				// TODO Auto-generated method stub
+//				return null;
+//			}
+//		  });
+//        configuration.setGlobalConfig(globalConfig);
+        sqlSessionFactory.setConfiguration(configuration);
+        //添加插件
+        sqlSessionFactory.setPlugins(new Interceptor[]{
+                paginationInterceptor()
+        });
+        return sqlSessionFactory.getObject();
+    }</code></pre> 
+<h2 id="%236.%E8%BF%90%E8%A1%8C%E5%8F%8A%E7%BB%93%E6%9E%9C%EF%BC%9A">6.运行及结果：</h2> 
+<p>从不同数据源中获取同一个表的信息，执行效果如下，能够拿到master和slave数据源中的test_user表中的数据。</p> 
+<p><img alt="" height="527" src="https://images2.imgbox.com/dc/ed/IAARGyYK_o.png" width="552"></p> 
+<p>其它的API怎样使用，在github的说明中已经给出，请读者自己执行。</p> 
+<p><strong>如果文章对您有用，请帮忙点赞和收藏。</strong></p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/87544e5d9b5bf1829a032179caa5cb44/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">【全网最全】JSR303参数校验与全局异常处理（从理论到实践别用if判断参数了）</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/372110cada7b4550aa0e7f394739fb27/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">程序丸子的校招个人经验——八股文篇</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

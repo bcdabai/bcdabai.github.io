@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>​​Linux开源存储漫谈（5）SPDK iSCSI Target初体验 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="​​Linux开源存储漫谈（5）SPDK iSCSI Target初体验" />
+<meta property="og:description" content="SPDK及环境准备篇分别介绍了SPDK及我本地的环境信息，本篇将基于我的测试环境配置SPDK iSCSI Target并测试其性能，并对比Linux-IO iSCSI Target vs NFS的测试数据，展示SPDK的性能提升
+SPDK运行环境配置 环境准备篇中我们曾提及Ubuntu 22.04中如何开启iommu，这是进行SPDK iSCSI Target测试的前提，在这个过程中我个人就被折磨了很久，/sys/kernel/iommu_groups/目录下就是空空如也，网上google了很久也没能解决，再次强调一下，CLEAN的环境会少很多坑，环境准备篇中相关内容如下：
+2. 修改Linux启动参数启用iommu 修改/etc/default/grub文件GRUB_CMDLINE_LINUX行，然后执行grub-mkconfig后重启操作系统，使修改生效。 root@nvme:~# cat /etc/default/grub | grep &#34;^GRUB_CMDLINE_LINUX=&#34; GRUB_CMDLINE_LINUX=&#34;quiet intel_iommu=on&#34; root@nvme:~# root@nvme:~# grub-mkconfig -o /boot/grub/grub.cfg 通过如下命令检查iommu，注意，开启iommu后/sys/kernel/iommu_groups目录是不为空 root@nvme:~# dmesg | grep &#34;DMAR: Intel&#34; [ 1.493774] DMAR: Intel(R) Virtualization Technology for Directed I/O root@nvme:~# ls /sys/kernel/iommu_groups/ 0 1 2 3 4 5 6 7 8 root@nvme:~# 第一步，先找到NVMe设备PCI信息
+root@nvme:~# lspci 00:00.0 Host bridge: Intel Corporation Comet Lake-S 6c Host Bridge/DRAM Controller (rev 03) ." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/87e02278b3dcc30982c1698d7fe1f445/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2023-05-19T20:17:38+08:00" />
+<meta property="article:modified_time" content="2023-05-19T20:17:38+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">​​Linux开源存储漫谈（5）SPDK iSCSI Target初体验</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p><a class="link-info" href="https://blog.csdn.net/arvey8888/article/details/130678940" title="SPDK">SPDK</a>及<a class="link-info" href="https://blog.csdn.net/arvey8888/article/details/130570984" title="环境准备篇">环境准备篇</a>分别介绍了SPDK及我本地的环境信息，本篇将基于我的测试环境配置SPDK iSCSI Target并测试其性能，并对比<a class="link-info" href="https://blog.csdn.net/arvey8888/article/details/130621287" title="Linux-IO iSCSI Target vs NFS">Linux-IO iSCSI Target vs NFS</a>的测试数据，展示SPDK的性能提升</p> 
+<h3>SPDK运行环境配置</h3> 
+<p><a class="link-info" href="https://blog.csdn.net/arvey8888/article/details/130570984" title="环境准备篇">环境准备篇</a>中我们曾提及Ubuntu 22.04中如何开启iommu，这是进行SPDK iSCSI Target测试的前提，在这个过程中我个人就被折磨了很久，/sys/kernel/iommu_groups/目录下就是空空如也，网上google了很久也没能解决，再次强调一下，CLEAN的环境会少很多坑，<a class="link-info" href="https://blog.csdn.net/arvey8888/article/details/130570984" title="环境准备篇">环境准备篇</a>中相关内容如下：</p> 
+<pre><code class="language-html">2. 修改Linux启动参数启用iommu
+修改/etc/default/grub文件GRUB_CMDLINE_LINUX行，然后执行grub-mkconfig后重启操作系统，使修改生效。
+
+root@nvme:~# cat /etc/default/grub | grep "^GRUB_CMDLINE_LINUX="
+GRUB_CMDLINE_LINUX="quiet intel_iommu=on"
+root@nvme:~# 
+root@nvme:~# grub-mkconfig -o /boot/grub/grub.cfg
+
+通过如下命令检查iommu，注意，开启iommu后/sys/kernel/iommu_groups目录是不为空
+
+root@nvme:~# dmesg | grep "DMAR: Intel"
+[    1.493774] DMAR: Intel(R) Virtualization Technology for Directed I/O
+root@nvme:~# ls /sys/kernel/iommu_groups/
+0  1  2  3  4  5  6  7  8
+root@nvme:~#</code></pre> 
+<p>第一步，先找到NVMe设备PCI信息</p> 
+<pre><code class="language-bash">root@nvme:~# lspci
+00:00.0 Host bridge: Intel Corporation Comet Lake-S 6c Host Bridge/DRAM Controller (rev 03)
+......
+01:00.1 Audio device: Advanced Micro Devices, Inc. [AMD/ATI] Caicos HDMI Audio [Radeon HD 6450 / 7450/8450/8490 OEM / R5 230/235/235X OEM]
+02:00.0 Non-Volatile memory controller: Kingston Technology Company, Inc. Device 5017 (rev 03)
+03:00.0 Ethernet controller: Realtek Semiconductor Co., Ltd. RTL8111/8168/8411 PCI Express Gigabit Ethernet Controller (rev 16)
+04:00.0 Ethernet controller: Intel Corporation 82574L Gigabit Network Connection
+root@nvme:~#</code></pre> 
+<p>02:00.0 Non-Volatile memory controller: Kingston就是NVMe SSD盘的PCI信息，但是，这还不够，SPDK帮助文档中通篇都是"0000:01:00.0"的PCI地址信息，但是并没有写明如何在主机获取相关信息，0000:01:00.0（域:总线:设备.功能，更多PCI信息见：<a class="link-info" href="http://www.uml.org.cn/embeded/201205152.asp" rel="nofollow" title="Linux PCI设备驱动">Linux PCI设备驱动</a>），lspci默认是不显示Domain信息，加-D参数运行lspci，获取精准PCI设备地址</p> 
+<pre><code class="language-bash">root@nvme:~# lspci -D -s 02:00.0
+0000:02:00.0 Non-Volatile memory controller: Kingston Technology Company, Inc. Device 5017 (rev 03)
+root@nvme:~#
+</code></pre> 
+<p>第二步，unbind内核NVMe驱动</p> 
+<pre><code class="language-bash">root@nvme:~# cd /sys/bus/pci/devices/0000:02:00.0/driver
+root@nvme:/sys/bus/pci/devices/0000:02:00.0/driver# echo 0000:02:00.0 &gt; unbind
+
+# 查看内核块设备，/dev/nvme0n1在内核中被unbind
+root@nvme:/sys/bus/pci/devices/0000:02:00.0/driver# lsblk
+NAME   MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+loop0    7:0    0  63.3M  1 loop /snap/core20/1879
+loop1    7:1    0  53.2M  1 loop /snap/snapd/19122
+loop2    7:2    0  53.2M  1 loop /snap/snapd/18933
+loop3    7:3    0 111.9M  1 loop /snap/lxd/24322
+loop4    7:4    0  63.3M  1 loop /snap/core20/1852
+sda      8:0    0   1.8T  0 disk
+├─sda1   8:1    0     1M  0 part
+├─sda2   8:2    0   200G  0 part /
+├─sda3   8:3    0   200G  0 part /data
+├─sda4   8:4    0   1.4T  0 part
+└─sda5   8:5    0  1007K  0 part
+root@nvme:/sys/bus/pci/devices/0000:02:00.0/driver#
+</code></pre> 
+<p>第三步，初始化SPDK运行环境</p> 
+<pre><code class="language-bash">root@nvme:~# cd /data/github/spdk
+root@nvme:/data/github/spdk# HUGEMEM=8192 ./scripts/setup.sh
+0000:02:00.0 (2646 5017): nvme -&gt; vfio-pci
+root@nvme:/data/github/spdk# cat /proc/meminfo | grep -i huge
+......
+HugePages_Total:    4096
+HugePages_Free:     4096
+HugePages_Rsvd:        0
+HugePages_Surp:        0
+Hugepagesize:       2048 kB
+Hugetlb:         8388608 kB
+root@nvme:/data/github/spdk#
+</code></pre> 
+<p>可以读一下setup.sh脚本，"HUGEMEM=8192 ./scripts/setup.sh"等于"HUGEMEM=8192 ./scripts/setup.sh config"，主要用来分配大页内存，遍历并绑定PCIe设备（已经从内核unbind）</p> 
+<p>第四步，运行iscsi_tgt启动SPDK自带iscsi target服务程序</p> 
+<pre><code class="language-bash"># 建议新开一个窗口
+root@nvme:~# cd /data/github/spdk
+root@nvme:/data/github/spdk#
+root@nvme:/data/github/spdk# ./build/bin/iscsi_tgt
+[2023-05-17 06:31:30.664654] Starting SPDK v23.05-pre / DPDK 22.11.1 initialization...
+[2023-05-17 06:31:30.664806] [ DPDK EAL parameters: iscsi --no-shconf -c 0x1 --huge-unlink --log-level=lib.eal:6 --log-level=lib.cryptodev:5 --log-level=user1:6 --iova-mode=pa --base-virtaddr=0x200000000000 --match-allocations --file-prefix=spdk_pid1576 ]
+......</code></pre> 
+<p>第五步，在启动一个新的窗口，调用rpc.py配置iscsi target</p> 
+<pre><code class="language-bash">root@nvme:/data/github/spdk# ./scripts/rpc.py bdev_nvme_attach_controller -b mnvme0 -t PCIe -a 0000:02:00.0
+mnvme0n1
+
+root@nvme:/data/github/spdk# ./scripts/rpc.py iscsi_create_portal_group 1 192.168.2.111:3260
+
+root@nvme:/data/github/spdk# ./scripts/rpc.py iscsi_create_auth_group -c 'user:disUser secret:disUserPwd muser:mDisUser msecret:mDisUserPwd' 0
+
+root@nvme:/data/github/spdk# ./scripts/rpc.py iscsi_create_auth_group -c 'user:rwClientUser secret:rwClientUserPwd muser:mRwClientUser msecret:mRwClientUserPwd' 2
+
+root@nvme:/data/github/spdk# ./scripts/rpc.py iscsi_create_initiator_group 2 ANY 192.168.2.0/24
+
+root@nvme:/data/github/spdk# ./scripts/rpc.py iscsi_set_discovery_auth -m -r -g 0
+
+root@nvme:/data/github/spdk# ./scripts/rpc.py iscsi_create_target_node mnvmedisk1 "my nvme disk1" "mnvme0n1:0" 1:2 64 -g 2 -r -m
+
+root@nvme:/data/github/spdk#</code></pre> 
+<p>JSON-RPC说明，详见：<a class="link-info" href="https://spdk.io/doc/jsonrpc.html" rel="nofollow" title="SPDK JSON-RPC">SPDK JSON-RPC</a></p> 
+<p>bdev_nvme_attach_controller，创建一个基于的bdev</p> 
+<p>iscsi_create_portal_group，初始化iSCSI Portal Group信息，具体参见<a class="link-info" href="https://spdk.io/doc/jsonrpc.html" rel="nofollow" title="JSON-RPC">JSON-RPC</a>及<a class="link-info" href="https://blog.csdn.net/arvey8888/article/details/130621287" title="iSCSI基本概念">iSCSI基本概念</a></p> 
+<p>iscsi_create_auth_group，两次调用分别创建iSCSI discovery auth，及Initiator的ACL auth</p> 
+<p>iscsi_create_initiator_group，配置iSCSI Initiator信息，同Linux-IO iSCSI Target</p> 
+<p>iscsi_set_discovery_auth，设置discovery 使用tag为0的auth_group</p> 
+<p>iscsi_create_target_node，创建node，参数见<a class="link-info" href="https://spdk.io/doc/jsonrpc.html" rel="nofollow" title="JSON-RPC">JSON-RPC</a></p> 
+<p>第六步，参考<a class="link-info" href="https://blog.csdn.net/arvey8888/article/details/130570984" title="环境准备篇">环境准备篇</a>启动qemu虚拟机</p> 
+<pre><code class="language-bash"># 不要忘了启动虚拟机前初始化tap设备
+root@nvme:~# tunctl -t tap1
+root@nvme:~# brctl addif kvmbr0 tap1
+root@nvme:~# ifconfig tap1 up
+
+# 启动虚拟机
+root@nvme:~# cd /data/kvm/
+root@nvme:/data/kvm# ./start-kvm.iscsi.sh</code></pre> 
+<p>第七步，进入虚拟机，运行iscsiadm（initiator配置见： <a class="link-info" href="https://blog.csdn.net/arvey8888/article/details/130621287?spm=1001.2014.3001.5502" title="配置iSCSI Initiator">配置iSCSI Initiator</a>）</p> 
+<pre><code class="language-bash">root@vm-nvme:~# iscsiadm -m discovery -t sendtargets -p 192.168.2.111:3260
+192.168.2.111:3260,1 iqn.2016-06.io.spdk:mnvmedisk1
+root@vm-nvme:~# iscsiadm -m node -T iqn.2016-06.io.spdk:mnvmedisk1 --login      
+Logging in to [iface: default, target: iqn.2016-06.io.spdk:mnvmedisk1, portal: 192.168.2.111,3260]
+Login to [iface: default, target: iqn.2016-06.io.spdk:mnvmedisk1, portal: 192.168.2.111,3260] successful.
+root@vm-nvme:~# lsblk
+NAME    MAJ:MIN RM   SIZE RO TYPE MOUNTPOINTS
+fd0       2:0    1     4K  0 disk
+loop0     7:0    0  63.3M  1 loop /snap/core20/1852
+loop1     7:1    0  63.3M  1 loop /snap/core20/1879
+loop2     7:2    0 111.9M  1 loop /snap/lxd/24322
+loop3     7:3    0  53.2M  1 loop /snap/snapd/18933
+loop4     7:4    0  53.2M  1 loop /snap/snapd/19122
+sda       8:0    0   100G  0 disk
+sdb       8:16   0  32.2G  0 disk
+├─sdb1    8:17   0  32.1G  0 part /
+├─sdb14   8:30   0     4M  0 part
+└─sdb15   8:31   0   106M  0 part /boot/efi
+vda     252:0    0   366K  0 disk
+root@vm-nvme:~#</code></pre> 
+<h3>fio测试SPDK iSCSI Target</h3> 
+<p>对比内核NVMe测试数据，内核Linux-IO iSCSI Target及SPDK iSCSI Target，顺序读数据如下表</p> 
+<table border="1" cellpadding="1" cellspacing="1" style="width:500px;"><tbody><tr><td> </td><td>内核NVMe</td><td>内核Linux-IO iSCSI</td><td>SPDK iSCSI Target</td></tr><tr><td>iops</td><td>728k</td><td>299k</td><td>282k</td></tr><tr><td> <p>Bandwidth</p> </td><td>2842MiB</td><td>1183MiB</td><td>1101MiB</td></tr><tr><td>Latency</td><td>338 usec</td><td>839 usec</td><td>445.15 usec</td></tr></tbody></table> 
+<p>混合随机读写测试</p> 
+<pre><code class="language-bash">[global]
+bs=4096
+rw=write
+ioengine=libaio
+size=50G
+direct=1
+iodepth=256
+iodepth_batch=64
+iodepth_low=64
+iodepth_batch_complete=64
+userspace_reap
+group_reporting
+[test]
+numjobs=1
+filename=/dev/sdc</code></pre> 
+<table border="1" cellpadding="1" cellspacing="1"><tbody><tr><td>iodepth/_low/_batch/_complete</td><td>numjobs</td><td> <p>iops(read)</p> <p>lio/spdk</p> </td><td> <p>bw(read)</p> <p>lio/spdk</p> </td><td> <p>iops(write)</p> <p>lio/spdk</p> </td><td> <p>bw(write)</p> <p>lio/spdk</p> </td></tr><tr><td>64/16/16/16</td><td>16</td><td>29.4k/38.8k</td><td>115MiB/151MiB</td><td>7355/9696</td><td>28.7MiB/37.9MiB</td></tr><tr><td>32/8/8/8</td><td>16</td><td>29.8k/39.0k</td><td>117MiB/153MiB</td><td>7464/9770</td><td>29.2MiB/38.2MiB</td></tr><tr><td>32/8/8/8</td><td>8</td><td>28.9k/41.0k</td><td>113MiB/160MiB</td><td>7229/10.3k</td><td>28.2MiB/40.2MiB</td></tr></tbody></table> 
+<p>结合顺序读及随机读写数据、host、qemu虚拟机资源消耗数据，尤其是混合随机读写场景，spdk iSCSI Target性能明显优于Linux-IO iSCSI target，读写吞吐和iops都有30%的提升</p> 
+<p> </p> 
+<p>欢迎转载，请注明出处</p> 
+<p> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/b2209c543a8bf6d5658b19f6b09fd11c/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">​​Linux开源存储漫谈（4）​​存储性能软件加速库SPDK</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/971843e4fef35ea196d94a791452d61f/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">机器人动力学参数辨识方法开源程序数据分享</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

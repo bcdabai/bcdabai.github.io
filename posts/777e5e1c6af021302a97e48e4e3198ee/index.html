@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>SSD性能怎么测？看这一篇就够了！ - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="SSD性能怎么测？看这一篇就够了！" />
+<meta property="og:description" content="转载自：https://www.sohu.com/a/390625596_505795
+一、概述
+自从很多年前开始做SSD方面的测试以来，我就和某些行业工作者产生了同感：存储性能测试基本是所有计算机硬件测试里最复杂困难的一项。存储系统的性能受到整个机器其他硬件甚至软件方面的影响：按ssd本身来说，在不同负载（线程数，队列深度，块大小，随机度等）环境下一块盘发挥出的性能大有区别，设置成不同扇区大小性能会不同，在相同情况下测试一段时间盘的性能还会发生FOB-transition-steadystate的转变；按软件环境来说，不同系统、文件系统以及软件本身的访问模式都能造成性能差别；另外其他硬件比如CPU和控制器、阵列卡等也可能影响SSD的性能。因此在测试方法上的研究层出不穷，甚至有行业组织给出测试建议（如SNIA的Solid State Storage Performance Test Specification）。
+也正是因为这种复杂性，各种不做SSD的人，比如操作系统、数据库、磁盘控制器（HBA和阵列卡）甚至CPU/FPGA制造商都在为存储性能贡献力量。近几年各种诸如基于GPU、FPGA数据中心以及NDP（近数据处理）的新方案也层出不穷。
+本文主要测试的就是这些“SSD本身性能以外”的部分，通过在不同软硬件环境下对多块SSD进行测试，看看系统的硬件平台、操作系统和文件系统对SSD性能的影响，同时对目前几个存储测试工具进行评测，以验证它们的测试方法和生成的结果的可靠性。
+二、常见误区
+在开始测试之前，我们先纠正一些认识上的误区。
+1. 操作系统、文件系统（分区格式化）对SSD性能影响很小甚至与其无关
+其实曾经有个阿里的技术员就是因为忽视这个关系导致犯了很大错误被开除，甚至业界曾经因为这个问题出过一场风波。简单的看，你使用软件在读写磁盘数据时，系统会先下指令，文件系统会找到对应的LBA（逻辑地址），经过协议、驱动层到SSD主控，主控又会通过映射表将LBA转换成PBA（物理地址），从而对SSD颗粒上的数据进行读写。具体过程网上和书本里很多这方面介绍，这里就不赘述了。我们要知道的是，这其中每一环都会产生延迟损耗。
+在十几年前，我们可以说这种损耗相对于普通的碟片存储和早期SSD来说基本可以忽略不计。但是随着硬件的发展，存储设备的性能上升了几个数量级，于是这些软件的部分越来越不可以忽略，甚至开始争夺性能的主导影响因素。一个比较极端的例子就是，傲腾内存Optane DCPM在内存模式下延迟在200-300ns之间，但是在块设备模式下驱动成磁盘的话，延迟就是微秒级了。下图就是一个大概的影响因素的统计，应该是linux下，因为后文测试中win下影响更大。这也是人们不断开发引入更高效的新文件系统的原因之一。
+但是事情真的只是一个固定overhead这么简单么？事实并不是这样。实际上初始化格式化以后，SSD甚至整个存储系统的性能特性可能会发生很大的变化，不同文件系统下的磁盘性能也有很大差别。这就是上面阿里当年引进的SM843T彻底翻车的原因。还有过别人买了很多片840pro进行测试，结果如下图。通过个人测过的几十片SSD的经验来看，实际上CPU占用、CPU内存延迟、SSD的内部调度等方面都能影响硬盘的实际性能。要彻底弄清基本不可能，因为涉及到各家闭源的固件策略，所以我们只能而且必须要在测试时注意。
+2. 裸盘（RAW）不格式化直接测试出的性能=存储设备的真实性能
+这个观点有2个问题：
+① 文件系统和操作系统对性能可能有很大影响，上面已经详细说明不再赘述。对于一般人，一块硬盘给你，你不格式化又怎么使用呢？格式化写入文件的测试方式和裸盘直接跑哪个更能反映实际使用的方式和过程，哪个对于大部分用户更真实，一目了然。
+当然经过调查也发现部分数据库软件也有支持裸盘操作，但是因为管理繁琐，安全性未知，甚至有手册建议不要用裸盘存重要数据。而且一般同样要建立一个raw分区，而且要实现日志之类功能仍然是殊途同归。再加上现在的文件系统很多都支持directIO操作可以绕过缓存策略等影响因素，所以裸磁盘的应用面限制很大。
+② 测SSD的一个大忌就是不进行preconditioning，也就是测试前不先写入好被测试数据就对其进行测试。这不只是有些影响因素没测到的问题了，整个测试都可能掉进SSD的“行为陷阱”里。前几天和一个测试软件的开发者讨论了这个事情，基本把这个错误做法可能产生的问题整个列举了一遍。详细讨论过程在此：https://github.com/microsoft/diskspd/issues/131。
+大概总结一下，如果你不做preconditioning的话，直接拿来测或者测了没有写入到的地方，SSD的FTL可能仍然没有把颗粒上的这块空间标记为写入过，结果就是测试根本没有落盘（即没有读写到存储介质本身），硬盘闭着眼反馈00或者FF，直接在主控里解决了。甚至如果preconditioning做的不好的话，SSD仍然可能找出规律使得测试结果出错。目前已知有2个人因为这个问题测出了远高于SSD性能标称的数值，另一个在这：https://github.com/microsoft/diskspd/issues/129
+对于不能访问github的人，引用一下上述讨论的重点：
+What&#39;s probably happening is that the SSD has had very little data written to it (relative to capacity) since it was last cleared and the device can optimize away reading the SSD&#39;s NAND since it knows it hasn&#39;t been written - it just returns zeroes." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/777e5e1c6af021302a97e48e4e3198ee/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-10-27T10:49:15+08:00" />
+<meta property="article:modified_time" content="2020-10-27T10:49:15+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">SSD性能怎么测？看这一篇就够了！</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>转载自：<a href="https://www.sohu.com/a/390625596_505795" rel="nofollow">https://www.sohu.com/a/390625596_505795</a></p> 
+<p><strong>一、概述</strong></p> 
+<p>自从很多年前开始做SSD方面的测试以来，我就和某些行业工作者产生了同感：存储性能测试基本是所有计算机硬件测试里最复杂困难的一项。存储系统的性能受到整个机器其他硬件甚至软件方面的影响：按ssd本身来说，在不同负载（线程数，队列深度，块大小，随机度等）环境下一块盘发挥出的性能大有区别，设置成不同扇区大小性能会不同，在相同情况下测试一段时间盘的性能还会发生FOB-transition-steadystate的转变；按软件环境来说，不同系统、文件系统以及软件本身的访问模式都能造成性能差别；另外其他硬件比如CPU和控制器、阵列卡等也可能影响SSD的性能。因此在测试方法上的研究层出不穷，甚至有行业组织给出测试建议（如SNIA的Solid State Storage Performance Test Specification）。</p> 
+<p><img alt="" height="502" src="https://images2.imgbox.com/3d/03/L7StEc3j_o.png" width="830"></p> 
+<p>也正是因为这种复杂性，各种不做SSD的人，比如操作系统、数据库、磁盘控制器（HBA和阵列卡）甚至CPU/FPGA制造商都在为存储性能贡献力量。近几年各种诸如基于GPU、FPGA数据中心以及NDP（近数据处理）的新方案也层出不穷。</p> 
+<p>本文主要测试的就是这些“SSD本身性能以外”的部分，通过在不同软硬件环境下对多块SSD进行测试，看看系统的硬件平台、操作系统和文件系统对SSD性能的影响，同时对目前几个存储测试工具进行评测，以验证它们的测试方法和生成的结果的可靠性。</p> 
+<p><img alt="" height="584" src="https://images2.imgbox.com/e5/fa/V9fuCOc8_o.png" width="830"></p> 
+<p><strong>二、常见误区</strong></p> 
+<p>在开始测试之前，我们先纠正一些认识上的误区。</p> 
+<p>1. 操作系统、文件系统（分区格式化）对SSD性能影响很小甚至与其无关</p> 
+<p>其实曾经有个阿里的技术员就是因为忽视这个关系导致犯了很大错误被开除，甚至业界曾经因为这个问题出过一场风波。简单的看，你使用软件在读写磁盘数据时，系统会先下指令，文件系统会找到对应的LBA（逻辑地址），经过协议、驱动层到SSD主控，主控又会通过映射表将LBA转换成PBA（物理地址），从而对SSD颗粒上的数据进行读写。具体过程网上和书本里很多这方面介绍，这里就不赘述了。我们要知道的是，这其中每一环都会产生延迟损耗。</p> 
+<p>在十几年前，我们可以说这种损耗相对于普通的碟片存储和早期SSD来说基本可以忽略不计。但是随着硬件的发展，存储设备的性能上升了几个数量级，于是这些软件的部分越来越不可以忽略，甚至开始争夺性能的主导影响因素。一个比较极端的例子就是，傲腾内存Optane DCPM在内存模式下延迟在200-300ns之间，但是在块设备模式下驱动成磁盘的话，延迟就是微秒级了。下图就是一个大概的影响因素的统计，应该是linux下，因为后文测试中win下影响更大。这也是人们不断开发引入更高效的新文件系统的原因之一。</p> 
+<p><img alt="" height="432" src="https://images2.imgbox.com/e1/88/MgKCK0XO_o.png" width="830"></p> 
+<p>但是事情真的只是一个固定overhead这么简单么？事实并不是这样。实际上初始化格式化以后，SSD甚至整个存储系统的性能特性可能会发生很大的变化，不同文件系统下的磁盘性能也有很大差别。这就是上面阿里当年引进的SM843T彻底翻车的原因。还有过别人买了很多片840pro进行测试，结果如下图。通过个人测过的几十片SSD的经验来看，实际上CPU占用、CPU内存延迟、SSD的内部调度等方面都能影响硬盘的实际性能。要彻底弄清基本不可能，因为涉及到各家闭源的固件策略，所以我们只能而且必须要在测试时注意。</p> 
+<p><img alt="" height="410" src="https://images2.imgbox.com/b2/d0/IwpgDl5s_o.png" width="830"></p> 
+<p><img alt="" height="400" src="https://images2.imgbox.com/18/b4/QrSBgaf3_o.png" width="830"></p> 
+<p>2. 裸盘（RAW）不格式化直接测试出的性能=存储设备的真实性能</p> 
+<p>这个观点有2个问题：</p> 
+<p>① 文件系统和操作系统对性能可能有很大影响，上面已经详细说明不再赘述。对于一般人，一块硬盘给你，你不格式化又怎么使用呢？格式化写入文件的测试方式和裸盘直接跑哪个更能反映实际使用的方式和过程，哪个对于大部分用户更真实，一目了然。</p> 
+<p>当然经过调查也发现部分数据库软件也有支持裸盘操作，但是因为管理繁琐，安全性未知，甚至有手册建议不要用裸盘存重要数据。而且一般同样要建立一个raw分区，而且要实现日志之类功能仍然是殊途同归。再加上现在的文件系统很多都支持directIO操作可以绕过缓存策略等影响因素，所以裸磁盘的应用面限制很大。</p> 
+<p>② 测SSD的一个大忌就是不进行preconditioning，也就是测试前不先写入好被测试数据就对其进行测试。这不只是有些影响因素没测到的问题了，整个测试都可能掉进SSD的“行为陷阱”里。前几天和一个测试软件的开发者讨论了这个事情，基本把这个错误做法可能产生的问题整个列举了一遍。详细讨论过程在此：https://github.com/microsoft/diskspd/issues/131。</p> 
+<p>大概总结一下，如果你不做preconditioning的话，直接拿来测或者测了没有写入到的地方，SSD的FTL可能仍然没有把颗粒上的这块空间标记为写入过，结果就是测试根本没有落盘（即没有读写到存储介质本身），硬盘闭着眼反馈00或者FF，直接在主控里解决了。甚至如果preconditioning做的不好的话，SSD仍然可能找出规律使得测试结果出错。目前已知有2个人因为这个问题测出了远高于SSD性能标称的数值，另一个在这：https://github.com/microsoft/diskspd/issues/129</p> 
+<p>对于不能访问github的人，引用一下上述讨论的重点：</p> 
+<p>What's probably happening is that the SSD has had very little data written to it (relative to capacity) since it was last cleared and the device can optimize away reading the SSD's NAND since it knows it hasn't been written - it just returns zeroes. This can obviously be done a lot faster since its just stressing NVMe, the speed of the device's FTL processor and transfers over the PCIe bus attachment. If you were to precondition the device with writes (random is usually the choice since that will randomize the SSD's physical&lt;-&gt;logical block mapping tables) the read performance would probably settle close to where Samsung documents it: the data would actually be coming all the way from NAND.</p> 
+<p>Even if the SSD happens to be formatted with a filesystem and some data has been written to it (say, even an OS installation), its still quite possible for a fresh system device to have only had a small fraction of its capacity touched by the time of this test (you tell me?). If say only 50GB of data has been written out of the device's 512GB capacity (476GiB), ~90% of the reads could be optimized away.</p> 
+<p>同时作为验证，使用指令建立一个空的20GB文件而不进行数据写入（即不进行preconditioning）：</p> 
+<p>这时使用diskspd和iometer直接测试这个文件，就会得出一个100多万IOPS（约4GB/s）的结果。这个结果远远超过了pcie 3.0x4 SSD的随机带宽，甚至大幅高于理论顺序带宽。显然这个结果是错误的。当使用下面指令将数据写入这个文件也就是正常进行precondition以后，测试结果就会回归正常。</p> 
+<p>fio --thread --filename=iobw2.tst --rw=write --size=20G --name=writeonce --bs=1M --end_fsync=1</p> 
+<p><img alt="" height="670" src="https://images2.imgbox.com/fd/02/0mhpKORU_o.png" width="830"></p> 
+<p>当然你也可以不格式化直接不断写入来做preconditioning，SNIA的SSSPTS建议是全盘写入2遍。但是这样写2遍下来以后，SSD正在进行垃圾回收（GC），而且你并不知道它什么时候会停，有时候通电放置几小时以后测出来的性能仍然不正常。你也可以指定测试区域然后对这个区域进行preconditioning，但是这样的测试会非常复杂，SSD不确定会不会认为写入的数据是有效数据，而且有意避开系统环境这个影响因素一般也没什么实际意义。</p> 
+<p>所以个人建议测试SSD首先创建写入了full random或者pseudo random的随机数据文件，排除一切潜在威胁，然后进行测试。当然此次测试也会包含RAW的情况作为对比。</p> 
+<p>3. 只要CPU内外各总线（比如PCIe、IF、Mesh）带宽充足，PCI-e SSD就能发挥出最大性能</p> 
+<p>这个很好证伪。我们把CPU关成4核，此时CPU内外各个总线带宽仍然远大于区区一块PCI-e 3.0x4 SSD，但是这块SSD的随机性能已经下降到应有的一半，即便硬盘是裸盘没有分区。测试工具的选择会在后文提到。</p> 
+<p><img alt="" height="548" src="https://images2.imgbox.com/23/19/qnHdFX6c_o.png" width="830"></p> 
+<p>其实访问存储设备远远不是数据传输过去就行那么简单，其涉及到各种校验及元数据处理等操作，可能还有多次传输的情况。不是什么问题都能极度简化的。</p> 
+<p><strong>三、测试方法</strong></p> 
+<p>测试硬件：</p> 
+<p><img alt="" height="554" src="https://images2.imgbox.com/cf/9f/e4bvQwZ6_o.png" width="830"></p> 
+<p>参测SSD主要为Memblaze Pblaze5 D700 4TB和三星PM1725a 3.2TB。最后将会有傲腾内存Optane DCPM露脸。Windows下测试采用现成的binary，Linux下则自己build了3.18版本FIO。</p> 
+<p><img alt="" height="554" src="https://images2.imgbox.com/80/ed/5b6ouZNf_o.png" width="830"></p> 
+<p>测试平台：</p> 
+<p>CPU：Xeon Platinum 8275CL/EPYC2 7R32（IF频率3200MHz）/EPYC2 7702（IF频率2666MHz）</p> 
+<p>内存：Samsung DDR4-3200 2Rx4 RECC x6（@2933）/x8（@3200）</p> 
+<p>硬盘：Pblaze5，PM1725a，Optane DCPM 512GB（Apache Pass）</p> 
+<p>操作系统：Windows 10 1909，CentOS 8.1.1911</p> 
+<p>文件系统：RAW，NTFS，EXT4，XFS</p> 
+<p>测试软件：IOmeter，FIO，Diskspd</p> 
+<p>测试项目：</p> 
+<p>根据以往测试，其他软硬件对系统存储性能的影响集中体现在高并发高吞吐量的环境中，而这个方面往往是高性能数据中心关注的首要重点之一。依此设计测试4KB QD16x16T 随机direct-IO读取。文件系统下测试的部分，先创建20GB的测试文件并写入pseudo random随机数据，然后进行测试。</p> 
+<p>FIO的jobfile如下(linux下ioengine为libaio)：</p> 
+<p>[QD16x16TRR]</p> 
+<p>filename=iobw.tst</p> 
+<p>ioengine=windowsaio</p> 
+<p>direct=1</p> 
+<p>thread=1</p> 
+<p>iodepth=16</p> 
+<p>rw=randread</p> 
+<p>bs=4k</p> 
+<p>size=20g</p> 
+<p>numjobs=16</p> 
+<p>runtime=39</p> 
+<p>time_based</p> 
+<p>group_reporting</p> 
+<p>Diskspd命令如下：</p> 
+<p>diskspd.exe -b4K -t16 -r4K -o16 -d39 -Sh E:iobw.tst</p> 
+<p>测试过程：</p> 
+<p>如果要换算成GiB/s的话最后一步除以3次1024。</p> 
+<p>Pblaze5 D700：</p> 
+<p>首先是intel平台的测试。裸磁盘状态下SSD原始性能大概85万IOPS，和硬盘的标称性能基本一致。</p> 
+<p><img alt="" height="516" src="https://images2.imgbox.com/36/32/p9AcbWGL_o.png" width="830"></p> 
+<p>在windows+NTFS下iometer和FIO差不多，比diskspd测出的数值更高。SSD的性能发挥程度很高。</p> 
+<p><img alt="" height="628" src="https://images2.imgbox.com/cb/78/yuzGOEQg_o.png" width="830"></p> 
+<p>linux下，在XFS和EXT4文件系统上两个测试双双摸到84万IOPS，性能相对裸磁盘没有什么损失。而NTFS文件系统下得出的成绩很低，可能是因为FIO关闭文件系统缓存的指令没有生效。</p> 
+<p><img alt="" height="466" src="https://images2.imgbox.com/9e/84/foYdPubH_o.png" width="830"></p> 
+<p>然后是AMD EPYC2 7R32平台。裸盘测试的性能和intel基本一致，也为约85万IOPS。</p> 
+<p><img alt="" height="516" src="https://images2.imgbox.com/50/0a/2jWEMvUn_o.png" width="830"></p> 
+<p>windows+NTFS下，FIO和iometer仍然比较统一，但是性能损失比较大，而且每次测试成绩不太稳定，在42-50万IOPS徘徊。此时diskspd的成绩反而高一些。由于波动性的存在，统计的时候将同时统计最小和最大值。</p> 
+<p><img alt="" height="602" src="https://images2.imgbox.com/07/4f/j5IQQALK_o.png" width="830"></p> 
+<p>在linux下性能不稳定的现象明显减弱，相对于裸磁盘状态的性能下降也有不少缓解。这里我们可以看出不同文件系统下磁盘性能的差距。另外NTFS一样出现了bug。</p> 
+<p><img alt="" height="466" src="https://images2.imgbox.com/48/80/UMeQyHrM_o.png" width="830"></p> 
+<p>PM1725a：</p> 
+<p>接下来测试三星PM1725a。首先还是intel平台裸磁盘性能，约81万IOPS，仍然符合标称性能。</p> 
+<p><img alt="" height="516" src="https://images2.imgbox.com/4e/04/Ggs0lP5P_o.png" width="830"></p> 
+<p>在windows下格式化成NTFS测试，性能基本没有变化。</p> 
+<p><img alt="" height="602" src="https://images2.imgbox.com/5d/71/xlCft5V7_o.png" width="830"></p> 
+<p>在linux下性能反而有一点点损失，平均接近78万IOPS。</p> 
+<p><img alt="" height="466" src="https://images2.imgbox.com/0f/13/mFypFEOH_o.png" width="830"></p> 
+<p>然后是AMD 7R32 CPU下的测试。裸磁盘情况下和intel平台差不多。</p> 
+<p><img alt="" height="514" src="https://images2.imgbox.com/21/fd/Sh4srRDP_o.png" width="830"></p> 
+<p>windows下格式化以后，带宽仍然在44-50万iops波动，总体成绩和上面使用Pblaze5 D700时差不多。</p> 
+<p><img alt="" height="622" src="https://images2.imgbox.com/11/6e/HpWINbzS_o.png" width="830"></p> 
+<p>linux下，规律也和之前D700差不多，只是EXT4下性能下降更加明显。</p> 
+<p><img alt="" height="466" src="https://images2.imgbox.com/45/07/ykXZC1Q3_o.png" width="830"></p> 
+<p>另外通过发SSD给朋友然后远程借用的方式测试了一下EPYC2 7702+PM1725a在windows下的表现。规律和7R32差不多，不过绝对的性能数值弱一些，IOmeter和FIO在39-44万IOPS附近徘徊。</p> 
+<p><img alt="" height="466" src="https://images2.imgbox.com/02/9f/AGQETrLb_o.png" width="830"></p> 
+<p><strong>四、结果统计</strong></p> 
+<p>我们对上述测试的平均带宽（IOPS）和平均延迟进行统计。首先是Pblaze5 D700在各个平台、操作系统和文件系统下的结果（箭头代表越大还是越小越好）：</p> 
+<p><img alt="" height="814" src="https://images2.imgbox.com/3e/a7/8vRAiRcN_o.png" width="830"></p> 
+<p><img alt="" height="814" src="https://images2.imgbox.com/26/d3/6lM8irDo_o.png" width="830"></p> 
+<p>然后是PM1725a的结果：</p> 
+<p><img alt="" height="814" src="https://images2.imgbox.com/ae/b3/pmDqueYb_o.png" width="830"></p> 
+<p><img alt="" height="814" src="https://images2.imgbox.com/8c/d3/ByPBRA65_o.png" width="830"></p> 
+<p>另外，尝试使用Primo RAMdisk建立一个内存盘进行测试作为参考，结果如下。不过内存盘的性能主要受制于软件模拟驱动而不是使用的内存本身，这就是为什么内存能跑到100GB/s以上、100ns以下时内存盘仍然只能测出这个成绩。RAMdisk的特性有时候比较奇怪，仅供参考。</p> 
+<p><img alt="" height="512" src="https://images2.imgbox.com/38/08/9mc50VP0_o.png" width="756"></p> 
+<p><img alt="" height="512" src="https://images2.imgbox.com/ec/4f/ejjJ079I_o.png" width="756"></p> 
+<p>另外我对于测试软件本身进行了验证。在win下FIO内置的队列深度统计数据不太准，我们可以无视它。直接通过WPA抓取测试时磁盘实时的队列深度，我们可以发现3个软件在负载本身上大体都是可靠的。</p> 
+<p><img alt="" height="548" src="https://images2.imgbox.com/0f/4e/vssJSX44_o.png" width="830"></p> 
+<p><strong>五、结论</strong></p> 
+<p>1. 业界普遍的“windows下使用IOmeter，linux下使用FIO”的说法是正确的。不论从可以跑到的带宽和延迟的最好值、测试成绩还是负载而言，它们得出的数据都很可靠。在windows下，IOmeter的成绩比FIO稍好，bug很少，overhead很低包括CPU占用低，preconditioning以及设置负载模型方便的多，而且按成绩看默认就是直接IO模式；而在linux下，FIO可以发挥出SSD的全部性能，而且可设置的功能非常多。一般用户如果要验证结果的话，甚至Crystal Disk Info得出的数值都不差，这类爆发跑分软件不符合实际之处主要在测试项目的安排和一些bug，而不是实际测出的数值上。如果要做一个严谨的测试，那还是使用经过时间验证、行业普遍采用的工具比较好。</p> 
+<p>对于微软的diskspd，开发人员声称其使用了“windows下更加原生的IO路径”所以测出的成绩高一点。目前实际测试中，diskspd在intel平台结果比fio和iometer略低，但是在amd平台偏高不少。个人和其他专业人员探讨这个区别可能是时钟源问题导致的，但是目前我这里diskspd的高级时钟功能仍然因为bug无法正常打开。加之其功能仍然不全（比如没有x%随机读+y%顺序写这种设置），建议一般测试者等它更新几个版本稳定好用再说。</p> 
+<p>一款工具好不好，是看它好不好用，而不是看谁更新、谁有一些你用不到的功能。看看周遭世界，几百年几千年没有更新但是仍然好用的工具大把。</p> 
+<p><img alt="" height="734" src="https://images2.imgbox.com/78/0c/F0qwmmg6_o.png" width="830"></p> 
+<p>2.不同盘在不同操作系统、文件系统的上的性能发挥是有区别的。每个盘都有自己的特性。不建议在ubuntu上进行SSD性能测试，因为AMD平台性能波动非常大，有时候会超过硬盘裸盘性能，有时候多测几次性能减半；另外group_reporting功能有时会失效。</p> 
+<p>3. AMD平台的存储性能影响因素比intel平台复杂，和CPU核心数、频率和IF总线频率包括测试分配到哪个核心都有关系。如果你使用的是EPYC2 7R32这种IF和核心频率高CPU的话磁盘性能会有不少提升，但是如果你使用的是EPYC2 7452这种低IF低频或者R7 3700x这种少核心CPU加上一块普通闪存SSD的话，也许你在windows下只能享受到40万iops左右（大概相当于PM1725的一半）的性能。</p> 
+<p>另外AMD平台对于低延迟优化的SSD性能上限略有增加，比如我在测试SZ983的时候得到过60多万IOPS的性能，但是这些盘主推的低延迟优势会很难发挥。</p> 
+<p>4. AMD平台存储性能，在高吞吐量随机访问的承载能力方面，带宽和延迟都弱于Intel。根据上面的测试，虽然两者裸盘性能差不多，但是SSD分区格式化以后，AMD平台在windows下性能劣势较大，稳定性较差，linux下劣势相对较小；另外存储I/O对CPU核心的占用也更大。而这方面是高性能数据中心的一个关键性能指标。再加上AMD在数据库软件和硬件方面的生态非常不足，以及可扩展性较低，所以大家可以从几个侧面看到，为什么AMD卖出的EPYC一般都是用于云租赁而不是高I/O性能需求的数据中心之流，以及为什么即使各个厂商大力推广，业内仍然有很多人不愿意做基于AMD平台的存储系统方案。</p> 
+<p>同时，我们不应当认为做服务器方案的都是墨守成规的老顽固，更不要随便产生自己比一群专家更懂的错觉。</p> 
+<p>5.第4条结论不代表AMD在其他方面的性能差，更不代表AMD的CPU整体差。请对某些误导性言论进行仔细鉴别。</p> 
+<p>6. 对于intel，一颗6-8核心家用CPU基本足够跑满单盘，如果要测试性能一致性（consistency）建议使用8核以上CPU。对于单路intel Xeon的SSD性能总和的上限，我使用2条Optane DCPM 512GB傲腾内存加测试中的两块SSD，跑出了接近400万IOPS（16GB/s）的4K随机性能。此时所有SSD的性能基本是线性叠加，仍然没有达到CPU极限。</p> 
+<p>所以说，机器的存储性能标不高，怪不得工具、系统也怪不得盘。</p> 
+<p><img alt="" height="508" src="https://images2.imgbox.com/6f/91/6QrT42iS_o.png" width="830"></p> 
+<p>7.参考文献：</p> 
+<p>唐僧 huangliang - 性能修正：Intel Optane DC持久化内存更多测试</p> 
+<p>Steven B., Thai Le - Accelerate Your NVMe Drives with SPDK</p> 
+<p>neeyuese - 三星840 Pro新固件在Linux下严重掉速</p> 
+<p>Micron - P320h/P420m SSD Performance Optimization and Testing Introduction</p> 
+<p>Intel - Intel® Solid State Drive 750 Series Evaluation Guide</p> 
+<p>Intel - Intel® Optane Memory Evaluation Guide</p> 
+<p>SNIA - Solid State Storage (SSS) Performance Test Specification (PTS) Version 2.0.1</p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/fc3d6d83898423dbc7295d93523678bd/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">Sudo: unable to initialize policy plugin 解决方法</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/1a6aab8f6f8397c1dbccd43bc33244f9/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">＞ fsevents@1.2.13 install /Users/shenyuming/Desktop/FinancialPortrait/financial_portrait/node_module</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

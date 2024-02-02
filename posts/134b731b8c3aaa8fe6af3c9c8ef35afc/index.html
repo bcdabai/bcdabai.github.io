@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Java并发包之AbstractQueuedSynchronizer源码分析 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="Java并发包之AbstractQueuedSynchronizer源码分析" />
+<meta property="og:description" content="AQS(AbstractQueuedSynchronizer)是JUC里非常重要的类，像可重入锁ReentrantLock和CountDownLatch等底层都是有AQS来实现的。由于AQS底层结构比较复杂，如果直接讲源码的话大家可能看的一头雾水，这篇文章就从ReentrantLock的加锁和解锁入手，来一步步解析AQS的源码和底层工作原理。
+首先说一下AQS的基本结构，其中维护了一个双向链表，链表中每个节点都包含一个线程，其结构示意图如下：
+AQS结构示意图 链表中的节点Node有如下几个重要的属性：
+/** 共享模式下等待的标记 */ static final Node SHARED = new Node(); /** 独占模式下等待的标记 */ static final Node EXCLUSIVE = null; //下面四个属性都是该节点线程的等待状态 /** 表示当前节点的线程已被取消*/ static final int CANCELLED = 1; /** 表示当前线程的下一个线程需要被唤醒 */ static final int SIGNAL = -1; /** 表示当前线程在条件等待队列中 */ static final int CONDITION = -2; /** 表示下一个acquireShared需要无条件的传播*/ static final int PROPAGATE = -3; /** 等待状态 */ volatile int waitStatus; /** * 链接到当前节点/线程所依赖的前驱节点 * 当前线程用它来检查等待状态。在入队分配 * 仅在出队时出列（为了GC）。 此外，当 * 头节点永远不会被取消,一个节点成为头节点 * 仅仅是成功获取到锁的结果,一个被取消的线程永远也不会获取到锁,线程只取消自身 * 而不涉及其他节点 */ volatile Node prev; /** * 当前节点的后继节点,当前线程释放的才被唤起,在入队时分配,在绕过被取消的前驱节点 * 时调整,在出队列的时候取消(为了GC) * 如果一个节点的next为空,我们可以从尾部扫描它的prev,双重检查 * 被取消节点的next设置为指向节点本身而不是null,为了isOnSyncQueue更容易操作 */ volatile Node next; /** * 当前节点包含的线程，初始化后使用，使用后失效 */ volatile Thread thread; /** * 链接到下一个节点的等待条件 */ Node nextWaiter; 首先是加锁的过程 ReentrantLock使用lock()函数加锁，我们来分析下其实现： //ReentrantLock的lock方法是调用的同步队列内部类sync的lock方法 public void lock() { sync." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/134b731b8c3aaa8fe6af3c9c8ef35afc/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2022-03-28T17:18:29+08:00" />
+<meta property="article:modified_time" content="2022-03-28T17:18:29+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">Java并发包之AbstractQueuedSynchronizer源码分析</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="htmledit_views">
+                    <p>AQS(AbstractQueuedSynchronizer)是JUC里非常重要的类，像可重入锁ReentrantLock和CountDownLatch等底层都是有AQS来实现的。由于AQS底层结构比较复杂，如果直接讲源码的话大家可能看的一头雾水，这篇文章就从ReentrantLock的加锁和解锁入手，来一步步解析AQS的源码和底层工作原理。</p> 
+<p>首先说一下AQS的基本结构，其中维护了一个双向链表，链表中每个节点都包含一个线程，其结构示意图如下：</p> 
+<p></p> 
+<div class="img-center"> 
+ <figure class="image"> 
+  <img alt="" src="https://images2.imgbox.com/fe/73/D8qfWOui_o.png"> 
+  <figcaption>
+    AQS结构示意图 
+  </figcaption> 
+ </figure> 
+</div> 
+<p>链表中的节点Node有如下几个重要的属性：</p> 
+<pre><code class="language-java">        /** 共享模式下等待的标记 */
+        static final Node SHARED = new Node();
+        /** 独占模式下等待的标记 */
+        static final Node EXCLUSIVE = null;
+        
+        //下面四个属性都是该节点线程的等待状态
+        /** 表示当前节点的线程已被取消*/
+        static final int CANCELLED =  1;
+        /** 表示当前线程的下一个线程需要被唤醒 */
+        static final int SIGNAL    = -1;
+        /** 表示当前线程在条件等待队列中 */
+        static final int CONDITION = -2;
+        /** 表示下一个acquireShared需要无条件的传播*/
+        static final int PROPAGATE = -3;
+
+        /** 等待状态 */
+        volatile int waitStatus;
+
+        /**
+          * 链接到当前节点/线程所依赖的前驱节点
+          * 当前线程用它来检查等待状态。在入队分配
+          * 仅在出队时出列（为了GC）。 此外，当
+          * 头节点永远不会被取消,一个节点成为头节点
+          * 仅仅是成功获取到锁的结果,一个被取消的线程永远也不会获取到锁,线程只取消自身
+          * 而不涉及其他节点
+         */
+        volatile Node prev;
+
+        /**
+         * 当前节点的后继节点,当前线程释放的才被唤起,在入队时分配,在绕过被取消的前驱节点
+         * 时调整,在出队列的时候取消(为了GC)
+         * 如果一个节点的next为空,我们可以从尾部扫描它的prev,双重检查
+         * 被取消节点的next设置为指向节点本身而不是null,为了isOnSyncQueue更容易操作
+         */
+        volatile Node next;
+
+        /**
+         * 当前节点包含的线程，初始化后使用，使用后失效
+         */
+        volatile Thread thread;
+
+        /**
+         * 链接到下一个节点的等待条件
+         */
+        Node nextWaiter;</code></pre> 
+<h3>首先是加锁的过程</h3> 
+<h4 id="ReentrantLock%E4%BD%BF%E7%94%A8lock()%E5%87%BD%E6%95%B0%E5%8A%A0%E9%94%81%EF%BC%8C%E6%88%91%E4%BB%AC%E6%9D%A5%E5%88%86%E6%9E%90%E4%B8%8B%E5%85%B6%E5%AE%9E%E7%8E%B0%EF%BC%9A">ReentrantLock使用lock()函数加锁，我们来分析下其实现：</h4> 
+<pre><code class="language-java">    //ReentrantLock的lock方法是调用的同步队列内部类sync的lock方法
+    public void lock() {
+        sync.lock();
+    }
+    //sync是一个抽象类，其lock方法是一个抽象方法
+    abstract void lock();
+
+    //在ReentrantLock中sync又有两个子类FairSync和NonfairSync实现了lock方法
+    //区别在于公平竞争还是非公平竞争锁资源，我们先关注非公平竞争的实现
+    final void lock() {
+       //直接通过CAS尝试去修改状态，修改成功即成功抢占锁资源
+       if (compareAndSetState(0, 1))
+           setExclusiveOwnerThread(Thread.currentThread());
+       else
+       //否则进入同步队列
+           acquire(1);
+    }</code></pre> 
+<p>ReentrantLock的lock方法是调用的同步队列内部类sync的lock方法，而Sync是AQS的一个子类，Sync是一个抽象类，其lock方法是一个抽象方法，在ReentrantLock中Sync又有两个子类FairSync和NonfairSync实现了lock方法，区别在于公平竞争还是非公平竞争锁资源，我们先关注非公平竞争的实现。</p> 
+<p>其先通过compareAndSetState方法尝试修改锁标志状态，修改成功即把当前线程设置为运行线程，如果失败则调用acquire方法。</p> 
+<pre><code class="language-java">    
+        // 1. 先调用tryAcquire方法，尝试获取独占锁，返回true，表示获取到锁，不需要执行acquireQueued方法。
+        // 2. 调用acquireQueued方法，先调用addWaiter方法为当前线程创建一个节点node，并插入队列中，
+        // 然后调用acquireQueued方法去获取锁，如果不成功，就会让当前线程阻塞，当锁释放时才会被唤醒。
+        // acquireQueued方法返回值表示在线程等待过程中，是否有另一个线程调用该线程的interrupt方法，发起中断。
+    public final void acquire(int arg) {
+        if (!tryAcquire(arg) &amp;&amp;
+            acquireQueued(addWaiter(Node.EXCLUSIVE), arg))
+            selfInterrupt();
+    }</code></pre> 
+<p>这个方法主要完成了同步状态获取、节点构造、加入同步队列以及在同步队列中自旋等待的工作。</p> 
+<p><strong>1.首先调用自定义同步器实现的tryAcquire(int arg)方法，该方法保证线程安全的获取同步状态。</strong></p> 
+<p><strong>2.如果同步状态获取失败，则构造同步节点则构造同步节点（独占式同一时刻只能有一个线程成功获取到同步状态）并通过addWaiter方法将该节点加入到同步队列的尾部。</strong></p> 
+<p><strong>3.调用acquireQueued方法，使该节点以死循环的方式获取同步状态。</strong></p> 
+<p><strong>4.如果获取不到则阻塞节点中的线程，而被阻塞线程的唤醒只要依靠前驱节点的出队或阻塞线程被中断来实现。</strong></p> 
+<h4 id="%E5%85%88%E5%85%B3%E6%B3%A8tryAcquire%E6%96%B9%E6%B3%95%EF%BC%9A">先关注tryAcquire方法：</h4> 
+<p>其也是一个抽象方法，实现在NonfairSync的tryAcquire方法中直接调用nonfairTryAcquire方法。</p> 
+<pre><code class="language-java">        protected final boolean tryAcquire(int acquires) {
+            return nonfairTryAcquire(acquires);
+        }</code></pre> 
+<pre><code class="language-java"> 
+        final boolean nonfairTryAcquire(int acquires) {
+            //获取当前线程
+            final Thread current = Thread.currentThread();
+            //获取锁状态
+            int c = getState();
+            if (c == 0) {
+                //尝试抢占锁资源
+                if (compareAndSetState(0, acquires)) {
+                    setExclusiveOwnerThread(current);
+                    return true;
+                }
+            }
+            else if (current == getExclusiveOwnerThread()) {
+                //每次重入，锁标志+1
+                int nextc = c + acquires;
+                //超过锁的最大值，报错
+                if (nextc &lt; 0) // overflow
+                    throw new Error("Maximum lock count exceeded");
+                setState(nextc);
+                return true;
+            }
+            return false;
+        }</code></pre> 
+<p>在tryAcquire的非公平实现nonfairTryAcquire中会再次尝试获取锁标志，如果当前线程已经成功占有锁，则原有锁标志+1，超出int最大值报错。</p> 
+<h4 id="%E7%84%B6%E5%90%8E%E6%98%AFaddWaiter%E6%96%B9%E6%B3%95%EF%BC%9A">然后是addWaiter方法：</h4> 
+<pre><code class="language-java">    private Node addWaiter(Node mode) {
+        //新建一个节点
+        Node node = new Node(Thread.currentThread(), mode);
+        // Try the fast path of enq; backup to full enq on failure
+        Node pred = tail;
+        //队列此时不为空
+        if (pred != null) {
+            node.prev = pred;
+            //使用CAS乐观锁尝试加入队列尾部
+            if (compareAndSetTail(pred, node)) {
+                pred.next = node;
+                return node;
+            }
+        }
+        //调用入队方法
+        enq(node);
+        return node;
+    }
+
+    private Node enq(final Node node) {
+        //死循环入队
+        for (;;) {
+            Node t = tail;
+            //队列为空
+            if (t == null) { // Must initialize
+                //cas设置当前节点为头节点
+                if (compareAndSetHead(new Node()))
+                    //头尾相连
+                    tail = head;
+            } else {
+                node.prev = t;
+                //将当前节点添加到队列尾部
+                if (compareAndSetTail(t, node)) {
+                    //连接前驱节点
+                    t.next = node;
+                    return t;
+                }
+            }
+        }
+    }</code></pre> 
+<p>入队的过程大概分为以下几步：</p> 
+<p>1.新建一个节点，若队列此时不为空，通过cas操作尝试加入当前节点到队列尾部，加入成功直接返回，队列不为空或者入队失败则进入调用入队方法enq；</p> 
+<p>2.死循环入队，如果队列为空，通过cas尝试加入队列头部，然后头尾相连；</p> 
+<p>3.队列不为空，则加入队列尾部，并连接上一个节点。</p> 
+<h4 id="%E6%8E%A5%E7%9D%80%E6%98%AFacquireQueued%E6%96%B9%E6%B3%95%EF%BC%9A">接着是acquireQueued方法：</h4> 
+<p>该方法比较复杂，嵌套调用了多个方法，我们一行一行代码分析</p> 
+<pre><code class="language-java">   final boolean acquireQueued(final Node node, int arg) {
+        // 操作是否成功
+        boolean failed = true;
+        try {
+            //是否中断
+            boolean interrupted = false;
+        	// 自旋
+        	// 获取当前节点的前驱节点
+            for (;;) {
+                final Node p = node.predecessor();
+                //前驱节点是头节点，并且已经获取了锁
+                if (p == head &amp;&amp; tryAcquire(arg)) {
+                    //设置当前节点为头节点
+                    setHead(node);
+                    //为了能被回收，设置头节点的后驱节点为null
+                    p.next = null; // help GC
+                    failed = false;
+                    return interrupted;
+                }
+                //判断当前节点在获取锁失败后是否需要中断并阻塞该线程
+                if (shouldParkAfterFailedAcquire(p, node) &amp;&amp;
+                    parkAndCheckInterrupt())
+                    interrupted = true;
+            }
+        } finally {
+            if (failed)
+                //取消获取
+                cancelAcquire(node);
+        }
+    }
+   //根据前驱节点的状态来判断当前节点的线程是否应该阻塞
+   private static boolean shouldParkAfterFailedAcquire(Node pred, Node node) {
+        int ws = pred.waitStatus;
+        if (ws == Node.SIGNAL)
+            //如果前驱节点等待状态为Node.SIGNAL，则直接阻塞当前线程
+            return true;
+        if (ws &gt; 0) {
+            //前驱节点等待状态是取消Node.CANCELLED
+            //表示前一个节点所在的线程已经被唤醒了，要从等待队列中移除前驱节点
+            //所以从pred节点一直向前查找不是CANCELLED状态的节点，并把它作为当前节点的前驱节点
+            do {
+                node.prev = pred = pred.prev;
+            } while (pred.waitStatus &gt; 0);
+            pred.next = node;
+        } else {
+            //此时前驱节点的等待状态只能是0或者PROPAGATE，不可能是CONDITION
+            //CONDITION(这个是特殊状态，只在condition列表中节点中存在
+            //将前驱节点状态设置为Node.SIGNAL，在下次循环时直接阻塞当前节点的线程
+            compareAndSetWaitStatus(pred, ws, Node.SIGNAL);
+        }
+        return false;
+    }
+
+    /**
+     * 阻塞当前线程，线程被唤醒后返回当前线程中断状态
+     */
+    private final boolean parkAndCheckInterrupt() {
+        // 通过LockSupport.park方法，阻塞当前线程
+        LockSupport.park(this);
+        // 当前线程被唤醒后，返回当前线程中断状态
+        return Thread.interrupted();
+    }
+    
+    /**
+     * 发生异常跳出循环，取消当前节点
+     */
+    private void cancelAcquire(Node node) {
+        // Ignore if node doesn't exist
+        if (node == null)
+            return;
+
+        node.thread = null;
+
+        // Skip cancelled predecessors
+        Node pred = node.prev;
+        //跳过那些取消的节点
+        while (pred.waitStatus &gt; 0)
+            node.prev = pred = pred.prev;
+
+        // predNext is the apparent node to unsplice. CASes below will
+        // fail if not, in which case, we lost race vs another cancel
+        // or signal, so no further action is necessary.
+        Node predNext = pred.next;
+
+        // Can use unconditional write instead of CAS here.
+        // After this atomic step, other Nodes can skip past us.
+        // Before, we are free of interference from other threads.
+        //将node2的waitStatus设置为Node.CANCELLED
+        node.waitStatus = Node.CANCELLED;
+
+        // If we are the tail, remove ourselves.
+        //如果当前节点是尾部，则把当前节点的前驱节点设置为尾部，前驱节点的后置节点设置为null
+        if (node == tail &amp;&amp; compareAndSetTail(node, pred)) {
+            compareAndSetNext(pred, predNext, null);
+        } else {
+            // If successor needs signal, try to set pred's next-link
+            // so it will get one. Otherwise wake it up to propagate.
+            int ws;
+            //不是头节点，将前置节点的后置节点设置为当前节点的后置节点
+            if (pred != head &amp;&amp;
+                ((ws = pred.waitStatus) == Node.SIGNAL ||
+                 (ws &lt;= 0 &amp;&amp; compareAndSetWaitStatus(pred, ws, Node.SIGNAL))) &amp;&amp;
+                pred.thread != null) {
+                Node next = node.next;
+                if (next != null &amp;&amp; next.waitStatus &lt;= 0)
+                    compareAndSetNext(pred, predNext, next);
+            } else {
+                unparkSuccessor(node);
+            }
+
+            node.next = node; // help GC
+        }
+    }
+    
+    //唤醒异常节点的后驱节点
+    private void unparkSuccessor(Node node) {
+        //如果当前节点等待状态小于0，（只能是SIGNAL），更新等待状态为0
+        int ws = node.waitStatus;
+        if (ws &lt; 0)
+            compareAndSetWaitStatus(node, ws, 0);
+
+        //如果后驱节点不是null则唤醒
+        //如果是null或者状态是取消
+        //从尾部向前遍历找到实际的未取消的继任者     
+        Node s = node.next;
+        if (s == null || s.waitStatus &gt; 0) {
+            s = null;
+            for (Node t = tail; t != null &amp;&amp; t != node; t = t.prev)
+                if (t.waitStatus &lt;= 0)
+                    s = t;
+        }
+        //唤醒该节点
+        if (s != null)
+            LockSupport.unpark(s.thread);
+    }</code></pre> 
+<p>总的来说，acquireQueued方法作用步骤如下：</p> 
+<p>1.自旋，如果前驱节点是头节点，并且占锁成功，则设置当前节点为头节点，方法结束；</p> 
+<p>2.当前节点并非头节点或占锁失败，判断该节点线程是否需要阻塞，进入shouldParkAfterFailedAcquire方法：</p> 
+<p>a)判断前驱节点的等待状态是否是Node.SIGNAL，如果是则直接返回true；</p> 
+<p>b)前驱节点状态为Node.CANCELLED表示前一个节点已经被唤醒了，需要从等待队列里移除该节点，并一直往前查看知道找到一个等待状态不为CANCELLED的节点设置为当前节点的前驱节点；</p> 
+<p>c)前驱节点的等待状态为PROPAGATE，更新前驱节点的状态为Node.SIGNAL，当进入下一次循环时，直接阻塞当前节点的线程；</p> 
+<p>3.shouldParkAfterFailedAcquire返回true，调用parkAndCheckInterrupt方法阻塞当前节点的线程，否则进入下一次循环。</p> 
+<p>4.如果当前节点的线程发生异常，进入cancelAcquire方法：</p> 
+<p>a)获取前驱节点（如果其等待状态是取消则向前查找不是取消状态的节点作为前驱节点）</p> 
+<p>b)设置当前节点等待状态为取消</p> 
+<p>c)当前节点是尾节点，从队列中移除自己</p> 
+<p>d)前置节点不是头节点，且其等待状态是SIGNAL（不是SIGNAL更新成SIGNAL），将前置节点的后置节点更新为当前节点的后置节点（剔除自己）</p> 
+<p>e)如果前驱节点是头节点或者更新状态为SIGNAL失败，直接唤醒后驱节点（若后驱节点为null或等待状态为取消则从尾部向前遍历找到实际的未取消的继任者唤醒）</p> 
+<h3 id="main-toc">接下来看看如何解锁</h3> 
+<p>代码如下</p> 
+<pre><code class="language-java">public void unlock() {
+    sync.release(1);
+}</code></pre> 
+<p> release方法</p> 
+<pre><code class="language-java">public final boolean release(int arg) {
+        //尝试释放锁
+        if (tryRelease(arg)) {
+            Node h = head;
+            //释放成功，唤醒后继节点
+            if (h != null &amp;&amp; h.waitStatus != 0)
+                unparkSuccessor(h);
+            return true;
+        }
+        return false;
+    }</code></pre> 
+<p>tryRelease方法</p> 
+<pre><code>protected final boolean tryRelease(int releases) {
+	// 计算剩余的重入次数
+    int c = getState() - releases;
+    if (Thread.currentThread() != getExclusiveOwnerThread())
+        throw new IllegalMonitorStateException();
+    // 是否完全的释放了锁（针对可重入性）
+    boolean free = false;
+    if (c == 0) {
+    	// 表示完全释放了锁
+        free = true;
+        // 设置独占锁的持有者为null
+        setExclusiveOwnerThread(null);
+    }
+    // 设置AQS的state
+    setState(c);
+    return free;
+}</code></pre> 
+<h3>最后我们以一个流程图来表示可重入锁加锁解锁的全流程 </h3> 
+<div class="img-center"> 
+ <figure class="image"> 
+  <img alt="AQS工作全流程示意图（请放大后查看）" height="1038" src="https://images2.imgbox.com/b3/a2/xwKvqEAn_o.png" width="1200"> 
+  <figcaption>
+         可重入锁非公平模式全流程示意图 （请放大后查看） 
+  </figcaption> 
+ </figure> 
+</div> 
+<h2></h2> 
+<h2>共享锁</h2> 
+<p>juc中许多工具类比如CountDownLatch ReentrantReadWriteLock等都是由共享锁实现</p> 
+<h3 id="21-acquire方法">2.1 acquire方法</h3> 
+<p>Semaphore的非公平锁方式下的acquire方法：</p> 
+<pre><code class="language-java">  1  /**
+  2   * Semaphore:
+  3   */
+  4  public void acquire() throws InterruptedException {
+  5    sync.acquireSharedInterruptibly(1);
+  6  }
+  7
+  8  /**
+  9   * AbstractQueuedSynchronizer:
+ 10   */
+ 11  public final void acquireSharedInterruptibly(int arg)
+ 12        throws InterruptedException {
+ 13    //arg = 1
+ 14    //如果当前线程已经中断了，直接抛出异常。因为被中断了就没有意义再去获取锁资源了
+ 15    if (Thread.interrupted())
+ 16        throw new InterruptedException();
+ 17    //尝试去获取共享资源
+ 18    if (tryAcquireShared(arg) &lt; 0)
+ 19        //获取资源失败的话，进CLH队列进行排队等待
+ 20        doAcquireSharedInterruptibly(arg);
+ 21}
+ 22
+ 23  /**
+ 24   * Semaphore:
+ 25   * 第18行代码处：
+ 26   */
+ 27  protected int tryAcquireShared(int acquires) {
+ 28    return nonfairTryAcquireShared(acquires);
+ 29}
+ 30
+ 31  final int nonfairTryAcquireShared(int acquires) {
+ 32    //acquires = 1
+ 33    for (; ; ) {
+ 34        int available = getState();
+ 35        int remaining = available - acquires;
+ 36        /*
+ 37        如果剩余资源小于0或者CAS设置state-1成功了的话，退出死循环
+ 38        注意，这里不需要判断溢出了，因为这里是在做state-1
+ 39         */
+ 40        if (remaining &lt; 0 ||
+ 41                compareAndSetState(available, remaining))
+ 42            return remaining;
+ 43    }
+ 44  }
+</code></pre> 
+<h3 id="22-doacquiresharedinterruptibly方法">2.2 doAcquireSharedInterruptibly方法</h3> 
+<p>doAcquireSharedInterruptibly方法和独占模式的acquireQueued方法类似，但区别是共享模式在一个节点获取锁后，会通知后续的节点也来一起尝试获取：</p> 
+<pre><code class="language-java">  1  /**
+  2   * AbstractQueuedSynchronizer:
+  3   * 和独占模式下的acquireQueued方法的代码类似，只不过这里是共享模式下的响应中断模式
+  4   */
+  5  private void doAcquireSharedInterruptibly(int arg)
+  6        throws InterruptedException {
+  7    //CLH队列尾加入一个新的共享节点
+  8    final Node node = addWaiter(Node.SHARED);
+  9    boolean failed = true;
+ 10    try {
+ 11        for (; ; ) {
+ 12            //获取当前节点的前一个节点
+ 13            final Node p = node.predecessor();
+ 14            if (p == head) {
+ 15                /*
+ 16                和独占模式一样，只有前一个节点是头节点，也就是当前节点
+ 17                是实际上的第一个等待着的节点的时候才尝试获取资源（FIFO）
+ 18                 */
+ 19                int r = tryAcquireShared(arg);
+ 20                if (r &gt;= 0) {
+ 21                    /*
+ 22                    r大于等于0说明此时还有锁资源（等于0说明锁资源被当前线程拿走后就没了），
+ 23                    设置头节点，并且通知后面的节点也获取锁资源。独占锁和共享锁的差异点就在于此，
+ 24                    共享锁在前一个节点获取资源后，会通知后续的节点也一起来获取
+ 25                     */
+ 26                    setHeadAndPropagate(node, r);
+ 27                    p.next = null;
+ 28                    failed = false;
+ 29                    return;
+ 30                }
+ 31            }
+ 32            /*
+ 33            和独占模式一样，将CLH队列中当前节点之前的一些CANCELLED状态的节点剔除；前一个节点状态如果
+ 34            为SIGNAL时，就会阻塞当前线程。不同的是，这里会抛出异常，而不是独占模式的会设定中断位为true
+ 35            即响应中断模式，如果线程被中断了会抛出InterruptedException
+ 36             */
+ 37            if (shouldParkAfterFailedAcquire(p, node) &amp;&amp;
+ 38                    parkAndCheckInterrupt())
+ 39                throw new InterruptedException();
+ 40        }
+ 41    } finally {
+ 42        if (failed)
+ 43            //如果线程被中断后唤醒，就会取消当前线程获取锁资源的请求
+ 44            cancelAcquire(node);
+ 45    }
+ 46}
+ 47
+ 48  /**
+ 49   * 第26行代码处：
+ 50   */
+ 51  private void setHeadAndPropagate(Node node, int propagate) {
+ 52    //记录旧head节点
+ 53    Node h = head;
+ 54    //执行完setHead方法后，node节点成为新的head节点
+ 55    setHead(node);
+ 56    /*
+ 57    &lt;1&gt;propagate&gt;0表示还有剩余锁资源；
+ 58    &lt;2&gt;旧head节点的状态&lt;0（旧head节点是null这个条件是为了调用waitStatus时防止空指针异常）；
+ 59    &lt;3&gt;新head节点的状态&lt;0（新head节点是null这个条件是为了调用waitStatus时防止空指针异常）
+ 60    这些条件满足其一就会尝试调用doReleaseShared方法来唤醒后面的节点
+ 61     */
+ 62    if (propagate &gt; 0 || h == null || h.waitStatus &lt; 0 ||
+ 63            (h = head) == null || h.waitStatus &lt; 0) {
+ 64        Node s = node.next;
+ 65        /*
+ 66        具体是否会调用doReleaseShared方法还需要判断node是最后一个节点或者node的下一个节点是
+ 67        共享节点的时候才去唤醒（判断s是否为null一方面也是为了后面判断s是否是共享节点时不会抛
+ 68        出空指针异常；但更重要的原因是因为如果node是CLH队列中的最后一个节点的话，这个时候虽然
+ 69        拿到的s是null，但如果此时有其他的线程在CLH队列中新添加了一个节点后，此处并不能及时感
+ 70        知到这个变化。于是此时也会走进doReleaseShared方法中去处理这种情况（当然，如果没有发生
+ 71        多线程插入节点的时候，多调用一次doReleaseShared方法也是无妨的，在该方法里面会过滤掉这
+ 72        种情况）。同时这里会特殊判断共享节点是因为CLH队列中可能会存在独占节点和共享节点共存的
+ 73        场景出现，也就是ReentrantReadWriteLock读写锁的场景。这里会一直传播唤醒共享节点直到遇
+ 74        到一个独占节点为止，后面的节点不管是独占或共享状态都不会再被唤醒了）
+ 75         */
+ 76        if (s == null || s.isShared())
+ 77            doReleaseShared();
+ 78    }
+ 79}
+ 80
+ 81  /**
+ 82   * 唤醒后续节点（加锁和释放锁都会调用本方法）
+ 83   */
+ 84  private void doReleaseShared() {
+ 85    for (; ; ) {
+ 86        Node h = head;
+ 87        //h != null &amp;&amp; h != tail说明此时CLH队列中至少有两个节点（包括空节点），即至少含有一个真正在等待着的节点
+ 88        if (h != null &amp;&amp; h != tail) {
+ 89            int ws = h.waitStatus;
+ 90            if (ws == Node.SIGNAL) {
+ 91                /*
+ 92                因为下面要唤醒下一个节点，所以将头节点的状态SIGNAL改为0（因为SIGNAL表示的是下一个节点是阻塞状态）
+ 93                如果CAS没成功，就继续尝试
+ 94                 */
+ 95                if (!compareAndSetWaitStatus(h, Node.SIGNAL, 0))
+ 96                    continue;
+ 97                //唤醒下一个可以被唤醒的节点
+ 98                unparkSuccessor(h);
+ 99            } else if (ws == 0 &amp;&amp;
+100                    !compareAndSetWaitStatus(h, 0, Node.PROPAGATE))
+101                /*
+102                需要注意的是，在共享锁模式下，不论是acquire方法还是release方法，都会调用到doReleaseShared的，
+103                而且每个方法也可能有多个线程在调用。也就是说doReleaseShared方法会有多个线程在调用。假如此时有
+104                多个线程进入到第89行代码处，而其中一个线程先执行了第90行代码处的if条件，将头节点状态改为了0
+105                而剩下的线程就不能跳进第90行代码处的if条件中，而只能走到第99行代码处，ws == 0条件满足，
+106                于是剩下的线程就去CAS竞争修改头节点状态为PROPAGATE（表示需要将唤醒动作向后继续传播）。修改成功的
+107                那个线程就跳到了第135行代码处，进行下个判断逻辑，而再剩下的那些线程就让它们继续循环就行了
+108                （剩下的那些线程会发现head节点此时已经变成了PROPAGATE状态，于是会在下一次循环的第86行代码处
+109                和第135行代码处两次判断head指针是否指向了同一个节点（包括之前那个CAS修改成功的线程和执行唤醒
+110                动作的线程最后也会走到这里）。如果相同了，说明：
+111                &lt;1&gt;可能是当前唤醒传播停止了（每个被唤醒的线程都可能会走入到本方法中的unparkSuccessor处
+112                唤醒下一个节点，相当于把唤醒动作“传播”下去。同时每次唤醒后会变更head指针，如果head不发生变动了，
+113                就说明唤醒传播停止了（注意上面所说的读写锁场景，也有可能是遇到了一个独占节点才停止的））；
+114                &lt;2&gt;可能是将要唤醒下一个节点但还没唤醒前的瞬间
+115                不管是属于哪种情况，这些线程都可以退出了（第二种情况下只要等下一个节点唤醒并抢到锁后，还是会走到
+116                本方法里面的，也就是会将唤醒动作继续传播下去。但那个时候就不需要这些线程来操心了，只需要保证唤醒
+117                能一直传播下去就OK））
+118
+119                总结一下：因为head节点的状态为0就说明此时是一个中间过渡状态，最简单的情况下只有这个线程以及它所
+120                唤醒的下个线程们在一直传递地唤醒着，是不会走入到99行代码处的if条件中来的。而如果有线程能走到这里，
+121                就说明此时在doReleaseShared方法也就是本方法中有多个线程在同时调用着。PROPAGATE状态的出现，
+122                我认为是为了创造出一种区别于SIGNAL状态的另外一种状态（因为SIGNAL状态的含义定义死了就是代表后一个
+123                节点是阻塞状态，所以这里不能用SIGNAL状态来代替）。这个时候将head节点由原来的0置为PROPAGATE状态，
+124                以此来保证之前的那些线程也可以读取到此时旧的head节点状态是PROPAGATE，是&lt;0的，从而可以调用到
+125                doReleaseShared方法继续去唤醒下一个节点，也就是将唤醒动作传播下去（在之前某个版本的
+126                setHeadAndPropagate方法中，if条件中是没有最后那两个判断新head节点状态的条件的。如果是这样的话，
+127                我上面的这些分析就是没问题的，但是后来不知道为什么又添加了那两个条件，这个时候的解释就略显苍白了
+128                （因为即使没有PROPAGATE状态，这些获取锁的线程虽然拿到旧的head节点状态是0，但是此时获取到的新的head
+129                节点也就是它们自己，其状态肯定是&lt;0的，所以一样会走doReleaseShared方法）。但是之前确实是这样的，
+130                也就是PROPAGATE状态添加的本意就是为了将唤醒传播下去，可能是后来为了修复某个bug，就又做了些改动
+131                吧，这里就不再深究了）
+132                 */
+133                continue;
+134        }
+135        if (h == head)
+136            break;
+137    }
+138  }
+</code></pre> 
+<h3 id="23-release方法">2.3 release方法</h3> 
+<p>Semaphore的release方法：</p> 
+<pre><code class="language-java"> 1  /**
+ 2   * Semaphore:
+ 3   */
+ 4  public void release() {
+ 5    sync.releaseShared(1);
+ 6}
+ 7
+ 8  /**
+ 9   * AbstractQueuedSynchronizer:
+10   */
+11  public final boolean releaseShared(int arg) {
+12    //arg = 1
+13    //释放锁资源，也就是做state+1的操作
+14    if (tryReleaseShared(arg)) {
+15        /*
+16        唤醒后续可以被唤醒的节点
+17        从这里就可以看出，在共享锁模式下，不仅释放锁的方法可以唤醒节点，加锁的方法也会触发唤醒后续节点的操作
+18         */
+19        doReleaseShared();
+20        return true;
+21    }
+22    return false;
+23}
+24
+25  /**
+26   * Semaphore:
+27   * 第14行代码处：
+28   */
+29  protected final boolean tryReleaseShared(int releases) {
+30    //releases = 1
+31    for (; ; ) {
+32        int current = getState();
+33        int next = current + releases;
+34        //如果超出int最大值，则抛出Error。同时如果传进来的releases本身就小于0的话，也会抛出Error
+35        if (next &lt; current)
+36            throw new Error("Maximum permit count exceeded");
+37        //CAS修改state+1
+38        if (compareAndSetState(current, next))
+39            return true;
+40    }
+41  }
+</code></pre> 
+<hr> 
+<h2 id="3-propagate状态">3 PROPAGATE状态</h2> 
+<p>值得一提的是：纵观整个AQS的源码，只有在doReleaseShared方法中具体用到了PROPAGATE这个状态，在其他地方都是没有显式用到的，那么可能就会对这个状态存在的意义有些许质疑了。其实在早期版本的AQS源码中是没有PROPAGATE这个状态的，之所以要引入它是为了解决一个bug（JDK-6801020）：</p> 
+<p class="img-center"><img alt="" src="https://images2.imgbox.com/9a/12/m46JeP4W_o.png"></p> 
+<p>从上面可以看到，这个bug是在Java 7中修复的（在Java 6中的一些版本中也已经添加了PROPAGATE状态），同时在bug清单的下面也贴出了可能出现bug的测试代码。那么下面就来看一下离现在非常久远的Java 5u22中的该处代码是如何实现的：</p> 
+<pre><code class="language-java"> 1  private void setHeadAndPropagate(Node node, int propagate) {
+ 2    setHead(node);
+ 3    if (propagate &gt; 0 &amp;&amp; node.waitStatus != 0) {
+ 4        Node s = node.next;
+ 5        if (s == null || s.isShared())
+ 6            unparkSuccessor(node);
+ 7    }
+ 8  }
+ 9
+10   public final boolean releaseShared(int arg) {
+11    if (tryReleaseShared(arg)) {
+12        Node h = head;
+13        if (h != null &amp;&amp; h.waitStatus != 0)
+14            unparkSuccessor(h);
+15        return true;
+16    }
+17    return false;
+18  }
+</code></pre> 
+<p>可以看到，早期版本的实现相比于现在的实现来说简单了很多，总结起来最主要的区别有以下几个：</p> 
+<ol><li>在setHeadAndPropagate方法中，早期版本对节点waitStatus状态的判断只是!=0，而现在改为了&lt;0；</li><li>早期版本的releaseShared方法中的执行逻辑和独占锁下的release方法是一样的，而现在将具体的唤醒逻辑写在了doReleaseShared方法里面，和setHeadAndPropagate方法共同调用。</li></ol> 
+<p>而可能出现bug的测试代码如下：</p> 
+<pre><code class="language-java"> 1  import java.util.concurrent.Semaphore;
+ 2
+ 3  public class TestSemaphore {
+ 4
+ 5    private static Semaphore sem = new Semaphore(0);
+ 6
+ 7    private static class Thread1 extends Thread {
+ 8        @Override
+ 9        public void run() {
+10            sem.acquireUninterruptibly();
+11        }
+12    }
+13
+14    private static class Thread2 extends Thread {
+15        @Override
+16        public void run() {
+17            sem.release();
+18        }
+19    }
+20
+21    public static void main(String[] args) throws InterruptedException {
+22        for (int i = 0; i &lt; 10000000; i++) {
+23            Thread t1 = new Thread1();
+24            Thread t2 = new Thread1();
+25            Thread t3 = new Thread2();
+26            Thread t4 = new Thread2();
+27            t1.start();
+28            t2.start();
+29            t3.start();
+30            t4.start();
+31            t1.join();
+32            t2.join();
+33            t3.join();
+34            t4.join();
+35            System.out.println(i);
+36        }
+37    }
+38  }
+</code></pre> 
+<p>其实上面所做的操作无非就是创建了四个线程：t1和t2用于获取信号量，而t3和t4用于释放信号量，其中的10000000次for循环是为了放大出现bug的几率，join操作是为了阻塞主线程。现在就可以说出出现bug的现象了：也就是这里可能会出现线程被hang住的情况发生（遗憾的是，我并没有模拟出来这个bug）。</p> 
+<p>可以想象这样一种场景：假如说当前CLH队列中有一个空节点和两个被阻塞的节点（t1和t2想要获取信号量但获取不到被阻塞在CLH队列中（state初始为0））：head-&gt;t1-&gt;t2（tail）。</p> 
+<ul><li><strong>时刻1：</strong>t3调用release-&gt;releaseShared-&gt;tryReleaseShared，将state+1变为1，同时发现此时的head节点不为null并且waitStatus为-1，于是继续调用unparkSuccessor方法，在该方法中会将head的waitStatus改为0；</li><li><strong>时刻2：</strong>t1被上面t3调用的unparkSuccessor方法所唤醒，调用了tryAcquireShared，将state-1又变为了0。注意，此时还没有调用接下来的setHeadAndPropagate方法；</li><li><strong>时刻3：</strong>t4调用release-&gt;releaseShared-&gt;tryReleaseShared，将state+1变为1，同时发现此时的head节点虽然不为null，但是waitStatus为0，所以就不会执行unparkSuccessor方法；</li><li><strong>时刻4：</strong>t1执行setHeadAndPropagate-&gt;setHead，将头节点置为自己。但在此时propagate也就是剩余的state已经为0了（propagate是在时刻2时通过传参的方式传进来的，那个时候-1后剩余的state是0），所以也不会执行unparkSuccessor方法。</li></ul> 
+<p>至此可以发现一轮循环走完后，CLH队列中的t2线程永远不会被唤醒，主线程也就永远处在阻塞中，这里也就出现了bug。那么来看一下现在的AQS代码在引入了PROPAGATE状态后，在面对同样的场景下是如何解决这个bug的：</p> 
+<ul><li><strong>时刻1：</strong>t3调用release-&gt;releaseShared-&gt;tryReleaseShared，将state+1变为1，继续调用doReleaseShared方法，将head的waitStatus改为0，同时调用unparkSuccessor方法；</li><li><strong>时刻2：</strong>t1被上面t3调用的unparkSuccessor方法所唤醒，调用了tryAcquireShared，将state-1又变为了0。注意，此时还没有调用接下来的setHeadAndPropagate方法；</li><li><strong>时刻3：</strong>t4调用release-&gt;releaseShared-&gt;tryReleaseShared，将state+1变为1，同时继续调用doReleaseShared方法，<strong>此时会将head的waitStatus改为PROPAGATE</strong>；</li><li><strong>时刻4：</strong>t1执行setHeadAndPropagate-&gt;setHead，将新的head节点置为自己。虽然此时propagate依旧是0，但是“h.waitStatus &lt; 0”这个条件是满足的（h现在是PROPAGATE状态），同时下一个节点也就是t2也是共享节点，所以会执行doReleaseShared方法，将新的head节点（t1）的waitStatus改为0，同时调用unparkSuccessor方法，此时也就会唤醒t2了。</li></ul> 
+<p>至此就可以看出，在引入了PROPAGATE状态后，可以有效避免在高并发场景下可能出现的、线程没有被成功唤醒的情况出现。</p> 
+<p> </p>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/d972719a3d47a408f996f69569c76127/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">移动硬盘在电脑上的设备和驱动器中没有读出来，另一台电脑上是好的</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/296eb7601ea3f5bf67a663f28c3c40e2/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">Appium 多线程自动化----Android</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>

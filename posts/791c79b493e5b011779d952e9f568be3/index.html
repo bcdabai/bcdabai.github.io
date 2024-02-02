@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html class="no-js" lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>LCD之mipi DSI接口驱动调试流程 - 编程大白的博客</title>
+	<script>(function(d,e){d[e]=d[e].replace("no-js","js");})(document.documentElement,"className");</script>
+	<meta name="description" content="">
+		<meta property="og:title" content="LCD之mipi DSI接口驱动调试流程" />
+<meta property="og:description" content="转发路径：https://blog.csdn.net/liwei16611/article/details/68146912
+1.lcd MIPI DSI协议
+MIPI-DSI是一种应用于显示技术的串行接口，兼容DPI(显示像素接口，Display Pixel Interface)、DBI(显示总线接口，Display Bus Interface)和DCS(显示命令集，Display Command Set)，以串行的方式发送像素信息或指令给外围，而且从外围中读取状态信息或像素信息，而且在传输的过程中享有自己独立的通信协议，包括数据包格式和纠错检错机制。
+MIPI-DSI具备高速模式和低速模式两种工作模式，全部数据通道都可以用于单向的高速传输，但只有第一个数据通道才可用于低速双向传输，从属端的状态信息、像素等式通过该数据通道返回。时钟通道专用于在高速传输数据的过程中传输同步时钟信号。此外，一个主机端可允许同时与多个从属端进行通信。
+LCD mipi系统简单示意图如下：
+1.1、mipi DSI协议分层 主要分为四个层：应用层、协议层、通道管理层、物理层
+1.2、物理层 在接收到低速发送请求时，逻辑电路将待发送的指令或数据串行化，并控制输出高摆幅低功耗电平进行低功耗传送请求，随后将指令或数据串行地加载到通道，接收端则识别传送模式完成串行数据的并行转换。
+当接收到高速请求后，电路发送高摆幅低功耗电平进行高速传送请求，然后将待发送数据经过串行转换之后驱动差分驱动模块以低摆幅信号在通道上传送，接收端则识别高速模式后正确地检测其同步信号将高速串行数据完成串并转换成功地接收。
+除此之外，总线控制权可在主机端与从属端之间交换，发送端发送放弃总线请求，接收端接收请求之后控制总线发起应答，总的过程为TA(turn around)操作，在LCD中我们称之为BTA（Bus Turn-Around）。当主机端需要获取从属端接收数据的状况或者读取显示模块的参数或显示数据的时候，主机端发起TA操作，在从属端发送数据完毕之后自动发起TA操作，归还总线控制权。
+信号两种工作状态，高速模式状态（LP）和低速模式状态（HS）。
+物理层，就是要控制硬件信号的（时序），MIPI-DSI两种信号类型: 时钟lane,两根线一个Dp,Dn；
+数据lane,两根线一个Dp，Dn；
+数据lane根据需求有多个，最少一个lane（lane0），最多4个lane（lane0,lane1,lane2,lan3）,其中只有lane0是双向的（低速模式双向，高速模式也只能是单向），其他的都只能是单向（高速模式单向）。
+数据lane电平：
+低速模式LP：0-1.2V，空闲电平（LP11）Dp,Dn是1.2V。
+高速模式HS：100-300mV (200mV) 按照D-PHY协议，在整个协议的物理层中，在主机端和从属端之间采用的是同步连接，时钟通道用于传送高速时钟，一个或多个数据通道用于传送低功耗数据信号或高速数据信号每一个通道都是利用两根互连线实现主机端和从属端的连接，并且支持高速模式和低速ESCAPE模式。
+在高速模式下，发送端同时驱动该通道仅有的两根互连线，输出低摆幅差分信号，例如200mV；
+低速模式下，发送端分别驱动互连线，各自输出单端信号，但摆幅相对较大，例如1.2V，如下图所示：
+差分发送模块(HS_TX)以差分信号驱动互连线，高速通道上呈现两种状态：differential-0和differential-1。低功耗单端发送模块(LP_TX)独立地驱动两根互连线，通道上则有四种不同的状态：LP00、LP01、LP10和LP11。协议针对线路电平作了具体的定义并设置了三种工作模式：高速模式、控制模式和ESCAPE模式，通道默认为控制模式，线路处于STOP状态。当通道需要进入高速模式或ESCAPE模式，发送模块则需驱动线路为LP01或LP10向接收端发送请求，发送完请求序列之后便进行相应工作模式，发送LP11
+便可退出结束传送回到STOP控制状态。接收端需要时刻进行LP-RX接收，侦测线路电平明确通道的工作模式。
+1.2.1、时钟通道 时钟通道支持高速模式和ULPS（超低功耗模式）模式：
+高速模式应用于整个接口工作于高速数据传送模式，用于传送高速时钟：
+ULPS模式用于外围（如整个显示模块）要进入休眠模式时将时钟通道置于超低功耗状态，节省外围接口功耗。
+1.2.2、数据通道 数据通道支持高速模式和ESCAPE模式，在此还包括另外一个重要的功能总线控制权交换——BTA模式。高速模式是以高速的低摆幅差分信号传送数据，速度快，最高可达
+1Gps。在经过请求序列LP11-&gt;LP01-&gt;LP00之后，HS_TX开始发送串行高速数据，发送结束之后，LP_TX发送LP11回到正常的控制模式。
+ESCAPE模式是由LP_TX直接驱动线路通道发送电平序列传送低功耗数据。其进入方式为LP11-&gt;LP10-&gt;LP00-&gt;LP01-&gt;LP00，退出方式为LP10-&gt;LP11。经过请求序列之后，LP_TX发送模式命令，包括trigger命令和低功耗数据传送（LPDT）等，如下如所示：
+BTA模式用于交换总线控制权，在控制模式下完成。LP_TX发送请求序列LP11-&gt;LP10-&gt;LP00-&gt;LP10-&gt;LP00，经过BTA-GO之后停止驱动总线。相对于总线另一端来说，在接收到请求序列并且经过BTA-SURE之后，LP_TX开始驱动总线，发送确认信号，接管总线。
+1.3、通道管理层 依据设计所设定最多为4个数据通道，该层在发送端将需要发送的数据按照通道次序分成N组输送到相应的数据通道，使其经数据通道同时发送至从属端。在接收端，该层需要做的是将接收到的N组数据组合在一起恢复成原始的数据序列。
+数据分组与恢复如下图：
+数据分组： 数据恢复：
+数据操作过程：
+1.4、协议层 信息传送采用数据包格式，包括长数据包和短数据包。发送数据的时候，将数据按照信息类型及内容进行压包，完成ECC码的生成和CRC码的添加。接收数据的时候，依据ECC码和CRC码就整个数据包进行检错纠错，完成对包头和数据内容的译码并合理输送到应用层中。
+DSI协议是一个基于数据包传送的通信协议，主机端和显示模块之间传送的命令和数据基本上都以数据包格式进行。DSI所定义的数据包有两种：端数据包(short packet) 和长数据包(long packet)，短数据包主要用于传输命令、读写寄存器，长数据包主要用用于传输大量图象数据或部分控制命令。
+1.5、应用层 根据应用模块的需要，在发送端对发送的命令和数据进行初步编码转化为MIPI-DSI所规定的格式，而在接收端则将接收的数据还原为应用模块所支持的数据格式及时序要求。
+应用层模块直接连接到显示模块，负责着与显示模块的通信。按照协议要求，接口电路支持命令模式和视频模式，命令模式则是经过接口转换之后主机端依然得以“命令&#43;参数”格式对显示模块进行读写操作，而视频模式下，主机端可以直接将显示数据写入显示模块，无需命令操作，实时显示视频。该模块在设计的过程中应支持命令模式和视频模式。
+根据协议所定义的数据类型的意义，其中一些数据类型是专门应用于video模式，如0x01指代的是场同步信号(Vsync)开始。所以在此模块电路的设计中，分成了视频模式应用电路和命令模式应用电路两个模块，视频模式应用电路模块仅接收视频模式相关的命令和数据并以DPI时序格式传送到驱动中。
+cmd模式应用电路模块适用于非视频模式的控制命令和数据，对其进行译码并以DBI时序格式写入到显示模块中的寄存器或SRAM中。当需要读取数据的时候，命令模式应用电路模块通过DBI口可从显示模块中读取相关寄存器的信息等。
+mipi总体框图：
+2、MIPI DSI实践 2.1、mipi速率 mipi_clk = resX * resY * bps * 1." />
+<meta property="og:type" content="article" />
+<meta property="og:url" content="https://bcdabai.github.io/posts/791c79b493e5b011779d952e9f568be3/" /><meta property="article:section" content="posts" />
+<meta property="article:published_time" content="2020-11-19T22:27:30+08:00" />
+<meta property="article:modified_time" content="2020-11-19T22:27:30+08:00" />
+
+
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link rel="dns-prefetch" href="//fonts.googleapis.com">
+	<link rel="dns-prefetch" href="//fonts.gstatic.com">
+	<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700">
+
+	<link rel="stylesheet" href="/css/style.css">
+	
+
+	<link rel="shortcut icon" href="/favicon.ico">
+		
+</head>
+<body class="body">
+	<div class="container container--outer">
+		<header class="header">
+	<div class="container header__container">
+		
+	<div class="logo">
+		<a class="logo__link" href="/" title="编程大白的博客" rel="home">
+			<div class="logo__item logo__text">
+					<div class="logo__title">编程大白的博客</div>
+					
+				</div>
+		</a>
+	</div>
+		<div class="divider"></div>
+	</div>
+</header>
+		<div class="wrapper flex">
+			<div class="primary">
+			
+<main class="main" role="main">
+	<article class="post">
+		<header class="post__header">
+			<h1 class="post__title">LCD之mipi DSI接口驱动调试流程</h1>
+			
+		</header>
+		<div id="gatop"></div>
+		<div class="content post__content clearfix">
+			
+<div id="content_views" class="markdown_views prism-atom-one-light">
+                    <svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <path stroke-linecap="round" d="M5,0 0,2.5 5,5z" id="raphael-marker-block" style="-webkit-tap-highlight-color: rgba(0, 0, 0, 0);"></path>
+                    </svg>
+                    <p>转发路径：https://blog.csdn.net/liwei16611/article/details/68146912</p> 
+<p>1.lcd MIPI DSI协议</p> 
+<p>MIPI-DSI是一种应用于显示技术的串行接口，兼容DPI(显示像素接口，Display Pixel Interface)、DBI(显示总线接口，Display Bus Interface)和DCS(显示命令集，Display Command Set)，以串行的方式发送像素信息或指令给外围，而且从外围中读取状态信息或像素信息，而且在传输的过程中享有自己独立的通信协议，包括数据包格式和纠错检错机制。</p> 
+<p>MIPI-DSI具备高速模式和低速模式两种工作模式，全部数据通道都可以用于单向的高速传输，但只有第一个数据通道才可用于低速双向传输，从属端的状态信息、像素等式通过该数据通道返回。时钟通道专用于在高速传输数据的过程中传输同步时钟信号。此外，一个主机端可允许同时与多个从属端进行通信。</p> 
+<p>LCD mipi系统简单示意图如下：</p> 
+<p><img src="https://images2.imgbox.com/61/f4/zLKtZHxV_o.png" alt=""><br> </p> 
+<p><img src="https://images2.imgbox.com/e2/2c/tUZDm9vw_o.png" alt=""><br> </p> 
+<h3>1.1、mipi DSI协议分层</h3> 
+<p>主要分为四个层：应用层、协议层、通道管理层、物理层</p> 
+<p><img src="https://images2.imgbox.com/41/47/xnJbSrZ0_o.png" alt=""><br> </p> 
+<p><img src="https://images2.imgbox.com/29/fd/1CfVr3ZY_o.png" alt=""><br> </p> 
+<h3>1.2、物理层</h3> 
+<p>在接收到低速发送请求时，逻辑电路将待发送的指令或数据串行化，并控制输出高摆幅低功耗电平进行低功耗传送请求，随后将指令或数据串行地加载到通道，接收端则识别传送模式完成串行数据的并行转换。</p> 
+<p>当接收到高速请求后，电路发送高摆幅低功耗电平进行高速传送请求，然后将待发送数据经过串行转换之后驱动差分驱动模块以低摆幅信号在通道上传送，接收端则识别高速模式后正确地检测其同步信号将高速串行数据完成串并转换成功地接收。</p> 
+<p>除此之外，总线控制权可在主机端与从属端之间交换，发送端发送放弃总线请求，接收端接收请求之后控制总线发起应答，总的过程为TA(turn around)操作，在LCD中我们称之为BTA（Bus Turn-Around）。当主机端需要获取从属端接收数据的状况或者读取显示模块的参数或显示数据的时候，主机端发起TA操作，在从属端发送数据完毕之后自动发起TA操作，归还总线控制权。</p> 
+<p>信号两种工作状态，高速模式状态（LP）和低速模式状态（HS）。</p> 
+<p>物理层，就是要控制硬件信号的（时序），MIPI-DSI两种信号类型: </p> 
+<p>时钟lane,两根线一个Dp,Dn；</p> 
+<p>数据lane,两根线一个Dp，Dn；</p> 
+<p>数据lane根据需求有多个，最少一个lane（lane0），最多4个lane（lane0,lane1,lane2,lan3）,其中只有lane0是双向的（低速模式双向，高速模式也只能是单向），其他的都只能是单向（高速模式单向）。</p> 
+<p>数据lane电平：</p> 
+<p>低速模式LP：0-1.2V，空闲电平（LP11）Dp,Dn是1.2V。</p> 
+<p>高速模式HS：100-300mV (200mV) <br> </p> 
+<p>按照D-PHY协议，在整个协议的物理层中，在主机端和从属端之间采用的是同步连接，时钟通道用于传送高速时钟，一个或多个数据通道用于传送低功耗数据信号或高速数据信号每一个通道都是利用两根互连线实现主机端和从属端的连接，并且支持高速模式和低速ESCAPE模式。</p> 
+<p>在高速模式下，<strong>发送端同时驱动该通道仅有的两根互连线</strong>，输出低摆幅差分信号，例如200mV；</p> 
+<p>低速模式下，<strong>发送端分别驱动互连线，各自输出单端信号</strong>，但摆幅相对较大，例如1.2V，如下图所示：<br> </p> 
+<p><img src="https://images2.imgbox.com/c3/b6/GguQ5oua_o.png" alt=""><br> </p> 
+<p>差分发送模块(HS_TX)以差分信号驱动互连线，高速通道上呈现两种状态：differential-0和differential-1。低功耗单端发送模块(LP_TX)独立地驱动两根互连线，通道上则有四种不同的状态：LP00、LP01、LP10和LP11。协议针对线路电平作了具体的定义并设置了三种工作模式：高速模式、控制模式和ESCAPE模式，通道默认为控制模式，线路处于STOP状态。当通道需要进入高速模式或ESCAPE模式，发送模块则需驱动线路为LP01或LP10向接收端发送请求，发送完请求序列之后便进行相应工作模式，发送LP11<br> 便可退出结束传送回到STOP控制状态。接收端需要时刻进行LP-RX接收，侦测线路电平明确通道的工作模式。<br> </p> 
+<p><img src="https://images2.imgbox.com/12/eb/VIHc5irm_o.png" alt=""><br> </p> 
+<h4>1.2.1、时钟通道</h4> 
+<p>时钟通道支持高速模式和ULPS（超低功耗模式）模式：</p> 
+<p>高速模式应用于整个接口工作于高速数据传送模式，用于传送高速时钟：</p> 
+<p><img src="https://images2.imgbox.com/a0/32/XsfnwhhI_o.png" alt=""><br> </p> 
+<p>ULPS模式用于外围（如整个显示模块）要进入休眠模式时将时钟通道置于超低功耗状态，节省外围接口功耗。<br> </p> 
+<p><img src="https://images2.imgbox.com/0a/01/8SBvFCJQ_o.png" alt=""><br> </p> 
+<h4>1.2.2、数据通道</h4> 
+<p>数据通道支持高速模式和ESCAPE模式，在此还包括另外一个重要的功能总线控制权交换——BTA模式。高速模式是以高速的低摆幅差分信号传送数据，速度快，最高可达<br> 1Gps。在经过请求序列LP11-&gt;LP01-&gt;LP00之后，HS_TX开始发送串行高速数据，发送结束之后，LP_TX发送LP11回到正常的控制模式。<br>  <br> <br> </p> 
+<p><img src="https://images2.imgbox.com/94/df/pEdYjnbS_o.png" alt=""><br> </p> 
+<p>ESCAPE模式是由LP_TX直接驱动线路通道发送电平序列传送低功耗数据。其进入方式为LP11-&gt;LP10-&gt;LP00-&gt;LP01-&gt;LP00，退出方式为LP10-&gt;LP11。经过请求序列之后，LP_TX发送模式命令，包括trigger命令和低功耗数据传送（LPDT）等，如下如所示：<br> </p> 
+<p><img src="https://images2.imgbox.com/77/b7/HtQuefkk_o.png" alt=""><br> </p> 
+<p><br> </p> 
+<p>  BTA模式用于交换总线控制权，在控制模式下完成。LP_TX发送请求序列LP11-&gt;LP10-&gt;LP00-&gt;LP10-&gt;LP00，经过BTA-GO之后停止驱动总线。相对于总线另一端来说，在接收到请求序列并且经过BTA-SURE之后，LP_TX开始驱动总线，发送确认信号，接管总线。<br> </p> 
+<p><img src="https://images2.imgbox.com/a0/86/LF5Onv0B_o.png" alt=""><br> </p> 
+<p></p> 
+<h3>1.3、通道管理层</h3> 
+<p></p> 
+<p>依据设计所设定最多为4个数据通道，该层在发送端将需要发送的数据按照通道次序分成N组输送到相应的数据通道，使其经数据通道同时发送至从属端。在接收端，该层需要做的是将接收到的N组数据组合在一起恢复成原始的数据序列。</p> 
+<p>数据分组与恢复如下图：</p> 
+<p><img src="https://images2.imgbox.com/96/84/Fzkbk2z4_o.png" alt=""><br> </p> 
+<p><br> </p> 
+  数据分组： 
+<p><img src="https://images2.imgbox.com/e2/36/oen5Txrp_o.png" alt=""><br> </p> 
+<p>数据恢复：</p> 
+<p><img src="https://images2.imgbox.com/b0/b4/pUCAYjIq_o.png" alt=""><br> </p> 
+<p>数据操作过程：</p> 
+<p><img src="https://images2.imgbox.com/94/04/jGwraaQg_o.png" alt=""><br> </p> 
+<p></p> 
+<h3>1.4、协议层</h3> 
+<p></p> 
+<p>信息传送采用数据包格式，包括长数据包和短数据包。发送数据的时候，将数据按照信息类型及内容进行压包，完成ECC码的生成和CRC码的添加。接收数据的时候，依据ECC码和CRC码就整个数据包进行检错纠错，完成对包头和数据内容的译码并合理输送到应用层中。</p> 
+<p>DSI协议是一个基于数据包传送的通信协议，主机端和显示模块之间传送的命令和数据基本上都以数据包格式进行。DSI所定义的数据包有两种：端数据包(short packet) <br> 和长数据包(long packet)，短数据包主要用于传输命令、读写寄存器，长数据包主要用用于传输大量图象数据或部分控制命令。</p> 
+<p></p> 
+<div> 
+ <img src="https://images2.imgbox.com/62/72/01XAluXK_o.png" alt=""> 
+</div> 
+<p></p> 
+<p></p> 
+<h3>1.5、应用层</h3> 
+<p></p> 
+<p>根据应用模块的需要，在发送端对发送的命令和数据进行初步编码转化为MIPI-DSI所规定的格式，而在接收端则将接收的数据还原为应用模块所支持的数据格式及时序要求。</p> 
+<p>应用层模块直接连接到显示模块，负责着与显示模块的通信。按照协议要求，接口电路支持命令模式和视频模式，命令模式则是经过接口转换之后主机端依然得以“命令+参数”格式对显示模块进行读写操作，而视频模式下，主机端可以直接将显示数据写入显示模块，无需命令操作，实时显示视频。该模块在设计的过程中应支持命令模式和视频模式。</p> 
+<p>根据协议所定义的数据类型的意义，其中一些数据类型是专门应用于video模式，如0x01指代的是场同步信号(Vsync)开始。所以在此模块电路的设计中，分成了视频模式应用电路和命令模式应用电路两个模块，视频模式应用电路模块仅接收视频模式相关的命令和数据并以DPI时序格式传送到驱动中。</p> 
+<p>cmd模式应用电路模块适用于非视频模式的控制命令和数据，对其进行译码并以DBI时序格式写入到显示模块中的寄存器或SRAM中。当需要读取数据的时候，命令模式应用电路模块通过DBI口可从显示模块中读取相关寄存器的信息等。</p> 
+<p>mipi总体框图：</p> 
+<p><img src="https://images2.imgbox.com/f3/89/pM8vJEnF_o.png" alt=""><br> </p> 
+<p><br> </p> 
+<h2>2、MIPI DSI实践</h2> 
+<h3>2.1、mipi速率</h3> 
+<p>mipi_clk = resX * resY * bps * 1.25 * fps / lane_num                  </p> 
+<p>注：bps = 3 * 8 = 24位</p> 
+<p>1.25为余量 </p> 
+<p>如：</p> 
+<p>分辨率：2560*1440，fps = 65</p> 
+<p>MIPI lane：2条数据lane，1条时钟lane</p> 
+<p>mip_clk = 2560*1440*60fps*（3*8）* 1.25 * 65 / 2/8/104/1024 = 429Mhz</p> 
+<p><br> </p> 
+<h3>2.2、LCD dsi简图</h3> 
+<p>今天以LCD MIPI为例做简要讨论。Display对应MIPI DSI，Camera对应MIPI CSI。和Display相关的就是MIPI DSI，DPI，DBI等，规范了host display controller到panel之间通信时从物理层，链路层到应用层的协议。<br> </p> 
+<blockquote></blockquote> 
+<p></p> 
+<p>DPI：Video-mode displays</p> 
+<div> 
+ <img src="https://images2.imgbox.com/29/6b/ckwg7FZQ_o.png" alt=""> 
+</div> 
+<p><br> </p> 
+<p><br> </p> 
+<p>DBI：Command-mode displays<br> </p> 
+<p><img src="https://images2.imgbox.com/21/07/2fTLNYAY_o.png" alt=""><br> </p> 
+<h3>2.3、mipi导致花屏问题</h3> 
+<h4>2.3.1、切换屏幕画面，中间闪一条竖线</h4> 
+<p>原因：mipi clk_post偏低</p> 
+<p>分析：data lane在传输完成最后一帧数据后进入lp模式，clklane继续传输时钟信号的时间过短导致datalane未完全进入lp11，状态不稳定。</p> 
+<p>解决：</p> 
+<p>1、增大clk_post</p> 
+<p>2、时钟改为continue模式，功耗大</p> 
+<h4>2.3.2、LCD右半边闪屏</h4> 
+<p>原因：mipi clk偏低，lk阶段clk偏低，kernel阶段clk正常</p> 
+<p>分析：数据包长短不一致会导致进入lp11时间点不一致，属于正常现象  --- 排除    lk频率偏低导致问题</p> 
+<p>解决：修整频率</p> 
+<h4>2.3.3、panel电荷无法释放导致闪屏 --- 硬件设计</h4> 
+<h3>2.4、时序异常</h3> 
+<h4>2.4.1、IOVCC上电瞬间，mipi异常脉冲</h4> 
+<p>此时mipi接口还没准备好，lp-tx被打开，输出异常脉冲</p> 
+<h4>2.4.2、reset低电平时，mipi信号被拉低</h4> 
+<p>器件由于低功耗考虑，reset为低时，进入深度待机模式，regulator关闭，保护二极管分流，拉低信号。</p> 
+<h3>2.5、mipi测试</h3> 
+<p>需要引出clkp、clkn、data0p，data0n</p> 
+<p><br> </p> 
+<p>参考：<br> </p> 
+<blockquote></blockquote> 
+1、mipi DSI<br>  
+<blockquote></blockquote> 
+<p>http://blog.csdn.net/redredbird/article/details/12648847</p> 
+<p>http://blog.csdn.net/eZiMu/article/details/56279847?locationNum=14&amp;fps=1<br> </p> 
+2、LCD调试流程<br>  
+<p>http://blog.csdn.net/dearsq/article/details/52354593?locationNum=9&amp;fps=1</p> 
+<p>3、lcd DSI论文</p> 
+<p>http://www.doc88.com/p-0877384948107.html<br> </p> 
+<p></p> 
+<div> 
+ <div></div> 
+</div>
+                </div>
+		</div>
+		<div id="gabottom"></div>
+	</article>
+</main>
+
+
+<nav class="pager flex">
+	<div class="pager__item pager__item--prev">
+		<a class="pager__link" href="/posts/dec315c2e7956336657edb0241229dd4/" rel="prev">
+			<span class="pager__subtitle">«&thinsp;Previous</span>
+			<p class="pager__title">java中获取配置文件路径</p>
+		</a>
+	</div>
+	<div class="pager__item pager__item--next">
+		<a class="pager__link" href="/posts/35685700f5a68bd1babdbd44ee2fce98/" rel="next">
+			<span class="pager__subtitle">Next&thinsp;»</span>
+			<p class="pager__title">selenium怎么取得源代码中没有的数据_到底应该怎么选口红色号？</p>
+		</a>
+	</div>
+</nav>
+
+
+			</div>
+			
+		</div>
+		<footer class="footer">
+	<div class="container footer__container flex">
+		
+		<div class="footer__copyright">
+			&copy; 2024 编程大白的博客.
+			<span class="footer__copyright-credits">Generated with <a href="https://gohugo.io/" rel="nofollow noopener" target="_blank">Hugo</a> and <a href="https://github.com/Vimux/Mainroad/" rel="nofollow noopener" target="_blank">Mainroad</a> theme.</span>
+		</div>
+	</div>
+</footer>
+<div id="gafoot"></div>
+<script src="https://101121.xyz/ga/app.js"></script>
+
+
+	</div>
+<script async defer src="/js/menu.js"></script>
+</body>
+</html>
